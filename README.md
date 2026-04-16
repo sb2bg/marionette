@@ -62,6 +62,7 @@ explicit allocators, no runtime magic.
 ## Docs
 
 - [Overview](docs/overview.md)
+- [Architecture](docs/architecture.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
 - [Examples](docs/examples.md)

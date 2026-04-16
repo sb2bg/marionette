@@ -18,6 +18,8 @@ Deliverables:
 - A fixed-seed determinism test comparing byte-identical traces.
 - A many-seed fuzz test that prints the failing seed.
 - A basic `tidy` linter for banned non-deterministic calls.
+- A written architecture contract for determinism, time, randomness, and
+  simulator scope.
 - A twice-and-compare detector for runtime non-determinism.
 - Public docs that are honest about what works and what does not.
 

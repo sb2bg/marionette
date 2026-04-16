@@ -11,6 +11,8 @@ Phase 0 is intentionally small. Today Marionette has seeded randomness,
 simulated time, and trace logging. Disk, network, scheduling, and replay
 tooling are planned.
 
+For the precise correctness model, see [Architecture](architecture.md).
+
 ## What This Solves
 
 Distributed systems bugs often depend on timing, ordering, and failure:
@@ -68,4 +70,3 @@ Marionette is aimed at people building reliability-critical systems:
 - Infrastructure control planes.
 
 It is probably overkill for ordinary CRUD applications.
-

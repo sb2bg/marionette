@@ -1,7 +1,9 @@
 # Determinism
 
-Determinism is Marionette's core product. If the same seed does not produce
-the same trace, the library has failed.
+Determinism is Marionette's core product. Given the same Marionette version,
+Zig version, target platform, user code, simulation options, and seed, the
+same simulation must produce the same declared result and byte-identical
+Marionette trace. If it does not, the library has failed.
 
 ## The Rule
 
@@ -30,8 +32,9 @@ These are banned in simulated code:
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.
 
 Phase 0 ships an AST-based `tidy` linter for the obvious direct-call cases.
-It ignores comments and string literals, but it does not yet perform semantic
-alias or import resolution.
+It ignores comments and string literals, and it catches simple const aliases
+such as `const time = std.time;`. It does not yet perform full semantic import
+resolution.
 
 ## Enforcement Layers
 
