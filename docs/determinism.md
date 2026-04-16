@@ -29,8 +29,8 @@ These are banned in simulated code:
 - Pointer identity as a source of ordering or hashing.
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.
 
-Phase 0 will ship a substring-based `tidy` linter for the obvious cases.
-Later phases should move toward AST-based checks.
+Phase 0 ships a substring-based `tidy` linter for the obvious cases. Later
+phases should move toward AST-based checks.
 
 ## Enforcement Layers
 
@@ -44,8 +44,17 @@ Marionette enforces determinism in four layers.
 
 2. Build-integrated linter.
 
-   The planned `marionette-tidy` executable scans source for banned calls and
-   can be wired into `zig build test`.
+   The `marionette-tidy` executable scans source for banned calls and can be
+   wired into `zig build test`.
+
+   ```zig
+   const marionette = @import("src/build_support.zig");
+
+   const tidy = marionette.addTidyStep(b, .{
+       .paths = &.{ "src", "examples", "tests" },
+   });
+   test_step.dependOn(&tidy.step);
+   ```
 
 3. Twice-and-compare runtime detector.
 
@@ -98,4 +107,3 @@ Good trace events should be:
 
 Do not record wall-clock timestamps, memory addresses, thread ids, or
 unordered container dumps.
-

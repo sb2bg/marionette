@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_support = @import("src/build_support.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -34,8 +35,15 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = tests_mod });
     const run_tests = b.addRunArtifact(tests);
 
+    const tidy = build_support.addTidyStep(b, .{
+        .paths = &.{ "src", "examples", "tests" },
+        .target = target,
+        .optimize = optimize,
+    });
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_example_tests.step);
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&tidy.step);
 }

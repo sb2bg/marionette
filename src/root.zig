@@ -30,3 +30,7 @@ pub const Random = @import("random.zig").Random;
 
 /// Deterministic simulation state for Phase 0 tests.
 pub const World = @import("world.zig").World;
+
+test {
+    _ = @import("tidy.zig");
+}

@@ -119,3 +119,20 @@ Examples of returned errors:
 The project may add named aliases like `TraceError` once the trace API
 settles, but it should not invent broad custom errors until there are real
 domain failures to expose.
+
+## Build Support
+
+`src/build_support.zig` exposes a helper for wiring `marionette-tidy` into a
+build:
+
+```zig
+const marionette = @import("src/build_support.zig");
+
+const tidy = marionette.addTidyStep(b, .{
+    .paths = &.{ "src", "examples", "tests" },
+});
+test_step.dependOn(&tidy.step);
+```
+
+The helper builds the `marionette-tidy` executable and creates a run step that
+exits non-zero when banned non-deterministic calls are found.
