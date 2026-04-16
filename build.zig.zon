@@ -5,8 +5,10 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
+        "README.md",
         "build.zig",
         "build.zig.zon",
+        "docs",
         "src",
     },
 }
