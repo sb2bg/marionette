@@ -12,9 +12,10 @@ const std = @import("std");
 const mar = @import("marionette");
 
 test "scenario is replayable" {
+    const ns_per_ms: mar.Duration = 1_000_000;
     var world = try mar.World.init(std.testing.allocator, .{
         .seed = 0xC0FFEE,
-        .tick_ns = std.time.ns_per_ms,
+        .tick_ns = ns_per_ms,
     });
     defer world.deinit();
 
@@ -63,6 +64,7 @@ explicit allocators, no runtime magic.
 - [Overview](docs/overview.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
+- [Examples](docs/examples.md)
 - [Roadmap](docs/roadmap.md)
 - [Prior art](docs/prior-art.md)
 

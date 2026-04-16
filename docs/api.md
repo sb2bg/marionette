@@ -48,9 +48,11 @@ pub const Duration = u64;
 Create a world with an explicit allocator:
 
 ```zig
+const ns_per_ms: mar.Duration = 1_000_000;
+
 var world = try mar.World.init(std.testing.allocator, .{
     .seed = 0xC0FFEE,
-    .tick_ns = std.time.ns_per_ms,
+    .tick_ns = ns_per_ms,
 });
 defer world.deinit();
 ```
@@ -59,7 +61,7 @@ Advance simulated time:
 
 ```zig
 try world.tick();
-try world.runFor(10 * std.time.ns_per_ms);
+try world.runFor(10 * ns_per_ms);
 ```
 
 Record service-level trace events:
@@ -117,4 +119,3 @@ Examples of returned errors:
 The project may add named aliases like `TraceError` once the trace API
 settles, but it should not invent broad custom errors until there are real
 domain failures to expose.
-

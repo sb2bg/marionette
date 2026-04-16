@@ -9,6 +9,8 @@
         "build.zig",
         "build.zig.zon",
         "docs",
+        "examples",
         "src",
+        "tests",
     },
 }
