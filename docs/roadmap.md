@@ -16,6 +16,7 @@ Deliverables:
 - `World` with a `SimClock`, seeded `Random`, and trace log.
 - A small example service that uses clock and randomness.
 - A fixed-seed determinism test comparing byte-identical traces.
+- A versioned text trace format with event indexes.
 - A many-seed fuzz test that prints the failing seed.
 - A basic `tidy` linter for banned non-deterministic calls.
 - A written architecture contract for determinism, time, randomness, and

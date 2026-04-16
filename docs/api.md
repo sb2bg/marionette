@@ -78,19 +78,34 @@ const trace = world.traceBytes();
 
 The returned trace slice is invalidated by later trace writes.
 
+Phase 0 traces start with `marionette.trace format=text version=0`. Every
+later `World.record` line is prefixed with a global `event=<u64>` index.
+
 ## Random Choices In A World
 
-`world.random()` returns a raw `std.Random` view over the world's seeded PRNG.
-Raw draws are deterministic, but they are not automatically traced.
+`world.unsafeUntracedRandom()` returns a raw `std.Random` view over the
+world's seeded PRNG. Raw draws are deterministic, but they are not
+automatically traced. The unsafe name is intentional: simulator decisions
+should usually use traced helpers.
 
 Use traced helpers when the random choice should appear in the replay trace:
 
 ```zig
 const value = try world.randomU64();
 const enabled = try world.randomBool();
+const index = try world.randomIntLessThan(u64, 1_000_000);
 ```
 
-More typed helpers will be added as examples need them.
+`randomIntLessThan` uses Zig's rejection-sampling bounded integer helper, so it
+does not teach modulo bias.
+
+User code that should not receive the whole `World` can take a narrow traced
+random authority:
+
+```zig
+const random = world.tracedRandom();
+const latency_ns = try random.intLessThan(u64, 1_000_000);
+```
 
 ## Error Policy
 
@@ -119,6 +134,12 @@ Examples of returned errors:
 The project may add named aliases like `TraceError` once the trace API
 settles, but it should not invent broad custom errors until there are real
 domain failures to expose.
+
+When a future `marionette.run` wrapper catches a scenario error return, it
+should preserve the partial trace through the last completed event and include
+that trace in the failure report. Panics are harder because Zig's default panic
+path may abort before Marionette can flush anything; users should prefer
+error-returning invariant checks for simulated failures.
 
 ## Build Support
 

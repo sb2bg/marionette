@@ -23,6 +23,8 @@ pub const World = struct {
     rng: random_module.Random,
     /// Byte trace compared by determinism tests.
     trace_log: std.ArrayList(u8),
+    /// Next event index to write into the trace.
+    event_index: u64,
 
     /// Configuration for a simulation world.
     pub const Options = struct {
@@ -32,6 +34,26 @@ pub const World = struct {
         start_ns: clock_module.Timestamp = 0,
         /// Nanoseconds advanced by one world tick.
         tick_ns: clock_module.Duration = clock_module.default_tick_ns,
+    };
+
+    /// Narrow traced-random authority derived from a world.
+    pub const TracedRandom = struct {
+        world: *World,
+
+        /// Draw a traced `u64`.
+        pub fn randomU64(self: TracedRandom) !u64 {
+            return self.world.randomU64();
+        }
+
+        /// Draw a traced boolean.
+        pub fn boolean(self: TracedRandom) !bool {
+            return self.world.randomBool();
+        }
+
+        /// Draw a traced unbiased integer in the range `0 <= value < less_than`.
+        pub fn intLessThan(self: TracedRandom, comptime T: type, less_than: T) !T {
+            return self.world.randomIntLessThan(T, less_than);
+        }
     };
 
     /// Construct a world with deterministic time, randomness, and tracing.
@@ -44,9 +66,11 @@ pub const World = struct {
             }),
             .rng = .init(options.seed),
             .trace_log = .empty,
+            .event_index = 0,
         };
         errdefer world.deinit();
 
+        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=0\n");
         try world.record(
             "world.init seed={} start_ns={} tick_ns={}",
             .{ options.seed, options.start_ns, options.tick_ns },
@@ -69,14 +93,19 @@ pub const World = struct {
         return &self.sim_clock;
     }
 
-    /// Return a raw `std.Random` view over the world's seeded PRNG.
+    /// Return an untraced raw `std.Random` view over the world's seeded PRNG.
     ///
     /// This is useful for code that needs the full `std.Random` API, but
     /// individual draws through the returned value are not automatically
-    /// traced. Use `randomU64()` or `randomBool()` when the trace must
-    /// capture the random choice.
-    pub fn random(self: *World) std.Random {
+    /// traced. Prefer `randomU64()`, `randomBool()`, or `randomIntLessThan()`
+    /// for simulator choices.
+    pub fn unsafeUntracedRandom(self: *World) std.Random {
         return self.rng.random();
+    }
+
+    /// Return the traced random authority for user code.
+    pub fn tracedRandom(self: *World) TracedRandom {
+        return .{ .world = self };
     }
 
     /// Draw a traced `u64` from the world's seeded random stream.
@@ -90,6 +119,16 @@ pub const World = struct {
     pub fn randomBool(self: *World) !bool {
         const value = self.rng.random().boolean();
         try self.record("world.random_bool value={}", .{value});
+        return value;
+    }
+
+    /// Draw a traced unbiased integer in the range `0 <= value < less_than`.
+    pub fn randomIntLessThan(self: *World, comptime T: type, less_than: T) !T {
+        const value = self.rng.random().intRangeLessThan(T, 0, less_than);
+        try self.record(
+            "world.random_int_less_than type={s} less_than={} value={}",
+            .{ @typeName(T), less_than, value },
+        );
         return value;
     }
 
@@ -121,8 +160,13 @@ pub const World = struct {
     /// The format string should not include a trailing newline; `record`
     /// adds one so trace records stay line-oriented and comparable.
     pub fn record(self: *World, comptime fmt: []const u8, args: anytype) !void {
+        const start_len = self.trace_log.items.len;
+        errdefer self.trace_log.shrinkRetainingCapacity(start_len);
+
+        try self.trace_log.print(self.allocator, "event={} ", .{self.event_index});
         try self.trace_log.print(self.allocator, fmt, args);
         try self.trace_log.append(self.allocator, '\n');
+        self.event_index += 1;
     }
 
     /// Return the trace bytes recorded so far.
@@ -130,6 +174,11 @@ pub const World = struct {
     /// The returned slice is invalidated by later trace writes.
     pub fn traceBytes(self: *const World) []const u8 {
         return self.trace_log.items;
+    }
+
+    /// Return the index that will be assigned to the next trace event.
+    pub fn nextEventIndex(self: *const World) u64 {
+        return self.event_index;
     }
 };
 
@@ -145,8 +194,8 @@ test "world: owns seeded random and simulated clock" {
     try std.testing.expectEqual(@as(clock_module.Timestamp, 10), a.now());
     try std.testing.expectEqual(a.now(), b.now());
 
-    const random_a = a.random();
-    const random_b = b.random();
+    const random_a = a.unsafeUntracedRandom();
+    const random_b = b.unsafeUntracedRandom();
     for (0..128) |_| {
         try std.testing.expectEqual(random_a.int(u64), random_b.int(u64));
     }
@@ -174,10 +223,11 @@ test "world: trace records deterministic actions" {
     try world.record("service.allowed request_id={}", .{7});
 
     try std.testing.expectEqualStrings(
-        \\world.init seed=12648430 start_ns=5 tick_ns=2
-        \\world.tick now_ns=7
-        \\world.run_for start_ns=7 duration_ns=4 end_ns=11
-        \\service.allowed request_id=7
+        \\marionette.trace format=text version=0
+        \\event=0 world.init seed=12648430 start_ns=5 tick_ns=2
+        \\event=1 world.tick now_ns=7
+        \\event=2 world.run_for start_ns=7 duration_ns=4 end_ns=11
+        \\event=3 service.allowed request_id=7
         \\
     , world.traceBytes());
 }
@@ -198,4 +248,14 @@ test "world: same seed and actions produce identical traces" {
     try b.record("service.count value={}", .{3});
 
     try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
+}
+
+test "world: randomIntLessThan records unbiased bounded draws" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99 });
+    defer world.deinit();
+
+    for (0..128) |_| {
+        const value = try world.randomIntLessThan(u64, 1_000_000);
+        try std.testing.expect(value < 1_000_000);
+    }
 }

@@ -21,13 +21,14 @@ test "scenario is replayable" {
 
     try world.tick();
     _ = try world.randomU64();
-    try world.record("request accepted id={}", .{42});
+    try world.record("request.accepted id={}", .{42});
 
     try std.testing.expectEqualStrings(
-        \\world.init seed=12648430 start_ns=0 tick_ns=1000000
-        \\world.tick now_ns=1000000
-        \\world.random_u64 value=10121301305976376037
-        \\request accepted id=42
+        \\marionette.trace format=text version=0
+        \\event=0 world.init seed=12648430 start_ns=0 tick_ns=1000000
+        \\event=1 world.tick now_ns=1000000
+        \\event=2 world.random_u64 value=10121301305976376037
+        \\event=3 request.accepted id=42
         \\
     , world.traceBytes());
 }
@@ -63,6 +64,7 @@ explicit allocators, no runtime magic.
 
 - [Overview](docs/overview.md)
 - [Architecture](docs/architecture.md)
+- [Trace Format](docs/trace-format.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
 - [Examples](docs/examples.md)

@@ -11,7 +11,7 @@ pub fn RateLimiter(comptime ClockType: type) type {
         const Self = @This();
 
         clock: *ClockType,
-        random: std.Random,
+        random: mar.World.TracedRandom,
         capacity: u32,
         tokens: u32,
         refill_amount: u32,
@@ -20,7 +20,7 @@ pub fn RateLimiter(comptime ClockType: type) type {
 
         pub const Options = struct { capacity: u32, refill_amount: u32, refill_interval_ns: mar.Duration };
 
-        pub fn init(clock: *ClockType, random: std.Random, options: Options) Self {
+        pub fn init(clock: *ClockType, random: mar.World.TracedRandom, options: Options) Self {
             std.debug.assert(options.capacity > 0);
             std.debug.assert(options.refill_amount > 0);
             std.debug.assert(options.refill_interval_ns > 0);
@@ -36,23 +36,23 @@ pub fn RateLimiter(comptime ClockType: type) type {
             };
         }
 
-        pub fn allow(self: *Self) bool {
-            self.refillDue();
+        pub fn allow(self: *Self) !bool {
+            try self.refillDue();
             if (self.tokens == 0) return false;
             self.tokens -= 1;
             return true;
         }
 
-        fn refillDue(self: *Self) void {
+        fn refillDue(self: *Self) !void {
             const now = self.clock.now();
             while (now >= self.next_refill_ns) {
                 self.tokens = @min(self.capacity, self.tokens + self.refill_amount);
-                self.next_refill_ns += self.refill_interval_ns + self.jitter();
+                self.next_refill_ns += self.refill_interval_ns + try self.jitter();
             }
         }
 
-        fn jitter(self: *Self) mar.Duration {
-            return self.random.int(u64) % (self.refill_interval_ns / 4 + 1);
+        fn jitter(self: *Self) !mar.Duration {
+            return self.random.intLessThan(mar.Duration, self.refill_interval_ns / 4 + 1);
         }
     };
 }
@@ -63,7 +63,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     defer world.deinit();
 
     const Limiter = RateLimiter(mar.Clock(.simulation));
-    var limiter = Limiter.init(world.clock(), world.random(), .{
+    var limiter = Limiter.init(world.clock(), world.tracedRandom(), .{
         .capacity = 3,
         .refill_amount = 2,
         .refill_interval_ns = 5 * ns_per_ms,
@@ -71,7 +71,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 
     var allowed: u32 = 0;
     for (0..24) |request_index| {
-        const ok = limiter.allow();
+        const ok = try limiter.allow();
         if (ok) allowed += 1;
         try world.record(
             "rate_limiter.request index={} allowed={} tokens={} next_refill_ns={}",

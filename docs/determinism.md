@@ -111,3 +111,5 @@ Good trace events should be:
 
 Do not record wall-clock timestamps, memory addresses, thread ids, or
 unordered container dumps.
+
+The Phase 0 trace format is specified in [Trace Format](trace-format.md).

@@ -15,7 +15,8 @@ each example in `build.zig`.
 The rate limiter is a token bucket with jittered refill scheduling. It uses:
 
 - `Clock.now()` to decide when refills are due.
-- A seeded random stream to jitter the next refill time.
+- `World.randomIntLessThan(...)` to jitter the next refill time without modulo
+  bias and with trace visibility.
 - `World.record(...)` to produce a replayable trace.
 
 Run it with the rest of the test suite:
