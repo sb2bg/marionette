@@ -24,6 +24,7 @@ Phase 0 has:
 - `Clock(.production)` and `Clock(.simulation)`.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
+- `mar.run`, which executes a scenario twice and compares traces.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
 - An AST-based tidy linter for obvious nondeterministic calls, including
@@ -31,7 +32,6 @@ Phase 0 has:
 
 Phase 0 does not yet have:
 
-- `marionette.run`.
 - A scheduler.
 - Disk or network simulation.
 - Invariant registration.
@@ -139,7 +139,7 @@ contains the zero-cost shape and a ReleaseFast object-code check.
 
 ## Failure Surface
 
-When Marionette finds a bug, the minimum useful failure report is:
+When Marionette finds a bug, the long-term minimum useful failure report is:
 
 - Failing seed.
 - Simulation options.
@@ -151,12 +151,16 @@ When Marionette finds a bug, the minimum useful failure report is:
 Better reports will add shrinking and a reduced trace. A report that only says
 `seed 0x1234 failed` is insufficient.
 
-If a scenario returns an error, `marionette.run` should preserve and print the
-partial trace through the last completed event before returning the error. If a
-scenario panics, Zig's default panic path may abort without giving Marionette a
-chance to flush anything. Marionette should document that limitation plainly
-and prefer error-returning checks for simulated failures; a future custom panic
-hook can improve crash traces.
+If a scenario returns an error, `mar.run` preserves the partial trace through
+the last completed event in `RunReport.failed`. If a scenario panics, Zig's
+default panic path may abort without giving Marionette a chance to flush
+anything. Marionette documents that limitation plainly and should prefer
+error-returning checks for simulated failures; a future custom panic hook can
+improve crash traces.
+
+Current `RunFailure` captures seed, options, failure kind, event counts, owned
+traces, and the scenario error name. A future CLI wrapper should add an exact
+reproduction command once the command-line surface exists.
 
 ## Exploration Strategy
 
@@ -237,7 +241,7 @@ Required test classes:
 - Tidy catches banned calls and ignores comments/string literals.
 - Tidy catches simple aliases to banned call paths.
 - Debug and ReleaseSafe builds both pass.
-- Future CI should run twice-and-compare on every example.
+- CI should run twice-and-compare on every example.
 
 ## Showcase Example
 
@@ -268,28 +272,24 @@ a time. Running two independent simulations concurrently in the same process is
 fine if each thread owns a different `World` and they do not share simulated
 state. Cross-world coordination is outside Marionette's determinism contract.
 
-## Target `run` Walkthrough
+## `run` Walkthrough
 
-`marionette.run(.{ .seed = 0x1234 }, myTest)` does not exist yet. The target
-chronology is:
+`mar.run(allocator, .{ .seed = 0x1234 }, myTest)` chronology:
 
-1. Parse options and freeze the seed, start time, exploration profile, max
-   event count, and trace settings.
+1. Freeze the seed, start time, tick size, and trace settings.
 2. Construct one `World`.
 3. Create exactly one clock authority and one PRNG authority inside the world.
-4. Construct simulated disk, network, scheduler, and BUGGIFY authorities from
-   that same world state.
-5. Invoke the user's scenario with those authorities.
-6. On every event, pick the next simulator decision from the world's PRNG.
-7. Route all time movement through the world's clock.
-8. Record stable event data into the trace.
-9. Check registered safety invariants at configured points.
-10. Stop on success, user error, invariant failure, liveness failure, or budget
-    exhaustion.
-11. Rerun the same scenario with the same seed and compare byte-identical
-    traces.
-12. If the run failed, print the seed, options, event index, failure kind,
-    trace location, and reproduction command.
+4. Invoke the user's scenario with that world.
+5. On every event, pick simulator decisions from the world's PRNG.
+6. Route all time movement through the world's clock.
+7. Record stable event data into the trace.
+8. Stop on success or scenario error.
+9. Preserve a partial trace if the scenario returned an error.
+10. If the first run passed, rerun the same scenario with the same seed.
+11. Compare byte-identical traces.
+12. Return `RunReport.passed` with one owned trace, or `RunReport.failed` with
+    seed, options, event counts, failure kind, traces, and scenario error name
+    when available.
 
 The dangerous spots are scheduler choice, time advancement, raw randomness,
 unordered state dumps, and host APIs. Those must stay under simulator control.

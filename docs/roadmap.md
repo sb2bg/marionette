@@ -21,7 +21,7 @@ Deliverables:
 - A basic `tidy` linter for banned non-deterministic calls.
 - A written architecture contract for determinism, time, randomness, and
   simulator scope.
-- A twice-and-compare detector for runtime non-determinism.
+- `mar.run`, a twice-and-compare detector for runtime non-determinism.
 - Public docs that are honest about what works and what does not.
 
 Done means:

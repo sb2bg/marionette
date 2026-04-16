@@ -107,6 +107,29 @@ const random = world.tracedRandom();
 const latency_ns = try random.intLessThan(u64, 1_000_000);
 ```
 
+## `run`
+
+`mar.run(allocator, options, scenario)` executes a scenario twice with the same
+seed and compares byte-identical traces.
+
+```zig
+fn scenario(world: *mar.World) !void {
+    try world.tick();
+    try world.record("scenario.done", .{});
+}
+
+var report = try mar.run(std.testing.allocator, .{ .seed = 0x1234 }, scenario);
+defer report.deinit();
+```
+
+The return value is `mar.RunReport`:
+
+- `.passed` contains the owned trace from the first successful run.
+- `.failed` contains a failure report with seed, options, event counts, traces,
+  failure kind, and scenario error name when available.
+
+See [Run](run.md) for details.
+
 ## Error Policy
 
 Marionette uses a small error policy:
@@ -135,11 +158,11 @@ The project may add named aliases like `TraceError` once the trace API
 settles, but it should not invent broad custom errors until there are real
 domain failures to expose.
 
-When a future `marionette.run` wrapper catches a scenario error return, it
-should preserve the partial trace through the last completed event and include
-that trace in the failure report. Panics are harder because Zig's default panic
-path may abort before Marionette can flush anything; users should prefer
-error-returning invariant checks for simulated failures.
+When `mar.run` catches a scenario error return, it preserves the partial trace
+through the last completed event and includes that trace in the failure report.
+Panics are harder because Zig's default panic path may abort before Marionette
+can flush anything; users should prefer error-returning invariant checks for
+simulated failures.
 
 ## Build Support
 

@@ -59,9 +59,19 @@ pub fn RateLimiter(comptime ClockType: type) type {
 
 /// Run a deterministic scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var world = try mar.World.init(allocator, .{ .seed = seed, .tick_ns = ns_per_ms });
-    defer world.deinit();
+    var report = try mar.run(allocator, .{ .seed = seed, .tick_ns = ns_per_ms }, scenario);
+    defer report.deinit();
 
+    switch (report) {
+        .passed => |*passed| return passed.takeTrace(),
+        .failed => |failure| {
+            failure.print();
+            return error.RateLimiterScenarioFailed;
+        },
+    }
+}
+
+fn scenario(world: *mar.World) !void {
     const Limiter = RateLimiter(mar.Clock(.simulation));
     var limiter = Limiter.init(world.clock(), world.tracedRandom(), .{
         .capacity = 3,
@@ -81,5 +91,4 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     }
 
     try world.record("rate_limiter.summary allowed={}", .{allowed});
-    return allocator.dupe(u8, world.traceBytes());
 }

@@ -62,7 +62,7 @@ Marionette enforces determinism in four layers.
 
 3. Twice-and-compare runtime detector.
 
-   The planned detector runs a scenario twice with the same seed and compares
+   `mar.run` runs a scenario twice with the same seed and compares
    byte-for-byte traces. A mismatch means non-determinism leaked.
 
 4. Documentation.

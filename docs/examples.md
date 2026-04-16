@@ -18,6 +18,7 @@ The rate limiter is a token bucket with jittered refill scheduling. It uses:
 - `World.randomIntLessThan(...)` to jitter the next refill time without modulo
   bias and with trace visibility.
 - `World.record(...)` to produce a replayable trace.
+- `mar.run(...)` to execute the scenario twice and compare traces.
 
 Run it with the rest of the test suite:
 
@@ -32,9 +33,9 @@ const trace = try rate_limiter.runScenario(allocator, 0xC0FFEE);
 defer allocator.free(trace);
 ```
 
-Calling `runScenario` twice with the same seed should produce byte-identical
-trace output. Calling it with different seeds may produce different traces
-because the refill schedule is jittered from the seeded random stream.
+`runScenario` delegates to `mar.run`, so every call already performs
+twice-and-compare replay. Calling it with different seeds may produce different
+traces because the refill schedule is jittered from the seeded random stream.
 
 ## Example Rules
 

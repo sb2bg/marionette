@@ -3,6 +3,7 @@
 //! Public API entry point.
 
 const clock_module = @import("clock.zig");
+const run_module = @import("run.zig");
 
 /// Return the clock implementation for a comptime mode.
 pub const Clock = clock_module.Clock;
@@ -31,6 +32,25 @@ pub const Random = @import("random.zig").Random;
 /// Deterministic simulation state for Phase 0 tests.
 pub const World = @import("world.zig").World;
 
+/// Configuration for `run`.
+pub const RunOptions = run_module.RunOptions;
+
+/// Successful deterministic scenario result.
+pub const RunResult = run_module.RunResult;
+
+/// Data-bearing scenario failure.
+pub const RunFailure = run_module.RunFailure;
+
+/// Failure kind captured by the runner.
+pub const RunFailureKind = run_module.RunFailureKind;
+
+/// Result of `run`: either a verified replay or a failure report.
+pub const RunReport = run_module.RunReport;
+
+/// Run a scenario twice with the same seed and compare traces.
+pub const run = run_module.run;
+
 test {
+    _ = @import("run.zig");
     _ = @import("tidy.zig");
 }

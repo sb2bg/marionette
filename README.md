@@ -11,26 +11,26 @@ Same seed. Same trace. Same bug.
 const std = @import("std");
 const mar = @import("marionette");
 
-test "scenario is replayable" {
-    const ns_per_ms: mar.Duration = 1_000_000;
-    var world = try mar.World.init(std.testing.allocator, .{
-        .seed = 0xC0FFEE,
-        .tick_ns = ns_per_ms,
-    });
-    defer world.deinit();
-
+fn scenario(world: *mar.World) !void {
     try world.tick();
     _ = try world.randomU64();
     try world.record("request.accepted id={}", .{42});
+}
 
-    try std.testing.expectEqualStrings(
-        \\marionette.trace format=text version=0
-        \\event=0 world.init seed=12648430 start_ns=0 tick_ns=1000000
-        \\event=1 world.tick now_ns=1000000
-        \\event=2 world.random_u64 value=10121301305976376037
-        \\event=3 request.accepted id=42
-        \\
-    , world.traceBytes());
+test "scenario is replayable" {
+    var report = try mar.run(std.testing.allocator, .{
+        .seed = 0xC0FFEE,
+        .tick_ns = 1_000_000,
+    }, scenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| try std.testing.expect(passed.trace.len > 0),
+        .failed => |failure| {
+            failure.print();
+            return error.ScenarioFailed;
+        },
+    }
 }
 ```
 
@@ -65,6 +65,7 @@ explicit allocators, no runtime magic.
 - [Overview](docs/overview.md)
 - [Architecture](docs/architecture.md)
 - [Trace Format](docs/trace-format.md)
+- [Run](docs/run.md)
 - [BUGGIFY](docs/buggify.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
