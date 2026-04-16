@@ -1,7 +1,8 @@
 //! Deterministic simulation state.
 //!
-//! A `World` owns the Phase 0 simulation state: one fake clock and one
-//! seeded PRNG. Later phases will add schedulers, disk, and network here.
+//! A `World` owns the Phase 0 simulation state: one fake clock, one
+//! seeded PRNG, and a trace log. Later phases will add schedulers, disk,
+//! and network here.
 
 const std = @import("std");
 
@@ -11,13 +12,17 @@ const random_module = @import("random.zig");
 /// Container for deterministic simulation state.
 ///
 /// `World` is the entry point for simulation tests. It owns the fake
-/// clock and seeded random stream used by services under test. In Phase 0
-/// it is deliberately single-node and single-threaded.
+/// clock, seeded random stream, and trace log used by services under
+/// test. In Phase 0 it is deliberately single-node and single-threaded.
 pub const World = struct {
+    /// Allocator used for the trace log.
+    allocator: std.mem.Allocator,
     /// Fake clock advanced explicitly by the world.
     sim_clock: clock_module.SimClock,
     /// Seeded pseudorandom number generator for reproducible choices.
     rng: random_module.Random,
+    /// Byte trace compared by determinism tests.
+    trace_log: std.ArrayList(u8),
 
     /// Configuration for a simulation world.
     pub const Options = struct {
@@ -29,15 +34,31 @@ pub const World = struct {
         tick_ns: clock_module.Duration = clock_module.default_tick_ns,
     };
 
-    /// Construct a world with deterministic time and randomness.
-    pub fn init(options: Options) World {
-        return .{
+    /// Construct a world with deterministic time, randomness, and tracing.
+    pub fn init(allocator: std.mem.Allocator, options: Options) !World {
+        var world: World = .{
+            .allocator = allocator,
             .sim_clock = .init(.{
                 .start_ns = options.start_ns,
                 .tick_ns = options.tick_ns,
             }),
             .rng = .init(options.seed),
+            .trace_log = .empty,
         };
+        errdefer world.deinit();
+
+        try world.record(
+            "world.init seed={} start_ns={} tick_ns={}",
+            .{ options.seed, options.start_ns, options.tick_ns },
+        );
+
+        return world;
+    }
+
+    /// Release memory owned by the world.
+    pub fn deinit(self: *World) void {
+        self.trace_log.deinit(self.allocator);
+        self.* = undefined;
     }
 
     /// Return the world's simulated clock.
@@ -48,35 +69,78 @@ pub const World = struct {
         return &self.sim_clock;
     }
 
-    /// Return a `std.Random` view over the world's seeded PRNG.
+    /// Return a raw `std.Random` view over the world's seeded PRNG.
+    ///
+    /// This is useful for code that needs the full `std.Random` API, but
+    /// individual draws through the returned value are not automatically
+    /// traced. Use `randomU64()` or `randomBool()` when the trace must
+    /// capture the random choice.
     pub fn random(self: *World) std.Random {
         return self.rng.random();
     }
 
+    /// Draw a traced `u64` from the world's seeded random stream.
+    pub fn randomU64(self: *World) !u64 {
+        const value = self.rng.random().int(u64);
+        try self.record("world.random_u64 value={}", .{value});
+        return value;
+    }
+
+    /// Draw a traced boolean from the world's seeded random stream.
+    pub fn randomBool(self: *World) !bool {
+        const value = self.rng.random().boolean();
+        try self.record("world.random_bool value={}", .{value});
+        return value;
+    }
+
     /// Advance the world by one simulation tick.
-    pub fn tick(self: *World) void {
+    pub fn tick(self: *World) !void {
         self.sim_clock.tick();
+        try self.record("world.tick now_ns={}", .{self.now()});
     }
 
     /// Advance the world by a duration measured in nanoseconds.
     ///
     /// `duration_ns` must be an exact multiple of the world's tick size.
-    pub fn runFor(self: *World, duration_ns: clock_module.Duration) void {
+    pub fn runFor(self: *World, duration_ns: clock_module.Duration) !void {
+        const start_ns = self.now();
         self.sim_clock.runFor(duration_ns);
+        try self.record(
+            "world.run_for start_ns={} duration_ns={} end_ns={}",
+            .{ start_ns, duration_ns, self.now() },
+        );
     }
 
     /// Return the world's current simulated timestamp in nanoseconds.
     pub fn now(self: *const World) clock_module.Timestamp {
         return self.sim_clock.now();
     }
+
+    /// Append one line to the world's trace.
+    ///
+    /// The format string should not include a trailing newline; `record`
+    /// adds one so trace records stay line-oriented and comparable.
+    pub fn record(self: *World, comptime fmt: []const u8, args: anytype) !void {
+        try self.trace_log.print(self.allocator, fmt, args);
+        try self.trace_log.append(self.allocator, '\n');
+    }
+
+    /// Return the trace bytes recorded so far.
+    ///
+    /// The returned slice is invalidated by later trace writes.
+    pub fn traceBytes(self: *const World) []const u8 {
+        return self.trace_log.items;
+    }
 };
 
 test "world: owns seeded random and simulated clock" {
-    var a: World = .init(.{ .seed = 1234, .tick_ns = 10 });
-    var b: World = .init(.{ .seed = 1234, .tick_ns = 10 });
+    var a = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer a.deinit();
+    var b = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer b.deinit();
 
-    a.tick();
-    b.tick();
+    try a.tick();
+    try b.tick();
 
     try std.testing.expectEqual(@as(clock_module.Timestamp, 10), a.now());
     try std.testing.expectEqual(a.now(), b.now());
@@ -89,9 +153,49 @@ test "world: owns seeded random and simulated clock" {
 }
 
 test "world: runFor advances whole simulated ticks" {
-    var world: World = .init(.{ .seed = 0, .tick_ns = 3 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 0, .tick_ns = 3 });
+    defer world.deinit();
 
-    world.runFor(12);
+    try world.runFor(12);
 
     try std.testing.expectEqual(@as(clock_module.Timestamp, 12), world.now());
+}
+
+test "world: trace records deterministic actions" {
+    var world = try World.init(std.testing.allocator, .{
+        .seed = 0xC0FFEE,
+        .start_ns = 5,
+        .tick_ns = 2,
+    });
+    defer world.deinit();
+
+    try world.tick();
+    try world.runFor(4);
+    try world.record("service.allowed request_id={}", .{7});
+
+    try std.testing.expectEqualStrings(
+        \\world.init seed=12648430 start_ns=5 tick_ns=2
+        \\world.tick now_ns=7
+        \\world.run_for start_ns=7 duration_ns=4 end_ns=11
+        \\service.allowed request_id=7
+        \\
+    , world.traceBytes());
+}
+
+test "world: same seed and actions produce identical traces" {
+    var a = try World.init(std.testing.allocator, .{ .seed = 42, .tick_ns = 10 });
+    defer a.deinit();
+    var b = try World.init(std.testing.allocator, .{ .seed = 42, .tick_ns = 10 });
+    defer b.deinit();
+
+    try a.tick();
+    try b.tick();
+
+    _ = try a.randomU64();
+    _ = try b.randomU64();
+
+    try a.record("service.count value={}", .{3});
+    try b.record("service.count value={}", .{3});
+
+    try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
 }
