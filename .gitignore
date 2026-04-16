@@ -1,0 +1,10 @@
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*.swo
+
