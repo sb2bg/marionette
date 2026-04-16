@@ -1,4 +1,4 @@
-//! Substring-based determinism linter.
+//! AST-based determinism linter.
 
 const std = @import("std");
 
@@ -61,13 +61,24 @@ pub fn scanSourceForPath(
     source: []const u8,
     options: Options,
 ) !void {
-    for (options.patterns) |pattern| {
-        var offset: usize = 0;
-        while (std.mem.indexOfPos(u8, source, offset, pattern.needle)) |index| {
-            offset = index + pattern.needle.len;
+    const sentinel_source = try allocator.dupeZ(u8, source);
+    defer allocator.free(sentinel_source);
+
+    var tree = try std.zig.Ast.parse(allocator, sentinel_source, .zig);
+    defer tree.deinit(allocator);
+
+    if (tree.errors.len > 0) return error.ParseError;
+
+    for (0..tree.nodes.len) |node_index| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
+        if (tree.nodeTag(node) != .field_access) continue;
+
+        for (options.patterns) |pattern| {
+            if (!fieldAccessMatches(tree, node, pattern.needle)) continue;
             if (isAllowed(path, pattern.needle)) continue;
 
-            const location = lineColumn(source, index);
+            const token = tree.firstToken(node);
+            const location = lineColumn(source, tree.tokenStart(token));
             try result.violations.append(allocator, .{
                 .path = try allocator.dupe(u8, normalizePath(path)),
                 .line = location.line,
@@ -156,6 +167,47 @@ fn lineColumn(source: []const u8, index: usize) Location {
     return location;
 }
 
+fn fieldAccessMatches(tree: std.zig.Ast, node: std.zig.Ast.Node.Index, needle: []const u8) bool {
+    var expected_buffer: [8][]const u8 = undefined;
+    var expected_count: usize = 0;
+
+    var split = std.mem.splitScalar(u8, needle, '.');
+    while (split.next()) |part| {
+        if (expected_count == expected_buffer.len) return false;
+        expected_buffer[expected_count] = part;
+        expected_count += 1;
+    }
+
+    var reverse_buffer: [8][]const u8 = undefined;
+    var reverse_count: usize = 0;
+    var current = node;
+    while (true) {
+        switch (tree.nodeTag(current)) {
+            .field_access => {
+                if (reverse_count == reverse_buffer.len) return false;
+                const lhs, const field_token = tree.nodeData(current).node_and_token;
+                reverse_buffer[reverse_count] = tree.tokenSlice(field_token);
+                reverse_count += 1;
+                current = lhs;
+            },
+            .identifier => {
+                if (reverse_count == reverse_buffer.len) return false;
+                reverse_buffer[reverse_count] = tree.tokenSlice(tree.nodeMainToken(current));
+                reverse_count += 1;
+                break;
+            },
+            else => return false,
+        }
+    }
+
+    if (expected_count != reverse_count) return false;
+    for (expected_buffer[0..expected_count], 0..) |expected, index| {
+        const actual = reverse_buffer[reverse_count - 1 - index];
+        if (!std.mem.eql(u8, expected, actual)) return false;
+    }
+    return true;
+}
+
 fn isAllowed(path: []const u8, needle: []const u8) bool {
     _ = needle;
     const normalized = normalizePath(path);
@@ -188,6 +240,24 @@ test "tidy flags banned patterns" {
     try std.testing.expectEqual(@as(usize, 13), result.violations.items[0].column);
 }
 
+test "tidy ignores comments and string literals" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/comment.zig",
+        \\// std.time.nanoTimestamp()
+        \\const text = "std.crypto.random";
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
+}
+
 test "tidy allows wrapper files to mention banned patterns" {
     var result: ScanResult = .{};
     defer result.deinit(std.testing.allocator);
@@ -201,4 +271,24 @@ test "tidy allows wrapper files to mention banned patterns" {
     );
 
     try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
+}
+
+test "tidy identifies aliases when matching patterns" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/alias.zig",
+        \\// const time = std.time;
+        \\const now = time.nanoTimestamp();
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
+    try std.testing.expectEqual(@as(usize, 2), result.violations.items[0].line);
+    try std.testing.expectEqual(@as(usize, 13), result.violations.items[0].column);
 }

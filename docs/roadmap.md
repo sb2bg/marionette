@@ -38,7 +38,7 @@ Planned work:
 
 - Stabilize `Clock`, `Random`, and `Disk`.
 - Add disk fault injection.
-- Upgrade the linter from substring matching to AST-based checks.
+- Expand the AST-based linter with simple alias detection.
 - Add docs on allocator discipline and banned standard-library calls.
 - Add realistic examples such as a job queue or small KV store.
 

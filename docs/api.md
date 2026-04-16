@@ -135,4 +135,6 @@ test_step.dependOn(&tidy.step);
 ```
 
 The helper builds the `marionette-tidy` executable and creates a run step that
-exits non-zero when banned non-deterministic calls are found.
+exits non-zero when banned non-deterministic calls are found. The current
+linter is AST-based: it ignores comments and string literals, but does not
+yet resolve aliases such as `const time = std.time`.

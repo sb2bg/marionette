@@ -20,8 +20,8 @@ TigerBeetle's VOPR is the most important Zig-adjacent reference point. It
 tests a replicated system in a deterministic single-threaded simulation and
 uses aggressive engineering discipline to keep that simulation trustworthy.
 
-Marionette's planned `tidy` linter is directly inspired by TigerBeetle's
-approach to enforcing project rules in code.
+Marionette's `tidy` linter is directly inspired by TigerBeetle's approach to
+enforcing project rules in code.
 
 Useful starting point:
 

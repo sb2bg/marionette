@@ -29,8 +29,9 @@ These are banned in simulated code:
 - Pointer identity as a source of ordering or hashing.
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.
 
-Phase 0 ships a substring-based `tidy` linter for the obvious cases. Later
-phases should move toward AST-based checks.
+Phase 0 ships an AST-based `tidy` linter for the obvious direct-call cases.
+It ignores comments and string literals, but it does not yet perform semantic
+alias or import resolution.
 
 ## Enforcement Layers
 
@@ -44,8 +45,8 @@ Marionette enforces determinism in four layers.
 
 2. Build-integrated linter.
 
-   The `marionette-tidy` executable scans source for banned calls and can be
-   wired into `zig build test`.
+   The `marionette-tidy` executable parses Zig source with `std.zig.Ast`,
+   scans for banned direct call paths, and can be wired into `zig build test`.
 
    ```zig
    const marionette = @import("src/build_support.zig");
