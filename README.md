@@ -4,8 +4,9 @@ Deterministic simulation testing for Zig.
 
 Write your service once, against Marionette's interfaces. In production it
 runs with zero overhead. In tests, it runs inside a simulator that controls
-time, scheduling, disk, and network, so any bug you find can be replayed
-exactly, as many times as you need.
+time and seeded randomness today, with scheduling, disk, and network planned
+for later phases. Any bug the simulator finds should be replayable exactly,
+as many times as you need.
 
 > **Status: early development (Phase 0).** The ideas work in toy examples.
 > The API will change. Do not use this in production yet. See
@@ -20,11 +21,12 @@ clocks move forward smoothly. Production runs in a universe that does none
 of those things.
 
 Deterministic simulation testing (DST) closes that gap. You run your code in
-a simulated world that injects failures, dropped packets, delayed writes,
-partitioned nodes, clock skew, torn disk writes, but does it _deterministically_.
-One seed produces one exact execution. When the simulator finds a bug, you
-save the seed. Replay it, and the bug appears again, in the same order, at
-the same tick. No more "couldn't reproduce, closing as wontfix."
+a simulated world that can eventually inject failures, dropped packets,
+delayed writes, partitioned nodes, clock skew, torn disk writes, but does it
+_deterministically_. One seed produces one exact execution. When the
+simulator finds a bug, you save the seed. Replay it, and the bug appears
+again, in the same order, at the same tick. No more "couldn't reproduce,
+closing as wontfix."
 
 This approach is how FoundationDB, TigerBeetle, and a growing number of
 serious distributed systems are tested. Until now, adopting it meant building
@@ -36,52 +38,84 @@ your own simulator from scratch.
 const std = @import("std");
 const mar = @import("marionette");
 
-// Your service takes Marionette's interfaces as parameters.
-// In production, these are zero-cost wrappers over syscalls.
-// In tests, they route through the simulator.
-const RateLimiter = struct {
-    clock: mar.Clock,
-    requests_per_second: u32,
-    last_refill: u64,
-    tokens: u32,
+fn RateLimiter(comptime ClockType: type) type {
+    return struct {
+        const Self = @This();
 
-    pub fn allow(self: *RateLimiter) bool {
-        const now = self.clock.now();
-        const elapsed = now - self.last_refill;
-        // ... refill logic ...
-        if (self.tokens > 0) {
+        clock: *ClockType,
+        requests_per_second: u32,
+        last_refill_ns: mar.Timestamp,
+        tokens: u32,
+
+        pub fn init(clock: *ClockType, requests_per_second: u32) Self {
+            return .{
+                .clock = clock,
+                .requests_per_second = requests_per_second,
+                .last_refill_ns = clock.now(),
+                .tokens = requests_per_second,
+            };
+        }
+
+        pub fn allow(self: *Self) bool {
+            const now = self.clock.now();
+            const elapsed_ns = now - self.last_refill_ns;
+            const earned = elapsed_ns * self.requests_per_second / std.time.ns_per_s;
+
+            if (earned > 0) {
+                self.tokens = @min(
+                    self.requests_per_second,
+                    self.tokens + @as(u32, @intCast(earned)),
+                );
+                self.last_refill_ns = now;
+            }
+
+            if (self.tokens == 0) return false;
             self.tokens -= 1;
             return true;
         }
-        return false;
-    }
-};
+    };
+}
 
-test "rate limiter never allows more than the configured rate" {
-    // Same seed. Same execution. Every single time.
-    var world = try mar.World.init(.{ .seed = 0xC0FFEE });
+test "rate limiter is deterministic under simulated time" {
+    var world = try mar.World.init(std.testing.allocator, .{
+        .seed = 0xC0FFEE,
+        .tick_ns = std.time.ns_per_ms,
+    });
     defer world.deinit();
 
-    var limiter = RateLimiter{
-        .clock = world.clock(),
-        .requests_per_second = 100,
-        .last_refill = 0,
-        .tokens = 100,
-    };
+    const SimRateLimiter = RateLimiter(mar.Clock(.simulation));
+    var limiter = SimRateLimiter.init(world.clock(), 100);
 
     var allowed: u32 = 0;
-    for (0..10_000) |_| {
+    for (0..1_000) |_| {
         if (limiter.allow()) allowed += 1;
         try world.tick();
     }
 
-    try std.testing.expect(allowed <= 100 + (world.elapsed_seconds() * 100));
+    try world.record("rate_limiter.allowed count={}", .{allowed});
+    try std.testing.expectEqual(@as(u32, 199), allowed);
 }
 ```
 
-The interesting part isn't the rate limiter. It's that `zig build test`
-produces the exact same execution every time. When someone eventually finds a
-bug, the fix starts with a seed number, not a 20-slide postmortem.
+The same service can be instantiated with `mar.Clock(.production)` for code
+that reads host time, or `mar.Clock(.simulation)` for code that runs inside a
+deterministic `World`. In simulation, time moves only when the test calls
+`world.tick()` or `world.runFor(...)`, and actions can be recorded into
+`world.traceBytes()` for byte-for-byte replay checks.
+
+## Current API
+
+The Phase 0 public API is intentionally small:
+
+- `mar.Random`: seeded wrapper around Zig's default PRNG. Callers must provide
+  a `u64` seed.
+- `mar.Clock(.production)`: wall-clock time backed by `std.time`.
+- `mar.Clock(.simulation)`: fake time backed by `mar.SimClock`.
+- `mar.World`: owns one `SimClock`, one seeded `Random`, and a trace log.
+  It exposes `tick()`, `runFor(...)`, `record(...)`, and `traceBytes()`.
+
+Phase 0 does not yet include a scheduler, disk simulator, network simulator,
+node spawning, trace export format, or time-travel debugging.
 
 ## Why Zig
 
