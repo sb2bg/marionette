@@ -23,6 +23,7 @@ Phase 0 has:
 - `World`, which owns one simulated clock, one seeded PRNG, and one trace log.
 - `Clock(.production)` and `Clock(.simulation)`.
 - A seeded `Random` wrapper.
+- A text trace format with a version header and global event indexes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
 - An AST-based tidy linter for obvious nondeterministic calls, including
@@ -83,10 +84,11 @@ There is exactly one seeded PRNG per `World`. Every simulator choice must draw
 from it: packet latency, disk latency, BUGGIFY, crash timing, workload
 generation, scheduling choices, and future shrink decisions.
 
-Current `World.random()` exposes a raw deterministic `std.Random` view for
-ergonomics. Draws through that view are deterministic, but not automatically
-traced. When a draw matters to replay diagnostics, use traced helpers such as
-`randomU64()` and `randomBool()`.
+Current `World.unsafeUntracedRandom()` exposes a raw deterministic
+`std.Random` view for rare cases that need the full standard API. Draws
+through that view are deterministic, but not automatically traced. The unsafe
+name is intentional. Simulator decisions should use traced helpers such as
+`randomU64()`, `randomBool()`, and `randomIntLessThan()`.
 
 Direct `std.crypto.random`, unseeded randomness, `/dev/urandom`, wall-clock
 seeding, and host entropy are banned inside simulated code. The tidy linter is
@@ -102,7 +104,8 @@ const std = @import("std");
 const mar = @import("marionette");
 
 fn client(world: *mar.World) !void {
-    const latency_ns = try world.randomU64() % 1_000_000;
+    const random = world.tracedRandom();
+    const latency_ns = try random.intLessThan(u64, 1_000_000);
     world.clock().sleep(latency_ns);
     try world.record("client.request latency_ns={}", .{latency_ns});
 }
@@ -131,7 +134,8 @@ if (sim.buggify(.drop_packet)) return error.PacketDropped;
 In simulation builds, `sim.buggify` draws from the world's PRNG and records the
 decision when useful. In production builds, `sim` is a production authority and
 the branch should fold away when the hook is disabled at comptime. This is the
-Zig replacement for FoundationDB-style BUGGIFY macros.
+Zig replacement for FoundationDB-style BUGGIFY macros. `docs/buggify.md`
+contains the zero-cost shape and a ReleaseFast object-code check.
 
 ## Failure Surface
 
@@ -147,6 +151,13 @@ When Marionette finds a bug, the minimum useful failure report is:
 Better reports will add shrinking and a reduced trace. A report that only says
 `seed 0x1234 failed` is insufficient.
 
+If a scenario returns an error, `marionette.run` should preserve and print the
+partial trace through the last completed event before returning the error. If a
+scenario panics, Zig's default panic path may abort without giving Marionette a
+chance to flush anything. Marionette should document that limitation plainly
+and prefer error-returning checks for simulated failures; a future custom panic
+hook can improve crash traces.
+
 ## Exploration Strategy
 
 Marionette will not claim to solve state-space exploration. Phase 0 and early
@@ -161,6 +172,42 @@ Planned strategy layers:
 - Shrinking only after failures are represented as replayable event streams.
 
 Branch coverage alone is a weak signal for distributed simulation quality.
+
+## Event Ordering
+
+`World` event indexes are global and deterministic. In Phase 0, events are
+emitted directly by the single-threaded scenario. In the future multi-node
+scheduler, the simulator must pick one runnable event at a time from a stable
+ordering, likely `(simulated_time, priority, deterministic_tiebreaker)`.
+
+The tiebreaker must not depend on pointer addresses, hash map iteration, or OS
+scheduling. A scheduler that cannot explain its next-event choice in the trace
+is not deterministic enough.
+
+## Multi-Node Authority Shape
+
+The preferred Phase 2 shape is a per-node handle:
+
+```zig
+fn nodeMain(node: *mar.Node) !void {
+    try node.network().send(.{ .to = 2, .body = "ping" });
+}
+```
+
+Each `Node` would expose the node's identity, clock view, random/fault hooks,
+network view, and storage view. The shared `World` remains the owner of global
+simulation state, but application code should usually receive `Node`, not
+`World` plus a loose node id.
+
+Rejected alternatives for now:
+
+- Passing `*World` plus `node_id` everywhere. This is easy internally but leaks
+  too much simulator authority into application code.
+- Giving each node an independent world. This weakens global ordering and makes
+  network partitions harder to represent correctly.
+
+Under a partition, two nodes differ because their `Node.network()` authorities
+consult the world's partition state through their node identity.
 
 ## Invariants And Liveness
 
@@ -213,6 +260,13 @@ Marionette is not:
 
 Scope control is part of correctness. It is better to be narrow and true than
 wide and almost deterministic.
+
+## Thread-Safety
+
+`World` is not thread-safe. A single `World` must be driven by one OS thread at
+a time. Running two independent simulations concurrently in the same process is
+fine if each thread owns a different `World` and they do not share simulated
+state. Cross-world coordination is outside Marionette's determinism contract.
 
 ## Target `run` Walkthrough
 
