@@ -69,12 +69,16 @@ pub fn scanSourceForPath(
 
     if (tree.errors.len > 0) return error.ParseError;
 
+    var aliases: std.ArrayList(Alias) = .empty;
+    defer aliases.deinit(allocator);
+    try collectAliases(allocator, tree, options, &aliases);
+
     for (0..tree.nodes.len) |node_index| {
         const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
         if (tree.nodeTag(node) != .field_access) continue;
 
         for (options.patterns) |pattern| {
-            if (!fieldAccessMatches(tree, node, pattern.needle)) continue;
+            if (!fieldAccessMatches(tree, node, pattern.needle, aliases.items)) continue;
             if (isAllowed(path, pattern.needle)) continue;
 
             const token = tree.firstToken(node);
@@ -154,6 +158,28 @@ const Location = struct {
     column: usize,
 };
 
+const max_path_parts = 8;
+
+const PathParts = struct {
+    items: [max_path_parts][]const u8 = undefined,
+    len: usize = 0,
+
+    fn append(self: *PathParts, part: []const u8) !void {
+        if (self.len == self.items.len) return error.TooManyPathParts;
+        self.items[self.len] = part;
+        self.len += 1;
+    }
+
+    fn slice(self: *const PathParts) []const []const u8 {
+        return self.items[0..self.len];
+    }
+};
+
+const Alias = struct {
+    name: []const u8,
+    parts: PathParts,
+};
+
 fn lineColumn(source: []const u8, index: usize) Location {
     var location: Location = .{ .line = 1, .column = 1 };
     for (source[0..index]) |byte| {
@@ -167,45 +193,93 @@ fn lineColumn(source: []const u8, index: usize) Location {
     return location;
 }
 
-fn fieldAccessMatches(tree: std.zig.Ast, node: std.zig.Ast.Node.Index, needle: []const u8) bool {
-    var expected_buffer: [8][]const u8 = undefined;
-    var expected_count: usize = 0;
+fn collectAliases(
+    allocator: std.mem.Allocator,
+    tree: std.zig.Ast,
+    options: Options,
+    aliases: *std.ArrayList(Alias),
+) !void {
+    for (0..tree.nodes.len) |node_index| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
+        const var_decl = tree.fullVarDecl(node) orelse continue;
 
-    var split = std.mem.splitScalar(u8, needle, '.');
-    while (split.next()) |part| {
-        if (expected_count == expected_buffer.len) return false;
-        expected_buffer[expected_count] = part;
-        expected_count += 1;
-    }
+        const init_node = var_decl.ast.init_node.unwrap() orelse continue;
+        var init_parts: PathParts = .{};
+        collectPathParts(tree, init_node, &init_parts) catch continue;
 
-    var reverse_buffer: [8][]const u8 = undefined;
-    var reverse_count: usize = 0;
-    var current = node;
-    while (true) {
-        switch (tree.nodeTag(current)) {
-            .field_access => {
-                if (reverse_count == reverse_buffer.len) return false;
-                const lhs, const field_token = tree.nodeData(current).node_and_token;
-                reverse_buffer[reverse_count] = tree.tokenSlice(field_token);
-                reverse_count += 1;
-                current = lhs;
-            },
-            .identifier => {
-                if (reverse_count == reverse_buffer.len) return false;
-                reverse_buffer[reverse_count] = tree.tokenSlice(tree.nodeMainToken(current));
-                reverse_count += 1;
-                break;
-            },
-            else => return false,
+        for (options.patterns) |pattern| {
+            if (!pathPartsAreNeedlePrefix(init_parts.slice(), pattern.needle)) continue;
+
+            const name_token = var_decl.ast.mut_token + 1;
+            const name = tree.tokenSlice(name_token);
+            try aliases.append(allocator, .{ .name = name, .parts = init_parts });
+            break;
         }
     }
+}
 
-    if (expected_count != reverse_count) return false;
-    for (expected_buffer[0..expected_count], 0..) |expected, index| {
-        const actual = reverse_buffer[reverse_count - 1 - index];
-        if (!std.mem.eql(u8, expected, actual)) return false;
+fn fieldAccessMatches(
+    tree: std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    needle: []const u8,
+    aliases: []const Alias,
+) bool {
+    var parts: PathParts = .{};
+    collectPathParts(tree, node, &parts) catch return false;
+    return pathPartsMatchNeedle(parts.slice(), needle) or pathPartsMatchAlias(parts, needle, aliases);
+}
+
+fn collectPathParts(
+    tree: std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    parts: *PathParts,
+) !void {
+    switch (tree.nodeTag(node)) {
+        .field_access => {
+            const lhs, const field_token = tree.nodeData(node).node_and_token;
+            try collectPathParts(tree, lhs, parts);
+            try parts.append(tree.tokenSlice(field_token));
+        },
+        .identifier => try parts.append(tree.tokenSlice(tree.nodeMainToken(node))),
+        else => return error.UnsupportedPath,
+    }
+}
+
+fn pathPartsAreNeedlePrefix(parts: []const []const u8, needle: []const u8) bool {
+    if (parts.len == 0) return false;
+    var index: usize = 0;
+    var split = std.mem.splitScalar(u8, needle, '.');
+    while (index < parts.len) : (index += 1) {
+        const expected = split.next() orelse return false;
+        if (!std.mem.eql(u8, expected, parts[index])) return false;
     }
     return true;
+}
+
+fn pathPartsMatchNeedle(parts: []const []const u8, needle: []const u8) bool {
+    var index: usize = 0;
+    var split = std.mem.splitScalar(u8, needle, '.');
+    while (split.next()) |expected| : (index += 1) {
+        if (index == parts.len) return false;
+        if (!std.mem.eql(u8, expected, parts[index])) return false;
+    }
+    return index == parts.len;
+}
+
+fn pathPartsMatchAlias(parts: PathParts, needle: []const u8, aliases: []const Alias) bool {
+    const actual = parts.slice();
+    if (actual.len == 0) return false;
+
+    for (aliases) |alias| {
+        if (!std.mem.eql(u8, alias.name, actual[0])) continue;
+
+        var expanded = alias.parts;
+        for (actual[1..]) |part| {
+            expanded.append(part) catch return false;
+        }
+        return pathPartsMatchNeedle(expanded.slice(), needle);
+    }
+    return false;
 }
 
 fn isAllowed(path: []const u8, needle: []const u8) bool {
@@ -281,7 +355,7 @@ test "tidy identifies aliases when matching patterns" {
         std.testing.allocator,
         &result,
         "src/alias.zig",
-        \\// const time = std.time;
+        \\const time = std.time;
         \\const now = time.nanoTimestamp();
         \\
     ,
