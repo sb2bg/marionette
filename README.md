@@ -65,6 +65,7 @@ explicit allocators, no runtime magic.
 - [Overview](docs/overview.md)
 - [Architecture](docs/architecture.md)
 - [Trace Format](docs/trace-format.md)
+- [BUGGIFY](docs/buggify.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
 - [Examples](docs/examples.md)

@@ -11,7 +11,9 @@ Phase 0 is intentionally small. Today Marionette has seeded randomness,
 simulated time, and trace logging. Disk, network, scheduling, and replay
 tooling are planned.
 
-For the precise correctness model, see [Architecture](architecture.md).
+For the precise correctness model, see [Architecture](architecture.md). For
+the replay artifact bytes, see [Trace Format](trace-format.md). For the
+planned zero-cost fault hook shape, see [BUGGIFY](buggify.md).
 
 ## What This Solves
 
