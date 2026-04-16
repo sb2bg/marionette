@@ -3,8 +3,10 @@
 zig-cache/
 zig-out/
 
+# Local reference repository checkouts
+.references/
+
 # Local editor and OS files
 .DS_Store
 *.swp
 *.swo
-
