@@ -18,6 +18,7 @@ fn scenario(world: *mar.World) !void {
 test "scenario is deterministic" {
     var report = try mar.run(std.testing.allocator, .{
         .seed = 0x1234,
+        .checks = &.{.{ .name = "trace exists", .check = traceExists }},
     }, scenario);
     defer report.deinit();
 
@@ -30,6 +31,10 @@ test "scenario is deterministic" {
             return error.ScenarioFailed;
         },
     }
+}
+
+fn traceExists(world: *mar.World) !void {
+    if (world.traceBytes().len == 0) return error.EmptyTrace;
 }
 ```
 
@@ -50,17 +55,46 @@ trace. Instead, `mar.run` captures:
 - First trace.
 - Second trace when a second run happened.
 - First and second event counts.
-- Scenario error name when user code returned an error.
+- Error name when user code or a check returned an error.
+- Check name when a named check failed.
 
 Failure kinds:
 
 - `scenario_error`: user scenario returned an error. The first trace is the
   partial trace through the last completed event.
+- `check_failed`: a named check returned an error after the scenario body.
+  The first trace is the partial trace through the check failure.
 - `determinism_mismatch`: both runs completed, but their traces differed.
 
 Panics are different from error returns. Zig's default panic path may abort
 before Marionette can report a partial trace, so simulated failures should
 prefer error-returning invariant checks.
+
+## Checks
+
+Checks are the Phase 0 invariant hook. A check is a named function that runs
+after the scenario body and returns an error when a property is violated:
+
+```zig
+fn noBadState(world: *mar.World) !void {
+    if (std.mem.indexOf(u8, world.traceBytes(), "bad_state") != null) {
+        return error.BadState;
+    }
+}
+
+const checks = [_]mar.Check{
+    .{ .name = "no bad state", .check = noBadState },
+};
+
+var report = try mar.run(std.testing.allocator, .{
+    .seed = 0x1234,
+    .checks = &checks,
+}, scenario);
+```
+
+This is intentionally small. Future scheduler work can check invariants after
+every event or on quiescence, but the current API already gives failures a
+stable name and preserved trace.
 
 ## Ownership
 
