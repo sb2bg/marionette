@@ -107,6 +107,19 @@ const random = world.tracedRandom();
 const latency_ns = try random.intLessThan(u64, 1_000_000);
 ```
 
+## Seeds
+
+`mar.parseSeed` accepts decimal `u64` seeds and 40-character Git hashes:
+
+```zig
+const seed = try mar.parseSeed("000000000000000000000000000000000000002a");
+try std.testing.expectEqual(@as(u64, 42), seed);
+```
+
+Git hashes are parsed as `u160` hexadecimal values and truncated to the low 64
+bits. This is useful for CLI tools and CI jobs that want deterministic seed
+variation by commit.
+
 ## `run`
 
 `mar.run(allocator, options, scenario)` executes a scenario twice with the same
@@ -122,11 +135,31 @@ var report = try mar.run(std.testing.allocator, .{ .seed = 0x1234 }, scenario);
 defer report.deinit();
 ```
 
+Checks can be attached to the run options:
+
+```zig
+fn noBadState(world: *mar.World) !void {
+    if (std.mem.indexOf(u8, world.traceBytes(), "bad_state") != null) {
+        return error.BadState;
+    }
+}
+
+const checks = [_]mar.Check{
+    .{ .name = "no bad state", .check = noBadState },
+};
+
+var report = try mar.run(std.testing.allocator, .{
+    .seed = 0x1234,
+    .checks = &checks,
+}, scenario);
+defer report.deinit();
+```
+
 The return value is `mar.RunReport`:
 
 - `.passed` contains the owned trace from the first successful run.
 - `.failed` contains a failure report with seed, options, event counts, traces,
-  failure kind, and scenario error name when available.
+  failure kind, error name when available, and check name when a check failed.
 
 See [Run](run.md) for details.
 
