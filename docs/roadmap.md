@@ -19,8 +19,11 @@ Deliverables:
 - A versioned text trace format with event indexes.
 - A many-seed fuzz test that prints the failing seed.
 - A basic `tidy` linter for banned non-deterministic calls.
+- A small named-check API for post-scenario invariant checks.
+- A seed parser for decimal seeds and 40-character Git hashes.
 - A written architecture contract for determinism, time, randomness, and
   simulator scope.
+- A written disk fault model before disk simulation code exists.
 - `mar.run`, a twice-and-compare detector for runtime non-determinism.
 - Public docs that are honest about what works and what does not.
 
@@ -40,7 +43,7 @@ Goal: make Marionette useful for a single-node service.
 Planned work:
 
 - Stabilize `Clock`, `Random`, and `Disk`.
-- Add disk fault injection.
+- Add disk fault injection based on [Disk Fault Model](disk-fault-model.md).
 - Expand the AST-based linter with simple alias detection.
 - Add docs on allocator discipline and banned standard-library calls.
 - Add realistic examples such as a job queue or small KV store.

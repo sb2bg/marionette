@@ -8,12 +8,14 @@ to direct operations. In simulation, they route through a controlled world
 that can replay the same execution from the same seed.
 
 Phase 0 is intentionally small. Today Marionette has seeded randomness,
-simulated time, and trace logging. Disk, network, scheduling, and replay
-tooling are planned.
+simulated time, trace logging, twice-and-compare replay, and named
+post-scenario checks. Disk, network, scheduling, and richer replay tooling are
+planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
 the replay artifact bytes, see [Trace Format](trace-format.md). For the
-planned zero-cost fault hook shape, see [BUGGIFY](buggify.md).
+planned zero-cost fault hook shape, see [BUGGIFY](buggify.md). For storage
+faults, see [Disk Fault Model](disk-fault-model.md).
 
 ## What This Solves
 

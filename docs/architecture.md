@@ -2,6 +2,9 @@
 
 This document records Marionette's foundational correctness contract. If a
 future feature weakens this contract, it needs an explicit design discussion.
+For scheduler, network, invariants, or liveness work, read
+[TigerBeetle Lessons](tigerbeetle-lessons.md) first. For disk work, read
+[Disk Fault Model](disk-fault-model.md) before writing code.
 
 ## Determinism Contract
 
@@ -25,6 +28,8 @@ Phase 0 has:
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
 - `mar.run`, which executes a scenario twice and compares traces.
+- `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
+- `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
 - An AST-based tidy linter for obvious nondeterministic calls, including
@@ -34,7 +39,7 @@ Phase 0 does not yet have:
 
 - A scheduler.
 - Disk or network simulation.
-- Invariant registration.
+- Event-by-event invariant checking.
 - Liveness checking.
 - Seed shrinking.
 - Syscall interception.
@@ -159,8 +164,9 @@ error-returning checks for simulated failures; a future custom panic hook can
 improve crash traces.
 
 Current `RunFailure` captures seed, options, failure kind, event counts, owned
-traces, and the scenario error name. A future CLI wrapper should add an exact
-reproduction command once the command-line surface exists.
+traces, error name when available, and check name when a named check failed. A
+future CLI wrapper should add an exact reproduction command once the
+command-line surface exists.
 
 ## Exploration Strategy
 
@@ -221,10 +227,14 @@ check them regularly.
 
 Planned API direction:
 
-- Register invariants with the world or scenario.
+- Register invariants with the run, world, or scenario.
 - Check cheap invariants after every event.
 - Allow expensive invariants every N events and on quiescence.
 - Include invariant name and event index in failure reports.
+
+Current Phase 0 support is deliberately smaller: `RunOptions.checks` accepts
+named `mar.Check` functions that run after the scenario body. This proves the
+failure-report shape, but it is not enough for serious multi-event DST yet.
 
 Liveness is harder. Marionette should eventually detect stuck systems, unmet
 deadlines, and lack of progress under fair scheduling assumptions. This is not
@@ -276,20 +286,21 @@ state. Cross-world coordination is outside Marionette's determinism contract.
 
 `mar.run(allocator, .{ .seed = 0x1234 }, myTest)` chronology:
 
-1. Freeze the seed, start time, tick size, and trace settings.
+1. Freeze the seed, start time, tick size, checks, and trace settings.
 2. Construct one `World`.
 3. Create exactly one clock authority and one PRNG authority inside the world.
 4. Invoke the user's scenario with that world.
 5. On every event, pick simulator decisions from the world's PRNG.
 6. Route all time movement through the world's clock.
 7. Record stable event data into the trace.
-8. Stop on success or scenario error.
-9. Preserve a partial trace if the scenario returned an error.
-10. If the first run passed, rerun the same scenario with the same seed.
-11. Compare byte-identical traces.
-12. Return `RunReport.passed` with one owned trace, or `RunReport.failed` with
-    seed, options, event counts, failure kind, traces, and scenario error name
-    when available.
+8. If the scenario succeeds, run configured checks in order.
+9. Stop on success, scenario error, or check error.
+10. Preserve a partial trace if the scenario or a check returned an error.
+11. If the first run passed, rerun the same scenario with the same seed.
+12. Compare byte-identical traces.
+13. Return `RunReport.passed` with one owned trace, or `RunReport.failed` with
+    seed, options, event counts, failure kind, traces, error name when
+    available, and check name when a check failed.
 
 The dangerous spots are scheduler choice, time advancement, raw randomness,
 unordered state dumps, and host APIs. Those must stay under simulator control.
