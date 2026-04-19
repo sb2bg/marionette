@@ -13,7 +13,7 @@ const mar = @import("marionette");
 
 fn scenario(world: *mar.World) !void {
     try world.tick();
-    _ = try world.randomU64();
+    _ = try world.randomIntLessThan(u64, 1_000);
     try world.record("request.accepted id={}", .{42});
 }
 
@@ -36,9 +36,9 @@ test "scenario is replayable" {
 
 ## Status
 
-Phase 0. Time, seeded randomness, and trace logging are being built now.
-Disk, network, scheduling, shrinking, and time-travel debugging are planned,
-not implemented.
+Phase 0. Time, seeded randomness, trace logging, replay checks, and named
+scenario checks are being built now. Disk, network, scheduling, shrinking, and
+time-travel debugging are planned, not implemented.
 
 The API is not stable. Do not use this in production yet.
 
@@ -67,11 +67,13 @@ explicit allocators, no runtime magic.
 - [Trace Format](docs/trace-format.md)
 - [Run](docs/run.md)
 - [BUGGIFY](docs/buggify.md)
+- [Disk Fault Model](docs/disk-fault-model.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
 - [Examples](docs/examples.md)
 - [Roadmap](docs/roadmap.md)
 - [Prior art](docs/prior-art.md)
+- [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
 
 ## Is This For Me?
 
