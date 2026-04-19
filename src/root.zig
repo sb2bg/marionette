@@ -4,6 +4,7 @@
 
 const clock_module = @import("clock.zig");
 const run_module = @import("run.zig");
+const seed_module = @import("seed.zig");
 
 /// Return the clock implementation for a comptime mode.
 pub const Clock = clock_module.Clock;
@@ -35,6 +36,9 @@ pub const World = @import("world.zig").World;
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 
+/// Named scenario check run by `run`.
+pub const Check = run_module.Check;
+
 /// Successful deterministic scenario result.
 pub const RunResult = run_module.RunResult;
 
@@ -50,7 +54,14 @@ pub const RunReport = run_module.RunReport;
 /// Run a scenario twice with the same seed and compare traces.
 pub const run = run_module.run;
 
+/// Errors returned while parsing a user-supplied seed.
+pub const SeedParseError = seed_module.SeedParseError;
+
+/// Parse a decimal seed or 40-character Git hash.
+pub const parseSeed = seed_module.parseSeed;
+
 test {
     _ = @import("run.zig");
+    _ = @import("seed.zig");
     _ = @import("tidy.zig");
 }
