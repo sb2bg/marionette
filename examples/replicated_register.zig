@@ -12,17 +12,20 @@ const replica_count = 3;
 const quorum = 2;
 const max_messages = 64;
 
-const checks = [_]mar.Check{
-    .{ .name = "committed replicas agree", .check = noCommittedDivergence },
+const checks = [_]mar.StateCheck(Cluster){
+    .{ .name = "committed register is safe", .check = committedRegisterIsSafe },
 };
 
 /// Run the correct replicated-register scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.run(allocator, .{
-        .seed = seed,
-        .tick_ns = ns_per_ms,
-        .checks = &checks,
-    }, scenario);
+    var report = try mar.runWithState(
+        allocator,
+        .{ .seed = seed, .tick_ns = ns_per_ms },
+        Cluster,
+        Cluster.init,
+        scenario,
+        &checks,
+    );
     defer report.deinit();
 
     switch (report) {
@@ -37,21 +40,43 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 /// Run a deliberately buggy scenario. Tests use this to prove the checker
 /// catches divergent committed state without making the normal suite fail.
 pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.run(allocator, .{
-        .seed = seed,
-        .tick_ns = ns_per_ms,
-        .checks = &checks,
-    }, buggyScenario);
+    return mar.runWithState(
+        allocator,
+        .{ .seed = seed, .tick_ns = ns_per_ms },
+        Cluster,
+        Cluster.init,
+        buggyScenario,
+        &checks,
+    );
 }
 
-fn noCommittedDivergence(world: *mar.World) !void {
-    if (std.mem.indexOf(u8, world.traceBytes(), "register.invariant_violation") != null) {
-        return error.CommittedDivergence;
+/// Run a same-version conflict scenario and return an owned trace.
+pub fn runConflictScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    var report = try mar.runWithState(
+        allocator,
+        .{ .seed = seed, .tick_ns = ns_per_ms },
+        Cluster,
+        Cluster.init,
+        conflictScenario,
+        &checks,
+    );
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |*passed| return passed.takeTrace(),
+        .failed => |failure| {
+            failure.print();
+            return error.ReplicatedRegisterScenarioFailed;
+        },
     }
 }
 
-fn scenario(world: *mar.World) !void {
-    var cluster = Cluster.init();
+fn committedRegisterIsSafe(world: *mar.World, cluster: *const Cluster) !void {
+    try cluster.checkCommittedAgreement(world);
+    try cluster.checkCommittedQuorumAccepted(world);
+}
+
+fn scenario(world: *mar.World, cluster: *Cluster) !void {
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
@@ -60,11 +85,22 @@ fn scenario(world: *mar.World) !void {
     });
 }
 
-fn buggyScenario(world: *mar.World) !void {
-    var cluster = Cluster.init();
+fn buggyScenario(world: *mar.World, cluster: *Cluster) !void {
     try cluster.forceCommit(world, 0, 1, 41);
     try cluster.forceCommit(world, 1, 1, 42);
-    try cluster.recordCommittedAgreement(world);
+}
+
+fn conflictScenario(world: *mar.World, cluster: *Cluster) !void {
+    try cluster.write(world, .{
+        .version = 1,
+        .value = 41,
+        .retry_limit = 1,
+    });
+    try cluster.write(world, .{
+        .version = 1,
+        .value = 42,
+        .retry_limit = 1,
+    });
 }
 
 const Replica = struct {
@@ -75,15 +111,22 @@ const Replica = struct {
 
     fn accept(self: *Replica, version: u64, value: u64) bool {
         if (version < self.accepted_version) return false;
+        if (version == self.accepted_version and self.accepted_version != 0 and value != self.accepted_value) {
+            return false;
+        }
         self.accepted_version = version;
         self.accepted_value = value;
         return true;
     }
 
-    fn commit(self: *Replica, version: u64, value: u64) void {
-        if (version < self.committed_version) return;
+    fn commit(self: *Replica, version: u64, value: u64) bool {
+        if (version < self.committed_version) return false;
+        if (version == self.committed_version and self.committed_version != 0 and value != self.committed_value) {
+            return false;
+        }
         self.committed_version = version;
         self.committed_value = value;
+        return true;
     }
 };
 
@@ -101,10 +144,15 @@ const Message = struct {
     value: u64,
 };
 
+fn messageLessThan(a: Message, b: Message) bool {
+    return a.deliver_at < b.deliver_at or (a.deliver_at == b.deliver_at and a.id < b.id);
+}
+
+const MessageQueue = mar.EventQueue(Message, max_messages, messageLessThan);
+
 const Cluster = struct {
     replicas: [replica_count]Replica,
-    pending: [max_messages]Message,
-    pending_len: usize,
+    pending: MessageQueue,
     next_message_id: u64,
 
     const WriteOptions = struct {
@@ -118,8 +166,7 @@ const Cluster = struct {
     fn init() Cluster {
         return .{
             .replicas = [_]Replica{.{}} ** replica_count,
-            .pending = undefined,
-            .pending_len = 0,
+            .pending = MessageQueue.init(),
             .next_message_id = 0,
         };
     }
@@ -159,7 +206,6 @@ const Cluster = struct {
                 "register.write.no_quorum version={} acks={}",
                 .{ options.version, ack_count },
             );
-            try self.recordCommittedAgreement(world);
             return;
         }
 
@@ -178,7 +224,6 @@ const Cluster = struct {
             );
         }
         try self.drain(world, null);
-        try self.recordCommittedAgreement(world);
     }
 
     fn send(
@@ -199,7 +244,6 @@ const Cluster = struct {
             return;
         }
 
-        std.debug.assert(self.pending_len < self.pending.len);
         const latency_ticks = 1 + try world.randomIntLessThan(u64, 3);
         const message: Message = .{
             .id = self.next_message_id,
@@ -210,8 +254,7 @@ const Cluster = struct {
             .value = value,
         };
         self.next_message_id += 1;
-        self.pending[self.pending_len] = message;
-        self.pending_len += 1;
+        try self.pending.push(message);
 
         try world.record(
             "network.send id={} kind={s} to={} version={} value={} deliver_at={}",
@@ -220,9 +263,7 @@ const Cluster = struct {
     }
 
     fn drain(self: *Cluster, world: *mar.World, acked: ?*[replica_count]bool) !void {
-        while (self.pending_len > 0) {
-            const index = self.nextMessageIndex();
-            const message = self.removeMessage(index);
+        while (self.pending.pop()) |message| {
             if (message.deliver_at > world.now()) {
                 try world.runFor(message.deliver_at - world.now());
             }
@@ -233,32 +274,6 @@ const Cluster = struct {
             );
             try self.apply(world, message, acked);
         }
-    }
-
-    fn nextMessageIndex(self: *const Cluster) usize {
-        std.debug.assert(self.pending_len > 0);
-
-        var best: usize = 0;
-        for (self.pending[1..self.pending_len], 1..) |message, index| {
-            const current = self.pending[best];
-            if (message.deliver_at < current.deliver_at or
-                (message.deliver_at == current.deliver_at and message.id < current.id))
-            {
-                best = index;
-            }
-        }
-        return best;
-    }
-
-    fn removeMessage(self: *Cluster, index: usize) Message {
-        const message = self.pending[index];
-        std.mem.copyForwards(
-            Message,
-            self.pending[index .. self.pending_len - 1],
-            self.pending[index + 1 .. self.pending_len],
-        );
-        self.pending_len -= 1;
-        return message;
     }
 
     fn apply(
@@ -280,24 +295,25 @@ const Cluster = struct {
                 );
             },
             .commit => {
-                self.replicas[replica_index].commit(message.version, message.value);
+                const committed = self.replicas[replica_index].commit(message.version, message.value);
                 try world.record(
-                    "replica.commit replica={} version={} value={}",
-                    .{ message.to, message.version, message.value },
+                    "replica.commit replica={} version={} value={} committed={}",
+                    .{ message.to, message.version, message.value, committed },
                 );
             },
         }
     }
 
     fn forceCommit(self: *Cluster, world: *mar.World, replica_index: usize, version: u64, value: u64) !void {
-        self.replicas[replica_index].commit(version, value);
+        self.replicas[replica_index].committed_version = version;
+        self.replicas[replica_index].committed_value = value;
         try world.record(
             "replica.commit replica={} version={} value={} forced=true",
             .{ replica_index, version, value },
         );
     }
 
-    fn recordCommittedAgreement(self: *const Cluster, world: *mar.World) !void {
+    fn checkCommittedAgreement(self: *const Cluster, world: *mar.World) !void {
         var committed_count: u8 = 0;
         var expected_version: u64 = 0;
         var expected_value: u64 = 0;
@@ -327,7 +343,7 @@ const Cluster = struct {
                         replica.committed_value,
                     },
                 );
-                return;
+                return error.CommittedDivergence;
             }
         }
 
@@ -335,6 +351,33 @@ const Cluster = struct {
             "register.check committed_agreement=ok committed_count={}",
             .{committed_count},
         );
+    }
+
+    fn checkCommittedQuorumAccepted(self: *const Cluster, world: *mar.World) !void {
+        for (self.replicas, 0..) |replica, replica_index| {
+            if (replica.committed_version == 0) continue;
+
+            const accepted_count = self.countAccepted(replica.committed_version, replica.committed_value);
+            if (accepted_count < quorum) {
+                try world.record(
+                    "register.invariant_violation kind=commit_without_accepted_quorum replica={} version={} value={} accepted_count={}",
+                    .{ replica_index, replica.committed_version, replica.committed_value, accepted_count },
+                );
+                return error.CommitWithoutAcceptedQuorum;
+            }
+        }
+
+        try world.record("register.check committed_quorum=ok", .{});
+    }
+
+    fn countAccepted(self: *const Cluster, version: u64, value: u64) u8 {
+        var count: u8 = 0;
+        for (self.replicas) |replica| {
+            if (replica.accepted_version == version and replica.accepted_value == value) {
+                count += 1;
+            }
+        }
+        return count;
     }
 };
 
