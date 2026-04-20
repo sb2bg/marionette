@@ -16,6 +16,16 @@ pub const Check = struct {
     check: *const fn (*World) anyerror!void,
 };
 
+/// Named scenario check over user-owned scenario state.
+pub fn StateCheck(comptime State: type) type {
+    return struct {
+        /// Stable name included in failure reports.
+        name: []const u8,
+        /// Check function. It may inspect state and record through the world.
+        check: *const fn (*World, *const State) anyerror!void,
+    };
+}
+
 /// Configuration for one deterministic scenario run.
 pub const RunOptions = struct {
     /// Seed for the world's random stream.
@@ -193,6 +203,63 @@ pub fn run(
     return .{ .passed = first_passed };
 }
 
+/// Run a stateful scenario twice with fresh state and compare traces.
+///
+/// `init_state` is called once per replay attempt. Scenario state is not owned
+/// by `RunReport`, and Phase 0 state must not require a deinitializer.
+pub fn runWithState(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    comptime State: type,
+    comptime init_state: fn () State,
+    comptime scenario: fn (*World, *State) anyerror!void,
+    comptime state_checks: []const StateCheck(State),
+) std.mem.Allocator.Error!RunReport {
+    var first = try runOnceWithState(allocator, options, State, init_state, scenario, state_checks);
+    switch (first) {
+        .failed => |failure| return .{ .failed = failure },
+        .passed => {},
+    }
+    errdefer first.deinit();
+
+    var second = try runOnceWithState(allocator, options, State, init_state, scenario, state_checks);
+    switch (second) {
+        .failed => |failure| {
+            const passed = first.passed;
+            return .{ .failed = .{
+                .allocator = allocator,
+                .options = options,
+                .first_trace = passed.trace,
+                .second_trace = failure.first_trace,
+                .first_event_count = passed.event_count,
+                .second_event_count = failure.first_event_count,
+                .kind = failure.kind,
+                .error_name = failure.error_name,
+                .check_name = failure.check_name,
+            } };
+        },
+        .passed => {},
+    }
+    errdefer second.deinit();
+
+    const first_passed = first.passed;
+    const second_passed = second.passed;
+    if (!std.mem.eql(u8, first_passed.trace, second_passed.trace)) {
+        return .{ .failed = .{
+            .allocator = allocator,
+            .options = options,
+            .kind = .determinism_mismatch,
+            .first_trace = first_passed.trace,
+            .second_trace = second_passed.trace,
+            .first_event_count = first_passed.event_count,
+            .second_event_count = second_passed.event_count,
+        } };
+    }
+
+    allocator.free(second_passed.trace);
+    return .{ .passed = first_passed };
+}
+
 fn runOnce(
     allocator: std.mem.Allocator,
     options: RunOptions,
@@ -211,6 +278,63 @@ fn runOnce(
             null,
         ) };
     };
+
+    for (options.checks) |check| {
+        check.check(&world) catch |err| {
+            return .{ .failed = try failureFromWorld(
+                allocator,
+                options,
+                .check_failed,
+                &world,
+                err,
+                check.name,
+            ) };
+        };
+    }
+
+    return .{ .passed = .{
+        .allocator = allocator,
+        .options = options,
+        .trace = try allocator.dupe(u8, world.traceBytes()),
+        .event_count = world.nextEventIndex(),
+    } };
+}
+
+fn runOnceWithState(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    comptime State: type,
+    comptime init_state: fn () State,
+    comptime scenario: fn (*World, *State) anyerror!void,
+    comptime state_checks: []const StateCheck(State),
+) std.mem.Allocator.Error!RunOnceResult {
+    var world = try World.init(allocator, options.worldOptions());
+    defer world.deinit();
+
+    var state = init_state();
+    scenario(&world, &state) catch |err| {
+        return .{ .failed = try failureFromWorld(
+            allocator,
+            options,
+            .scenario_error,
+            &world,
+            err,
+            null,
+        ) };
+    };
+
+    for (state_checks) |check| {
+        check.check(&world, &state) catch |err| {
+            return .{ .failed = try failureFromWorld(
+                allocator,
+                options,
+                .check_failed,
+                &world,
+                err,
+                check.name,
+            ) };
+        };
+    }
 
     for (options.checks) |check| {
         check.check(&world) catch |err| {
@@ -363,6 +487,81 @@ test "run: check failures preserve partial trace and check name" {
             try std.testing.expectEqual(@as(u64, 5), failure.first_event_count);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.done") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "check.fail") != null);
+        },
+    }
+}
+
+const CounterState = struct {
+    value: u8 = 0,
+
+    fn init() CounterState {
+        return .{};
+    }
+};
+
+fn counterScenario(world: *World, state: *CounterState) !void {
+    state.value += 1;
+    try world.record("state.value value={}", .{state.value});
+}
+
+fn counterCheck(world: *World, state: *const CounterState) !void {
+    if (state.value != 1) return error.BadCounter;
+    try world.record("state.check value={}", .{state.value});
+}
+
+test "runWithState: checks inspect fresh scenario state" {
+    const state_checks = [_]StateCheck(CounterState){
+        .{ .name = "counter is one", .check = counterCheck },
+    };
+
+    var report = try runWithState(
+        std.testing.allocator,
+        .{ .seed = 1234 },
+        CounterState,
+        CounterState.init,
+        counterScenario,
+        &state_checks,
+    );
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| {
+            try std.testing.expectEqual(@as(u64, 3), passed.event_count);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.value value=1") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.check value=1") != null);
+        },
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+fn failingCounterCheck(world: *World, state: *const CounterState) !void {
+    try world.record("state.check.fail value={}", .{state.value});
+    return error.StateInvariantBroken;
+}
+
+test "runWithState: check failures preserve partial trace and check name" {
+    const state_checks = [_]StateCheck(CounterState){
+        .{ .name = "counter fails", .check = failingCounterCheck },
+    };
+
+    var report = try runWithState(
+        std.testing.allocator,
+        .{ .seed = 1234 },
+        CounterState,
+        CounterState.init,
+        counterScenario,
+        &state_checks,
+    );
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.check_failed, failure.kind);
+            try std.testing.expectEqualStrings("StateInvariantBroken", failure.error_name.?);
+            try std.testing.expectEqualStrings("counter fails", failure.check_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "state.value value=1") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "state.check.fail value=1") != null);
         },
     }
 }
