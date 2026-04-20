@@ -29,6 +29,10 @@ Phase 0 has:
 - A text trace format with a version header and global event indexes.
 - `mar.run`, which executes a scenario twice and compares traces.
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
+- `mar.runWithState` and `mar.StateCheck`, which let checks inspect structured
+  scenario state initialized fresh for each replay attempt.
+- `mar.EventQueue`, a fixed-capacity deterministic event queue sketch for
+  stable `(ready_at, event_id)`-style ordering.
 - `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
@@ -233,8 +237,10 @@ Planned API direction:
 - Include invariant name and event index in failure reports.
 
 Current Phase 0 support is deliberately smaller: `RunOptions.checks` accepts
-named `mar.Check` functions that run after the scenario body. This proves the
-failure-report shape, but it is not enough for serious multi-event DST yet.
+named `mar.Check` functions that run after the scenario body, and
+`mar.runWithState` accepts named `mar.StateCheck(State)` functions that inspect
+structured scenario state. This proves the failure-report shape, but it is not
+enough for serious multi-event DST yet.
 
 Liveness is harder. Marionette should eventually detect stuck systems, unmet
 deadlines, and lack of progress under fair scheduling assumptions. This is not
@@ -257,9 +263,10 @@ Required test classes:
 
 The first showcase is `examples/replicated_register.zig`, a tiny
 VOPR-inspired cluster model with deterministic message drops, latency,
-delivery ordering, and a committed-state checker. It is useful because it
-makes the future scheduler, network, and checker APIs concrete, but it is not
-a proof that Marionette can test real distributed systems.
+delivery ordering, same-version conflict rejection, and stateful committed
+state checkers. It is useful because it makes the future scheduler, network,
+and checker APIs concrete, but it is not a proof that Marionette can test real
+distributed systems.
 
 The stronger proof example should be a small replicated protocol, not only a
 rate limiter or register. A 500-line Raft, VSR, or primary-backup KV store that

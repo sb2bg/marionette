@@ -107,6 +107,30 @@ const random = world.tracedRandom();
 const latency_ns = try random.intLessThan(u64, 1_000_000);
 ```
 
+## Event Queue
+
+`mar.EventQueue` is a fixed-capacity deterministic event queue. It is a
+scheduler building block, not the final scheduler API.
+
+```zig
+const Event = struct {
+    ready_at: u64,
+    id: u64,
+};
+
+fn lessThan(a: Event, b: Event) bool {
+    return a.ready_at < b.ready_at or (a.ready_at == b.ready_at and a.id < b.id);
+}
+
+const Queue = mar.EventQueue(Event, 64, lessThan);
+var queue = Queue.init();
+try queue.push(.{ .ready_at = 10, .id = 1 });
+```
+
+Callers provide the ordering function explicitly. For distributed simulation,
+that ordering should be based on stable fields such as `(ready_at, event_id)`,
+not pointer identity or hash-map iteration.
+
 ## Seeds
 
 `mar.parseSeed` accepts decimal `u64` seeds and 40-character Git hashes:
@@ -135,7 +159,7 @@ var report = try mar.run(std.testing.allocator, .{ .seed = 0x1234 }, scenario);
 defer report.deinit();
 ```
 
-Checks can be attached to the run options:
+World-only checks can be attached to the run options:
 
 ```zig
 fn noBadState(world: *mar.World) !void {
@@ -154,6 +178,44 @@ var report = try mar.run(std.testing.allocator, .{
 }, scenario);
 defer report.deinit();
 ```
+
+Stateful scenarios can use `mar.runWithState` and `mar.StateCheck(State)`:
+
+```zig
+const Model = struct {
+    committed: bool = false,
+
+    fn init() Model {
+        return .{};
+    }
+};
+
+fn scenario(world: *mar.World, model: *Model) !void {
+    model.committed = true;
+    try world.record("model.commit", .{});
+}
+
+fn committed(world: *mar.World, model: *const Model) !void {
+    if (!model.committed) return error.NotCommitted;
+}
+
+const state_checks = [_]mar.StateCheck(Model){
+    .{ .name = "committed", .check = committed },
+};
+
+var report = try mar.runWithState(
+    std.testing.allocator,
+    .{ .seed = 0x1234 },
+    Model,
+    Model.init,
+    scenario,
+    &state_checks,
+);
+defer report.deinit();
+```
+
+`runWithState` initializes fresh state for each replay attempt. Phase 0 state
+must be plain value state that does not require a deinitializer.
 
 The return value is `mar.RunReport`:
 

@@ -37,8 +37,8 @@ test "scenario is replayable" {
 ## Status
 
 Phase 0. Time, seeded randomness, trace logging, replay checks, and named
-scenario checks are being built now. Disk, network, scheduling, shrinking, and
-time-travel debugging are planned, not implemented.
+world/state scenario checks are being built now. Disk, network, scheduling,
+shrinking, and time-travel debugging are planned, not implemented.
 
 The API is not stable. Do not use this in production yet.
 

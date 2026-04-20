@@ -19,8 +19,9 @@ Deliverables:
 - A versioned text trace format with event indexes.
 - A many-seed fuzz test that prints the failing seed.
 - A basic `tidy` linter for banned non-deterministic calls.
-- A small named-check API for post-scenario invariant checks.
+- A small named-check API for world and state post-scenario invariant checks.
 - A seed parser for decimal seeds and 40-character Git hashes.
+- A deterministic event queue sketch for future scheduler work.
 - A written architecture contract for determinism, time, randomness, and
   simulator scope.
 - A written disk fault model before disk simulation code exists.

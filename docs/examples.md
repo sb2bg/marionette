@@ -47,11 +47,13 @@ portable shapes Marionette needs:
 
 - A small cluster model with three replicas.
 - Seeded message drops and delivery latency.
-- A deterministic pending-message order of `(deliver_at, message_id)`.
+- `mar.EventQueue` ordering pending messages by `(deliver_at, message_id)`.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
-- A named `mar.Check` that fails when the trace records committed divergence.
+- A named `mar.StateCheck` that inspects structured cluster state.
+- Rejection of conflicting same-version proposals.
 
-The normal scenario writes one value to a quorum and commits it:
+The normal scenario writes one value to a quorum, commits it, and checks that
+committed replicas agree and that committed values were accepted by a quorum:
 
 ```zig
 const trace = try replicated_register.runScenario(allocator, 0xC0FFEE);
@@ -65,6 +67,9 @@ the checker path catches divergent committed state:
 var report = try replicated_register.runBuggyScenario(allocator, 0xC0FFEE);
 defer report.deinit();
 ```
+
+There is also a same-version conflict scenario used by tests to prove the
+register rejects conflicting values instead of overwriting accepted state.
 
 This is intentionally tiny. Its job is to make the future scheduler, network,
 and invariant APIs concrete enough to critique before they become core library

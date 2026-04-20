@@ -72,8 +72,8 @@ prefer error-returning invariant checks.
 
 ## Checks
 
-Checks are the Phase 0 invariant hook. A check is a named function that runs
-after the scenario body and returns an error when a property is violated:
+Checks are the Phase 0 invariant hook. A world check is a named function that
+runs after the scenario body and returns an error when a property is violated:
 
 ```zig
 fn noBadState(world: *mar.World) !void {
@@ -92,9 +92,46 @@ var report = try mar.run(std.testing.allocator, .{
 }, scenario);
 ```
 
+Stateful scenarios should use `mar.runWithState`. The state initializer runs
+once per replay attempt, so the second run starts from the same state as the
+first:
+
+```zig
+const Model = struct {
+    committed: bool = false,
+
+    fn init() Model {
+        return .{};
+    }
+};
+
+fn scenario(world: *mar.World, model: *Model) !void {
+    model.committed = true;
+    try world.record("model.commit", .{});
+}
+
+fn committed(world: *mar.World, model: *const Model) !void {
+    if (!model.committed) return error.NotCommitted;
+    try world.record("model.check committed=true", .{});
+}
+
+const state_checks = [_]mar.StateCheck(Model){
+    .{ .name = "committed", .check = committed },
+};
+
+var report = try mar.runWithState(
+    std.testing.allocator,
+    .{ .seed = 0x1234 },
+    Model,
+    Model.init,
+    scenario,
+    &state_checks,
+);
+```
+
 This is intentionally small. Future scheduler work can check invariants after
 every event or on quiescence, but the current API already gives failures a
-stable name and preserved trace.
+stable name, preserved trace, and direct access to structured scenario state.
 
 ## Ownership
 

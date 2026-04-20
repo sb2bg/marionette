@@ -8,7 +8,7 @@ to direct operations. In simulation, they route through a controlled world
 that can replay the same execution from the same seed.
 
 Phase 0 is intentionally small. Today Marionette has seeded randomness,
-simulated time, trace logging, twice-and-compare replay, and named
+simulated time, trace logging, twice-and-compare replay, and named world/state
 post-scenario checks. Disk, network, scheduling, and richer replay tooling are
 planned.
 
