@@ -33,11 +33,20 @@ pub const Random = @import("random.zig").Random;
 /// Deterministic simulation state for Phase 0 tests.
 pub const World = @import("world.zig").World;
 
+/// Fixed-capacity deterministic event queue.
+pub const EventQueue = @import("scheduler.zig").EventQueue;
+
+/// Errors returned by fixed-capacity event queues.
+pub const EventQueueError = @import("scheduler.zig").EventQueueError;
+
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 
 /// Named scenario check run by `run`.
 pub const Check = run_module.Check;
+
+/// Named scenario check over user-owned scenario state.
+pub const StateCheck = run_module.StateCheck;
 
 /// Successful deterministic scenario result.
 pub const RunResult = run_module.RunResult;
@@ -54,6 +63,9 @@ pub const RunReport = run_module.RunReport;
 /// Run a scenario twice with the same seed and compare traces.
 pub const run = run_module.run;
 
+/// Run a stateful scenario twice with fresh state and compare traces.
+pub const runWithState = run_module.runWithState;
+
 /// Errors returned while parsing a user-supplied seed.
 pub const SeedParseError = seed_module.SeedParseError;
 
@@ -62,6 +74,7 @@ pub const parseSeed = seed_module.parseSeed;
 
 test {
     _ = @import("run.zig");
+    _ = @import("scheduler.zig");
     _ = @import("seed.zig");
     _ = @import("tidy.zig");
 }
