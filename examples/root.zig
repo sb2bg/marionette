@@ -35,9 +35,18 @@ test "examples: replicated register checker catches committed divergence" {
         .passed => return error.ExpectedRunFailure,
         .failed => |failure| {
             try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
-            try std.testing.expectEqualStrings("committed replicas agree", failure.check_name.?);
+            try std.testing.expectEqualStrings("committed register is safe", failure.check_name.?);
             try std.testing.expectEqualStrings("CommittedDivergence", failure.error_name.?);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "register.invariant_violation") != null);
         },
     }
+}
+
+test "examples: replicated register rejects same-version conflicts" {
+    const trace = try replicated_register.runConflictScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "value=42 accepted=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "register.write.no_quorum version=1 acks=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "register.check committed_agreement=ok") != null);
 }
