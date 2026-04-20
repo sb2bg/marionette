@@ -37,6 +37,39 @@ defer allocator.free(trace);
 twice-and-compare replay. Calling it with different seeds may produce different
 traces because the refill schedule is jittered from the seeded random stream.
 
+## Replicated Register
+
+Source: [`examples/replicated_register.zig`](../examples/replicated_register.zig)
+
+The replicated register is the first VOPR-inspired showcase. It is not a real
+consensus protocol and does not copy TigerBeetle internals. It demonstrates the
+portable shapes Marionette needs:
+
+- A small cluster model with three replicas.
+- Seeded message drops and delivery latency.
+- A deterministic pending-message order of `(deliver_at, message_id)`.
+- Trace events for sends, drops, deliveries, accepts, commits, and checks.
+- A named `mar.Check` that fails when the trace records committed divergence.
+
+The normal scenario writes one value to a quorum and commits it:
+
+```zig
+const trace = try replicated_register.runScenario(allocator, 0xC0FFEE);
+defer allocator.free(trace);
+```
+
+The example also includes a deliberately buggy scenario used by tests to prove
+the checker path catches divergent committed state:
+
+```zig
+var report = try replicated_register.runBuggyScenario(allocator, 0xC0FFEE);
+defer report.deinit();
+```
+
+This is intentionally tiny. Its job is to make the future scheduler, network,
+and invariant APIs concrete enough to critique before they become core library
+surface.
+
 ## Example Rules
 
 - Keep examples focused and readable.

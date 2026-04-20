@@ -75,6 +75,9 @@ explicit allocators, no runtime magic.
 - [Prior art](docs/prior-art.md)
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
 
+Current examples include a rate limiter and a tiny VOPR-inspired replicated
+register showcase.
+
 ## Is This For Me?
 
 Eventually, yes, if you are building a database, queue, storage engine,

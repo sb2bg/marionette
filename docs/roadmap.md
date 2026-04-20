@@ -46,7 +46,7 @@ Planned work:
 - Add disk fault injection based on [Disk Fault Model](disk-fault-model.md).
 - Expand the AST-based linter with simple alias detection.
 - Add docs on allocator discipline and banned standard-library calls.
-- Add realistic examples such as a job queue or small KV store.
+- Grow the replicated-register showcase toward a job queue or small KV store.
 
 Done means a Zig service can adopt Marionette for reproducible single-node
 testing with simulated time and disk faults.
