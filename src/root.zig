@@ -51,7 +51,7 @@ pub const RunAttributeValue = run_module.RunAttributeValue;
 /// Build one replay-visible typed attribute from a scalar value.
 pub const runAttribute = run_module.runAttribute;
 
-/// Build run attributes from a scalar-only config struct.
+/// Build run attributes from a scalar-only run profile struct.
 pub const runAttributesFrom = run_module.runAttributesFrom;
 
 /// Named scenario check run by `run`.

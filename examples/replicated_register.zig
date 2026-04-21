@@ -12,7 +12,7 @@ const replica_count = 3;
 const quorum = 2;
 const max_messages = 64;
 
-const NormalProfile = struct {
+const NormalRunProfile = struct {
     replicas: u64,
     quorum: u64,
     max_messages: u64,
@@ -20,12 +20,12 @@ const NormalProfile = struct {
     retry_limit: u8,
 };
 
-const CommonProfile = struct {
+const CommonRunProfile = struct {
     replicas: u64,
     quorum: u64,
 };
 
-const normal_profile: NormalProfile = .{
+const normal_profile: NormalRunProfile = .{
     .replicas = replica_count,
     .quorum = quorum,
     .max_messages = max_messages,
@@ -33,7 +33,7 @@ const normal_profile: NormalProfile = .{
     .retry_limit = 8,
 };
 
-const common_profile: CommonProfile = .{
+const common_profile: CommonRunProfile = .{
     .replicas = replica_count,
     .quorum = quorum,
 };

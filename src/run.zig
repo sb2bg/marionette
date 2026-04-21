@@ -49,10 +49,18 @@ pub fn runAttribute(key: []const u8, value: anytype) RunAttribute {
     return .{ .key = key, .value = runAttributeValue(value) };
 }
 
-/// Build run attributes from a scalar-only config struct.
+/// Build run attributes from a scalar-only run profile struct.
 ///
-/// Field names become attribute keys. This is useful for keeping the values
-/// recorded in the trace derived from the same typed config the scenario uses.
+/// Contract:
+/// - Only deterministic scalar fields are supported: ints, floats, bools, and
+///   UTF-8 string slices/literals.
+/// - Fields are emitted in declaration order.
+/// - Field names become exported attribute keys.
+/// - Runtime behavior must depend on the original profile, not on the derived
+///   attributes.
+///
+/// Use `runAttribute` when a stable exported key should differ from an
+/// internal field name.
 pub fn runAttributesFrom(config: anytype) [runAttributeFieldCount(@TypeOf(config))]RunAttribute {
     const Config = @TypeOf(config);
     const fields = switch (@typeInfo(Config)) {
