@@ -345,7 +345,7 @@ const Cluster = struct {
                     options.proposal_drop_percent,
                 );
             }
-            try self.drain(world, &acked);
+            try self.drain(&acked);
         }
 
         const ack_count = countAcks(&acked);
@@ -371,7 +371,7 @@ const Cluster = struct {
                 options.commit_drop_percent,
             );
         }
-        try self.drain(world, null);
+        try self.drain(null);
     }
 
     fn send(
@@ -400,7 +400,7 @@ const Cluster = struct {
         });
     }
 
-    fn drain(self: *Cluster, _: *mar.World, acked: ?*[replica_count]bool) !void {
+    fn drain(self: *Cluster, acked: ?*[replica_count]bool) !void {
         var context: DeliveryContext = .{
             .cluster = self,
             .acked = acked,
