@@ -94,11 +94,6 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             pub fn healLinks(self: Control) !void {
                 try self.network.healLinks();
             }
-
-            /// Evolve time-based network fault state at the current simulated time.
-            pub fn tick(self: Control) !void {
-                try self.network.tick();
-            }
         };
 
         /// Packet delivered by `popReady`.
@@ -278,7 +273,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             );
         }
 
-        fn tick(self: *Self) !void {
+        fn evolveFaults(self: *Self) !void {
             try self.expireClogs();
         }
 
@@ -345,7 +340,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         /// Pop the next ready packet and record its delivery.
         pub fn popReady(self: *Self) !?Packet {
             while (true) {
-                try self.expireClogs();
+                try self.evolveFaults();
                 const link_index = self.nextReadyLinkIndex() orelse return null;
                 const ready = self.links[link_index].pending.pop().?;
 
@@ -531,6 +526,45 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
         pub fn network(self: *Self) Control {
             return self.packet_core.control();
         }
+
+        /// Advance simulated time by one tick and evolve network fault state.
+        pub fn tick(self: *Self) !void {
+            try self.packet_core.world.tick();
+            try self.packet_core.evolveFaults();
+        }
+
+        /// Advance simulated time by whole ticks and evolve network faults.
+        pub fn runFor(self: *Self, duration_ns: clock_module.Duration) !void {
+            const tick_ns = self.packet_core.world.clock().tick_ns;
+            std.debug.assert(duration_ns % tick_ns == 0);
+
+            var remaining = duration_ns;
+            while (remaining > 0) : (remaining -= tick_ns) {
+                try self.tick();
+            }
+        }
+
+        /// Drive queued packets until the network has no pending work.
+        ///
+        /// Prefer this wrapper over `packetCore().drainUntilIdle` when time may
+        /// advance, because it routes time movement through the outer
+        /// simulation tick before delivering ready packets.
+        pub fn drainUntilIdle(
+            self: *Self,
+            context: anytype,
+            comptime deliver: fn (@TypeOf(context), *World, PacketCore.Packet) anyerror!void,
+        ) !void {
+            while (true) {
+                while (try self.packet_core.popReady()) |packet| {
+                    try deliver(context, self.packet_core.world, packet);
+                }
+
+                const deliver_at = self.packet_core.nextDeliveryAt() orelse break;
+                if (deliver_at > self.packet_core.world.now()) {
+                    try self.runFor(deliver_at - self.packet_core.world.now());
+                }
+            }
+        }
     };
 }
 
@@ -608,7 +642,7 @@ test "network simulation: control view owns fault orchestration" {
     var sim = Sim.init(&world);
     try sim.network().setLink(0, 1, false);
     try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try world.runFor(10);
+    try sim.runFor(10);
 
     try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.link from=0 to=1 enabled=false") != null);
@@ -635,7 +669,7 @@ test "network: clogged path waits while other paths deliver" {
     try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
     try std.testing.expectEqual(@as(?clock_module.Timestamp, 30), sim.packetCore().nextDeliveryAt());
 
-    try world.runFor(20);
+    try sim.runFor(20);
     const second = (try sim.packetCore().popReady()).?;
     try std.testing.expectEqual(@as(NodeId, 1), second.to);
     try std.testing.expectEqual(@as(u64, 0), second.id);
@@ -656,13 +690,32 @@ test "network: explicit unclog releases queued packets early" {
     try sim.network().clog(0, 1, 30);
     try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
 
-    try world.runFor(10);
+    try sim.runFor(10);
     try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
     try sim.network().unclog(0, 1);
 
     const packet = (try sim.packetCore().popReady()).?;
     try std.testing.expectEqual(@as(NodeId, 1), packet.to);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.unclog from=0 to=1 active=true") != null);
+}
+
+test "network simulation: outer tick advances time and faults" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var sim = Sim.init(&world);
+    try sim.network().clog(0, 1, 10);
+    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+
+    try sim.tick();
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
+    const packet = (try sim.packetCore().popReady()).?;
+    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.unclog from=0 to=1 active=false") != null);
 }
 
 test "network: heal clears active clogs" {
@@ -676,7 +729,7 @@ test "network: heal clears active clogs" {
     try sim.network().heal();
 
     try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try world.runFor(10);
+    try sim.runFor(10);
     const packet = (try sim.packetCore().popReady()).?;
     try std.testing.expectEqual(@as(NodeId, 1), packet.to);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal disabled_count=0 down_count=0 clogged_count=1") != null);

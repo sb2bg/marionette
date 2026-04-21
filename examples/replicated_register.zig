@@ -406,7 +406,7 @@ const Cluster = struct {
             .cluster = self,
             .acked = acked,
         };
-        try self.sim.packetCore().drainUntilIdle(&context, DeliveryContext.deliver);
+        try self.sim.drainUntilIdle(&context, DeliveryContext.deliver);
     }
 
     const DeliveryContext = struct {

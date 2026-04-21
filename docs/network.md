@@ -76,12 +76,12 @@ For examples that just need to drive all pending network work, use
 `drainUntilIdle`:
 
 ```zig
-try sim.packetCore().drainUntilIdle(context, deliver);
+try sim.drainUntilIdle(context, deliver);
 ```
 
 The callback receives each delivered packet. The helper advances simulated time
-to the next queued packet and keeps running until the queue is empty. The
-callback may enqueue more packets.
+to the next queued packet through `sim.tick()` and keeps running until the
+queue is empty. The callback may enqueue more packets.
 
 This is a low-level primitive for examples and early scheduler work. Harness
 code may still touch `packetCore()` directly for send and delivery, but fault
@@ -188,9 +188,9 @@ try sim.network().unclogAll();
 ```
 
 Clogs also expire when simulated time reaches `until_ns`. `popReady` evolves
-that state before selecting a packet, and `sim.network().tick()` lets a future
-scheduler evolve time-based network faults at a tick boundary even when no
-packet is delivered.
+that deterministic state before selecting a packet as a backstop. Scenario and
+scheduler code should move simulated time through `sim.tick()` or
+`sim.runFor(...)` so network faults evolve at the same boundary as the clock.
 
 ## Partitions
 
@@ -236,6 +236,18 @@ Network latency is measured in nanoseconds, but it must align with the
 world's tick size. Phase 0 simulated time advances in whole ticks, so
 `UnstableNetwork` asserts that `min_latency_ns` and `latency_jitter_ns` are
 whole multiples of the world's tick.
+
+When using `UnstableNetworkSimulation`, prefer:
+
+```zig
+try sim.tick();
+try sim.runFor(10 * ns_per_ms);
+```
+
+over calling `world.tick()` or `world.runFor(...)` directly. The simulation
+wrapper advances the world and then evolves network fault state. This mirrors
+VOPR's outer simulator tick and keeps future disk/network/crash subsystems
+from each needing separate caller-managed ticks.
 
 The current latency model is uniform integer jitter over whole ticks:
 
@@ -293,11 +305,17 @@ are explicit scenario actions. Path clogs are time-based: the control plane
 sets a clog deadline, and the network evolves that state as simulated time
 advances. That is useful, but it is not the final VOPR-style fault scheduler.
 
+Future probabilistic fault evolution must be tick-only. Lazy `popReady`
+expiration is acceptable for deterministic clog deadlines because no random
+roll is involved; random partition or clog probabilities must not fire from
+observation methods, or the random stream would depend on how often user code
+polls the network.
+
 The next structural layer should be tick-evolved network state: partitions
-start and heal on simulator ticks, clog probabilities fire per path, and
-liveness mode can change network defaults for the rest of a run. The per-link
-queue topology exists so those faults can be added without rewriting the
-packet core again.
+start and heal on simulator ticks, clog probabilities fire per path with a
+stability floor, and liveness mode can change network defaults for the rest of
+a run. The per-link queue topology exists so those faults can be added without
+rewriting the packet core again.
 
 ## Current Limits
 

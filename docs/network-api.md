@@ -149,6 +149,10 @@ deterministic pieces before Marionette commits to the final user API.
 The packet core already has a declared topology and per-link queues. The env
 layer still needs to provide the process-facing authority for application
 code; the current simulator-control view is the first half of that split.
+`UnstableNetworkSimulation.tick()` is the current outer tick for this slice:
+it advances the world clock and then evolves network fault state. Future
+tick-evolved subsystems should attach to an outer simulation tick rather than
+asking users to remember separate subsystem ticks.
 
 ## Non-Goals For Now
 

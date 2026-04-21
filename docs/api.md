@@ -225,12 +225,22 @@ while (try sim.packetCore().popReady()) |packet| {
 For examples that should run queued packets until no network work remains:
 
 ```zig
-try sim.packetCore().drainUntilIdle(context, deliver);
+try sim.drainUntilIdle(context, deliver);
 ```
 
 `send` records `network.send` or `network.drop`. `popReady` records
 `network.deliver`. Latency values must align with the world's tick size because
 Phase 0 simulated time advances in whole ticks.
+
+When a network simulation owns time-evolved faults, advance time through the
+simulation wrapper:
+
+```zig
+try sim.tick();
+try sim.runFor(10 * ns_per_ms);
+```
+
+This advances the backing world and then evolves network fault state.
 
 Nodes are up by default. Mark one down or up with:
 
