@@ -30,8 +30,10 @@ Local study notes:
 Useful starting points:
 
 - TigerBeetle docs: <https://docs.tigerbeetle.com/single-page/>
-- Local reference files under `.references/tigerbeetle/src/testing`
-- Local VOPR entry point: `.references/tigerbeetle/src/vopr.zig`
+- VOPR entry point:
+  <https://github.com/tigerbeetle/tigerbeetle/blob/main/src/vopr.zig>
+- Testing internals:
+  <https://github.com/tigerbeetle/tigerbeetle/tree/main/src/testing>
 
 ## Antithesis
 

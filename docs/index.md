@@ -2,8 +2,8 @@
 
 Deterministic simulation testing for Zig.
 
-Marionette helps Zig services reproduce timing, randomness, and eventually
-disk/network failures from a seed.
+Marionette helps Zig services reproduce timing, randomness, and simulated
+failure from a seed.
 
 Make rare bugs repeat themselves.
 
