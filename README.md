@@ -97,4 +97,4 @@ Not published yet. Phase 0 is source-only while the core API settles.
 
 ## License
 
-TBD. Expected to be MIT or Apache-2.0 before a Phase 0 release.
+MIT. See [LICENSE](LICENSE).
