@@ -14,8 +14,8 @@
 
 Deterministic simulation testing for Zig.
 
-Marionette helps Zig services reproduce timing, randomness, and eventually
-disk/network failures from a seed.
+Marionette helps Zig services reproduce timing, randomness, and simulated
+failure from a seed.
 
 Make rare bugs repeat themselves.
 
@@ -53,9 +53,9 @@ Phase 0. Time, seeded randomness, trace logging, replay checks, and named
 world/state scenario checks are being built now. `ProductionEnv` and
 `SimulationEnv` move authority selection to the composition root. Run tags and
 typed attributes are trace-visible so failing seeds can carry their expanded
-profile. An unstable deterministic network sketch exists for examples. Disk,
-a real scheduler, shrinking, and time-travel debugging are planned, not
-implemented.
+profile. An unstable deterministic network sketch exists for examples, but the
+stable network API is still being designed. Disk, a real scheduler, shrinking,
+and time-travel debugging are planned, not implemented.
 
 The API is not stable. Do not use this in production yet.
 
@@ -95,8 +95,9 @@ explicit allocators, no runtime magic.
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
 - [Blog](docs/blog/index.md)
 
-Current examples include a rate limiter and a tiny VOPR-inspired replicated
-register showcase.
+Current examples include a rate limiter and a small replicated-register
+showcase that exercises seeded message drops, deterministic delivery, and
+state checks.
 
 ## Is This For Me?
 
