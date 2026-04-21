@@ -162,12 +162,12 @@ defer report.deinit();
 Runs can carry replay-visible tags and typed attributes:
 
 ```zig
-const Profile = struct {
+const SmokeRunProfile = struct {
     replicas: u64,
     packet_loss_percent: u8,
 };
 
-const profile: Profile = .{
+const profile: SmokeRunProfile = .{
     .replicas = 3,
     .packet_loss_percent = 20,
 };
@@ -187,8 +187,13 @@ var report = try mar.run(std.testing.allocator, .{
 scenario code runs and are included in failure summaries. Tags are loose
 searchable labels. Attributes are stable scalar facts needed to reproduce the
 run without forcing tools to parse presentation strings.
-`mar.runAttributesFrom` derives those facts from a scalar-only config struct so
-the trace-visible values stay tied to the scenario config.
+`mar.runAttributesFrom` derives those facts from a scalar-only run profile
+struct so the trace-visible values stay tied to the scenario config.
+
+The helper intentionally treats field names as exported attribute keys and
+emits fields in declaration order. Use `mar.runAttribute` directly when a
+stable exported key should differ from an internal field name. Runtime behavior
+should read from the profile, not from derived attributes.
 
 World-only checks can be attached to the run options:
 

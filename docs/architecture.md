@@ -32,7 +32,8 @@ Phase 0 has:
   run facts replay-visible in traces and failure summaries without losing
   scalar value types.
 - `runAttributesFrom`, a small helper for deriving typed attributes from the
-  same scalar config struct a scenario uses.
+  same scalar run profile struct a scenario uses. Field names are exported
+  attribute keys, and runtime behavior must not depend on derived attributes.
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
 - `mar.runWithState` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.

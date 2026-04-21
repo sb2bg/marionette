@@ -16,11 +16,11 @@ fn scenario(world: *mar.World) !void {
 }
 
 test "scenario is deterministic" {
-    const Profile = struct {
+    const SmokeRunProfile = struct {
         requests: u64,
     };
 
-    const profile: Profile = .{ .requests = 1 };
+    const profile: SmokeRunProfile = .{ .requests = 1 };
     const tags = [_][]const u8{ "scenario:smoke" };
     const attributes = mar.runAttributesFrom(profile);
 
@@ -93,12 +93,12 @@ that seed. Use `profile_name`, `tags`, and `attributes` to make the expanded
 run shape visible:
 
 ```zig
-const Profile = struct {
+const SmokeRunProfile = struct {
     replicas: u64,
     proposal_drop_percent: u8,
 };
 
-const profile: Profile = .{
+const profile: SmokeRunProfile = .{
     .replicas = 3,
     .proposal_drop_percent = 20,
 };
@@ -126,9 +126,13 @@ event=5 run.attribute key=proposal_drop_percent value=uint:20
 
 Tags should be stable scalar labels. Attribute keys should be stable scalar
 text, and values should use the narrow typed union Marionette exposes.
-`mar.runAttributesFrom` derives attributes from a scalar-only config struct
-using field names as keys. Do not put pointers, addresses, unordered dumps, or
-machine-local paths in run metadata.
+`mar.runAttributesFrom` derives attributes from a scalar-only run profile
+struct using field names as keys and declaration order as output order. That
+makes field names part of the exported trace contract. Use `mar.runAttribute`
+directly when a stable exported key should differ from an internal field name.
+Runtime behavior should read from the profile, not from derived attributes. Do
+not put pointers, addresses, unordered dumps, or machine-local paths in run
+metadata.
 
 ## Checks
 

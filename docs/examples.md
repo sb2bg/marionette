@@ -64,10 +64,11 @@ defer allocator.free(trace);
 
 The trace starts with the profile and expanded knobs, including replica count,
 quorum, queue capacity, proposal drop percent, and retry limit. Those
-attributes are derived from typed profile structs with `mar.runAttributesFrom`
-so the trace-visible facts stay tied to the config the scenario executes. That
-keeps the showcase aligned with the VOPR lesson that a seed alone is not enough
-context for a failure.
+attributes are derived from typed run profile structs with
+`mar.runAttributesFrom` so the trace-visible facts stay tied to the config the
+scenario executes. Field names are intentionally exported as attribute keys.
+That keeps the showcase aligned with the VOPR lesson that a seed alone is not
+enough context for a failure.
 
 The example also includes a deliberately buggy scenario used by tests to prove
 the checker path catches divergent committed state:
