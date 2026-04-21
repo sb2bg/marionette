@@ -38,6 +38,42 @@ defer allocator.free(trace);
 twice-and-compare replay. Calling it with different seeds may produce different
 traces because the refill schedule is jittered from the seeded random stream.
 
+## Retry Queue
+
+Source: [`examples/retry_queue.zig`](https://github.com/sb2bg/marionette/blob/main/examples/retry_queue.zig)
+
+The retry queue is the README-facing bug demo. It models a single leased job:
+
+- Worker 1 leases the job.
+- The lease times out.
+- Worker 2 leases the same job.
+- A late completion from worker 1 arrives after worker 2 owns the lease.
+
+The correct scenario rejects the stale completion and then accepts worker 2's
+completion. The deliberately buggy scenario accepts both completions, and a
+named `mar.StateCheck` catches the duplicate completion:
+
+```zig
+var report = try retry_queue.runBuggyScenario(allocator, 0xC0FFEE);
+defer report.deinit();
+```
+
+The useful trace shape is:
+
+```text
+queue.lease job=7 worker=1 deadline_ns=5000000
+queue.timeout job=7 worker=1
+queue.lease job=7 worker=2
+queue.complete job=7 worker=1 accepted=true reason=stale_ack_bug completions=1
+queue.complete job=7 worker=2 accepted=true reason=current_lease completions=2
+queue.invariant_violation job=7 completions=2
+```
+
+This example does not require disk or a real scheduler. It shows the smaller
+Phase 0 loop Marionette is proving first: seeded choices, simulated time,
+trace-visible behavior, and a named checker that preserves the failure
+context.
+
 ## Replicated Register
 
 Source: [`examples/replicated_register.zig`](https://github.com/sb2bg/marionette/blob/main/examples/replicated_register.zig)

@@ -12,7 +12,8 @@
   <a href="https://sb2bg.github.io/marionette/">Docs and blog</a>
 </p>
 
-[![CI](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+[![Zig build](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg?branch=main&job=Zig%20build)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+[![Zig test](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg?branch=main&job=Zig%20test)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
 
 Deterministic simulation testing for Zig.
 
@@ -21,33 +22,31 @@ failure from a seed.
 
 Make rare bugs repeat themselves.
 
-```zig
-const std = @import("std");
-const mar = @import("marionette");
+## What It Finds
 
-fn scenario(world: *mar.World) !void {
-    var env = mar.SimulationEnv.init(world);
-    try env.tick();
-    _ = try env.random().intLessThan(u64, 1_000);
-    try env.record("request.accepted id={}", .{42});
-}
+The README example is a tiny retry queue, not a toy counter. A worker leases a
+job, times out, and the job is leased again. The bug is accepting the late
+completion from the first worker after the second worker owns the lease.
 
-test "scenario is replayable" {
-    var report = try mar.run(std.testing.allocator, .{
-        .seed = 0xC0FFEE,
-        .tick_ns = 1_000_000,
-    }, scenario);
-    defer report.deinit();
+Marionette turns that unlucky ordering into a replayable failure:
 
-    switch (report) {
-        .passed => |passed| try std.testing.expect(passed.trace.len > 0),
-        .failed => |failure| {
-            failure.print();
-            return error.ScenarioFailed;
-        },
-    }
-}
+```text
+marionette failure: kind=check_failed seed=12648430 profile=retry-queue-late-ack-bug ... error=JobCompletedTwice check=job completed at most once
 ```
+
+The trace excerpt shows the race directly:
+
+```text
+queue.lease job=7 worker=1 deadline_ns=5000000
+queue.timeout job=7 worker=1
+queue.lease job=7 worker=2
+queue.complete job=7 worker=1 accepted=true reason=stale_ack_bug completions=1
+queue.complete job=7 worker=2 accepted=true reason=current_lease completions=2
+queue.invariant_violation job=7 completions=2
+```
+
+The full example lives in
+[`examples/retry_queue.zig`](examples/retry_queue.zig).
 
 ## Status
 
@@ -97,9 +96,9 @@ explicit allocators, no runtime magic.
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
 - [Blog](docs/blog/index.md)
 
-Current examples include a rate limiter and a small replicated-register
-showcase that exercises seeded message drops, deterministic delivery, and
-state checks.
+Current examples include a retry queue with a duplicate-completion bug, a rate
+limiter, and a small replicated-register showcase that exercises seeded message
+drops, deterministic delivery, and state checks.
 
 ## Is This For Me?
 
