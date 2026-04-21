@@ -12,9 +12,10 @@ const std = @import("std");
 const mar = @import("marionette");
 
 fn scenario(world: *mar.World) !void {
-    try world.tick();
-    _ = try world.randomIntLessThan(u64, 1_000);
-    try world.record("request.accepted id={}", .{42});
+    var env = mar.SimulationEnv.init(world);
+    try env.tick();
+    _ = try env.random().intLessThan(u64, 1_000);
+    try env.record("request.accepted id={}", .{42});
 }
 
 test "scenario is replayable" {
@@ -37,10 +38,11 @@ test "scenario is replayable" {
 ## Status
 
 Phase 0. Time, seeded randomness, trace logging, replay checks, and named
-world/state scenario checks are being built now. Run tags and typed attributes
-are trace-visible so failing seeds can carry their expanded profile. Disk,
-network, scheduling, shrinking, and time-travel debugging are planned, not
-implemented.
+world/state scenario checks are being built now. `ProductionEnv` and
+`SimulationEnv` move authority selection to the composition root. Run tags and
+typed attributes are trace-visible so failing seeds can carry their expanded
+profile. Disk, network, scheduling, shrinking, and time-travel debugging are
+planned, not implemented.
 
 The API is not stable. Do not use this in production yet.
 

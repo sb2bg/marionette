@@ -10,8 +10,8 @@ Marionette trace. If it does not, the library has failed.
 Simulated code must route non-deterministic behavior through Marionette
 interfaces:
 
-- Time through `Clock`.
-- Randomness through seeded `Random` or `World`.
+- Time through `ProductionEnv`, `SimulationEnv`, or `Clock`.
+- Randomness through an environment, seeded `Random`, or `World`.
 - Disk through the future Disk interface.
 - Network through the future Network interface.
 - Scheduling through the future scheduler.
@@ -43,8 +43,8 @@ Marionette enforces determinism in four layers.
 1. API design.
 
    The intended path should be the easiest path. Users should have no reason
-   to reach for `std.time.nanoTimestamp` when `World.clock()` is already in
-   hand.
+   to reach for host time when `ProductionEnv`, `SimulationEnv`, or
+   `World.clock()` is already in hand.
 
 2. Build-integrated linter.
 

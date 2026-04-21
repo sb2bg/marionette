@@ -3,6 +3,7 @@
 //! Public API entry point.
 
 const clock_module = @import("clock.zig");
+const env_module = @import("env.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
 
@@ -15,7 +16,7 @@ pub const ClockMode = clock_module.Mode;
 /// Duration in nanoseconds.
 pub const Duration = clock_module.Duration;
 
-/// Wall-clock implementation backed by `std.time`.
+/// Wall-clock implementation backed by Zig's host IO clock.
 pub const ProductionClock = clock_module.ProductionClock;
 
 /// Deterministic fake clock advanced explicitly by tests.
@@ -26,6 +27,18 @@ pub const Timestamp = clock_module.Timestamp;
 
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
+
+/// Return the environment implementation for a comptime mode.
+pub const Env = env_module.Env;
+
+/// Production composition-root environment.
+pub const ProductionEnv = env_module.ProductionEnv;
+
+/// Simulation composition-root environment backed by a `World`.
+pub const SimulationEnv = env_module.SimulationEnv;
+
+/// Production random authority backed by host entropy.
+pub const ProductionRandom = env_module.ProductionRandom;
 
 /// Seeded deterministic random number generator.
 pub const Random = @import("random.zig").Random;
@@ -85,6 +98,7 @@ pub const SeedParseError = seed_module.SeedParseError;
 pub const parseSeed = seed_module.parseSeed;
 
 test {
+    _ = @import("env.zig");
     _ = @import("run.zig");
     _ = @import("scheduler.zig");
     _ = @import("seed.zig");

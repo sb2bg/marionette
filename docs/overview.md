@@ -2,10 +2,10 @@
 
 Marionette is a deterministic simulation testing (DST) library for Zig.
 
-The core promise: write a service against Marionette's interfaces for time,
-randomness, disk, and network. In production, those interfaces compile down
-to direct operations. In simulation, they route through a controlled world
-that can replay the same execution from the same seed.
+The core promise: write a service against a Marionette environment for time,
+randomness, disk, and network. In production, that environment routes to direct
+operations. In simulation, it routes through a controlled world that can replay
+the same execution from the same seed.
 
 Phase 0 is intentionally small. Today Marionette has seeded randomness,
 simulated time, trace logging, twice-and-compare replay, and named world/state
@@ -46,6 +46,10 @@ Marionette is not:
 
 Users must route time, randomness, disk, and network through Marionette's
 interfaces. That discipline is the product.
+
+Marionette does not auto-detect whether code is running in production or
+simulation. The application chooses `ProductionEnv` or `SimulationEnv` once at
+the composition root and passes that environment into the main loop.
 
 ## Why Zig
 

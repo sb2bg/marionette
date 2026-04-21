@@ -1,15 +1,15 @@
 //! Time sources for production and deterministic simulation.
 //!
-//! Production time is the only place in Marionette that may touch
-//! `std.time`. Simulated time is explicit state and only advances when
+//! Production time is the only place in Marionette that may touch host time.
+//! Simulated time is explicit state and only advances when
 //! the caller ticks or sleeps the simulated clock.
 
 const std = @import("std");
 
 /// Nanoseconds since an implementation-defined epoch.
 ///
-/// `ProductionClock` uses `std.time.nanoTimestamp()`. `SimClock` uses
-/// the simulated world's epoch, which defaults to zero.
+/// `ProductionClock` uses Zig's host IO clock. `SimClock` uses the simulated
+/// world's epoch, which defaults to zero.
 pub const Timestamp = u64;
 
 /// Duration in nanoseconds.
@@ -20,7 +20,7 @@ pub const Duration = u64;
 /// Passing the mode at comptime keeps services generic over time while
 /// still letting release builds erase unused simulation code.
 pub const Mode = enum {
-    /// Wall-clock time backed by `std.time`.
+    /// Wall-clock time backed by Zig's host IO clock.
     production,
     /// Deterministic fake time owned by a simulation world.
     simulation,
@@ -44,7 +44,7 @@ pub fn Clock(comptime mode: Mode) type {
 ///
 /// This is intentionally small: `now()` reads wall-clock time and
 /// `sleep()` blocks the current thread. It is the only Marionette clock
-/// implementation allowed to call `std.time`.
+/// implementation allowed to read host time.
 pub const ProductionClock = struct {
     /// Construct a production clock.
     pub fn init() ProductionClock {
@@ -53,14 +53,18 @@ pub const ProductionClock = struct {
 
     /// Return the current wall-clock timestamp in nanoseconds.
     pub fn now(_: *const ProductionClock) Timestamp {
-        const timestamp = std.time.nanoTimestamp();
-        std.debug.assert(timestamp >= 0);
-        return @intCast(timestamp);
+        const timestamp = std.Io.Clock.real.now(std.Options.debug_io);
+        std.debug.assert(timestamp.nanoseconds >= 0);
+        return @intCast(timestamp.nanoseconds);
     }
 
     /// Block the current thread for `duration_ns` nanoseconds.
     pub fn sleep(_: *ProductionClock, duration_ns: Duration) void {
-        std.time.sleep(duration_ns);
+        std.Io.sleep(
+            std.Options.debug_io,
+            .fromNanoseconds(duration_ns),
+            .awake,
+        ) catch unreachable;
     }
 };
 

@@ -25,7 +25,7 @@ const SimClock = mar.Clock(.simulation);
 ```
 
 `mar.Clock(.production)` returns `mar.ProductionClock`, which reads host time
-through `std.time`.
+through Zig's host IO clock.
 
 `mar.Clock(.simulation)` returns `mar.SimClock`, which advances only when the
 caller explicitly ticks or sleeps it.
@@ -36,6 +36,44 @@ All timestamps and durations are nanoseconds:
 pub const Timestamp = u64;
 pub const Duration = u64;
 ```
+
+## `Env`
+
+Most application code should receive an environment from its caller instead of
+constructing individual authorities itself:
+
+```zig
+fn service(env: anytype) !void {
+    const now = env.clock().now();
+    const jitter = try env.random().intLessThan(mar.Duration, 1_000);
+    _ = .{ now, jitter };
+}
+```
+
+Production chooses production authorities once at the composition root:
+
+```zig
+var env = mar.ProductionEnv.init(.{});
+try service(&env);
+```
+
+Simulation borrows a `World` and routes through traced deterministic
+authorities:
+
+```zig
+fn scenario(world: *mar.World) !void {
+    var env = mar.SimulationEnv.init(world);
+    try service(&env);
+}
+```
+
+`mar.Env(.production)` aliases `mar.ProductionEnv`.
+`mar.Env(.simulation)` aliases `mar.SimulationEnv`.
+
+Phase 0 environments expose `clock()` and `random()`. `SimulationEnv` also
+exposes `tick()`, `runFor()`, and `record()` as convenience wrappers around the
+backing world for scenario code. Future disk and network authorities should be
+added to this environment shape instead of relying on auto-detection.
 
 ## `World`
 

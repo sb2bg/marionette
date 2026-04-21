@@ -25,6 +25,8 @@ Phase 0 has:
 
 - `World`, which owns one simulated clock, one seeded PRNG, and one trace log.
 - `Clock(.production)` and `Clock(.simulation)`.
+- `ProductionEnv`, `SimulationEnv`, and `Env(mode)`, which move authority
+  selection to the application composition root.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
 - `mar.run`, which executes a scenario twice and compares traces.
@@ -58,6 +60,10 @@ Phase 0 does not yet have:
 
 Marionette is a library-first simulator. User code should pass explicit
 authorities at the top of the program instead of reaching for host globals.
+The intended application shape is to choose `ProductionEnv` or `SimulationEnv`
+once at the composition root and pass that environment into the main loop.
+Marionette should not auto-detect the environment from globals, environment
+variables, thread-locals, or build flags.
 
 For Phase 0, Marionette owns small interfaces for time and randomness because
 they are needed now and they are not solved by `std.Io`. For disk and network,
@@ -118,18 +124,19 @@ The target shape is deliberately close to ordinary Zig dependency passing:
 const std = @import("std");
 const mar = @import("marionette");
 
-fn client(world: *mar.World) !void {
-    const random = world.tracedRandom();
-    const latency_ns = try random.intLessThan(u64, 1_000_000);
-    world.clock().sleep(latency_ns);
-    try world.record("client.request latency_ns={}", .{latency_ns});
+fn client(env: anytype) !u64 {
+    const latency_ns = try env.random().intLessThan(u64, 1_000_000);
+    env.clock().sleep(latency_ns);
+    return latency_ns;
 }
 
 test "single request is replayable" {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 0x1234 });
     defer world.deinit();
 
-    try client(&world);
+    var env = mar.SimulationEnv.init(&world);
+    const latency_ns = try client(&env);
+    try env.record("client.request latency_ns={}", .{latency_ns});
 }
 ```
 
