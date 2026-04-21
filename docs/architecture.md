@@ -149,7 +149,7 @@ if (sim.buggify(.drop_packet)) return error.PacketDropped;
 In simulation builds, `sim.buggify` draws from the world's PRNG and records the
 decision when useful. In production builds, `sim` is a production authority and
 the branch should fold away when the hook is disabled at comptime. This is the
-Zig replacement for FoundationDB-style BUGGIFY macros. `docs/buggify.md`
+Zig replacement for FoundationDB-style BUGGIFY macros. [BUGGIFY](buggify.md)
 contains the zero-cost shape and a ReleaseFast object-code check.
 
 ## Failure Surface

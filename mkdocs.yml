@@ -20,6 +20,9 @@ markdown_extensions:
   - pymdownx.highlight
   - pymdownx.superfences
 
+exclude_docs: |
+  requirements.txt
+
 nav:
   - Home: index.md
   - Blog:
