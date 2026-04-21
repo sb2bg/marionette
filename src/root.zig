@@ -40,7 +40,7 @@ pub const ProductionEnv = env_module.ProductionEnv;
 /// Simulation composition-root environment backed by a `World`.
 pub const SimulationEnv = env_module.SimulationEnv;
 
-/// Production random authority backed by host entropy.
+/// Production random view backed by host entropy.
 pub const ProductionRandom = env_module.ProductionRandom;
 
 /// Seeded deterministic random number generator.

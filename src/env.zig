@@ -49,27 +49,22 @@ pub const BuggifyRate = struct {
     }
 };
 
-/// Production random authority backed by host entropy.
+/// Production random view backed by host entropy.
 pub const ProductionRandom = struct {
-    source: std.Random.IoSource,
-
-    /// Construct a production random authority.
-    pub fn init() ProductionRandom {
-        return .{ .source = .{ .io = std.Options.debug_io } };
-    }
+    source: *std.Random.IoSource,
 
     /// Draw an untraced `u64` from host entropy.
-    pub fn randomU64(self: *const ProductionRandom) !u64 {
+    pub fn randomU64(self: ProductionRandom) !u64 {
         return self.source.interface().int(u64);
     }
 
     /// Draw an untraced boolean from host entropy.
-    pub fn boolean(self: *const ProductionRandom) !bool {
+    pub fn boolean(self: ProductionRandom) !bool {
         return self.source.interface().boolean();
     }
 
     /// Draw an unbiased integer in the range `0 <= value < less_than`.
-    pub fn intLessThan(self: *const ProductionRandom, comptime T: type, less_than: T) !T {
+    pub fn intLessThan(self: ProductionRandom, comptime T: type, less_than: T) !T {
         return self.source.interface().intRangeLessThan(T, 0, less_than);
     }
 };
@@ -77,7 +72,7 @@ pub const ProductionRandom = struct {
 /// Production environment for the application composition root.
 pub const ProductionEnv = struct {
     clock_authority: clock_module.ProductionClock,
-    random_authority: ProductionRandom,
+    random_source: std.Random.IoSource,
 
     pub const Options = struct {};
 
@@ -85,7 +80,7 @@ pub const ProductionEnv = struct {
     pub fn init(_: Options) ProductionEnv {
         return .{
             .clock_authority = .init(),
-            .random_authority = .init(),
+            .random_source = .{ .io = std.Options.debug_io },
         };
     }
 
@@ -94,14 +89,18 @@ pub const ProductionEnv = struct {
         return &self.clock_authority;
     }
 
-    /// Return the production random authority.
-    pub fn random(self: *ProductionEnv) *ProductionRandom {
-        return &self.random_authority;
+    /// Return the production random view.
+    pub fn random(self: *ProductionEnv) ProductionRandom {
+        return .{ .source = &self.random_source };
     }
 
-    /// Disabled production fault hook. This should fold away in optimized builds.
+    /// Disabled production fault hook.
+    ///
+    /// The error union matches `SimulationEnv.buggify`, whose trace write can
+    /// fail, so generic call sites can use the same `try env.buggify(...)`
+    /// shape in both modes. This should still fold away in optimized builds.
     pub fn buggify(_: *ProductionEnv, comptime hook: anytype, rate: BuggifyRate) !bool {
-        _ = hook;
+        _ = hookName(hook);
         _ = rate;
         return comptime false;
     }
@@ -138,7 +137,7 @@ pub const SimulationEnv = struct {
         const fired = roll < rate.numerator;
         try self.world.record(
             "buggify hook={s} rate={}/{} roll={} fired={}",
-            .{ @tagName(hook), rate.numerator, rate.denominator, roll, fired },
+            .{ hookName(hook), rate.numerator, rate.denominator, roll, fired },
         );
         return fired;
     }
@@ -158,6 +157,14 @@ pub const SimulationEnv = struct {
         try self.world.record(fmt, args);
     }
 };
+
+fn hookName(comptime hook: anytype) []const u8 {
+    const Hook = @TypeOf(hook);
+    return switch (@typeInfo(Hook)) {
+        .enum_literal, .@"enum" => @tagName(hook),
+        else => @compileError("buggify hook must be an enum literal or enum value"),
+    };
+}
 
 test "env: comptime selector chooses implementation" {
     try std.testing.expectEqual(ProductionEnv, Env(.production));
@@ -194,6 +201,18 @@ test "env: simulation buggify is traced" {
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u32 less_than=100") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet rate=20/100 roll=") != null);
+}
+
+test "env: buggify accepts typed enum hooks" {
+    const Hook = enum { drop_packet };
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var env = SimulationEnv.init(&world);
+    _ = try env.buggify(Hook.drop_packet, .percent(20));
+
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet") != null);
 }
 
 test "env: buggify supports always and never rates" {
