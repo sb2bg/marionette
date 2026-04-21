@@ -6,8 +6,9 @@ work. It is not the final public network API yet.
 The goal is a deterministic network authority that can make distributed
 failures replayable from a seed. The first slice is intentionally small:
 messages can be delayed, dropped, queued, filtered by directed link state,
-partitioned, healed, and delivered in a stable order. Replay recording, path
-clogging, node spawning, and the final scheduler API come later.
+partitioned, healed, stopped, restarted, and delivered in a stable order.
+Replay recording, path clogging, node spawning, and the final scheduler API
+come later.
 
 ## VOPR Lessons
 
@@ -71,6 +72,34 @@ callback may enqueue more packets.
 
 This is a low-level primitive for examples and early scheduler work. A future
 `SimulationEnv.network()` or node-scoped authority may wrap it.
+
+## Node State
+
+Nodes are up by default. Mark a simulated process down or up with:
+
+```zig
+try network.setNode(world, 1, false);
+try network.setNode(world, 1, true);
+```
+
+A down source cannot submit new packets. `send` still consumes a stable packet
+id and records:
+
+```text
+network.drop id=<id> from=1 to=2 reason=source_down
+```
+
+A down destination drops ready packets at delivery time:
+
+```text
+network.drop id=<id> from=0 to=1 reason=destination_down
+```
+
+Queued packets are not removed when a node goes down. If the destination is
+restarted before delivery time, the packet can still be delivered. That keeps
+process state as another deterministic delivery gate, like directed link
+state, without trying to model full process-local storage or restart behavior
+yet.
 
 ## Link Filters
 
@@ -171,8 +200,11 @@ Current network trace events:
 
 - `network.send id={} from={} to={} deliver_at={} latency_ns={}`
 - `network.drop id={} from={} to={} drop_rate={}/{} roll={}`
+- `network.drop id={} from={} to={} reason=source_down`
+- `network.drop id={} from={} to={} reason=destination_down`
 - `network.drop id={} from={} to={} reason=link_disabled`
 - `network.deliver id={} from={} to={} now_ns={}`
+- `network.node node={} up={}`
 - `network.link from={} to={} enabled={}`
 - `network.partition left_count={} right_count={}`
 - `network.heal disabled_count={}`
@@ -185,7 +217,6 @@ register example does with `register.message`.
 
 `UnstableNetwork` does not yet support:
 
-- Process up/down state.
 - Replay recording.
 - Packet duplication.
 - Path clogging.
@@ -198,6 +229,6 @@ smallest useful packet core before growing.
 
 ## Next Step
 
-The next high-value addition is path clogging or process up/down state. Both
-would make the network model closer to the failure shapes a real distributed
-system needs without committing to the final node-scoped API yet.
+The next high-value addition is path clogging. It would make the network model
+closer to the failure shapes a real distributed system needs without
+committing to the final node-scoped API yet.

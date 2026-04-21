@@ -63,7 +63,7 @@ Planned work:
 
 - Stabilize the current `UnstableNetwork` sketch into a real network
   interface.
-- Packet delay, drop, reorder, and partition.
+- Packet delay, drop, reorder, partition, and process up/down state.
 - Node spawning.
 - Single-threaded cooperative scheduler.
 - A real consensus or replication example.

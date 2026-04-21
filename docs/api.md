@@ -224,6 +224,13 @@ try network.drainUntilIdle(world, context, deliver);
 `network.deliver`. Latency values must align with the world's tick size because
 Phase 0 simulated time advances in whole ticks.
 
+Nodes are up by default. Mark one down or up with:
+
+```zig
+try network.setNode(world, 1, false);
+try network.setNode(world, 1, true);
+```
+
 Directed links can be disabled and re-enabled:
 
 ```zig

@@ -43,8 +43,9 @@ Phase 0 has:
 - `mar.UnstableEventQueue`, a fixed-capacity deterministic event queue sketch for
   stable `(ready_at, event_id)`-style ordering.
 - `mar.UnstableNetwork`, a fixed-capacity deterministic network sketch for
-  seeded packet loss, tick-aligned latency, directed link filters, simple
-  partitions, and stable `(deliver_at, packet_id)` delivery order.
+  seeded packet loss, tick-aligned latency, process up/down state, directed
+  link filters, simple partitions, and stable `(deliver_at, packet_id)`
+  delivery order.
 - `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.

@@ -56,6 +56,7 @@ Rules:
   `buggify hook=<comptime-tag> rate=<numerator>/<denominator> roll=<value> fired=<bool>`.
 - Unstable network events use `network.send`, `network.drop`, and
   `network.deliver` with stable packet ids and node ids.
+- Node-state changes use `network.node`.
 - Link-filter changes use `network.link`, `network.partition`, and
   `network.heal`.
 

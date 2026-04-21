@@ -2,7 +2,7 @@
 //!
 //! This is the first simulation-kernel slice inspired by TigerBeetle's VOPR
 //! packet simulator: messages enter a deterministic queue, seeded decisions
-//! choose loss and latency, link filters can drop packets at delivery, and
+//! choose loss and latency, link filters and node state can drop packets, and
 //! delivery order is keyed by `(deliver_at, packet_id)`.
 
 const std = @import("std");
@@ -22,6 +22,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
 
         pub const Error = error{
             LinkFilterFull,
+            NodeStateFull,
         } || scheduler.EventQueueError;
 
         /// Packet delivered by `popReady`.
@@ -50,6 +51,8 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
         pending: Queue = .init(),
         disabled_links: [capacity]DisabledLink = undefined,
         disabled_link_count: usize = 0,
+        down_nodes: [capacity]NodeId = undefined,
+        down_node_count: usize = 0,
         next_packet_id: u64 = 0,
 
         /// Construct an empty network.
@@ -71,6 +74,30 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
         /// Return whether a directed link is currently enabled.
         pub fn linkEnabled(self: *const Self, from: NodeId, to: NodeId) bool {
             return self.disabledLinkIndex(from, to) == null;
+        }
+
+        /// Return whether a simulated node/process is currently up.
+        pub fn nodeUp(self: *const Self, node: NodeId) bool {
+            return self.downNodeIndex(node) == null;
+        }
+
+        /// Mark one simulated node/process up or down.
+        pub fn setNode(self: *Self, world: *World, node: NodeId, up: bool) !void {
+            if (up) {
+                if (self.downNodeIndex(node)) |index| {
+                    self.down_node_count -= 1;
+                    self.down_nodes[index] = self.down_nodes[self.down_node_count];
+                }
+            } else if (self.downNodeIndex(node) == null) {
+                if (self.down_node_count == self.down_nodes.len) return error.NodeStateFull;
+                self.down_nodes[self.down_node_count] = node;
+                self.down_node_count += 1;
+            }
+
+            try world.record(
+                "network.node node={} up={}",
+                .{ node, up },
+            );
         }
 
         /// Enable or disable one directed link.
@@ -139,6 +166,14 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
             const packet_id = self.next_packet_id;
             self.next_packet_id += 1;
 
+            if (!self.nodeUp(from)) {
+                try world.record(
+                    "network.drop id={} from={} to={} reason=source_down",
+                    .{ packet_id, from, to },
+                );
+                return;
+            }
+
             const drop_roll = try world.randomIntLessThan(u32, options.drop_rate.denominator);
             if (drop_roll < options.drop_rate.numerator) {
                 try world.record(
@@ -179,6 +214,14 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
                 if (packet.deliver_at > world.now()) return null;
 
                 const ready = self.pending.pop().?;
+                if (!self.nodeUp(ready.to)) {
+                    try world.record(
+                        "network.drop id={} from={} to={} reason=destination_down",
+                        .{ ready.id, ready.from, ready.to },
+                    );
+                    continue;
+                }
+
                 if (!self.linkEnabled(ready.from, ready.to)) {
                     try world.record(
                         "network.drop id={} from={} to={} reason=link_disabled",
@@ -221,6 +264,13 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
         fn disabledLinkIndex(self: *const Self, from: NodeId, to: NodeId) ?usize {
             for (self.disabled_links[0..self.disabled_link_count], 0..) |link, index| {
                 if (link.from == from and link.to == to) return index;
+            }
+            return null;
+        }
+
+        fn downNodeIndex(self: *const Self, node: NodeId) ?usize {
+            for (self.down_nodes[0..self.down_node_count], 0..) |down_node, index| {
+                if (down_node == node) return index;
             }
             return null;
         }
@@ -334,6 +384,61 @@ test "network: partition disables crossing links and heal restores them" {
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.partition left_count=1 right_count=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal disabled_count=4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
+}
+
+test "network: down source cannot send" {
+    const Network = UnstableNetwork(TestPayload, 4);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init();
+    try std.testing.expect(network.nodeUp(0));
+
+    try network.setNode(&world, 0, false);
+    try std.testing.expect(!network.nodeUp(0));
+
+    try network.send(&world, 0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.node node=0 up=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=source_down") != null);
+}
+
+test "network: down destination drops ready packets at delivery" {
+    const Network = UnstableNetwork(TestPayload, 4);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init();
+    try network.send(&world, 0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try network.setNode(&world, 1, false);
+    try world.runFor(10);
+
+    try std.testing.expectEqual(@as(?Network.Packet, null), try network.popReady(&world));
+    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=destination_down") != null);
+}
+
+test "network: restarted destination can receive queued packets" {
+    const Network = UnstableNetwork(TestPayload, 4);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init();
+    try network.send(&world, 0, 1, .{ .value = 1 }, .{ .min_latency_ns = 20 });
+    try network.setNode(&world, 1, false);
+    try world.runFor(10);
+    try network.setNode(&world, 1, true);
+    try world.runFor(10);
+
+    const packet = (try network.popReady(&world)).?;
+    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
+    try std.testing.expectEqual(@as(u64, 1), packet.payload.value);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.node node=1 up=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.node node=1 up=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
 }
 
