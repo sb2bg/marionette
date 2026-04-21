@@ -61,8 +61,8 @@ Goal: simulate distributed systems in one process.
 
 Planned work:
 
-- Stabilize the current `UnstableNetwork` sketch into a real network
-  interface.
+- Stabilize the current fixed-topology, per-link-queue `UnstableNetwork`
+  sketch into a real network interface.
 - Packet delay, drop, reorder, partition, and process up/down state.
 - Node spawning.
 - Single-threaded cooperative scheduler.

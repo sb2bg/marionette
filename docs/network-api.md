@@ -16,16 +16,16 @@ The only network implementation is:
 
 ```zig
 const Network = mar.UnstableNetwork(Payload, .{
-    .packet_capacity = 64,
-    .max_disabled_links = 16,
-    .max_down_nodes = 8,
+    .node_count = 3,
+    .client_count = 1,
+    .path_capacity = 64,
 });
 ```
 
 `UnstableNetwork` is a simulation-kernel primitive for examples and scheduler
-work. It owns packet ids, seeded drops, latency, link filters, partitions,
-node state, and deterministic delivery order. It is not the final app-facing
-network API.
+work. It owns a fixed topology, per-link packet queues, packet ids, seeded
+drops, latency, link filters, partitions, node state, and deterministic
+delivery order. It is not the final app-facing network API.
 
 ## Two Surfaces
 
@@ -139,6 +139,10 @@ SimulationEnv.network()
 
 The current `UnstableNetwork` is the packet core in this chain. It proves the
 deterministic pieces before Marionette commits to the final user API.
+
+The packet core already has a declared topology and per-link queues. The env
+layer still needs to provide two views over that state: a process-facing
+authority for application code and a simulator-control authority for faults.
 
 ## Non-Goals For Now
 

@@ -48,7 +48,8 @@ portable shapes Marionette needs:
 
 - A small cluster model with three replicas.
 - Seeded message drops and delivery latency.
-- `mar.UnstableNetwork` ordering pending messages by `(deliver_at, packet_id)`.
+- `mar.UnstableNetwork` routing packets through a fixed topology and per-link
+  queues ordered by `(deliver_at, packet_id)`.
 - A partition scenario that drops queued packets through directed link filters.
 - `RunOptions.profile_name`, tags, and `RunAttribute` for replay-visible
   knobs.

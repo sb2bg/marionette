@@ -193,8 +193,9 @@ not pointer identity or hash-map iteration.
 
 `mar.UnstableNetwork(Payload, options)` is the first network/scheduler sketch.
 It is intentionally not the final public network API. It gives examples a
-shared deterministic primitive for seeded packet loss, tick-aligned latency,
-and delivery order by `(deliver_at, packet_id)`.
+shared deterministic primitive for fixed topologies, per-link queues, seeded
+packet loss, tick-aligned latency, and delivery order by
+`(deliver_at, packet_id)`.
 
 See [Network Model](network.md) for the design contract and current limits.
 See [Network API Direction](network-api.md) for the intended future split
@@ -204,9 +205,9 @@ simulator-control operations.
 ```zig
 const Payload = struct { value: u64 };
 const Network = mar.UnstableNetwork(Payload, .{
-    .packet_capacity = 64,
-    .max_disabled_links = 16,
-    .max_down_nodes = 8,
+    .node_count = 3,
+    .client_count = 1,
+    .path_capacity = 64,
 });
 
 var network = Network.init(world);

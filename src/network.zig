@@ -1,36 +1,51 @@
 //! Unstable deterministic network primitive.
 //!
 //! This is the first simulation-kernel slice inspired by TigerBeetle's VOPR
-//! packet simulator: messages enter a deterministic queue, seeded decisions
-//! choose loss and latency, link filters and node state can drop packets, and
-//! delivery order is keyed by `(deliver_at, packet_id)`.
+//! packet simulator: messages enter deterministic per-link queues, seeded
+//! decisions choose loss and latency, link filters and node state can drop
+//! packets, and delivery order is keyed by `(deliver_at, packet_id)`.
 
 const std = @import("std");
 
+const clock_module = @import("clock.zig");
 const env_module = @import("env.zig");
 const scheduler = @import("scheduler.zig");
-const clock_module = @import("clock.zig");
 const World = @import("world.zig").World;
 
 /// Stable simulated node/process identifier.
 pub const NodeId = u16;
 
-/// Fixed capacities for one unstable network instance.
+/// Fixed topology and per-path capacity for one unstable network instance.
 pub const NetworkOptions = struct {
-    packet_capacity: usize,
-    max_disabled_links: usize,
-    max_down_nodes: usize,
+    /// Number of simulated service/replica nodes.
+    node_count: usize,
+    /// Number of simulated client processes. Client ids follow node ids.
+    client_count: usize = 0,
+    /// Maximum packets queued on one directed path.
+    path_capacity: usize,
 };
 
-/// Build a fixed-capacity deterministic network for one payload type.
+/// Build a fixed-topology deterministic network for one payload type.
 pub fn UnstableNetwork(comptime Payload: type, comptime network_options: NetworkOptions) type {
+    const configured_process_count = network_options.node_count + network_options.client_count;
+    comptime {
+        if (network_options.node_count == 0) {
+            @compileError("network_options.node_count must be greater than zero");
+        }
+        if (network_options.path_capacity == 0) {
+            @compileError("network_options.path_capacity must be greater than zero");
+        }
+        if (configured_process_count == 0 or configured_process_count > @as(usize, std.math.maxInt(NodeId)) + 1) {
+            @compileError("network topology does not fit in NodeId");
+        }
+    }
+
     return struct {
         const Self = @This();
 
-        pub const Error = error{
-            LinkFilterFull,
-            NodeStateFull,
-        } || scheduler.EventQueueError;
+        pub const process_count = configured_process_count;
+        pub const path_count = process_count * process_count;
+        pub const Error = scheduler.EventQueueError;
 
         /// Packet delivered by `popReady`.
         pub const Packet = struct {
@@ -48,19 +63,16 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             latency_jitter_ns: clock_module.Duration = 0,
         };
 
-        const Queue = scheduler.EventQueue(Packet, network_options.packet_capacity, packetLessThan);
+        const Queue = scheduler.EventQueue(Packet, network_options.path_capacity, packetLessThan);
 
-        const DisabledLink = struct {
-            from: NodeId,
-            to: NodeId,
+        const Link = struct {
+            enabled: bool = true,
+            pending: Queue = .init(),
         };
 
         world: *World,
-        pending: Queue = .init(),
-        disabled_links: [network_options.max_disabled_links]DisabledLink = undefined,
-        disabled_link_count: usize = 0,
-        down_nodes: [network_options.max_down_nodes]NodeId = undefined,
-        down_node_count: usize = 0,
+        links: [path_count]Link = defaultLinks(),
+        down_nodes: [process_count]bool = [_]bool{false} ** process_count,
         next_packet_id: u64 = 0,
 
         /// Construct an empty network.
@@ -68,38 +80,53 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             return .{ .world = world };
         }
 
-        /// Count queued, undelivered packets.
+        /// Count configured service/replica nodes.
+        pub fn nodeCount(_: *const Self) usize {
+            return network_options.node_count;
+        }
+
+        /// Count configured client processes.
+        pub fn clientCount(_: *const Self) usize {
+            return network_options.client_count;
+        }
+
+        /// Count all configured processes.
+        pub fn processCount(_: *const Self) usize {
+            return process_count;
+        }
+
+        /// Count queued, undelivered packets across every directed path.
         pub fn pendingCount(self: *const Self) usize {
-            return self.pending.count();
+            var count: usize = 0;
+            for (&self.links) |*link| count += link.pending.count();
+            return count;
         }
 
         /// Return the timestamp of the next queued packet, if any.
         pub fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
-            const packet = self.pending.peek() orelse return null;
-            return packet.deliver_at;
+            var best: ?Packet = null;
+            for (&self.links) |*link| {
+                const packet = link.pending.peek() orelse continue;
+                if (best == null or packetLessThan(packet, best.?)) best = packet;
+            }
+            return if (best) |packet| packet.deliver_at else null;
         }
 
         /// Return whether a directed link is currently enabled.
         pub fn linkEnabled(self: *const Self, from: NodeId, to: NodeId) bool {
-            return self.disabledLinkIndex(from, to) == null;
+            return self.links[self.pathIndex(from, to)].enabled;
         }
 
         /// Return whether a simulated node/process is currently up.
         pub fn nodeUp(self: *const Self, node: NodeId) bool {
-            return self.downNodeIndex(node) == null;
+            self.assertNode(node);
+            return !self.down_nodes[@intCast(node)];
         }
 
         /// Mark one simulated node/process up or down.
         pub fn setNode(self: *Self, node: NodeId, up: bool) !void {
-            if (up) {
-                if (self.downNodeIndex(node)) |index| {
-                    self.removeDownNodeAt(index);
-                }
-            } else if (self.downNodeIndex(node) == null) {
-                if (self.down_node_count == self.down_nodes.len) return error.NodeStateFull;
-                self.down_nodes[self.down_node_count] = node;
-                self.down_node_count += 1;
-            }
+            self.assertNode(node);
+            self.down_nodes[@intCast(node)] = !up;
 
             try self.world.record(
                 "network.node node={} up={}",
@@ -109,7 +136,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
         /// Enable or disable one directed link.
         pub fn setLink(self: *Self, from: NodeId, to: NodeId, enabled: bool) !void {
-            try self.setLinkState(from, to, enabled);
+            self.setLinkState(from, to, enabled);
             try self.world.record(
                 "network.link from={} to={} enabled={}",
                 .{ from, to, enabled },
@@ -122,10 +149,8 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             left: []const NodeId,
             right: []const NodeId,
         ) !void {
-            const links_needed = self.partitionLinksNeeded(left, right);
-            if (links_needed > self.disabled_links.len - self.disabled_link_count) {
-                return error.LinkFilterFull;
-            }
+            self.assertNodes(left);
+            self.assertNodes(right);
 
             try self.world.record(
                 "network.partition left_count={} right_count={}",
@@ -133,16 +158,16 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             );
             for (left) |from| {
                 for (right) |to| {
-                    try self.setLinkState(from, to, false);
-                    try self.setLinkState(to, from, false);
+                    self.setLinkState(from, to, false);
+                    self.setLinkState(to, from, false);
                 }
             }
         }
 
-        /// Re-enable every disabled link and mark every node up.
+        /// Re-enable every disabled link and mark every node/process up.
         pub fn heal(self: *Self) !void {
-            const disabled_count = self.disabled_link_count;
-            const down_count = self.down_node_count;
+            const disabled_count = self.disabledLinkCount();
+            const down_count = self.downNodeCount();
             self.clearDisabledLinks();
             self.clearDownNodes();
             try self.world.record(
@@ -153,65 +178,12 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
         /// Re-enable every disabled link without changing node state.
         pub fn healLinks(self: *Self) !void {
-            const disabled_count = self.disabled_link_count;
+            const disabled_count = self.disabledLinkCount();
             self.clearDisabledLinks();
             try self.world.record(
                 "network.heal_links disabled_count={}",
                 .{disabled_count},
             );
-        }
-
-        fn setLinkState(self: *Self, from: NodeId, to: NodeId, enabled: bool) !void {
-            if (enabled) {
-                if (self.disabledLinkIndex(from, to)) |index| {
-                    self.removeDisabledLinkAt(index);
-                }
-            } else if (self.disabledLinkIndex(from, to) == null) {
-                if (self.disabled_link_count == self.disabled_links.len) return error.LinkFilterFull;
-                self.disabled_links[self.disabled_link_count] = .{ .from = from, .to = to };
-                self.disabled_link_count += 1;
-            }
-        }
-
-        fn partitionLinksNeeded(self: *const Self, left: []const NodeId, right: []const NodeId) usize {
-            var needed: usize = 0;
-            for (left) |from| {
-                for (right) |to| {
-                    if (!self.linkChangeAlreadyApplied(from, to, false)) needed += 1;
-                    if (!self.linkChangeAlreadyApplied(to, from, false)) needed += 1;
-                }
-            }
-            return needed;
-        }
-
-        fn linkChangeAlreadyApplied(self: *const Self, from: NodeId, to: NodeId, enabled: bool) bool {
-            return self.linkEnabled(from, to) == enabled;
-        }
-
-        fn clearDisabledLinks(self: *Self) void {
-            for (0..self.disabled_link_count) |index| {
-                self.disabled_links[index] = .{ .from = 0, .to = 0 };
-            }
-            self.disabled_link_count = 0;
-        }
-
-        fn clearDownNodes(self: *Self) void {
-            for (0..self.down_node_count) |index| {
-                self.down_nodes[index] = 0;
-            }
-            self.down_node_count = 0;
-        }
-
-        fn removeDisabledLinkAt(self: *Self, index: usize) void {
-            self.disabled_link_count -= 1;
-            self.disabled_links[index] = self.disabled_links[self.disabled_link_count];
-            self.disabled_links[self.disabled_link_count] = .{ .from = 0, .to = 0 };
-        }
-
-        fn removeDownNodeAt(self: *Self, index: usize) void {
-            self.down_node_count -= 1;
-            self.down_nodes[index] = self.down_nodes[self.down_node_count];
-            self.down_nodes[self.down_node_count] = 0;
         }
 
         /// Submit one packet through the simulated network.
@@ -226,6 +198,8 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             payload: Payload,
             options: SendOptions,
         ) !void {
+            self.assertNode(from);
+            self.assertNode(to);
             options.drop_rate.validate();
 
             const packet_id = self.next_packet_id;
@@ -264,7 +238,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
                 .deliver_at = deliver_at,
                 .payload = payload,
             };
-            try self.pending.push(packet);
+            try self.links[self.pathIndex(from, to)].pending.push(packet);
 
             try self.world.record(
                 "network.send id={} from={} to={} deliver_at={} latency_ns={}",
@@ -275,10 +249,9 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         /// Pop the next ready packet and record its delivery.
         pub fn popReady(self: *Self) !?Packet {
             while (true) {
-                const packet = self.pending.peek() orelse return null;
-                if (packet.deliver_at > self.world.now()) return null;
+                const link_index = self.nextReadyLinkIndex() orelse return null;
+                const ready = self.links[link_index].pending.pop().?;
 
-                const ready = self.pending.pop().?;
                 if (!self.nodeUp(ready.to)) {
                     try self.world.record(
                         "network.drop id={} from={} to={} reason=destination_down",
@@ -325,20 +298,63 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             }
         }
 
-        // These linear scans are fine for Phase 0 capacities. If link/node
-        // limits grow, replace them with indexed state keyed by NodeId/path.
-        fn disabledLinkIndex(self: *const Self, from: NodeId, to: NodeId) ?usize {
-            for (self.disabled_links[0..self.disabled_link_count], 0..) |link, index| {
-                if (link.from == from and link.to == to) return index;
+        // Scanning per-link heads is deliberate for Phase 0 capacities. A
+        // later scheduler can add an index/heap over active paths without
+        // changing the per-link queue model needed for clogging.
+        fn nextReadyLinkIndex(self: *const Self) ?usize {
+            var best_index: ?usize = null;
+            var best_packet: Packet = undefined;
+            for (&self.links, 0..) |*link, index| {
+                const packet = link.pending.peek() orelse continue;
+                if (packet.deliver_at > self.world.now()) continue;
+                if (best_index == null or packetLessThan(packet, best_packet)) {
+                    best_index = index;
+                    best_packet = packet;
+                }
             }
-            return null;
+            return best_index;
         }
 
-        fn downNodeIndex(self: *const Self, node: NodeId) ?usize {
-            for (self.down_nodes[0..self.down_node_count], 0..) |down_node, index| {
-                if (down_node == node) return index;
+        fn setLinkState(self: *Self, from: NodeId, to: NodeId, enabled: bool) void {
+            self.links[self.pathIndex(from, to)].enabled = enabled;
+        }
+
+        fn clearDisabledLinks(self: *Self) void {
+            for (&self.links) |*link| link.enabled = true;
+        }
+
+        fn clearDownNodes(self: *Self) void {
+            for (&self.down_nodes) |*down| down.* = false;
+        }
+
+        fn disabledLinkCount(self: *const Self) usize {
+            var count: usize = 0;
+            for (&self.links) |*link| {
+                if (!link.enabled) count += 1;
             }
-            return null;
+            return count;
+        }
+
+        fn downNodeCount(self: *const Self) usize {
+            var count: usize = 0;
+            for (self.down_nodes) |down| {
+                if (down) count += 1;
+            }
+            return count;
+        }
+
+        fn pathIndex(self: *const Self, from: NodeId, to: NodeId) usize {
+            self.assertNode(from);
+            self.assertNode(to);
+            return @as(usize, from) * process_count + @as(usize, to);
+        }
+
+        fn assertNodes(self: *const Self, nodes: []const NodeId) void {
+            for (nodes) |node| self.assertNode(node);
+        }
+
+        fn assertNode(_: *const Self, node: NodeId) void {
+            std.debug.assert(@as(usize, node) < process_count);
         }
 
         fn latency(self: *Self, options: SendOptions) !clock_module.Duration {
@@ -359,6 +375,10 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             return a.deliver_at < b.deliver_at or
                 (a.deliver_at == b.deliver_at and a.id < b.id);
         }
+
+        fn defaultLinks() [path_count]Link {
+            return [_]Link{.{}} ** path_count;
+        }
     };
 }
 
@@ -367,9 +387,9 @@ const TestPayload = struct {
 };
 
 const test_options: NetworkOptions = .{
-    .packet_capacity = 8,
-    .max_disabled_links = 8,
-    .max_down_nodes = 8,
+    .node_count = 3,
+    .client_count = 1,
+    .path_capacity = 8,
 };
 
 test "network: delivers ready packets by time then packet id" {
@@ -409,25 +429,21 @@ test "network: traces deterministic drops" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 drop_rate=1/1") != null);
 }
 
-test "network: packet, link, and node capacities are independent" {
+test "network: queue capacity is per directed path" {
     const Network = UnstableNetwork(TestPayload, .{
-        .packet_capacity = 4,
-        .max_disabled_links = 1,
-        .max_down_nodes = 1,
+        .node_count = 3,
+        .client_count = 1,
+        .path_capacity = 1,
     });
 
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
     var network = Network.init(&world);
-    try network.setLink(0, 1, false);
-    try std.testing.expectError(error.LinkFilterFull, network.setLink(0, 2, false));
+    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try std.testing.expectError(error.EventQueueFull, network.send(0, 1, .{ .value = 2 }, .{ .min_latency_ns = 10 }));
 
-    try network.setNode(1, false);
-    try std.testing.expectError(error.NodeStateFull, network.setNode(2, false));
-
-    try network.send(0, 3, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try network.send(0, 3, .{ .value = 2 }, .{ .min_latency_ns = 10 });
+    try network.send(0, 2, .{ .value = 3 }, .{ .min_latency_ns = 10 });
     try std.testing.expectEqual(@as(usize, 2), network.pendingCount());
 }
 
@@ -497,26 +513,6 @@ test "network: healLinks leaves node state unchanged" {
     try std.testing.expect(network.linkEnabled(0, 1));
     try std.testing.expect(!network.nodeUp(1));
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal_links disabled_count=1") != null);
-}
-
-test "network: partition capacity failure does not partially disable links" {
-    const Network = UnstableNetwork(TestPayload, .{
-        .packet_capacity = 4,
-        .max_disabled_links = 1,
-        .max_down_nodes = 1,
-    });
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    const left = [_]NodeId{0};
-    const right = [_]NodeId{1};
-
-    try std.testing.expectError(error.LinkFilterFull, network.partition(&left, &right));
-    try std.testing.expect(network.linkEnabled(0, 1));
-    try std.testing.expect(network.linkEnabled(1, 0));
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.partition") == null);
 }
 
 test "network: down source cannot send" {

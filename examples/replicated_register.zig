@@ -289,9 +289,9 @@ const MessagePayload = struct {
 };
 
 const network_options: mar.UnstableNetworkOptions = .{
-    .packet_capacity = max_messages,
-    .max_disabled_links = 16,
-    .max_down_nodes = replica_count + 1,
+    .node_count = replica_count,
+    .client_count = 1,
+    .path_capacity = max_messages,
 };
 
 const Network = mar.UnstableNetwork(MessagePayload, network_options);

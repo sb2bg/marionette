@@ -20,7 +20,8 @@ portable lessons for Marionette are:
 
 - Treat the network as simulator-owned machinery, not real sockets.
 - Give every packet a stable id.
-- Queue packets per deterministic ordering, not host scheduling order.
+- Queue packets per directed link, with deterministic ordering inside each
+  path and stable tie-breaking across paths.
 - Make latency and packet loss seeded simulator decisions.
 - Trace sends, drops, and deliveries separately.
 - Keep more advanced fault modes layered on top of a small packet core.
@@ -36,11 +37,16 @@ The current type is:
 
 ```zig
 const Network = mar.UnstableNetwork(Payload, .{
-    .packet_capacity = 64,
-    .max_disabled_links = 16,
-    .max_down_nodes = 8,
+    .node_count = 3,
+    .client_count = 1,
+    .path_capacity = 64,
 });
 ```
+
+`node_count` declares simulated service/replica nodes. `client_count` declares
+extra client processes whose ids follow node ids. With the example above,
+valid process ids are `0`, `1`, `2`, and `3`; id `3` is the first client.
+`path_capacity` is per directed link, not global.
 
 `Payload` is user-owned data. Marionette only schedules and traces the packet
 metadata:
@@ -79,6 +85,26 @@ callback may enqueue more packets.
 
 This is a low-level primitive for examples and early scheduler work. A future
 `SimulationEnv.network()` or node-scoped authority may wrap it.
+
+## Topology
+
+The topology is fixed when the network type is instantiated:
+
+```zig
+.node_count = 3,
+.client_count = 1,
+```
+
+All node-shaped APIs assert that ids are inside `0..node_count + client_count`.
+That gives the simulator a known universe for partitions, per-link queues,
+node state, and future liveness cores. It also makes invalid topology use fail
+loudly instead of silently creating new processes by accident.
+
+Each directed path owns its own queue and enabled/disabled state. `popReady`
+scans the heads of all path queues and picks the ready packet with the lowest
+`(deliver_at, packet_id)`. The scan is acceptable for Phase 0 capacities; a
+later scheduler can add an index over active paths without changing the
+per-link model needed for clogging and path-local capacity.
 
 ## Node State
 
@@ -224,6 +250,18 @@ The payload is not dumped into the core network trace. User code should record
 domain-specific payload facts separately when useful, as the replicated
 register example does with `register.message`.
 
+## Fault Evolution
+
+Current packet loss is still a send-time decision, and partitions/node state
+are explicit scenario actions. That is enough for Phase 0 examples, but it is
+not the final VOPR-style fault model.
+
+The next structural layer should be tick-evolved network state: partitions
+start and heal on simulator ticks, path clogs last for deterministic
+durations, and liveness mode can change network defaults for the rest of a
+run. The per-link queue topology exists so those faults can be added without
+rewriting the packet core again.
+
 ## Current Limits
 
 `UnstableNetwork` does not yet support:
@@ -233,15 +271,17 @@ register example does with `register.message`.
 - Path clogging.
 - Broadcast.
 - Node spawning.
+- Tick-evolved fault schedules.
+- Network-level default send options.
 - Event-by-event scheduler callbacks.
+- Human summary rendering.
 
 These are deliberate omissions. The current primitive should prove the
 smallest useful packet core before growing.
 
 ## Next Step
 
-The next high-value addition is path clogging, but it should not be bolted
-onto the current global priority queue blindly. Clogging is per-link state:
-packets queued on a clogged path may need to wait independently of packets on
-healthy paths. That likely pushes Marionette toward per-link queues or a
-scheduler layer above the current packet core.
+The next high-value addition is the app-facing/control split described in
+`network-api.md`, followed by tick-evolved fault state on top of these per-link
+queues. `UnstableNetwork` is still a simulator primitive; examples should not
+teach it as the final production network surface.
