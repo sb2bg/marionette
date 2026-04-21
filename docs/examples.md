@@ -6,9 +6,9 @@ replay tests.
 
 ## Rate Limiter
 
-Source: [`examples/rate_limiter.zig`](../examples/rate_limiter.zig)
+Source: [`examples/rate_limiter.zig`](https://github.com/sb2bg/marionette/blob/main/examples/rate_limiter.zig)
 
-The examples module root is [`examples/root.zig`](../examples/root.zig).
+The examples module root is [`examples/root.zig`](https://github.com/sb2bg/marionette/blob/main/examples/root.zig).
 Add new examples there so `zig build test` picks them up without hard-coding
 each example in `build.zig`.
 
@@ -39,7 +39,7 @@ traces because the refill schedule is jittered from the seeded random stream.
 
 ## Replicated Register
 
-Source: [`examples/replicated_register.zig`](../examples/replicated_register.zig)
+Source: [`examples/replicated_register.zig`](https://github.com/sb2bg/marionette/blob/main/examples/replicated_register.zig)
 
 The replicated register is the first VOPR-inspired showcase. It is not a real
 consensus protocol and does not copy TigerBeetle internals. It demonstrates the

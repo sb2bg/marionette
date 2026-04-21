@@ -9,6 +9,7 @@
         "LICENSE",
         "build.zig",
         "build.zig.zon",
+        "mkdocs.yml",
         "docs",
         "examples",
         "src",

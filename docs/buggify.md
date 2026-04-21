@@ -9,7 +9,7 @@ real API should preserve.
 
 ## Worked Shape
 
-Source: [`examples/buggify_zero_cost.zig`](../examples/buggify_zero_cost.zig)
+Source: [`examples/buggify_zero_cost.zig`](https://github.com/sb2bg/marionette/blob/main/examples/buggify_zero_cost.zig)
 
 ```zig
 const Mode = enum { production, simulation };

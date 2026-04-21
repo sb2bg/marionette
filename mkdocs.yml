@@ -1,0 +1,40 @@
+site_name: Marionette
+site_description: Deterministic simulation testing for Zig.
+site_url: https://sb2bg.github.io/marionette/
+repo_url: https://github.com/sb2bg/marionette
+repo_name: sb2bg/marionette
+
+theme:
+  name: material
+  palette:
+    scheme: default
+    primary: black
+    accent: indigo
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Blog:
+      - blog/index.md
+      - Why deterministic replay in Zig is harder than it sounds: blog/why-deterministic-replay-in-zig-is-harder-than-it-sounds.md
+  - Docs:
+      - Overview: overview.md
+      - Architecture: architecture.md
+      - Trace Format: trace-format.md
+      - Run: run.md
+      - BUGGIFY: buggify.md
+      - Disk Fault Model: disk-fault-model.md
+      - API: api.md
+      - Determinism: determinism.md
+      - Examples: examples.md
+      - Roadmap: roadmap.md
+      - Prior Art: prior-art.md
+      - TigerBeetle Lessons: tigerbeetle-lessons.md

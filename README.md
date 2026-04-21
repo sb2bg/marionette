@@ -76,7 +76,7 @@ explicit allocators, no runtime magic.
 - [Roadmap](docs/roadmap.md)
 - [Prior art](docs/prior-art.md)
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
-- [Blog](docs/blog/README.md)
+- [Blog](docs/blog/index.md)
 
 Current examples include a rate limiter and a tiny VOPR-inspired replicated
 register showcase.
