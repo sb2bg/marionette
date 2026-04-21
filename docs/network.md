@@ -36,7 +36,7 @@ the same shape in spirit, but with a smaller generic API.
 The current type is:
 
 ```zig
-const Network = mar.UnstableNetwork(Payload, .{
+const Sim = mar.UnstableNetworkSimulation(Payload, .{
     .node_count = 3,
     .client_count = 1,
     .path_capacity = 64,
@@ -56,8 +56,8 @@ const Payload = struct {
     value: u64,
 };
 
-var network = Network.init(world);
-try network.send(0, 1, .{ .value = 42 }, .{
+var sim = Sim.init(world);
+try sim.packetCore().send(0, 1, .{ .value = 42 }, .{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
@@ -67,7 +67,7 @@ try network.send(0, 1, .{ .value = 42 }, .{
 Ready packets are consumed explicitly:
 
 ```zig
-while (try network.popReady()) |packet| {
+while (try sim.packetCore().popReady()) |packet| {
     try apply(packet.payload);
 }
 ```
@@ -76,15 +76,17 @@ For examples that just need to drive all pending network work, use
 `drainUntilIdle`:
 
 ```zig
-try network.drainUntilIdle(context, deliver);
+try sim.packetCore().drainUntilIdle(context, deliver);
 ```
 
 The callback receives each delivered packet. The helper advances simulated time
 to the next queued packet and keeps running until the queue is empty. The
 callback may enqueue more packets.
 
-This is a low-level primitive for examples and early scheduler work. A future
-`SimulationEnv.network()` or node-scoped authority may wrap it.
+This is a low-level primitive for examples and early scheduler work. Harness
+code may still touch `packetCore()` directly for send and delivery, but fault
+orchestration should go through `sim.network()`. A future `SimulationEnv.network()`
+or node-scoped authority may wrap the packet core for application code.
 
 ## Topology
 
@@ -111,8 +113,8 @@ per-link model needed for clogging and path-local capacity.
 Nodes are up by default. Mark a simulated process down or up with:
 
 ```zig
-try network.setNode(1, false);
-try network.setNode(1, true);
+try sim.network().setNode(1, false);
+try sim.network().setNode(1, true);
 ```
 
 A down source cannot submit new packets. `send` still consumes a stable packet
@@ -139,7 +141,7 @@ yet.
 Links are directed. A disabled link drops ready packets at delivery time:
 
 ```zig
-try network.setLink(0, 1, false);
+try sim.network().setLink(0, 1, false);
 ```
 
 If a packet from node `0` to node `1` is already queued when the link is
@@ -156,7 +158,7 @@ decide whether an in-flight packet makes it through.
 Re-enable a directed link with:
 
 ```zig
-try network.setLink(0, 1, true);
+try sim.network().setLink(0, 1, true);
 ```
 
 ## Partitions
@@ -167,7 +169,7 @@ helper disables both directions between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try network.partition(&left, &right);
+try sim.network().partition(&left, &right);
 ```
 
 This disables `0 -> 1`, `1 -> 0`, `0 -> 2`, and `2 -> 0`, while leaving
@@ -176,7 +178,7 @@ traffic inside the right side alone.
 Heal all disabled links with:
 
 ```zig
-try network.heal();
+try sim.network().heal();
 ```
 
 `heal` restores default network state by re-enabling links and marking nodes

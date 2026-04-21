@@ -12,20 +12,22 @@ or deterministic simulator events.
 
 Today, production networking does not exist in Marionette.
 
-The only network implementation is:
+The current network simulator wrapper is:
 
 ```zig
-const Network = mar.UnstableNetwork(Payload, .{
+const Sim = mar.UnstableNetworkSimulation(Payload, .{
     .node_count = 3,
     .client_count = 1,
     .path_capacity = 64,
 });
 ```
 
-`UnstableNetwork` is a simulation-kernel primitive for examples and scheduler
-work. It owns a fixed topology, per-link packet queues, packet ids, seeded
-drops, latency, link filters, partitions, node state, and deterministic
-delivery order. It is not the final app-facing network API.
+`UnstableNetworkSimulation` owns one `UnstableNetwork` packet core and exposes
+a simulator-control network view. The packet core owns a fixed topology,
+per-link packet queues, packet ids, seeded drops, latency, and deterministic
+delivery order. The control view owns test-only operations such as link
+filters, partitions, and node state. Neither type is the final app-facing
+network API.
 
 ## Two Surfaces
 
@@ -97,17 +99,19 @@ try sim.network().heal();
 These calls are not app behavior. They are fault orchestration. They should
 not be required or available in ordinary production service code.
 
-Today, these operations live directly on `UnstableNetwork`:
+Today, these operations live on `UnstableNetworkSimulation.network()`:
 
 ```zig
-try network.setNode(1, false);
-try network.partition(&left, &right);
-try network.heal();
+try sim.network().setNode(1, false);
+try sim.network().partition(&left, &right);
+try sim.network().heal();
 ```
 
 That is acceptable for Phase 0 because examples are still close to the
-simulation kernel. A later `SimulationEnv` or scheduler layer should wrap
-these operations so examples stop depending on the kernel type directly.
+simulation kernel. The important constraint is that fault orchestration is now
+separate from the packet core's send/delivery path. A later `SimulationEnv` or
+scheduler layer should wrap this again so examples stop depending on the
+unstable network simulator type directly.
 
 ## Production Path
 
@@ -141,8 +145,8 @@ The current `UnstableNetwork` is the packet core in this chain. It proves the
 deterministic pieces before Marionette commits to the final user API.
 
 The packet core already has a declared topology and per-link queues. The env
-layer still needs to provide two views over that state: a process-facing
-authority for application code and a simulator-control authority for faults.
+layer still needs to provide the process-facing authority for application
+code; the current simulator-control view is the first half of that split.
 
 ## Non-Goals For Now
 
@@ -168,9 +172,10 @@ Do not treat `UnstableNetwork` as the final user-facing production API.
 Code that uses:
 
 ```zig
-mar.UnstableNetwork(Payload, options)
+mar.UnstableNetworkSimulation(Payload, options)
 ```
 
-is using a simulator primitive. That is fine for examples and internal
-network work. Production-ready Marionette code should eventually depend on
+is using a simulator primitive. Code that reaches for
+`sim.packetCore().send(...)` is writing harness code, not production service
+code. Production-ready Marionette code should eventually depend on
 `env.network()` instead.

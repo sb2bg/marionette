@@ -47,6 +47,8 @@ Phase 0 has:
   per-link queues, seeded packet loss, tick-aligned latency, process up/down
   state, directed link filters, simple partitions, and stable
   `(deliver_at, packet_id)` delivery order.
+- `mar.UnstableNetworkSimulation`, a small owner wrapper that separates
+  harness packet-core send/delivery from simulator-control fault operations.
 - `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.

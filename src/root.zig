@@ -63,6 +63,9 @@ pub const UnstableEventQueueError = @import("scheduler.zig").EventQueueError;
 /// Unstable deterministic network primitive for examples and early scheduler work.
 pub const UnstableNetwork = @import("network.zig").UnstableNetwork;
 
+/// Unstable simulator wrapper that owns one deterministic network packet core.
+pub const UnstableNetworkSimulation = @import("network.zig").NetworkSimulation;
+
 /// Fixed topology and per-path capacity for one unstable network instance.
 pub const UnstableNetworkOptions = @import("network.zig").NetworkOptions;
 

@@ -191,11 +191,11 @@ not pointer identity or hash-map iteration.
 
 ## Network
 
-`mar.UnstableNetwork(Payload, options)` is the first network/scheduler sketch.
-It is intentionally not the final public network API. It gives examples a
-shared deterministic primitive for fixed topologies, per-link queues, seeded
-packet loss, tick-aligned latency, and delivery order by
-`(deliver_at, packet_id)`.
+`mar.UnstableNetworkSimulation(Payload, options)` is the first
+network/scheduler sketch. It is intentionally not the final public network
+API. It gives examples a shared deterministic primitive for fixed topologies,
+per-link queues, seeded packet loss, tick-aligned latency, simulator-control
+faults, and delivery order by `(deliver_at, packet_id)`.
 
 See [Network Model](network.md) for the design contract and current limits.
 See [Network API Direction](network-api.md) for the intended future split
@@ -204,20 +204,20 @@ simulator-control operations.
 
 ```zig
 const Payload = struct { value: u64 };
-const Network = mar.UnstableNetwork(Payload, .{
+const Sim = mar.UnstableNetworkSimulation(Payload, .{
     .node_count = 3,
     .client_count = 1,
     .path_capacity = 64,
 });
 
-var network = Network.init(world);
-try network.send(0, 1, .{ .value = 42 }, .{
+var sim = Sim.init(world);
+try sim.packetCore().send(0, 1, .{ .value = 42 }, .{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
 
-while (try network.popReady()) |packet| {
+while (try sim.packetCore().popReady()) |packet| {
     _ = packet.payload;
 }
 ```
@@ -225,7 +225,7 @@ while (try network.popReady()) |packet| {
 For examples that should run queued packets until no network work remains:
 
 ```zig
-try network.drainUntilIdle(context, deliver);
+try sim.packetCore().drainUntilIdle(context, deliver);
 ```
 
 `send` records `network.send` or `network.drop`. `popReady` records
@@ -235,15 +235,15 @@ Phase 0 simulated time advances in whole ticks.
 Nodes are up by default. Mark one down or up with:
 
 ```zig
-try network.setNode(1, false);
-try network.setNode(1, true);
+try sim.network().setNode(1, false);
+try sim.network().setNode(1, true);
 ```
 
 Directed links can be disabled and re-enabled:
 
 ```zig
-try network.setLink(0, 1, false);
-try network.setLink(0, 1, true);
+try sim.network().setLink(0, 1, false);
+try sim.network().setLink(0, 1, true);
 ```
 
 Partitions disable every directed link crossing between two groups:
@@ -251,8 +251,8 @@ Partitions disable every directed link crossing between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try network.partition(&left, &right);
-try network.heal();
+try sim.network().partition(&left, &right);
+try sim.network().heal();
 ```
 
 ## Seeds

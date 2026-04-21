@@ -47,6 +47,40 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         pub const path_count = process_count * process_count;
         pub const Error = scheduler.EventQueueError;
 
+        /// Simulator-control view for network fault orchestration.
+        pub const Control = struct {
+            network: *Self,
+
+            /// Mark one simulated node/process up or down.
+            pub fn setNode(self: Control, node: NodeId, up: bool) !void {
+                try self.network.setNode(node, up);
+            }
+
+            /// Enable or disable one directed link.
+            pub fn setLink(self: Control, from: NodeId, to: NodeId, enabled: bool) !void {
+                try self.network.setLink(from, to, enabled);
+            }
+
+            /// Disable all directed links crossing between two groups.
+            pub fn partition(
+                self: Control,
+                left: []const NodeId,
+                right: []const NodeId,
+            ) !void {
+                try self.network.partition(left, right);
+            }
+
+            /// Re-enable every disabled link and mark every node/process up.
+            pub fn heal(self: Control) !void {
+                try self.network.heal();
+            }
+
+            /// Re-enable every disabled link without changing node state.
+            pub fn healLinks(self: Control) !void {
+                try self.network.healLinks();
+            }
+        };
+
         /// Packet delivered by `popReady`.
         pub const Packet = struct {
             id: u64,
@@ -78,6 +112,11 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         /// Construct an empty network.
         pub fn init(world: *World) Self {
             return .{ .world = world };
+        }
+
+        /// Return the simulator-control view for network faults.
+        pub fn control(self: *Self) Control {
+            return .{ .network = self };
         }
 
         /// Count configured service/replica nodes.
@@ -123,8 +162,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             return !self.down_nodes[@intCast(node)];
         }
 
-        /// Mark one simulated node/process up or down.
-        pub fn setNode(self: *Self, node: NodeId, up: bool) !void {
+        fn setNode(self: *Self, node: NodeId, up: bool) !void {
             self.assertNode(node);
             self.down_nodes[@intCast(node)] = !up;
 
@@ -134,8 +172,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             );
         }
 
-        /// Enable or disable one directed link.
-        pub fn setLink(self: *Self, from: NodeId, to: NodeId, enabled: bool) !void {
+        fn setLink(self: *Self, from: NodeId, to: NodeId, enabled: bool) !void {
             self.setLinkState(from, to, enabled);
             try self.world.record(
                 "network.link from={} to={} enabled={}",
@@ -143,8 +180,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             );
         }
 
-        /// Disable all directed links crossing between two groups.
-        pub fn partition(
+        fn partition(
             self: *Self,
             left: []const NodeId,
             right: []const NodeId,
@@ -164,8 +200,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             }
         }
 
-        /// Re-enable every disabled link and mark every node/process up.
-        pub fn heal(self: *Self) !void {
+        fn heal(self: *Self) !void {
             const disabled_count = self.disabledLinkCount();
             const down_count = self.downNodeCount();
             self.clearDisabledLinks();
@@ -176,8 +211,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             );
         }
 
-        /// Re-enable every disabled link without changing node state.
-        pub fn healLinks(self: *Self) !void {
+        fn healLinks(self: *Self) !void {
             const disabled_count = self.disabledLinkCount();
             self.clearDisabledLinks();
             try self.world.record(
@@ -382,6 +416,33 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
     };
 }
 
+/// Build a small simulator wrapper that owns one unstable packet core.
+pub fn NetworkSimulation(comptime Payload: type, comptime network_options: NetworkOptions) type {
+    return struct {
+        const Self = @This();
+
+        pub const PacketCore = UnstableNetwork(Payload, network_options);
+        pub const Control = PacketCore.Control;
+
+        packet_core: PacketCore,
+
+        /// Construct a simulation wrapper around a world-owned authority set.
+        pub fn init(world: *World) Self {
+            return .{ .packet_core = .init(world) };
+        }
+
+        /// Return the low-level packet core for harness send/delivery code.
+        pub fn packetCore(self: *Self) *PacketCore {
+            return &self.packet_core;
+        }
+
+        /// Return the simulator-control view for network fault orchestration.
+        pub fn network(self: *Self) Control {
+            return self.packet_core.control();
+        }
+    };
+}
+
 const TestPayload = struct {
     value: u64,
 };
@@ -447,6 +508,22 @@ test "network: queue capacity is per directed path" {
     try std.testing.expectEqual(@as(usize, 2), network.pendingCount());
 }
 
+test "network simulation: control view owns fault orchestration" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var sim = Sim.init(&world);
+    try sim.network().setLink(0, 1, false);
+    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try world.runFor(10);
+
+    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.link from=0 to=1 enabled=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=link_disabled") != null);
+}
+
 test "network: disabled links drop ready packets at delivery" {
     const Network = UnstableNetwork(TestPayload, test_options);
 
@@ -454,7 +531,7 @@ test "network: disabled links drop ready packets at delivery" {
     defer world.deinit();
 
     var network = Network.init(&world);
-    try network.setLink(0, 1, false);
+    try network.control().setLink(0, 1, false);
     try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
     try world.runFor(10);
 
@@ -474,8 +551,8 @@ test "network: partition disables crossing links and heal resets network state" 
     const left = [_]NodeId{0};
     const right = [_]NodeId{ 1, 2 };
 
-    try network.partition(&left, &right);
-    try network.setNode(2, false);
+    try network.control().partition(&left, &right);
+    try network.control().setNode(2, false);
     try std.testing.expect(!network.linkEnabled(0, 1));
     try std.testing.expect(!network.linkEnabled(1, 0));
     try std.testing.expect(!network.linkEnabled(0, 2));
@@ -483,7 +560,7 @@ test "network: partition disables crossing links and heal resets network state" 
     try std.testing.expect(network.linkEnabled(1, 2));
     try std.testing.expect(!network.nodeUp(2));
 
-    try network.heal();
+    try network.control().heal();
     try std.testing.expect(network.linkEnabled(0, 1));
     try std.testing.expect(network.linkEnabled(1, 0));
     try std.testing.expect(network.nodeUp(2));
@@ -506,10 +583,10 @@ test "network: healLinks leaves node state unchanged" {
     defer world.deinit();
 
     var network = Network.init(&world);
-    try network.setLink(0, 1, false);
-    try network.setNode(1, false);
+    try network.control().setLink(0, 1, false);
+    try network.control().setNode(1, false);
 
-    try network.healLinks();
+    try network.control().healLinks();
     try std.testing.expect(network.linkEnabled(0, 1));
     try std.testing.expect(!network.nodeUp(1));
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal_links disabled_count=1") != null);
@@ -524,7 +601,7 @@ test "network: down source cannot send" {
     var network = Network.init(&world);
     try std.testing.expect(network.nodeUp(0));
 
-    try network.setNode(0, false);
+    try network.control().setNode(0, false);
     try std.testing.expect(!network.nodeUp(0));
 
     try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
@@ -541,7 +618,7 @@ test "network: down destination drops ready packets at delivery" {
 
     var network = Network.init(&world);
     try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try network.setNode(1, false);
+    try network.control().setNode(1, false);
     try world.runFor(10);
 
     try std.testing.expectEqual(@as(?Network.Packet, null), try network.popReady());
@@ -557,9 +634,9 @@ test "network: restarted destination can receive queued packets" {
 
     var network = Network.init(&world);
     try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 20 });
-    try network.setNode(1, false);
+    try network.control().setNode(1, false);
     try world.runFor(10);
-    try network.setNode(1, true);
+    try network.control().setNode(1, true);
     try world.runFor(10);
 
     const packet = (try network.popReady()).?;

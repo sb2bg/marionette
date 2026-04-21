@@ -221,13 +221,13 @@ fn partitionScenario(world: *mar.World, cluster: *Cluster) !void {
     var majority_side: [replica_count]mar.NodeId = undefined;
     const majority_side_len = buildMajoritySide(partitioned_replica, &majority_side);
 
-    try cluster.network.partition(&isolated, majority_side[0..majority_side_len]);
+    try cluster.sim.network().partition(&isolated, majority_side[0..majority_side_len]);
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
         .retry_limit = partition_profile.retry_limit,
     });
-    try cluster.network.heal();
+    try cluster.sim.network().heal();
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
@@ -294,11 +294,12 @@ const network_options: mar.UnstableNetworkOptions = .{
     .path_capacity = max_messages,
 };
 
-const Network = mar.UnstableNetwork(MessagePayload, network_options);
+const Simulation = mar.UnstableNetworkSimulation(MessagePayload, network_options);
+const Network = Simulation.PacketCore;
 
 const Cluster = struct {
     replicas: [replica_count]Replica,
-    network: Network,
+    sim: Simulation,
 
     const WriteOptions = struct {
         version: u64,
@@ -311,12 +312,12 @@ const Cluster = struct {
     fn init() Cluster {
         return .{
             .replicas = [_]Replica{.{}} ** replica_count,
-            .network = undefined,
+            .sim = undefined,
         };
     }
 
     fn bindWorld(self: *Cluster, world: *mar.World) void {
-        self.network = Network.init(world);
+        self.sim = Simulation.init(world);
     }
 
     fn write(self: *Cluster, world: *mar.World, options: WriteOptions) !void {
@@ -383,7 +384,7 @@ const Cluster = struct {
         value: u64,
         drop_percent: u8,
     ) !void {
-        try self.network.send(client_node_id, to, .{
+        try self.sim.packetCore().send(client_node_id, to, .{
             .kind = kind,
             .version = version,
             .value = value,
@@ -405,7 +406,7 @@ const Cluster = struct {
             .cluster = self,
             .acked = acked,
         };
-        try self.network.drainUntilIdle(&context, DeliveryContext.deliver);
+        try self.sim.packetCore().drainUntilIdle(&context, DeliveryContext.deliver);
     }
 
     const DeliveryContext = struct {
