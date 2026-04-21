@@ -12,8 +12,7 @@
   <a href="https://sb2bg.github.io/marionette/">Docs and blog</a>
 </p>
 
-[![Zig build](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg?branch=main&job=Zig%20build)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
-[![Zig test](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg?branch=main&job=Zig%20test)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+[![CI](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
 
 Deterministic simulation testing for Zig.
 
