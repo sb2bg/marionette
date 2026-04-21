@@ -191,7 +191,7 @@ not pointer identity or hash-map iteration.
 
 ## Network
 
-`mar.UnstableNetwork(Payload, capacity)` is the first network/scheduler sketch.
+`mar.UnstableNetwork(Payload, options)` is the first network/scheduler sketch.
 It is intentionally not the final public network API. It gives examples a
 shared deterministic primitive for seeded packet loss, tick-aligned latency,
 and delivery order by `(deliver_at, packet_id)`.
@@ -203,16 +203,20 @@ simulator-control operations.
 
 ```zig
 const Payload = struct { value: u64 };
-const Network = mar.UnstableNetwork(Payload, 64);
+const Network = mar.UnstableNetwork(Payload, .{
+    .packet_capacity = 64,
+    .max_disabled_links = 16,
+    .max_down_nodes = 8,
+});
 
-var network = Network.init();
-try network.send(world, 0, 1, .{ .value = 42 }, .{
+var network = Network.init(world);
+try network.send(0, 1, .{ .value = 42 }, .{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
 
-while (try network.popReady(world)) |packet| {
+while (try network.popReady()) |packet| {
     _ = packet.payload;
 }
 ```
@@ -220,7 +224,7 @@ while (try network.popReady(world)) |packet| {
 For examples that should run queued packets until no network work remains:
 
 ```zig
-try network.drainUntilIdle(world, context, deliver);
+try network.drainUntilIdle(context, deliver);
 ```
 
 `send` records `network.send` or `network.drop`. `popReady` records
@@ -230,15 +234,15 @@ Phase 0 simulated time advances in whole ticks.
 Nodes are up by default. Mark one down or up with:
 
 ```zig
-try network.setNode(world, 1, false);
-try network.setNode(world, 1, true);
+try network.setNode(1, false);
+try network.setNode(1, true);
 ```
 
 Directed links can be disabled and re-enabled:
 
 ```zig
-try network.setLink(world, 0, 1, false);
-try network.setLink(world, 0, 1, true);
+try network.setLink(0, 1, false);
+try network.setLink(0, 1, true);
 ```
 
 Partitions disable every directed link crossing between two groups:
@@ -246,8 +250,8 @@ Partitions disable every directed link crossing between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try network.partition(world, &left, &right);
-try network.heal(world);
+try network.partition(&left, &right);
+try network.heal();
 ```
 
 ## Seeds

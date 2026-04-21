@@ -58,7 +58,7 @@ Rules:
   `network.deliver` with stable packet ids and node ids.
 - Node-state changes use `network.node`.
 - Link-filter changes use `network.link`, `network.partition`, and
-  `network.heal`.
+  `network.heal`. Link-only healing uses `network.heal_links`.
 
 ## What Goes In
 

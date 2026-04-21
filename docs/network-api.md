@@ -15,7 +15,11 @@ Today, production networking does not exist in Marionette.
 The only network implementation is:
 
 ```zig
-const Network = mar.UnstableNetwork(Payload, capacity);
+const Network = mar.UnstableNetwork(Payload, .{
+    .packet_capacity = 64,
+    .max_disabled_links = 16,
+    .max_down_nodes = 8,
+});
 ```
 
 `UnstableNetwork` is a simulation-kernel primitive for examples and scheduler
@@ -96,9 +100,9 @@ not be required or available in ordinary production service code.
 Today, these operations live directly on `UnstableNetwork`:
 
 ```zig
-try network.setNode(world, 1, false);
-try network.partition(world, &left, &right);
-try network.heal(world);
+try network.setNode(1, false);
+try network.partition(&left, &right);
+try network.heal();
 ```
 
 That is acceptable for Phase 0 because examples are still close to the
@@ -160,7 +164,7 @@ Do not treat `UnstableNetwork` as the final user-facing production API.
 Code that uses:
 
 ```zig
-mar.UnstableNetwork(Payload, capacity)
+mar.UnstableNetwork(Payload, options)
 ```
 
 is using a simulator primitive. That is fine for examples and internal

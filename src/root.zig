@@ -63,6 +63,9 @@ pub const UnstableEventQueueError = @import("scheduler.zig").EventQueueError;
 /// Unstable deterministic network primitive for examples and early scheduler work.
 pub const UnstableNetwork = @import("network.zig").UnstableNetwork;
 
+/// Fixed capacities for one unstable network instance.
+pub const UnstableNetworkOptions = @import("network.zig").NetworkOptions;
+
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 

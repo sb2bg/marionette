@@ -56,7 +56,7 @@ test "examples: replicated register partition scenario is replayable" {
     try std.testing.expect(std.mem.indexOf(u8, a, "run.tag value=scenario:partition") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "network.partition left_count=1 right_count=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "reason=link_disabled") != null);
-    try std.testing.expect(std.mem.indexOf(u8, a, "network.heal disabled_count=6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.heal disabled_count=6 down_count=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "replica.commit replica=0 version=1 value=41 committed=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.check replica_committed=ok replica=0 version=1 value=41") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.check committed_quorum=ok") != null);

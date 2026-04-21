@@ -197,6 +197,7 @@ fn committedRegisterIsSafe(world: *mar.World, cluster: *const Cluster) !void {
 }
 
 fn scenario(world: *mar.World, cluster: *Cluster) !void {
+    cluster.bindWorld(world);
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
@@ -206,25 +207,27 @@ fn scenario(world: *mar.World, cluster: *Cluster) !void {
 }
 
 fn buggyScenario(world: *mar.World, cluster: *Cluster) !void {
+    cluster.bindWorld(world);
     try cluster.forceCommit(world, 0, 1, 41);
     try cluster.forceCommit(world, 1, 1, 42);
 }
 
 fn partitionScenario(world: *mar.World, cluster: *Cluster) !void {
     std.debug.assert(partition_profile.partitioned_replica < replica_count);
+    cluster.bindWorld(world);
 
     const partitioned_replica: mar.NodeId = @intCast(partition_profile.partitioned_replica);
     const isolated = [_]mar.NodeId{partitioned_replica};
     var majority_side: [replica_count]mar.NodeId = undefined;
     const majority_side_len = buildMajoritySide(partitioned_replica, &majority_side);
 
-    try cluster.network.partition(world, &isolated, majority_side[0..majority_side_len]);
+    try cluster.network.partition(&isolated, majority_side[0..majority_side_len]);
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
         .retry_limit = partition_profile.retry_limit,
     });
-    try cluster.network.heal(world);
+    try cluster.network.heal();
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
@@ -234,6 +237,7 @@ fn partitionScenario(world: *mar.World, cluster: *Cluster) !void {
 }
 
 fn conflictScenario(world: *mar.World, cluster: *Cluster) !void {
+    cluster.bindWorld(world);
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
@@ -284,7 +288,13 @@ const MessagePayload = struct {
     value: u64,
 };
 
-const Network = mar.UnstableNetwork(MessagePayload, max_messages);
+const network_options: mar.UnstableNetworkOptions = .{
+    .packet_capacity = max_messages,
+    .max_disabled_links = 16,
+    .max_down_nodes = replica_count + 1,
+};
+
+const Network = mar.UnstableNetwork(MessagePayload, network_options);
 
 const Cluster = struct {
     replicas: [replica_count]Replica,
@@ -301,8 +311,12 @@ const Cluster = struct {
     fn init() Cluster {
         return .{
             .replicas = [_]Replica{.{}} ** replica_count,
-            .network = .init(),
+            .network = undefined,
         };
+    }
+
+    fn bindWorld(self: *Cluster, world: *mar.World) void {
+        self.network = Network.init(world);
     }
 
     fn write(self: *Cluster, world: *mar.World, options: WriteOptions) !void {
@@ -369,7 +383,7 @@ const Cluster = struct {
         value: u64,
         drop_percent: u8,
     ) !void {
-        try self.network.send(world, client_node_id, to, .{
+        try self.network.send(client_node_id, to, .{
             .kind = kind,
             .version = version,
             .value = value,
@@ -386,12 +400,12 @@ const Cluster = struct {
         });
     }
 
-    fn drain(self: *Cluster, world: *mar.World, acked: ?*[replica_count]bool) !void {
+    fn drain(self: *Cluster, _: *mar.World, acked: ?*[replica_count]bool) !void {
         var context: DeliveryContext = .{
             .cluster = self,
             .acked = acked,
         };
-        try self.network.drainUntilIdle(world, &context, DeliveryContext.deliver);
+        try self.network.drainUntilIdle(&context, DeliveryContext.deliver);
     }
 
     const DeliveryContext = struct {

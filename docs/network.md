@@ -35,7 +35,11 @@ the same shape in spirit, but with a smaller generic API.
 The current type is:
 
 ```zig
-const Network = mar.UnstableNetwork(Payload, 64);
+const Network = mar.UnstableNetwork(Payload, .{
+    .packet_capacity = 64,
+    .max_disabled_links = 16,
+    .max_down_nodes = 8,
+});
 ```
 
 `Payload` is user-owned data. Marionette only schedules and traces the packet
@@ -46,8 +50,8 @@ const Payload = struct {
     value: u64,
 };
 
-var network = Network.init();
-try network.send(world, 0, 1, .{ .value = 42 }, .{
+var network = Network.init(world);
+try network.send(0, 1, .{ .value = 42 }, .{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
@@ -57,7 +61,7 @@ try network.send(world, 0, 1, .{ .value = 42 }, .{
 Ready packets are consumed explicitly:
 
 ```zig
-while (try network.popReady(world)) |packet| {
+while (try network.popReady()) |packet| {
     try apply(packet.payload);
 }
 ```
@@ -66,7 +70,7 @@ For examples that just need to drive all pending network work, use
 `drainUntilIdle`:
 
 ```zig
-try network.drainUntilIdle(world, context, deliver);
+try network.drainUntilIdle(context, deliver);
 ```
 
 The callback receives each delivered packet. The helper advances simulated time
@@ -81,8 +85,8 @@ This is a low-level primitive for examples and early scheduler work. A future
 Nodes are up by default. Mark a simulated process down or up with:
 
 ```zig
-try network.setNode(world, 1, false);
-try network.setNode(world, 1, true);
+try network.setNode(1, false);
+try network.setNode(1, true);
 ```
 
 A down source cannot submit new packets. `send` still consumes a stable packet
@@ -109,7 +113,7 @@ yet.
 Links are directed. A disabled link drops ready packets at delivery time:
 
 ```zig
-try network.setLink(world, 0, 1, false);
+try network.setLink(0, 1, false);
 ```
 
 If a packet from node `0` to node `1` is already queued when the link is
@@ -126,7 +130,7 @@ decide whether an in-flight packet makes it through.
 Re-enable a directed link with:
 
 ```zig
-try network.setLink(world, 0, 1, true);
+try network.setLink(0, 1, true);
 ```
 
 ## Partitions
@@ -137,7 +141,7 @@ helper disables both directions between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try network.partition(world, &left, &right);
+try network.partition(&left, &right);
 ```
 
 This disables `0 -> 1`, `1 -> 0`, `0 -> 2`, and `2 -> 0`, while leaving
@@ -146,12 +150,15 @@ traffic inside the right side alone.
 Heal all disabled links with:
 
 ```zig
-try network.heal(world);
+try network.heal();
 ```
 
+`heal` restores default network state by re-enabling links and marking nodes
+up. Use `healLinks` when a scenario needs to clear link filters without
+changing node state.
+
 This is deliberately simple. Later network work can add asymmetric partitions,
-automatic partition schedules, liveness modes, and explicit node up/down
-state.
+automatic partition schedules, and liveness modes.
 
 ## Ordering
 
@@ -210,7 +217,8 @@ Current network trace events:
 - `network.node node={} up={}`
 - `network.link from={} to={} enabled={}`
 - `network.partition left_count={} right_count={}`
-- `network.heal disabled_count={}`
+- `network.heal disabled_count={} down_count={}`
+- `network.heal_links disabled_count={}`
 
 The payload is not dumped into the core network trace. User code should record
 domain-specific payload facts separately when useful, as the replicated
@@ -232,6 +240,8 @@ smallest useful packet core before growing.
 
 ## Next Step
 
-The next high-value addition is path clogging. It would make the network model
-closer to the failure shapes a real distributed system needs without
-committing to the final node-scoped API yet.
+The next high-value addition is path clogging, but it should not be bolted
+onto the current global priority queue blindly. Clogging is per-link state:
+packets queued on a clogged path may need to wait independently of packets on
+healthy paths. That likely pushes Marionette toward per-link queues or a
+scheduler layer above the current packet core.
