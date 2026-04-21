@@ -5,8 +5,14 @@ const std = @import("std");
 const max_file_size = 10 * 1024 * 1024;
 
 pub const Pattern = struct {
+    pub const Match = enum {
+        exact,
+        prefix,
+    };
+
     needle: []const u8,
     reason: []const u8,
+    match: Match = .exact,
 };
 
 pub const Violation = struct {
@@ -28,15 +34,35 @@ pub const ScanResult = struct {
     }
 };
 
+pub const Allow = struct {
+    path: []const u8,
+    needle: ?[]const u8 = null,
+};
+
+// Keep this growing toward a small rules engine, not a pile of one-off string
+// checks. Tidy should encode Marionette's determinism contract as project law:
+// named bans, clear replacements, narrow allowlist entries, and tests for each
+// rule shape. Marionette should stay focused on deterministic-simulation hazards first.
 pub const default_patterns = [_]Pattern{
-    .{ .needle = "std.time.nanoTimestamp", .reason = "use ProductionClock or World.clock()" },
-    .{ .needle = "std.time.milliTimestamp", .reason = "use ProductionClock or World.clock()" },
-    .{ .needle = "std.Thread.spawn", .reason = "simulated components must be single-threaded" },
-    .{ .needle = "std.crypto.random", .reason = "use seeded Marionette randomness" },
+    .{ .needle = "std.time", .reason = "use ProductionClock or World.clock()", .match = .prefix },
+    .{ .needle = "std.Thread", .reason = "simulated components must be single-threaded", .match = .prefix },
+    .{ .needle = "std.crypto.random", .reason = "use seeded Marionette randomness", .match = .prefix },
+    .{ .needle = "std.fs.cwd", .reason = "route filesystem access through the future Disk interface" },
+    .{ .needle = "std.fs.openFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
+    .{ .needle = "std.fs.createFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
+    .{ .needle = "std.fs.copyFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
+    .{ .needle = "std.fs.deleteFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
+    .{ .needle = "std.net", .reason = "route network access through the future Network interface", .match = .prefix },
+};
+
+pub const default_allowed = [_]Allow{
+    .{ .path = "src/clock.zig", .needle = "std.time" },
+    .{ .path = "src/tidy.zig" },
 };
 
 pub const Options = struct {
     patterns: []const Pattern = &default_patterns,
+    allowed: []const Allow = &default_allowed,
 };
 
 pub fn scanPaths(
@@ -78,11 +104,12 @@ pub fn scanSourceForPath(
         if (tree.nodeTag(node) != .field_access) continue;
 
         for (options.patterns) |pattern| {
-            if (!fieldAccessMatches(tree, node, pattern.needle, aliases.items)) continue;
-            if (isAllowed(path, pattern.needle)) continue;
+            if (!fieldAccessMatches(tree, node, pattern, aliases.items)) continue;
+            if (isAllowed(path, pattern, options.allowed)) continue;
 
             const token = tree.firstToken(node);
             const location = lineColumn(source, tree.tokenStart(token));
+            if (hasViolation(result.*, path, location, pattern)) continue;
             try result.violations.append(allocator, .{
                 .path = try allocator.dupe(u8, normalizePath(path)),
                 .line = location.line,
@@ -221,12 +248,12 @@ fn collectAliases(
 fn fieldAccessMatches(
     tree: std.zig.Ast,
     node: std.zig.Ast.Node.Index,
-    needle: []const u8,
+    pattern: Pattern,
     aliases: []const Alias,
 ) bool {
     var parts: PathParts = .{};
     collectPathParts(tree, node, &parts) catch return false;
-    return pathPartsMatchNeedle(parts.slice(), needle) or pathPartsMatchAlias(parts, needle, aliases);
+    return pathPartsMatchPattern(parts.slice(), pattern) or pathPartsMatchAlias(parts, pattern, aliases);
 }
 
 fn collectPathParts(
@@ -266,7 +293,24 @@ fn pathPartsMatchNeedle(parts: []const []const u8, needle: []const u8) bool {
     return index == parts.len;
 }
 
-fn pathPartsMatchAlias(parts: PathParts, needle: []const u8, aliases: []const Alias) bool {
+fn pathPartsMatchPattern(parts: []const []const u8, pattern: Pattern) bool {
+    return switch (pattern.match) {
+        .exact => pathPartsMatchNeedle(parts, pattern.needle),
+        .prefix => pathPartsHaveNeedlePrefix(parts, pattern.needle),
+    };
+}
+
+fn pathPartsHaveNeedlePrefix(parts: []const []const u8, needle: []const u8) bool {
+    var index: usize = 0;
+    var split = std.mem.splitScalar(u8, needle, '.');
+    while (split.next()) |expected| : (index += 1) {
+        if (index == parts.len) return false;
+        if (!std.mem.eql(u8, expected, parts[index])) return false;
+    }
+    return true;
+}
+
+fn pathPartsMatchAlias(parts: PathParts, pattern: Pattern, aliases: []const Alias) bool {
     const actual = parts.slice();
     if (actual.len == 0) return false;
 
@@ -277,16 +321,19 @@ fn pathPartsMatchAlias(parts: PathParts, needle: []const u8, aliases: []const Al
         for (actual[1..]) |part| {
             expanded.append(part) catch return false;
         }
-        return pathPartsMatchNeedle(expanded.slice(), needle);
+        return pathPartsMatchPattern(expanded.slice(), pattern);
     }
     return false;
 }
 
-fn isAllowed(path: []const u8, needle: []const u8) bool {
-    _ = needle;
+fn isAllowed(path: []const u8, pattern: Pattern, allowed: []const Allow) bool {
     const normalized = normalizePath(path);
-    return std.mem.eql(u8, normalized, "src/clock.zig") or
-        std.mem.eql(u8, normalized, "src/tidy.zig");
+    for (allowed) |allow| {
+        if (!std.mem.eql(u8, normalized, normalizePath(allow.path))) continue;
+        const allowed_needle = allow.needle orelse return true;
+        if (std.mem.eql(u8, allowed_needle, pattern.needle)) return true;
+    }
+    return false;
 }
 
 fn normalizePath(path: []const u8) []const u8 {
@@ -295,6 +342,18 @@ fn normalizePath(path: []const u8) []const u8 {
         normalized = normalized[2..];
     }
     return normalized;
+}
+
+fn hasViolation(result: ScanResult, path: []const u8, location: Location, pattern: Pattern) bool {
+    const normalized = normalizePath(path);
+    for (result.violations.items) |violation| {
+        if (violation.line != location.line) continue;
+        if (violation.column != location.column) continue;
+        if (!std.mem.eql(u8, violation.path, normalized)) continue;
+        if (!std.mem.eql(u8, violation.pattern.needle, pattern.needle)) continue;
+        return true;
+    }
+    return false;
 }
 
 test "tidy flags banned patterns" {
@@ -312,6 +371,22 @@ test "tidy flags banned patterns" {
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
     try std.testing.expectEqual(@as(usize, 1), result.violations.items[0].line);
     try std.testing.expectEqual(@as(usize, 13), result.violations.items[0].column);
+}
+
+test "tidy flags prefix patterns" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/bad.zig",
+        "fn bad() void { std.time.sleep(1); }\n",
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
+    try std.testing.expectEqualStrings("std.time", result.violations.items[0].pattern.needle);
 }
 
 test "tidy ignores comments and string literals" {
@@ -347,6 +422,25 @@ test "tidy allows wrapper files to mention banned patterns" {
     try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
 }
 
+test "tidy allows specific patterns without exempting the whole file" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/custom_clock.zig",
+        \\const now = std.time.nanoTimestamp();
+        \\const random = std.crypto.random;
+        \\
+    ,
+        .{ .allowed = &.{.{ .path = "src/custom_clock.zig", .needle = "std.time" }} },
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
+    try std.testing.expectEqualStrings("std.crypto.random", result.violations.items[0].pattern.needle);
+}
+
 test "tidy identifies aliases when matching patterns" {
     var result: ScanResult = .{};
     defer result.deinit(std.testing.allocator);
@@ -362,7 +456,29 @@ test "tidy identifies aliases when matching patterns" {
         .{},
     );
 
+    try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items[0].line);
+    try std.testing.expectEqual(@as(usize, 14), result.violations.items[0].column);
+    try std.testing.expectEqual(@as(usize, 2), result.violations.items[1].line);
+    try std.testing.expectEqual(@as(usize, 13), result.violations.items[1].column);
+}
+
+test "tidy accepts caller-provided patterns" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    const patterns = [_]Pattern{
+        .{ .needle = "std.heap.page_allocator", .reason = "pass an allocator explicitly" },
+    };
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/custom.zig",
+        "const allocator = std.heap.page_allocator;\n",
+        .{ .patterns = &patterns },
+    );
+
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqual(@as(usize, 2), result.violations.items[0].line);
-    try std.testing.expectEqual(@as(usize, 13), result.violations.items[0].column);
+    try std.testing.expectEqualStrings("std.heap.page_allocator", result.violations.items[0].pattern.needle);
 }
