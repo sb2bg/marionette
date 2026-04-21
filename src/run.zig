@@ -44,6 +44,86 @@ pub const RunAttribute = struct {
     value: RunAttributeValue,
 };
 
+/// Build one replay-visible typed attribute from a scalar value.
+pub fn runAttribute(key: []const u8, value: anytype) RunAttribute {
+    return .{ .key = key, .value = runAttributeValue(value) };
+}
+
+/// Build run attributes from a scalar-only config struct.
+///
+/// Field names become attribute keys. This is useful for keeping the values
+/// recorded in the trace derived from the same typed config the scenario uses.
+pub fn runAttributesFrom(config: anytype) [runAttributeFieldCount(@TypeOf(config))]RunAttribute {
+    const Config = @TypeOf(config);
+    const fields = switch (@typeInfo(Config)) {
+        .@"struct" => |struct_info| struct_info.fields,
+        else => @compileError("runAttributesFrom expects a struct"),
+    };
+
+    var attributes: [fields.len]RunAttribute = undefined;
+    inline for (fields, 0..) |field, index| {
+        attributes[index] = runAttribute(field.name, @field(config, field.name));
+    }
+    return attributes;
+}
+
+fn runAttributeFieldCount(comptime Config: type) comptime_int {
+    return switch (@typeInfo(Config)) {
+        .@"struct" => |struct_info| {
+            if (struct_info.is_tuple) {
+                @compileError("runAttributesFrom expects a named-field struct");
+            }
+            return struct_info.fields.len;
+        },
+        else => @compileError("runAttributesFrom expects a struct"),
+    };
+}
+
+fn runAttributeValue(value: anytype) RunAttributeValue {
+    const Value = @TypeOf(value);
+    return switch (@typeInfo(Value)) {
+        .bool => .{ .boolean = value },
+        .int => |int_info| switch (int_info.signedness) {
+            .signed => .{ .int = @intCast(value) },
+            .unsigned => .{ .uint = @intCast(value) },
+        },
+        .comptime_int => if (value < 0)
+            .{ .int = @intCast(value) }
+        else
+            .{ .uint = @intCast(value) },
+        .float, .comptime_float => .{ .float = @floatCast(value) },
+        .pointer => |pointer_info| stringAttributeValue(Value, pointer_info, value),
+        .array => |array_info| {
+            if (array_info.child != u8) {
+                @compileError("run attribute arrays must be u8 strings");
+            }
+            return .{ .string = value[0..array_info.len] };
+        },
+        else => @compileError("unsupported run attribute value type: " ++ @typeName(Value)),
+    };
+}
+
+fn stringAttributeValue(comptime Value: type, comptime pointer_info: std.builtin.Type.Pointer, value: Value) RunAttributeValue {
+    switch (pointer_info.size) {
+        .slice => {
+            if (pointer_info.child != u8) {
+                @compileError("run attribute slices must be []const u8 strings");
+            }
+            return .{ .string = value };
+        },
+        .one => switch (@typeInfo(pointer_info.child)) {
+            .array => |array_info| {
+                if (array_info.child != u8) {
+                    @compileError("run attribute pointers-to-array must point to u8 strings");
+                }
+                return .{ .string = value[0..array_info.len] };
+            },
+            else => @compileError("unsupported run attribute pointer type: " ++ @typeName(Value)),
+        },
+        else => @compileError("unsupported run attribute pointer type: " ++ @typeName(Value)),
+    }
+}
+
 /// Named scenario check over user-owned scenario state.
 pub fn StateCheck(comptime State: type) type {
     return struct {
@@ -555,6 +635,43 @@ test "run: attributes and tags are traced before scenario code" {
         },
         .failed => return error.UnexpectedRunFailure,
     }
+}
+
+test "runAttributesFrom: derives typed attributes from config structs" {
+    const Profile = struct {
+        replicas: u8,
+        retry_limit: i16,
+        faults_enabled: bool,
+        mode: []const u8,
+        weight: f32,
+    };
+
+    const attributes = runAttributesFrom(Profile{
+        .replicas = 3,
+        .retry_limit = -1,
+        .faults_enabled = true,
+        .mode = "smoke",
+        .weight = 1.5,
+    });
+
+    try std.testing.expectEqual(@as(usize, 5), attributes.len);
+    try std.testing.expectEqualStrings("replicas", attributes[0].key);
+    try std.testing.expectEqual(@as(u64, 3), attributes[0].value.uint);
+    try std.testing.expectEqualStrings("retry_limit", attributes[1].key);
+    try std.testing.expectEqual(@as(i64, -1), attributes[1].value.int);
+    try std.testing.expectEqualStrings("faults_enabled", attributes[2].key);
+    try std.testing.expectEqual(true, attributes[2].value.boolean);
+    try std.testing.expectEqualStrings("mode", attributes[3].key);
+    try std.testing.expectEqualStrings("smoke", attributes[3].value.string);
+    try std.testing.expectEqualStrings("weight", attributes[4].key);
+    try std.testing.expectEqual(@as(f64, 1.5), attributes[4].value.float);
+}
+
+test "runAttribute: accepts string literals" {
+    const attribute = runAttribute("profile", "smoke");
+
+    try std.testing.expectEqualStrings("profile", attribute.key);
+    try std.testing.expectEqualStrings("smoke", attribute.value.string);
 }
 
 test "RunFailure: writeSummary includes replay attributes and tags" {

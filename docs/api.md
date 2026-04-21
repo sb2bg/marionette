@@ -162,11 +162,18 @@ defer report.deinit();
 Runs can carry replay-visible tags and typed attributes:
 
 ```zig
-const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
-const attributes = [_]mar.RunAttribute{
-    .{ .key = "replicas", .value = .{ .uint = 3 } },
-    .{ .key = "packet_loss_percent", .value = .{ .uint = 20 } },
+const Profile = struct {
+    replicas: u64,
+    packet_loss_percent: u8,
 };
+
+const profile: Profile = .{
+    .replicas = 3,
+    .packet_loss_percent = 20,
+};
+
+const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
+const attributes = mar.runAttributesFrom(profile);
 
 var report = try mar.run(std.testing.allocator, .{
     .seed = 0x1234,
@@ -180,6 +187,8 @@ var report = try mar.run(std.testing.allocator, .{
 scenario code runs and are included in failure summaries. Tags are loose
 searchable labels. Attributes are stable scalar facts needed to reproduce the
 run without forcing tools to parse presentation strings.
+`mar.runAttributesFrom` derives those facts from a scalar-only config struct so
+the trace-visible values stay tied to the scenario config.
 
 World-only checks can be attached to the run options:
 

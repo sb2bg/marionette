@@ -11,8 +11,32 @@ const ns_per_ms: mar.Duration = 1_000_000;
 const replica_count = 3;
 const quorum = 2;
 const max_messages = 64;
-const normal_proposal_drop_percent = 20;
-const normal_retry_limit = 8;
+
+const NormalProfile = struct {
+    replicas: u64,
+    quorum: u64,
+    max_messages: u64,
+    proposal_drop_percent: u8,
+    retry_limit: u8,
+};
+
+const CommonProfile = struct {
+    replicas: u64,
+    quorum: u64,
+};
+
+const normal_profile: NormalProfile = .{
+    .replicas = replica_count,
+    .quorum = quorum,
+    .max_messages = max_messages,
+    .proposal_drop_percent = 20,
+    .retry_limit = 8,
+};
+
+const common_profile: CommonProfile = .{
+    .replicas = replica_count,
+    .quorum = quorum,
+};
 
 const checks = [_]mar.StateCheck(Cluster){
     .{ .name = "committed register is safe", .check = committedRegisterIsSafe },
@@ -23,13 +47,7 @@ const normal_tags = [_][]const u8{
     "scenario:smoke",
 };
 
-const normal_attributes = [_]mar.RunAttribute{
-    .{ .key = "replicas", .value = .{ .uint = replica_count } },
-    .{ .key = "quorum", .value = .{ .uint = quorum } },
-    .{ .key = "max_messages", .value = .{ .uint = max_messages } },
-    .{ .key = "proposal_drop_percent", .value = .{ .uint = normal_proposal_drop_percent } },
-    .{ .key = "retry_limit", .value = .{ .uint = normal_retry_limit } },
-};
+const normal_attributes = mar.runAttributesFrom(normal_profile);
 
 const buggy_tags = [_][]const u8{
     "example:replicated_register",
@@ -37,10 +55,7 @@ const buggy_tags = [_][]const u8{
     "bug:forced_divergent_commit",
 };
 
-const common_attributes = [_]mar.RunAttribute{
-    .{ .key = "replicas", .value = .{ .uint = replica_count } },
-    .{ .key = "quorum", .value = .{ .uint = quorum } },
-};
+const common_attributes = mar.runAttributesFrom(common_profile);
 
 const conflict_tags = [_][]const u8{
     "example:replicated_register",
@@ -130,8 +145,8 @@ fn scenario(world: *mar.World, cluster: *Cluster) !void {
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
-        .proposal_drop_percent = normal_proposal_drop_percent,
-        .retry_limit = normal_retry_limit,
+        .proposal_drop_percent = normal_profile.proposal_drop_percent,
+        .retry_limit = normal_profile.retry_limit,
     });
 }
 

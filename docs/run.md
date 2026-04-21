@@ -16,10 +16,13 @@ fn scenario(world: *mar.World) !void {
 }
 
 test "scenario is deterministic" {
-    const tags = [_][]const u8{ "scenario:smoke" };
-    const attributes = [_]mar.RunAttribute{
-        .{ .key = "requests", .value = .{ .uint = 1 } },
+    const Profile = struct {
+        requests: u64,
     };
+
+    const profile: Profile = .{ .requests = 1 };
+    const tags = [_][]const u8{ "scenario:smoke" };
+    const attributes = mar.runAttributesFrom(profile);
 
     var report = try mar.run(std.testing.allocator, .{
         .seed = 0x1234,
@@ -90,11 +93,18 @@ that seed. Use `profile_name`, `tags`, and `attributes` to make the expanded
 run shape visible:
 
 ```zig
-const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
-const attributes = [_]mar.RunAttribute{
-    .{ .key = "replicas", .value = .{ .uint = 3 } },
-    .{ .key = "proposal_drop_percent", .value = .{ .uint = 20 } },
+const Profile = struct {
+    replicas: u64,
+    proposal_drop_percent: u8,
 };
+
+const profile: Profile = .{
+    .replicas = 3,
+    .proposal_drop_percent = 20,
+};
+
+const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
+const attributes = mar.runAttributesFrom(profile);
 
 var report = try mar.run(std.testing.allocator, .{
     .seed = 0x1234,
@@ -115,9 +125,10 @@ event=5 run.attribute key=proposal_drop_percent value=uint:20
 ```
 
 Tags should be stable scalar labels. Attribute keys should be stable scalar
-text, and values should use the narrow typed union Marionette exposes. Do not
-put pointers, addresses, unordered dumps, or machine-local paths in run
-metadata.
+text, and values should use the narrow typed union Marionette exposes.
+`mar.runAttributesFrom` derives attributes from a scalar-only config struct
+using field names as keys. Do not put pointers, addresses, unordered dumps, or
+machine-local paths in run metadata.
 
 ## Checks
 
