@@ -5,7 +5,7 @@ Deterministic simulation testing for Zig.
 Marionette helps Zig services reproduce timing, randomness, and eventually
 disk/network failures from a seed.
 
-Same seed. Same trace. Same bug.
+Make rare bugs repeat themselves.
 
 ```zig
 const std = @import("std");

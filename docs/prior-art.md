@@ -23,9 +23,15 @@ uses aggressive engineering discipline to keep that simulation trustworthy.
 Marionette's `tidy` linter is directly inspired by TigerBeetle's approach to
 enforcing project rules in code.
 
-Useful starting point:
+Local study notes:
+
+- [TigerBeetle Lessons](tigerbeetle-lessons.md)
+
+Useful starting points:
 
 - TigerBeetle docs: <https://docs.tigerbeetle.com/single-page/>
+- Local reference files under `.references/tigerbeetle/src/testing`
+- Local VOPR entry point: `.references/tigerbeetle/src/vopr.zig`
 
 ## Antithesis
 
