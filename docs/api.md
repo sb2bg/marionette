@@ -189,6 +189,35 @@ Callers provide the ordering function explicitly. For distributed simulation,
 that ordering should be based on stable fields such as `(ready_at, event_id)`,
 not pointer identity or hash-map iteration.
 
+## Network
+
+`mar.UnstableNetwork(Payload, capacity)` is the first network/scheduler sketch.
+It is intentionally not the final public network API. It gives examples a
+shared deterministic primitive for seeded packet loss, tick-aligned latency,
+and delivery order by `(deliver_at, packet_id)`.
+
+See [Network Model](network.md) for the design contract and current limits.
+
+```zig
+const Payload = struct { value: u64 };
+const Network = mar.UnstableNetwork(Payload, 64);
+
+var network = Network.init();
+try network.send(world, 0, 1, .{ .value = 42 }, .{
+    .drop_rate = .percent(20),
+    .min_latency_ns = 1_000_000,
+    .latency_jitter_ns = 2_000_000,
+});
+
+while (try network.popReady(world)) |packet| {
+    _ = packet.payload;
+}
+```
+
+`send` records `network.send` or `network.drop`. `popReady` records
+`network.deliver`. Latency values must align with the world's tick size because
+Phase 0 simulated time advances in whole ticks.
+
 ## Seeds
 
 `mar.parseSeed` accepts decimal `u64` seeds and 40-character Git hashes:

@@ -34,6 +34,7 @@ nav:
       - Trace Format: trace-format.md
       - Run: run.md
       - BUGGIFY: buggify.md
+      - Network Model: network.md
       - Disk Fault Model: disk-fault-model.md
       - API: api.md
       - Determinism: determinism.md

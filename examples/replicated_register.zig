@@ -200,25 +200,17 @@ const MessageKind = enum {
     commit,
 };
 
-const Message = struct {
-    id: u64,
-    deliver_at: mar.Timestamp,
-    to: u8,
+const MessagePayload = struct {
     kind: MessageKind,
     version: u64,
     value: u64,
 };
 
-fn messageLessThan(a: Message, b: Message) bool {
-    return a.deliver_at < b.deliver_at or (a.deliver_at == b.deliver_at and a.id < b.id);
-}
-
-const MessageQueue = mar.UnstableEventQueue(Message, max_messages, messageLessThan);
+const Network = mar.UnstableNetwork(MessagePayload, max_messages);
 
 const Cluster = struct {
     replicas: [replica_count]Replica,
-    pending: MessageQueue,
-    next_message_id: u64,
+    network: Network,
 
     const WriteOptions = struct {
         version: u64,
@@ -231,8 +223,7 @@ const Cluster = struct {
     fn init() Cluster {
         return .{
             .replicas = [_]Replica{.{}} ** replica_count,
-            .pending = MessageQueue.init(),
-            .next_message_id = 0,
+            .network = .init(),
         };
     }
 
@@ -300,70 +291,59 @@ const Cluster = struct {
         value: u64,
         drop_percent: u8,
     ) !void {
-        const roll = try world.randomIntLessThan(u8, 100);
-        if (roll < drop_percent) {
-            try world.record(
-                "network.drop kind={s} to={} version={} roll={} drop_percent={}",
-                .{ @tagName(kind), to, version, roll, drop_percent },
-            );
-            return;
-        }
-
-        const latency_ticks = 1 + try world.randomIntLessThan(u64, 3);
-        const message: Message = .{
-            .id = self.next_message_id,
-            .deliver_at = world.now() + latency_ticks * ns_per_ms,
-            .to = to,
+        try self.network.send(world, replica_count, to, .{
             .kind = kind,
             .version = version,
             .value = value,
-        };
-        self.next_message_id += 1;
-        try self.pending.push(message);
-
-        try world.record(
-            "network.send id={} kind={s} to={} version={} value={} deliver_at={}",
-            .{ message.id, @tagName(kind), to, version, value, message.deliver_at },
-        );
+        }, .{
+            .drop_rate = .percent(drop_percent),
+            .min_latency_ns = ns_per_ms,
+            .latency_jitter_ns = 2 * ns_per_ms,
+        });
+        try world.record("register.message kind={s} to={} version={} value={}", .{
+            @tagName(kind),
+            to,
+            version,
+            value,
+        });
     }
 
     fn drain(self: *Cluster, world: *mar.World, acked: ?*[replica_count]bool) !void {
-        while (self.pending.pop()) |message| {
-            if (message.deliver_at > world.now()) {
-                try world.runFor(message.deliver_at - world.now());
+        while (true) {
+            while (try self.network.popReady(world)) |packet| {
+                try self.apply(world, packet, acked);
             }
 
-            try world.record(
-                "network.deliver id={} kind={s} to={} now_ns={}",
-                .{ message.id, @tagName(message.kind), message.to, world.now() },
-            );
-            try self.apply(world, message, acked);
+            const deliver_at = self.network.nextDeliveryAt() orelse break;
+            if (deliver_at > world.now()) {
+                try world.runFor(deliver_at - world.now());
+            }
         }
     }
 
     fn apply(
         self: *Cluster,
         world: *mar.World,
-        message: Message,
+        packet: Network.Packet,
         acked: ?*[replica_count]bool,
     ) !void {
-        const replica_index: usize = message.to;
-        switch (message.kind) {
+        const replica_index: usize = packet.to;
+        switch (packet.payload.kind) {
             .propose => {
-                const accepted = self.replicas[replica_index].accept(message.version, message.value);
+                const accepted = self.replicas[replica_index].accept(packet.payload.version, packet.payload.value);
                 if (accepted) {
                     if (acked) |acks| acks[replica_index] = true;
                 }
                 try world.record(
                     "replica.accept replica={} version={} value={} accepted={}",
-                    .{ message.to, message.version, message.value, accepted },
+                    .{ packet.to, packet.payload.version, packet.payload.value, accepted },
                 );
             },
             .commit => {
-                const committed = self.replicas[replica_index].commit(message.version, message.value);
+                const committed = self.replicas[replica_index].commit(packet.payload.version, packet.payload.value);
                 try world.record(
                     "replica.commit replica={} version={} value={} committed={}",
-                    .{ message.to, message.version, message.value, committed },
+                    .{ packet.to, packet.payload.version, packet.payload.value, committed },
                 );
             },
         }

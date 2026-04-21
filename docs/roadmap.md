@@ -22,6 +22,8 @@ Deliverables:
 - A small named-check API for world and state post-scenario invariant checks.
 - A seed parser for decimal seeds and 40-character Git hashes.
 - A deterministic event queue sketch for future scheduler work.
+- An unstable deterministic network sketch for examples and early scheduler
+  work.
 - Replay-visible run tags, typed attributes, and testable failure summaries.
 - A written architecture contract for determinism, time, randomness, and
   simulator scope.
@@ -59,7 +61,8 @@ Goal: simulate distributed systems in one process.
 
 Planned work:
 
-- Network interface.
+- Stabilize the current `UnstableNetwork` sketch into a real network
+  interface.
 - Packet delay, drop, reorder, and partition.
 - Node spawning.
 - Single-threaded cooperative scheduler.

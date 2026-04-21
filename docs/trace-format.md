@@ -54,6 +54,8 @@ Rules:
   `float:<f64>`.
 - BUGGIFY events use
   `buggify hook=<comptime-tag> rate=<numerator>/<denominator> roll=<value> fired=<bool>`.
+- Unstable network events use `network.send`, `network.drop`, and
+  `network.deliver` with stable packet ids and node ids.
 
 ## What Goes In
 

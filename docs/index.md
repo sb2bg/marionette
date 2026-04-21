@@ -11,17 +11,18 @@ Make rare bugs repeat themselves.
 
 Marionette is in Phase 0. Time, seeded randomness, trace logging, replay
 checks, named world/state scenario checks, and trace-visible run context are
-being built now.
+being built now. An unstable deterministic network sketch exists for examples.
 
-Disk, network, scheduling, shrinking, and time-travel debugging are planned,
-not implemented. The API is not stable, and Marionette is not ready for
-production use.
+Disk, a real scheduler, shrinking, and time-travel debugging are planned, not
+implemented. The API is not stable, and Marionette is not ready for production
+use.
 
 ## Start Here
 
 - [Overview](overview.md)
 - [Determinism](determinism.md)
 - [Run](run.md)
+- [Network Model](network.md)
 - [API](api.md)
 - [Roadmap](roadmap.md)
 

@@ -25,6 +25,9 @@ pub const SimClock = clock_module.SimClock;
 /// Timestamp in nanoseconds.
 pub const Timestamp = clock_module.Timestamp;
 
+/// Stable simulated node/process identifier.
+pub const NodeId = @import("network.zig").NodeId;
+
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
 
@@ -56,6 +59,9 @@ pub const UnstableEventQueue = @import("scheduler.zig").EventQueue;
 
 /// Errors returned by unstable fixed-capacity event queues.
 pub const UnstableEventQueueError = @import("scheduler.zig").EventQueueError;
+
+/// Unstable deterministic network primitive for examples and early scheduler work.
+pub const UnstableNetwork = @import("network.zig").UnstableNetwork;
 
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
@@ -104,6 +110,7 @@ pub const parseSeed = seed_module.parseSeed;
 
 test {
     _ = @import("env.zig");
+    _ = @import("network.zig");
     _ = @import("run.zig");
     _ = @import("run_types.zig");
     _ = @import("scheduler.zig");

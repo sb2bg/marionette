@@ -42,6 +42,9 @@ Phase 0 has:
   scenario state initialized fresh for each replay attempt.
 - `mar.UnstableEventQueue`, a fixed-capacity deterministic event queue sketch for
   stable `(ready_at, event_id)`-style ordering.
+- `mar.UnstableNetwork`, a fixed-capacity deterministic network sketch for
+  seeded packet loss, tick-aligned latency, and stable `(deliver_at, packet_id)`
+  delivery order.
 - `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
@@ -51,7 +54,7 @@ Phase 0 has:
 Phase 0 does not yet have:
 
 - A scheduler.
-- Disk or network simulation.
+- Disk simulation.
 - Event-by-event invariant checking.
 - Liveness checking.
 - Seed shrinking.

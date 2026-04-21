@@ -32,6 +32,11 @@ pub fn EventQueue(
             return self.len;
         }
 
+        pub fn peek(self: *const Self) ?Event {
+            if (self.len == 0) return null;
+            return self.items[self.nextIndex()];
+        }
+
         pub fn push(self: *Self, event: Event) EventQueueError!void {
             if (self.len == self.items.len) return error.EventQueueFull;
             self.items[self.len] = event;
@@ -88,6 +93,18 @@ test "EventQueue: pops events in deterministic order" {
     try std.testing.expectEqual(TestEvent{ .ready_at = 10, .id = 3 }, queue.pop().?);
     try std.testing.expectEqual(TestEvent{ .ready_at = 20, .id = 2 }, queue.pop().?);
     try std.testing.expectEqual(@as(?TestEvent, null), queue.pop());
+}
+
+test "EventQueue: peeks without popping" {
+    const Queue = EventQueue(TestEvent, 4, testEventLessThan);
+    var queue = Queue.init();
+
+    try queue.push(.{ .ready_at = 20, .id = 2 });
+    try queue.push(.{ .ready_at = 10, .id = 1 });
+
+    try std.testing.expectEqual(TestEvent{ .ready_at = 10, .id = 1 }, queue.peek().?);
+    try std.testing.expectEqual(@as(usize, 2), queue.count());
+    try std.testing.expectEqual(TestEvent{ .ready_at = 10, .id = 1 }, queue.pop().?);
 }
 
 test "EventQueue: reports capacity overflow" {

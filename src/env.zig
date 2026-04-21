@@ -43,7 +43,7 @@ pub const BuggifyRate = struct {
         return .{ .numerator = 1, .denominator = denominator };
     }
 
-    fn validate(self: BuggifyRate) void {
+    pub fn validate(self: BuggifyRate) void {
         std.debug.assert(self.denominator > 0);
         std.debug.assert(self.numerator <= self.denominator);
     }

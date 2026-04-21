@@ -9,7 +9,8 @@ the same execution from the same seed.
 
 Phase 0 is intentionally small. Today Marionette has seeded randomness,
 simulated time, trace logging, twice-and-compare replay, and named world/state
-post-scenario checks. Disk, network, scheduling, and richer replay tooling are
+post-scenario checks. It also has an unstable deterministic network sketch for
+examples. Disk simulation, a real scheduler, and richer replay tooling are
 planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
