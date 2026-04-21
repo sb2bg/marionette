@@ -49,11 +49,13 @@ pub const Random = @import("random.zig").Random;
 /// Deterministic simulation state for Phase 0 tests.
 pub const World = @import("world.zig").World;
 
-/// Fixed-capacity deterministic event queue.
-pub const EventQueue = @import("scheduler.zig").EventQueue;
+/// Unstable fixed-capacity deterministic event queue for examples.
+///
+/// This is a Phase 0 scheduler sketch, not a stable public scheduler API.
+pub const UnstableEventQueue = @import("scheduler.zig").EventQueue;
 
-/// Errors returned by fixed-capacity event queues.
-pub const EventQueueError = @import("scheduler.zig").EventQueueError;
+/// Errors returned by unstable fixed-capacity event queues.
+pub const UnstableEventQueueError = @import("scheduler.zig").EventQueueError;
 
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;

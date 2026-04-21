@@ -48,7 +48,7 @@ portable shapes Marionette needs:
 
 - A small cluster model with three replicas.
 - Seeded message drops and delivery latency.
-- `mar.EventQueue` ordering pending messages by `(deliver_at, message_id)`.
+- `mar.UnstableEventQueue` ordering pending messages by `(deliver_at, message_id)`.
 - `RunOptions.profile_name`, tags, and `RunAttribute` for replay-visible
   knobs.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.

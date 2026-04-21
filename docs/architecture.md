@@ -40,7 +40,7 @@ Phase 0 has:
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
 - `mar.runWithState` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.
-- `mar.EventQueue`, a fixed-capacity deterministic event queue sketch for
+- `mar.UnstableEventQueue`, a fixed-capacity deterministic event queue sketch for
   stable `(ready_at, event_id)`-style ordering.
 - `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.

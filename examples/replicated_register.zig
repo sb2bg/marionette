@@ -213,7 +213,7 @@ fn messageLessThan(a: Message, b: Message) bool {
     return a.deliver_at < b.deliver_at or (a.deliver_at == b.deliver_at and a.id < b.id);
 }
 
-const MessageQueue = mar.EventQueue(Message, max_messages, messageLessThan);
+const MessageQueue = mar.UnstableEventQueue(Message, max_messages, messageLessThan);
 
 const Cluster = struct {
     replicas: [replica_count]Replica,

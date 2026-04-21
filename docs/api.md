@@ -122,7 +122,7 @@ try world.runFor(10 * ns_per_ms);
 Record service-level trace events:
 
 ```zig
-try world.record("request accepted id={}", .{42});
+try world.record("request.accepted id={}", .{42});
 ```
 
 Read the trace:
@@ -165,8 +165,10 @@ const latency_ns = try random.intLessThan(u64, 1_000_000);
 
 ## Event Queue
 
-`mar.EventQueue` is a fixed-capacity deterministic event queue. It is a
-scheduler building block, not the final scheduler API.
+`mar.UnstableEventQueue` is a fixed-capacity deterministic event queue. It is
+a scheduler sketch for examples, not the final scheduler API. It currently
+uses a linear scan on pop; the real scheduler should use a heap once queues get
+hot.
 
 ```zig
 const Event = struct {
@@ -178,7 +180,7 @@ fn lessThan(a: Event, b: Event) bool {
     return a.ready_at < b.ready_at or (a.ready_at == b.ready_at and a.id < b.id);
 }
 
-const Queue = mar.EventQueue(Event, 64, lessThan);
+const Queue = mar.UnstableEventQueue(Event, 64, lessThan);
 var queue = Queue.init();
 try queue.push(.{ .ready_at = 10, .id = 1 });
 ```
