@@ -103,6 +103,7 @@ pub const parseSeed = seed_module.parseSeed;
 test {
     _ = @import("env.zig");
     _ = @import("run.zig");
+    _ = @import("run_types.zig");
     _ = @import("scheduler.zig");
     _ = @import("seed.zig");
     _ = @import("tidy.zig");
