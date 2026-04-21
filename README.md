@@ -24,7 +24,7 @@ Make rare bugs repeat themselves.
 
 ## What It Finds
 
-The README example is a tiny retry queue, not a toy counter. A worker leases a
+The README example is a tiny retry queue. A worker leases a
 job, times out, and the job is leased again. The bug is accepting the late
 completion from the first worker after the second worker owns the lease.
 
