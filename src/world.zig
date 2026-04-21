@@ -167,7 +167,9 @@ pub const World = struct {
         errdefer self.trace_log.shrinkRetainingCapacity(start_len);
 
         try self.trace_log.print(self.allocator, "event={} ", .{self.event_index});
+        const payload_start = self.trace_log.items.len;
         try self.trace_log.print(self.allocator, fmt, args);
+        std.debug.assert(isValidTracePayload(self.trace_log.items[payload_start..]));
         try self.trace_log.append(self.allocator, '\n');
         self.event_index += 1;
     }
@@ -184,6 +186,72 @@ pub const World = struct {
         return self.event_index;
     }
 };
+
+fn isValidTracePayload(payload: []const u8) bool {
+    if (payload.len == 0) return false;
+    if (payload[0] == ' ' or payload[payload.len - 1] == ' ') return false;
+
+    var fields = std.mem.splitScalar(u8, payload, ' ');
+    const name = fields.next() orelse return false;
+    if (!isValidTraceName(name)) return false;
+
+    while (fields.next()) |field| {
+        if (field.len == 0) return false;
+
+        const equals_index = std.mem.indexOfScalar(u8, field, '=') orelse return false;
+        if (std.mem.indexOfScalar(u8, field[equals_index + 1 ..], '=') != null) return false;
+
+        const key = field[0..equals_index];
+        const value = field[equals_index + 1 ..];
+        if (!isValidTraceKey(key) or !isValidTraceValue(value)) return false;
+    }
+
+    return true;
+}
+
+fn isValidTraceName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |char| {
+        switch (char) {
+            'a'...'z', '0'...'9', '_', '.' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn isValidTraceKey(key: []const u8) bool {
+    if (key.len == 0) return false;
+    for (key) |char| {
+        switch (char) {
+            'a'...'z', '0'...'9', '_' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn isValidTraceValue(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |char| {
+        switch (char) {
+            ' ', '=', '\n', '\r', '\t', '\\' => return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
+test "world: trace payload validation rejects ambiguous fields" {
+    try std.testing.expect(isValidTracePayload("request.accepted id=42"));
+    try std.testing.expect(isValidTracePayload("buggify hook=drop_packet rate=20/100 roll=73 fired=false"));
+
+    try std.testing.expect(!isValidTracePayload("request accepted id=42"));
+    try std.testing.expect(!isValidTracePayload("request.accepted message=hello world"));
+    try std.testing.expect(!isValidTracePayload("request.accepted message=a=b"));
+    try std.testing.expect(!isValidTracePayload("request.accepted message=line\nbreak"));
+    try std.testing.expect(!isValidTracePayload("request.accepted path=C:\\tmp"));
+}
 
 test "world: owns seeded random and simulated clock" {
     var a = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
@@ -261,4 +329,26 @@ test "world: randomIntLessThan records unbiased bounded draws" {
         const value = try world.randomIntLessThan(u64, 1_000_000);
         try std.testing.expect(value < 1_000_000);
     }
+}
+
+test "world: failed record rolls back bytes and event index" {
+    var buffer: [256]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+
+    var world = try World.init(fixed.allocator(), .{ .seed = 99 });
+    defer world.deinit();
+
+    const before_trace = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(before_trace);
+    const before_event_index = world.nextEventIndex();
+
+    var large_value: [512]u8 = undefined;
+    @memset(&large_value, 'a');
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        world.record("service.large value={s}", .{large_value[0..]}),
+    );
+    try std.testing.expectEqual(before_event_index, world.nextEventIndex());
+    try std.testing.expectEqualStrings(before_trace, world.traceBytes());
 }

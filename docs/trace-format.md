@@ -40,10 +40,15 @@ Rules:
   call and every traced simulator helper.
 - Event indexes are global within one `World`.
 - Component and action names use lowercase words separated by `_`, with one
-  dot between the component and action.
+  dot between the component and action. The current `buggify` event name is a
+  short special case.
 - Keys use lowercase words separated by `_`.
-- Values must be stable text for the same Marionette version, Zig version,
-  target platform, user code, options, and seed.
+- Values must be non-empty stable text for the same Marionette version, Zig
+  version, target platform, user code, options, and seed.
+- `World.record` asserts that event payloads are unambiguous: no leading,
+  trailing, or repeated spaces; every field after the event name must be
+  exactly `key=value`; keys may contain only lowercase ASCII, digits, and `_`;
+  values may not contain space, `=`, newline, carriage return, tab, or `\`.
 - Run attributes encode the Marionette scalar type in the value text:
   `string:<text>`, `int:<i64>`, `uint:<u64>`, `bool:<true|false>`, or
   `float:<f64>`.
