@@ -46,7 +46,7 @@ constructing individual authorities itself:
 fn service(env: anytype) !void {
     const now = env.clock().now();
     const jitter = try env.random().intLessThan(mar.Duration, 1_000);
-    if (try env.buggify(.slow_path)) {
+    if (try env.buggify(.slow_path, .oneIn(10))) {
         env.clock().sleep(jitter);
     }
     _ = .{ now, jitter };
@@ -57,13 +57,6 @@ Production chooses production authorities once at the composition root:
 
 ```zig
 var env = mar.ProductionEnv.init(.{});
-try service(&env);
-```
-
-Custom production routing uses `ProductionEnvWith`:
-
-```zig
-var env = mar.ProductionEnvWith(MyClock, MyRandom).init(my_clock, my_random);
 try service(&env);
 ```
 
@@ -81,12 +74,19 @@ fn scenario(world: *mar.World) !void {
 `mar.Env(.simulation)` aliases `mar.SimulationEnv`.
 
 Phase 0 environments expose `clock()`, `random()`, and `buggify()`.
-`ProductionEnv.buggify` and custom production envs always return `false`.
-`SimulationEnv.buggify` draws through the world's PRNG and records the hook
-decision. `SimulationEnv` also exposes `tick()`, `runFor()`, and `record()` as
+`ProductionEnv.buggify` always returns `false`. `SimulationEnv.buggify` takes
+a `BuggifyRate`, draws through the world's PRNG, and records the hook
+decision. The hook only decides whether the fault fires; user code still owns
+the domain behavior, such as dropping a packet, delaying an operation, or
+returning a simulated disk error.
+
+`SimulationEnv` also exposes `tick()`, `runFor()`, and `record()` as
 convenience wrappers around the backing world for scenario code. Future disk
 and network authorities should be added to this environment shape instead of
-relying on auto-detection.
+relying on auto-detection. Marionette does not currently expose a public
+extension point for alternate production authority routing; keeping that closed
+avoids locking in a large user-implemented interface while the authority
+surface is still growing.
 
 ## `World`
 

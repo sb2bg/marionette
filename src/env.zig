@@ -16,45 +16,40 @@ pub fn Env(comptime mode: clock_module.Mode) type {
     };
 }
 
-/// Build a production environment from caller-provided authority types.
-///
-/// This is the Zig equivalent of a small trait-bounded environment: app code
-/// can be generic over any env that exposes the methods it calls.
-pub fn ProductionEnvWith(comptime ClockType: type, comptime RandomType: type) type {
-    return struct {
-        const Self = @This();
+/// Probability that a BUGGIFY hook fires in simulation.
+pub const BuggifyRate = struct {
+    numerator: u32,
+    denominator: u32,
 
-        clock_authority: ClockType,
-        random_authority: RandomType,
+    /// Disabled hook.
+    pub fn never() BuggifyRate {
+        return .{ .numerator = 0, .denominator = 1 };
+    }
 
-        /// Construct a custom production environment.
-        pub fn init(clock_authority: ClockType, random_authority: RandomType) Self {
-            return .{
-                .clock_authority = clock_authority,
-                .random_authority = random_authority,
-            };
-        }
+    /// Always-on hook.
+    pub fn always() BuggifyRate {
+        return .{ .numerator = 1, .denominator = 1 };
+    }
 
-        /// Return the caller-provided production clock authority.
-        pub fn clock(self: *Self) *ClockType {
-            return &self.clock_authority;
-        }
+    /// Percentage chance in the closed range `0..100`.
+    pub fn percent(value: u8) BuggifyRate {
+        std.debug.assert(value <= 100);
+        return .{ .numerator = value, .denominator = 100 };
+    }
 
-        /// Return the caller-provided production random authority.
-        pub fn random(self: *Self) *RandomType {
-            return &self.random_authority;
-        }
+    /// One-in-N chance.
+    pub fn oneIn(denominator: u32) BuggifyRate {
+        std.debug.assert(denominator > 0);
+        return .{ .numerator = 1, .denominator = denominator };
+    }
 
-        /// Disabled production fault hook. This should fold away in optimized builds.
-        pub fn buggify(_: *Self, comptime hook: anytype) !bool {
-            _ = hook;
-            return comptime false;
-        }
-    };
-}
+    fn validate(self: BuggifyRate) void {
+        std.debug.assert(self.denominator > 0);
+        std.debug.assert(self.numerator <= self.denominator);
+    }
+};
 
 /// Production random authority backed by host entropy.
-///
 pub const ProductionRandom = struct {
     source: std.Random.IoSource,
 
@@ -105,8 +100,9 @@ pub const ProductionEnv = struct {
     }
 
     /// Disabled production fault hook. This should fold away in optimized builds.
-    pub fn buggify(_: *ProductionEnv, comptime hook: anytype) !bool {
+    pub fn buggify(_: *ProductionEnv, comptime hook: anytype, rate: BuggifyRate) !bool {
         _ = hook;
+        _ = rate;
         return comptime false;
     }
 };
@@ -135,9 +131,15 @@ pub const SimulationEnv = struct {
     /// User code places these hooks at domain-specific fault points. The
     /// simulator owns the randomness and records the decision so failures are
     /// replayable. Production envs always return false.
-    pub fn buggify(self: *SimulationEnv, comptime hook: anytype) !bool {
-        const fired = try self.world.randomBool();
-        try self.world.record("buggify hook={s} fired={}", .{ @tagName(hook), fired });
+    pub fn buggify(self: *SimulationEnv, comptime hook: anytype, rate: BuggifyRate) !bool {
+        rate.validate();
+
+        const roll = try self.world.randomIntLessThan(u32, rate.denominator);
+        const fired = roll < rate.numerator;
+        try self.world.record(
+            "buggify hook={s} rate={}/{} roll={} fired={}",
+            .{ @tagName(hook), rate.numerator, rate.denominator, roll, fired },
+        );
         return fired;
     }
 
@@ -180,7 +182,7 @@ test "env: production exposes production authorities" {
 
     _ = env.clock().now();
     _ = try env.random().intLessThan(u8, 10);
-    try std.testing.expect(!try env.buggify(.drop_packet));
+    try std.testing.expect(!try env.buggify(.drop_packet, .percent(50)));
 }
 
 test "env: simulation buggify is traced" {
@@ -188,39 +190,18 @@ test "env: simulation buggify is traced" {
     defer world.deinit();
 
     var env = SimulationEnv.init(&world);
-    _ = try env.buggify(.drop_packet);
+    _ = try env.buggify(.drop_packet, .percent(20));
 
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_bool") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet fired=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u32 less_than=100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet rate=20/100 roll=") != null);
 }
 
-test "env: custom production routing" {
-    const FixedClock = struct {
-        now_ns: clock_module.Timestamp,
+test "env: buggify supports always and never rates" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
 
-        fn now(self: *@This()) clock_module.Timestamp {
-            return self.now_ns;
-        }
+    var env = SimulationEnv.init(&world);
 
-        fn sleep(self: *@This(), duration_ns: clock_module.Duration) void {
-            self.now_ns += duration_ns;
-        }
-    };
-
-    const FixedRandom = struct {
-        fn intLessThan(_: *@This(), comptime T: type, _: T) !T {
-            return 0;
-        }
-    };
-
-    var env = ProductionEnvWith(FixedClock, FixedRandom).init(
-        .{ .now_ns = 42 },
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 42), env.clock().now());
-    env.clock().sleep(8);
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 50), env.clock().now());
-    try std.testing.expectEqual(@as(u8, 0), try env.random().intLessThan(u8, 10));
-    try std.testing.expect(!try env.buggify(.custom_fault));
+    try std.testing.expect(try env.buggify(.always_fault, .always()));
+    try std.testing.expect(!try env.buggify(.never_fault, .never()));
 }

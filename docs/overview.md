@@ -13,9 +13,9 @@ post-scenario checks. Disk, network, scheduling, and richer replay tooling are
 planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
-the replay artifact bytes, see [Trace Format](trace-format.md). For the
-planned zero-cost fault hook shape, see [BUGGIFY](buggify.md). For storage
-faults, see [Disk Fault Model](disk-fault-model.md).
+the replay artifact bytes, see [Trace Format](trace-format.md). For
+simulation-only fault hooks, see [BUGGIFY](buggify.md). For storage faults,
+see [Disk Fault Model](disk-fault-model.md).
 
 ## What This Solves
 

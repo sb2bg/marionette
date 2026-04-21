@@ -1,101 +1,56 @@
 # BUGGIFY
 
-BUGGIFY is Marionette's fault-injection hook: a user writes a branch that can
-fire in simulation, while production builds erase it when the hook is disabled
-at comptime.
+BUGGIFY is Marionette's fault-injection hook. Marionette decides whether a
+hook fires; user code owns what that means for the domain.
 
 The Phase 0 API lives on `Env`:
 
 ```zig
-if (try env.buggify(.drop_packet)) return error.PacketDropped;
+if (try env.buggify(.drop_packet, .percent(20))) {
+    return error.PacketDropped;
+}
 ```
 
-`ProductionEnv.buggify` and envs made with `ProductionEnvWith` always return
-`false`. `SimulationEnv.buggify` draws through the world's single PRNG and
-records `buggify hook=<name> fired=<bool>` in the trace.
+`ProductionEnv.buggify` always returns `false`. `SimulationEnv.buggify` draws
+through the world's single PRNG according to the supplied `BuggifyRate` and
+records `buggify hook=<name> rate=<n>/<d> roll=<value> fired=<bool>` in the
+trace.
 
 Users can call `buggify` because application code knows domain-specific fault
-points a generic simulator cannot infer. Marionette controls the randomness,
-trace output, and production behavior.
+points a generic simulator cannot infer. A hook can guard behavior such as
+dropping a packet, delaying a response, simulating a disk write error, or
+forcing a retry path. Marionette controls the randomness, trace output, and
+production behavior.
 
-## Worked Shape
+## Worked Fault Hook
 
-Source: [`examples/buggify_zero_cost.zig`](https://github.com/sb2bg/marionette/blob/main/examples/buggify_zero_cost.zig)
+Source: [`examples/buggify_fault_hook.zig`](https://github.com/sb2bg/marionette/blob/main/examples/buggify_fault_hook.zig)
 
 ```zig
-const Mode = enum { production, simulation };
-const Hook = enum { drop_packet };
+pub fn sendPacket(env: anytype, packet_id: u64) !void {
+    const latency_ns = try env.random().intLessThan(mar.Duration, 1_000);
+    env.clock().sleep(latency_ns);
 
-fn Sim(comptime mode: Mode) type {
-    return struct {
-        const Self = @This();
+    if (try env.buggify(.drop_packet, .percent(20))) {
+        return SendError.PacketDropped;
+    }
 
-        inline fn buggify(_: *Self, comptime hook: Hook) bool {
-            _ = hook;
-            return switch (mode) {
-                .production => comptime false,
-                .simulation => true,
-            };
-        }
-    };
-}
-
-export fn send_packet_prod() u32 {
-    var sim: Sim(.production) = .{};
-    if (sim.buggify(.drop_packet)) return 0;
-    return 1;
-}
-
-export fn send_packet_baseline() u32 {
-    return 1;
+    _ = packet_id;
 }
 ```
 
-The production branch must compile to the same code as the baseline.
+This is intentionally not "just a random number." The random decision is
+Marionette's job. The packet drop is the user's domain behavior.
 
-## Local Check
+## Open Requirements
 
-Command:
-
-```sh
-zig build-obj -O ReleaseFast examples/buggify_zero_cost.zig \
-  -femit-bin=.zig-cache/buggify_zero_cost.o
-objdump -d .zig-cache/buggify_zero_cost.o
-nm -m .zig-cache/buggify_zero_cost.o
-```
-
-Observed on Darwin arm64:
-
-```text
-.zig-cache/buggify_zero_cost.o:	file format mach-o arm64
-
-Disassembly of section __TEXT,__text:
-
-0000000000000000 <ltmp0>:
-       0: a9bf7bfd     	stp	x29, x30, [sp, #-0x10]!
-       4: 910003fd     	mov	x29, sp
-       8: 52800020     	mov	w0, #0x1                ; =1
-       c: a8c17bfd     	ldp	x29, x30, [sp], #0x10
-      10: d65f03c0     	ret
-```
-
-The symbol table shows both exported functions share the same address:
-
-```text
-0000000000000000 (__TEXT,__text) external _send_packet_baseline
-0000000000000000 (__TEXT,__text) external _send_packet_prod
-```
-
-That is the bar for Marionette's real BUGGIFY API: disabled production hooks
-must fold away, not become cold branches.
-
-## Real API Requirements
-
-When implemented, BUGGIFY should specify:
+BUGGIFY still needs to specify:
 
 - The hook id type. Prefer a small enum or typed comptime tag over arbitrary
   strings in hot paths.
-- The probability model.
+- Whether hook probabilities are configured only at call sites or also by a
+  central scenario fault profile.
+- Whether an expanded options API is needed once hooks carry more context.
 - Whether the decision is traced by default.
 - How hook decisions draw from the world's single PRNG.
 - How production mode disables individual hooks at comptime.

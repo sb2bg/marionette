@@ -151,15 +151,20 @@ Fault hooks must not pollute production hot paths. The Zig shape is an
 environment method:
 
 ```zig
-if (try env.buggify(.drop_packet)) return error.PacketDropped;
+if (try env.buggify(.drop_packet, .percent(20))) {
+    return error.PacketDropped;
+}
 ```
 
 In simulation, `env.buggify` draws from the world's PRNG and records the
-decision. In production, `env.buggify` returns false and the branch should fold
-away in optimized builds. Users call `buggify` because application code knows
-domain-specific fault points that a generic simulator cannot infer. This is the
-Zig replacement for FoundationDB-style BUGGIFY macros. [BUGGIFY](buggify.md)
-contains the zero-cost shape and a ReleaseFast object-code check.
+decision and rate. In production, `env.buggify` returns false and the branch
+should fold away in optimized builds. Users call `buggify` because application
+code knows domain-specific fault points that a generic simulator cannot infer.
+Marionette decides whether the hook fires; user code owns the effect, such as
+dropping a packet, delaying an operation, or returning a simulated storage
+error. This is the Zig replacement for FoundationDB-style BUGGIFY macros.
+[BUGGIFY](buggify.md) contains the current API shape and the remaining
+production-codegen questions.
 
 ## Failure Surface
 

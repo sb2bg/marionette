@@ -29,7 +29,7 @@ event=2 run.tag value=scenario:smoke
 event=3 run.attribute key=packet_loss_percent value=uint:20
 event=4 world.tick now_ns=1000000
 event=5 world.random_u64 value=10121301305976376037
-event=6 buggify hook=drop_packet fired=false
+event=6 buggify hook=drop_packet rate=20/100 roll=73 fired=false
 event=7 request.accepted id=42
 ```
 
@@ -47,7 +47,8 @@ Rules:
 - Run attributes encode the Marionette scalar type in the value text:
   `string:<text>`, `int:<i64>`, `uint:<u64>`, `bool:<true|false>`, or
   `float:<f64>`.
-- BUGGIFY events use `buggify hook=<comptime-tag> fired=<bool>`.
+- BUGGIFY events use
+  `buggify hook=<comptime-tag> rate=<numerator>/<denominator> roll=<value> fired=<bool>`.
 
 ## What Goes In
 

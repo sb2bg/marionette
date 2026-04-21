@@ -5,7 +5,7 @@ const mar = @import("marionette");
 
 pub const rate_limiter = @import("rate_limiter.zig");
 pub const replicated_register = @import("replicated_register.zig");
-pub const buggify_zero_cost = @import("buggify_zero_cost.zig");
+pub const buggify_fault_hook = @import("buggify_fault_hook.zig");
 
 test "examples: rate limiter scenario is replayable" {
     const a = try rate_limiter.runScenario(std.testing.allocator, 0xC0FFEE);
