@@ -12,6 +12,8 @@
   <a href="https://sb2bg.github.io/marionette/">Docs and blog</a>
 </p>
 
+[![CI](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+
 Deterministic simulation testing for Zig.
 
 Marionette helps Zig services reproduce timing, randomness, and simulated
