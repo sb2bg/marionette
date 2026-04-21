@@ -3,7 +3,8 @@
 This document records Marionette's foundational correctness contract. If a
 future feature weakens this contract, it needs an explicit design discussion.
 For scheduler, network, invariants, or liveness work, read
-[TigerBeetle Lessons](tigerbeetle-lessons.md) first. For disk work, read
+[TigerBeetle Lessons](tigerbeetle-lessons.md) first. For network API work,
+read [Network API Direction](network-api.md). For disk work, read
 [Disk Fault Model](disk-fault-model.md) before writing code.
 
 ## Determinism Contract

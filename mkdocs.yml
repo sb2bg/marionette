@@ -35,6 +35,7 @@ nav:
       - Run: run.md
       - BUGGIFY: buggify.md
       - Network Model: network.md
+      - Network API Direction: network-api.md
       - Disk Fault Model: disk-fault-model.md
       - API: api.md
       - Determinism: determinism.md

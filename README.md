@@ -85,6 +85,7 @@ explicit allocators, no runtime magic.
 - [Run](docs/run.md)
 - [BUGGIFY](docs/buggify.md)
 - [Network Model](docs/network.md)
+- [Network API Direction](docs/network-api.md)
 - [Disk Fault Model](docs/disk-fault-model.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)

@@ -23,6 +23,7 @@ use.
 - [Determinism](determinism.md)
 - [Run](run.md)
 - [Network Model](network.md)
+- [Network API Direction](network-api.md)
 - [API](api.md)
 - [Roadmap](roadmap.md)
 

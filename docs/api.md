@@ -197,6 +197,9 @@ shared deterministic primitive for seeded packet loss, tick-aligned latency,
 and delivery order by `(deliver_at, packet_id)`.
 
 See [Network Model](network.md) for the design contract and current limits.
+See [Network API Direction](network-api.md) for the intended future split
+between production/simulation app-facing network authority and test-only
+simulator-control operations.
 
 ```zig
 const Payload = struct { value: u64 };

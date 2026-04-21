@@ -3,6 +3,9 @@
 This is a design note for Marionette's current unstable network simulation
 work. It is not the final public network API yet.
 
+For the intended production/simulation API split, see
+[Network API Direction](network-api.md).
+
 The goal is a deterministic network authority that can make distributed
 failures replayable from a seed. The first slice is intentionally small:
 messages can be delayed, dropped, queued, filtered by directed link state,
