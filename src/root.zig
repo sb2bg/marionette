@@ -6,6 +6,7 @@ const clock_module = @import("clock.zig");
 const env_module = @import("env.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
+const trace_summary_module = @import("trace_summary.zig");
 
 /// Return the clock implementation for a comptime mode.
 pub const Clock = clock_module.Clock;
@@ -114,6 +115,18 @@ pub const SeedParseError = seed_module.SeedParseError;
 /// Parse a decimal seed or 40-character Git hash.
 pub const parseSeed = seed_module.parseSeed;
 
+/// Owned deterministic summary of one Marionette trace.
+pub const Summary = trace_summary_module.Summary;
+
+/// Errors returned while summarizing a trace.
+pub const TraceSummaryError = trace_summary_module.TraceSummaryError;
+
+/// Build an owned summary from line-oriented trace bytes.
+pub const summarize = trace_summary_module.summarize;
+
+/// Convenience wrapper around `Summary.writeSummary`.
+pub const writeSummary = trace_summary_module.writeSummary;
+
 test {
     _ = @import("env.zig");
     _ = @import("network.zig");
@@ -122,4 +135,5 @@ test {
     _ = @import("scheduler.zig");
     _ = @import("seed.zig");
     _ = @import("tidy.zig");
+    _ = @import("trace_summary.zig");
 }

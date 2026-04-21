@@ -285,6 +285,23 @@ Git hashes are parsed as `u160` hexadecimal values and truncated to the low 64
 bits. This is useful for CLI tools and CI jobs that want deterministic seed
 variation by commit.
 
+## Trace Summary
+
+`mar.summarize(allocator, trace_bytes)` builds an owned `mar.Summary` from a
+Marionette trace. It is a debugging view, not a replay format.
+
+```zig
+var summary = try mar.summarize(allocator, trace);
+defer summary.deinit();
+
+try summary.writeSummary(writer);
+```
+
+The summary output is deterministic and line-oriented. It reports total event
+count, final simulated timestamp when present, replay context, subsystem and
+event counts, singleton events, network send/drop/delivery counts, drop
+reasons, and per-link network counts.
+
 ## `run`
 
 `mar.run(allocator, options, scenario)` executes a scenario twice with the same
