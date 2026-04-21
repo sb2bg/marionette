@@ -1,11 +1,22 @@
 # BUGGIFY
 
-BUGGIFY is Marionette's planned fault-injection hook: a user writes a branch
-that can fire in simulation, while production builds erase it when the hook is
-disabled at comptime.
+BUGGIFY is Marionette's fault-injection hook: a user writes a branch that can
+fire in simulation, while production builds erase it when the hook is disabled
+at comptime.
 
-The API is not implemented yet. This document pins down the zero-cost shape the
-real API should preserve.
+The Phase 0 API lives on `Env`:
+
+```zig
+if (try env.buggify(.drop_packet)) return error.PacketDropped;
+```
+
+`ProductionEnv.buggify` and envs made with `ProductionEnvWith` always return
+`false`. `SimulationEnv.buggify` draws through the world's single PRNG and
+records `buggify hook=<name> fired=<bool>` in the trace.
+
+Users can call `buggify` because application code knows domain-specific fault
+points a generic simulator cannot infer. Marionette controls the randomness,
+trace output, and production behavior.
 
 ## Worked Shape
 

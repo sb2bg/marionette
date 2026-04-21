@@ -31,6 +31,9 @@ pub const default_tick_ns = clock_module.default_tick_ns;
 /// Return the environment implementation for a comptime mode.
 pub const Env = env_module.Env;
 
+/// Build a production environment from caller-provided authority types.
+pub const ProductionEnvWith = env_module.ProductionEnvWith;
+
 /// Production composition-root environment.
 pub const ProductionEnv = env_module.ProductionEnv;
 

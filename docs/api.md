@@ -46,6 +46,9 @@ constructing individual authorities itself:
 fn service(env: anytype) !void {
     const now = env.clock().now();
     const jitter = try env.random().intLessThan(mar.Duration, 1_000);
+    if (try env.buggify(.slow_path)) {
+        env.clock().sleep(jitter);
+    }
     _ = .{ now, jitter };
 }
 ```
@@ -54,6 +57,13 @@ Production chooses production authorities once at the composition root:
 
 ```zig
 var env = mar.ProductionEnv.init(.{});
+try service(&env);
+```
+
+Custom production routing uses `ProductionEnvWith`:
+
+```zig
+var env = mar.ProductionEnvWith(MyClock, MyRandom).init(my_clock, my_random);
 try service(&env);
 ```
 
@@ -70,18 +80,25 @@ fn scenario(world: *mar.World) !void {
 `mar.Env(.production)` aliases `mar.ProductionEnv`.
 `mar.Env(.simulation)` aliases `mar.SimulationEnv`.
 
-Phase 0 environments expose `clock()` and `random()`. `SimulationEnv` also
-exposes `tick()`, `runFor()`, and `record()` as convenience wrappers around the
-backing world for scenario code. Future disk and network authorities should be
-added to this environment shape instead of relying on auto-detection.
+Phase 0 environments expose `clock()`, `random()`, and `buggify()`.
+`ProductionEnv.buggify` and custom production envs always return `false`.
+`SimulationEnv.buggify` draws through the world's PRNG and records the hook
+decision. `SimulationEnv` also exposes `tick()`, `runFor()`, and `record()` as
+convenience wrappers around the backing world for scenario code. Future disk
+and network authorities should be added to this environment shape instead of
+relying on auto-detection.
 
 ## `World`
 
-`mar.World` owns Phase 0 simulation state:
+`mar.World` owns Phase 0 simulation engine state:
 
 - One `SimClock`.
 - One seeded `Random`.
 - One trace log.
+
+Application code should usually receive `SimulationEnv`, not `World` directly.
+Scenarios and harnesses use `World` to construct envs, drive time, and inspect
+trace bytes.
 
 Create a world with an explicit allocator:
 
@@ -137,8 +154,9 @@ const index = try world.randomIntLessThan(u64, 1_000_000);
 `randomIntLessThan` uses Zig's rejection-sampling bounded integer helper, so it
 does not teach modulo bias.
 
-User code that should not receive the whole `World` can take a narrow traced
-random authority:
+Low-level harness code that should not receive the whole `World` can take a
+narrow traced random authority. Application code should usually use
+`env.random()` instead:
 
 ```zig
 const random = world.tracedRandom();

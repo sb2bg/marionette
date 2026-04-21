@@ -1,4 +1,4 @@
-//! Deterministic simulation state.
+//! Deterministic simulation engine state.
 //!
 //! A `World` owns the Phase 0 simulation state: one fake clock, one
 //! seeded PRNG, and a trace log. Later phases will add schedulers, disk,
@@ -9,11 +9,11 @@ const std = @import("std");
 const clock_module = @import("clock.zig");
 const random_module = @import("random.zig");
 
-/// Container for deterministic simulation state.
+/// Container for deterministic simulation engine state.
 ///
-/// `World` is the entry point for simulation tests. It owns the fake
-/// clock, seeded random stream, and trace log used by services under
-/// test. In Phase 0 it is deliberately single-node and single-threaded.
+/// `World` owns the fake clock, seeded random stream, and trace log used by
+/// simulation tests. Application code should usually receive `SimulationEnv`
+/// rather than `World` directly; `World` is the harness-owned engine.
 pub const World = struct {
     /// Allocator used for the trace log.
     allocator: std.mem.Allocator,
@@ -87,8 +87,8 @@ pub const World = struct {
 
     /// Return the world's simulated clock.
     ///
-    /// Services that depend on time should receive this pointer instead
-    /// of reading `std.time` directly.
+    /// Prefer `SimulationEnv.clock()` in application code. This is a
+    /// low-level world authority for harnesses and env implementations.
     pub fn clock(self: *World) *clock_module.SimClock {
         return &self.sim_clock;
     }
@@ -103,7 +103,10 @@ pub const World = struct {
         return self.rng.random();
     }
 
-    /// Return the traced random authority for user code.
+    /// Return the traced random authority.
+    ///
+    /// Prefer `SimulationEnv.random()` in application code. This is a
+    /// low-level world authority for harnesses and env implementations.
     pub fn tracedRandom(self: *World) TracedRandom {
         return .{ .world = self };
     }
