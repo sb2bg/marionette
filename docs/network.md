@@ -58,6 +58,17 @@ while (try network.popReady(world)) |packet| {
 }
 ```
 
+For examples that just need to drive all pending network work, use
+`drainUntilIdle`:
+
+```zig
+try network.drainUntilIdle(world, context, deliver);
+```
+
+The callback receives each delivered packet. The helper advances simulated time
+to the next queued packet and keeps running until the queue is empty. The
+callback may enqueue more packets.
+
 This is a low-level primitive for examples and early scheduler work. A future
 `SimulationEnv.network()` or node-scoped authority may wrap it.
 
@@ -160,7 +171,11 @@ Current network trace events:
 
 - `network.send id={} from={} to={} deliver_at={} latency_ns={}`
 - `network.drop id={} from={} to={} drop_rate={}/{} roll={}`
+- `network.drop id={} from={} to={} reason=link_disabled`
 - `network.deliver id={} from={} to={} now_ns={}`
+- `network.link from={} to={} enabled={}`
+- `network.partition left_count={} right_count={}`
+- `network.heal disabled_count={}`
 
 The payload is not dumped into the core network trace. User code should record
 domain-specific payload facts separately when useful, as the replicated
@@ -183,6 +198,6 @@ smallest useful packet core before growing.
 
 ## Next Step
 
-The next high-value addition is using partitions in a showcase scenario and
-then adding a small event loop that can drive network delivery without each
-example writing its own drain loop.
+The next high-value addition is path clogging or process up/down state. Both
+would make the network model closer to the failure shapes a real distributed
+system needs without committing to the final node-scoped API yet.

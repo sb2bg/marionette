@@ -45,6 +45,21 @@ test "examples: replicated register checker catches committed divergence" {
     }
 }
 
+test "examples: replicated register partition scenario is replayable" {
+    const a = try replicated_register.runPartitionScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(a);
+    const b = try replicated_register.runPartitionScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(b);
+
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.profile name=replicated-register-partition") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.tag value=scenario:partition") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.partition left_count=1 right_count=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "reason=link_disabled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.heal disabled_count=6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "register.check committed_quorum=ok") != null);
+}
+
 test "examples: replicated register rejects same-version conflicts" {
     const trace = try replicated_register.runConflictScenario(std.testing.allocator, 0xC0FFEE);
     defer std.testing.allocator.free(trace);

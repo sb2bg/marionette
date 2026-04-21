@@ -25,6 +25,14 @@ const CommonRunProfile = struct {
     quorum: u64,
 };
 
+const PartitionRunProfile = struct {
+    replicas: u64,
+    quorum: u64,
+    max_messages: u64,
+    partitioned_replica: u64,
+    retry_limit: u8,
+};
+
 const normal_profile: NormalRunProfile = .{
     .replicas = replica_count,
     .quorum = quorum,
@@ -36,6 +44,14 @@ const normal_profile: NormalRunProfile = .{
 const common_profile: CommonRunProfile = .{
     .replicas = replica_count,
     .quorum = quorum,
+};
+
+const partition_profile: PartitionRunProfile = .{
+    .replicas = replica_count,
+    .quorum = quorum,
+    .max_messages = max_messages,
+    .partitioned_replica = 0,
+    .retry_limit = 2,
 };
 
 const checks = [_]mar.StateCheck(Cluster){
@@ -56,6 +72,13 @@ const buggy_tags = [_][]const u8{
 };
 
 const common_attributes = mar.runAttributesFrom(common_profile);
+
+const partition_tags = [_][]const u8{
+    "example:replicated_register",
+    "scenario:partition",
+};
+
+const partition_attributes = mar.runAttributesFrom(partition_profile);
 
 const conflict_tags = [_][]const u8{
     "example:replicated_register",
@@ -109,6 +132,33 @@ pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport 
     );
 }
 
+/// Run a scenario that writes through a partition and return an owned trace.
+pub fn runPartitionScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    var report = try mar.runWithState(
+        allocator,
+        .{
+            .seed = seed,
+            .tick_ns = ns_per_ms,
+            .profile_name = "replicated-register-partition",
+            .tags = &partition_tags,
+            .attributes = &partition_attributes,
+        },
+        Cluster,
+        Cluster.init,
+        partitionScenario,
+        &checks,
+    );
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |*passed| return passed.takeTrace(),
+        .failed => |failure| {
+            failure.print();
+            return error.ReplicatedRegisterScenarioFailed;
+        },
+    }
+}
+
 /// Run a same-version conflict scenario and return an owned trace.
 pub fn runConflictScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     var report = try mar.runWithState(
@@ -153,6 +203,19 @@ fn scenario(world: *mar.World, cluster: *Cluster) !void {
 fn buggyScenario(world: *mar.World, cluster: *Cluster) !void {
     try cluster.forceCommit(world, 0, 1, 41);
     try cluster.forceCommit(world, 1, 1, 42);
+}
+
+fn partitionScenario(world: *mar.World, cluster: *Cluster) !void {
+    const isolated = [_]mar.NodeId{@intCast(partition_profile.partitioned_replica)};
+    const majority = [_]mar.NodeId{ replica_count, 1, 2 };
+
+    try cluster.network.partition(world, &isolated, &majority);
+    try cluster.write(world, .{
+        .version = 1,
+        .value = 41,
+        .retry_limit = partition_profile.retry_limit,
+    });
+    try cluster.network.heal(world);
 }
 
 fn conflictScenario(world: *mar.World, cluster: *Cluster) !void {
@@ -309,17 +372,21 @@ const Cluster = struct {
     }
 
     fn drain(self: *Cluster, world: *mar.World, acked: ?*[replica_count]bool) !void {
-        while (true) {
-            while (try self.network.popReady(world)) |packet| {
-                try self.apply(world, packet, acked);
-            }
-
-            const deliver_at = self.network.nextDeliveryAt() orelse break;
-            if (deliver_at > world.now()) {
-                try world.runFor(deliver_at - world.now());
-            }
-        }
+        var context: DeliveryContext = .{
+            .cluster = self,
+            .acked = acked,
+        };
+        try self.network.drainUntilIdle(world, &context, DeliveryContext.deliver);
     }
+
+    const DeliveryContext = struct {
+        cluster: *Cluster,
+        acked: ?*[replica_count]bool,
+
+        fn deliver(self: *@This(), world: *mar.World, packet: Network.Packet) !void {
+            try self.cluster.apply(world, packet, self.acked);
+        }
+    };
 
     fn apply(
         self: *Cluster,

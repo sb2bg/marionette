@@ -214,6 +214,12 @@ while (try network.popReady(world)) |packet| {
 }
 ```
 
+For examples that should run queued packets until no network work remains:
+
+```zig
+try network.drainUntilIdle(world, context, deliver);
+```
+
 `send` records `network.send` or `network.drop`. `popReady` records
 `network.deliver`. Latency values must align with the world's tick size because
 Phase 0 simulated time advances in whole ticks.

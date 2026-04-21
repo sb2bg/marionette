@@ -195,6 +195,29 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
             }
         }
 
+        /// Drive queued packets until the network has no pending work.
+        ///
+        /// The delivery callback may enqueue more packets. This helper keeps
+        /// advancing simulated time to the next packet and delivering ready
+        /// packets until the queue is empty.
+        pub fn drainUntilIdle(
+            self: *Self,
+            world: *World,
+            context: anytype,
+            comptime deliver: fn (@TypeOf(context), *World, Packet) anyerror!void,
+        ) !void {
+            while (true) {
+                while (try self.popReady(world)) |packet| {
+                    try deliver(context, world, packet);
+                }
+
+                const deliver_at = self.nextDeliveryAt() orelse break;
+                if (deliver_at > world.now()) {
+                    try world.runFor(deliver_at - world.now());
+                }
+            }
+        }
+
         fn disabledLinkIndex(self: *const Self, from: NodeId, to: NodeId) ?usize {
             for (self.disabled_links[0..self.disabled_link_count], 0..) |link, index| {
                 if (link.from == from and link.to == to) return index;
@@ -312,4 +335,34 @@ test "network: partition disables crossing links and heal restores them" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.partition left_count=1 right_count=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal disabled_count=4") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
+}
+
+test "network: drainUntilIdle advances time and delivers queued packets" {
+    const Network = UnstableNetwork(TestPayload, 4);
+
+    const DeliveryLog = struct {
+        values: [4]u64 = undefined,
+        count: usize = 0,
+
+        fn deliver(self: *@This(), _: *World, packet: Network.Packet) !void {
+            self.values[self.count] = packet.payload.value;
+            self.count += 1;
+        }
+    };
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init();
+    var log: DeliveryLog = .{};
+
+    try network.send(&world, 0, 1, .{ .value = 1 }, .{ .min_latency_ns = 20 });
+    try network.send(&world, 0, 1, .{ .value = 2 }, .{ .min_latency_ns = 10 });
+    try network.drainUntilIdle(&world, &log, DeliveryLog.deliver);
+
+    try std.testing.expectEqual(@as(usize, 2), log.count);
+    try std.testing.expectEqual(@as(u64, 2), log.values[0]);
+    try std.testing.expectEqual(@as(u64, 1), log.values[1]);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
+    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
 }

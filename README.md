@@ -1,6 +1,7 @@
 <p align="center">
   <a href="https://sb2bg.github.io/marionette/">
-    <img src="assets/transparent_logo_text.png" alt="Marionette" width="420">
+    <img src="assets/transparent_logo_text.png#gh-light-mode-only" alt="Marionette" width="420">
+    <img src="assets/transparent_logo_text_dark.png#gh-dark-mode-only" alt="Marionette" width="420">
   </a>
 </p>
 

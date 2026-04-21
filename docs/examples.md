@@ -49,6 +49,7 @@ portable shapes Marionette needs:
 - A small cluster model with three replicas.
 - Seeded message drops and delivery latency.
 - `mar.UnstableNetwork` ordering pending messages by `(deliver_at, packet_id)`.
+- A partition scenario that drops queued packets through directed link filters.
 - `RunOptions.profile_name`, tags, and `RunAttribute` for replay-visible
   knobs.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
@@ -77,6 +78,14 @@ the checker path catches divergent committed state:
 ```zig
 var report = try replicated_register.runBuggyScenario(allocator, 0xC0FFEE);
 defer report.deinit();
+```
+
+The partition scenario isolates one replica while the majority still accepts
+and commits the value:
+
+```zig
+const trace = try replicated_register.runPartitionScenario(allocator, 0xC0FFEE);
+defer allocator.free(trace);
 ```
 
 There is also a same-version conflict scenario used by tests to prove the
