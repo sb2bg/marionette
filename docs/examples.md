@@ -80,8 +80,9 @@ var report = try replicated_register.runBuggyScenario(allocator, 0xC0FFEE);
 defer report.deinit();
 ```
 
-The partition scenario isolates one replica while the majority still accepts
-and commits the value:
+The partition scenario derives its groups from the run profile, isolates one
+replica from the client and majority, then heals the network and replays the
+same value so the previously isolated replica commits too:
 
 ```zig
 const trace = try replicated_register.runPartitionScenario(allocator, 0xC0FFEE);

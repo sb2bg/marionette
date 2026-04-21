@@ -11,6 +11,7 @@ const ns_per_ms: mar.Duration = 1_000_000;
 const replica_count = 3;
 const quorum = 2;
 const max_messages = 64;
+const client_node_id: mar.NodeId = replica_count;
 
 const NormalRunProfile = struct {
     replicas: u64,
@@ -29,8 +30,10 @@ const PartitionRunProfile = struct {
     replicas: u64,
     quorum: u64,
     max_messages: u64,
+    client_node_id: u64,
     partitioned_replica: u64,
     retry_limit: u8,
+    catchup_retry_limit: u8,
 };
 
 const normal_profile: NormalRunProfile = .{
@@ -50,8 +53,10 @@ const partition_profile: PartitionRunProfile = .{
     .replicas = replica_count,
     .quorum = quorum,
     .max_messages = max_messages,
+    .client_node_id = client_node_id,
     .partitioned_replica = 0,
     .retry_limit = 2,
+    .catchup_retry_limit = 1,
 };
 
 const checks = [_]mar.StateCheck(Cluster){
@@ -206,16 +211,26 @@ fn buggyScenario(world: *mar.World, cluster: *Cluster) !void {
 }
 
 fn partitionScenario(world: *mar.World, cluster: *Cluster) !void {
-    const isolated = [_]mar.NodeId{@intCast(partition_profile.partitioned_replica)};
-    const majority = [_]mar.NodeId{ replica_count, 1, 2 };
+    std.debug.assert(partition_profile.partitioned_replica < replica_count);
 
-    try cluster.network.partition(world, &isolated, &majority);
+    const partitioned_replica: mar.NodeId = @intCast(partition_profile.partitioned_replica);
+    const isolated = [_]mar.NodeId{partitioned_replica};
+    var majority_side: [replica_count]mar.NodeId = undefined;
+    const majority_side_len = buildMajoritySide(partitioned_replica, &majority_side);
+
+    try cluster.network.partition(world, &isolated, majority_side[0..majority_side_len]);
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
         .retry_limit = partition_profile.retry_limit,
     });
     try cluster.network.heal(world);
+    try cluster.write(world, .{
+        .version = 1,
+        .value = 41,
+        .retry_limit = partition_profile.catchup_retry_limit,
+    });
+    try cluster.checkReplicaCommitted(world, partitioned_replica, 1, 41);
 }
 
 fn conflictScenario(world: *mar.World, cluster: *Cluster) !void {
@@ -348,13 +363,13 @@ const Cluster = struct {
     fn send(
         self: *Cluster,
         world: *mar.World,
-        to: u8,
+        to: mar.NodeId,
         kind: MessageKind,
         version: u64,
         value: u64,
         drop_percent: u8,
     ) !void {
-        try self.network.send(world, replica_count, to, .{
+        try self.network.send(world, client_node_id, to, .{
             .kind = kind,
             .version = version,
             .value = value,
@@ -394,7 +409,7 @@ const Cluster = struct {
         packet: Network.Packet,
         acked: ?*[replica_count]bool,
     ) !void {
-        const replica_index: usize = packet.to;
+        const replica_index: usize = @intCast(packet.to);
         switch (packet.payload.kind) {
             .propose => {
                 const accepted = self.replicas[replica_index].accept(packet.payload.version, packet.payload.value);
@@ -482,6 +497,29 @@ const Cluster = struct {
         try world.record("register.check committed_quorum=ok", .{});
     }
 
+    fn checkReplicaCommitted(
+        self: *const Cluster,
+        world: *mar.World,
+        replica_id: mar.NodeId,
+        version: u64,
+        value: u64,
+    ) !void {
+        const replica_index: usize = @intCast(replica_id);
+        const replica = self.replicas[replica_index];
+        if (replica.committed_version != version or replica.committed_value != value) {
+            try world.record(
+                "register.invariant_violation kind=replica_not_committed replica={} expected_version={} expected_value={} actual_version={} actual_value={}",
+                .{ replica_id, version, value, replica.committed_version, replica.committed_value },
+            );
+            return error.ReplicaNotCommitted;
+        }
+
+        try world.record(
+            "register.check replica_committed=ok replica={} version={} value={}",
+            .{ replica_id, version, value },
+        );
+    }
+
     fn countAccepted(self: *const Cluster, version: u64, value: u64) u8 {
         var count: u8 = 0;
         for (self.replicas) |replica| {
@@ -492,6 +530,18 @@ const Cluster = struct {
         return count;
     }
 };
+
+fn buildMajoritySide(partitioned_replica: mar.NodeId, output: *[replica_count]mar.NodeId) usize {
+    output[0] = client_node_id;
+    var len: usize = 1;
+    for (0..replica_count) |replica_index| {
+        const replica_id: mar.NodeId = @intCast(replica_index);
+        if (replica_id == partitioned_replica) continue;
+        output[len] = replica_id;
+        len += 1;
+    }
+    return len;
+}
 
 fn countAcks(acked: *const [replica_count]bool) u8 {
     var count: u8 = 0;
