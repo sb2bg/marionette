@@ -348,6 +348,13 @@ adapter. Likely shape is documented in `docs/network-api.md`.
 Add a VOPR-style cluster atlas that preserves recoverability invariants
 across replicas. This belongs after the disk-backed replicated example exists.
 
+### 17. Cooperative simulation scheduler
+
+Spawn deterministic simulated tasks/nodes, route sleeps and simulated IO
+through one scheduler, and trace every runnable-task decision. Production
+routing may use a different backend, but simulation semantics define the
+contract. This is Flow-inspired in goal, not a Flow clone.
+
 ---
 
 ## Phase 3: Production-Grade
@@ -388,6 +395,23 @@ Users call `sim.tick()` (or `sim.runFor(duration)`). Each subsystem exposes
 an internal fault-evolution hook called by `sim.tick()`. No public
 `sim.network().tick()`, no public `sim.disk().tick()`. This avoids the
 footgun where users forget to tick one subsystem.
+
+### Flow-inspired
+
+Marionette may eventually grow a small cooperative task scheduler: spawned
+simulated tasks, deterministic sleeps, deterministic IO waits, and one
+scheduler choosing the next runnable task from a stable ordering. This is the
+Zig-native version of the lesson from FoundationDB Flow: production logic
+should be testable under deterministic time, IO, and scheduling.
+
+Marionette will not build a new language or a preemptive user-thread runtime.
+Simulated tasks are single-threaded and yield only at Marionette authority
+boundaries such as sleep, network, disk, or explicit scheduler calls.
+
+Production backends may eventually route the same high-level API to real IO or
+event loops. The deterministic guarantee only covers effects
+that go through Marionette authorities; arbitrary production thread races are
+outside the simulator's model.
 
 ### Lazy expiry is a deterministic backstop, not a mechanism
 
@@ -437,6 +461,9 @@ so they don't get rediscussed.
   vs platform decision above.
 - **Real thread scheduling.** Marionette is not Shuttle-for-Zig. That may
   become a separate sibling library; it will not be Marionette.
+- **A Flow clone.** Marionette may borrow Flow's cooperative-simulation lesson,
+  but it will not introduce a new language or require users to rewrite services
+  in a Marionette-specific actor DSL.
 - **Cross-process simulation.** In-process only.
 - **TLS, real DNS, `std.net` compatibility.** The app-facing network will
   be narrower than `std.net`. If you need real sockets, you're not
