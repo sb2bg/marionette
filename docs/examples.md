@@ -48,6 +48,8 @@ portable shapes Marionette needs:
 - A small cluster model with three replicas.
 - Seeded message drops and delivery latency.
 - `mar.EventQueue` ordering pending messages by `(deliver_at, message_id)`.
+- `RunOptions.profile_name`, tags, and `RunAttribute` for replay-visible
+  knobs.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
 - A named `mar.StateCheck` that inspects structured cluster state.
 - Rejection of conflicting same-version proposals.
@@ -59,6 +61,11 @@ committed replicas agree and that committed values were accepted by a quorum:
 const trace = try replicated_register.runScenario(allocator, 0xC0FFEE);
 defer allocator.free(trace);
 ```
+
+The trace starts with the profile and expanded knobs, including replica count,
+quorum, queue capacity, proposal drop percent, and retry limit. That keeps the
+showcase aligned with the VOPR lesson that a seed alone is not enough context
+for a failure.
 
 The example also includes a deliberately buggy scenario used by tests to prove
 the checker path catches divergent committed state:

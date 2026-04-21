@@ -159,6 +159,28 @@ var report = try mar.run(std.testing.allocator, .{ .seed = 0x1234 }, scenario);
 defer report.deinit();
 ```
 
+Runs can carry replay-visible tags and typed attributes:
+
+```zig
+const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
+const attributes = [_]mar.RunAttribute{
+    .{ .key = "replicas", .value = .{ .uint = 3 } },
+    .{ .key = "packet_loss_percent", .value = .{ .uint = 20 } },
+};
+
+var report = try mar.run(std.testing.allocator, .{
+    .seed = 0x1234,
+    .profile_name = "smoke",
+    .tags = &tags,
+    .attributes = &attributes,
+}, scenario);
+```
+
+`profile_name`, `tags`, and `attributes` are recorded into the trace before
+scenario code runs and are included in failure summaries. Tags are loose
+searchable labels. Attributes are stable scalar facts needed to reproduce the
+run without forcing tools to parse presentation strings.
+
 World-only checks can be attached to the run options:
 
 ```zig
@@ -223,6 +245,10 @@ The return value is `mar.RunReport`:
 - `.failed` contains a failure report with seed, options, event counts, traces,
   failure kind, error name when available, and check name when a check failed.
 
+`RunFailure.writeSummary(writer)` writes the compact failure line used by
+`RunFailure.print()`. Prefer `writeSummary` in tests so failure output stays
+stable.
+
 See [Run](run.md) for details.
 
 ## Error Policy
@@ -274,7 +300,30 @@ test_step.dependOn(&tidy.step);
 ```
 
 The helper builds the `marionette-tidy` executable and creates a run step that
-exits non-zero when banned non-deterministic calls are found. The current
-linter is AST-based: it ignores comments and string literals, and catches
-simple const aliases such as `const time = std.time`. It does not yet perform
-full semantic import resolution.
+exits non-zero when banned non-deterministic calls are found. Projects can add
+their own exact or prefix bans and file-level or pattern-level allow entries:
+
+```zig
+const tidy = marionette.addTidyStep(b, .{
+    .paths = &.{ "src", "examples", "tests" },
+    .extra_patterns = &.{
+        .{
+            .needle = "std.heap.page_allocator",
+            .reason = "pass an allocator explicitly",
+        },
+        .{
+            .needle = "std.posix",
+            .reason = "route host effects through explicit interfaces",
+            .match = .prefix,
+        },
+    },
+    .extra_allowed = &.{
+        .{ .path = "src/platform.zig", .needle = "std.posix" },
+    },
+});
+```
+
+The current linter is AST-based: it ignores comments and string literals,
+supports exact and prefix dotted-path bans, and catches simple const aliases
+such as `const time = std.time`. It does not yet perform full semantic import
+resolution.

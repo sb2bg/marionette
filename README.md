@@ -37,8 +37,10 @@ test "scenario is replayable" {
 ## Status
 
 Phase 0. Time, seeded randomness, trace logging, replay checks, and named
-world/state scenario checks are being built now. Disk, network, scheduling,
-shrinking, and time-travel debugging are planned, not implemented.
+world/state scenario checks are being built now. Run tags and typed attributes
+are trace-visible so failing seeds can carry their expanded profile. Disk,
+network, scheduling, shrinking, and time-travel debugging are planned, not
+implemented.
 
 The API is not stable. Do not use this in production yet.
 
@@ -74,6 +76,7 @@ explicit allocators, no runtime magic.
 - [Roadmap](docs/roadmap.md)
 - [Prior art](docs/prior-art.md)
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
+- [Blog](docs/blog/README.md)
 
 Current examples include a rate limiter and a tiny VOPR-inspired replicated
 register showcase.

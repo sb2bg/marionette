@@ -50,12 +50,18 @@ Marionette enforces determinism in four layers.
 
    The `marionette-tidy` executable parses Zig source with `std.zig.Ast`,
    scans for banned direct call paths, and can be wired into `zig build test`.
+   Its defaults ban host time, host threads, host entropy, direct network
+   access, and common direct filesystem entry points. Projects can add their
+   own exact or prefix bans through `addTidyStep`.
 
    ```zig
    const marionette = @import("src/build_support.zig");
 
    const tidy = marionette.addTidyStep(b, .{
        .paths = &.{ "src", "examples", "tests" },
+       .extra_patterns = &.{
+           .{ .needle = "std.heap.page_allocator", .reason = "pass an allocator explicitly" },
+       },
    });
    test_step.dependOn(&tidy.step);
    ```

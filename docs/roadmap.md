@@ -22,6 +22,7 @@ Deliverables:
 - A small named-check API for world and state post-scenario invariant checks.
 - A seed parser for decimal seeds and 40-character Git hashes.
 - A deterministic event queue sketch for future scheduler work.
+- Replay-visible run tags, typed attributes, and testable failure summaries.
 - A written architecture contract for determinism, time, randomness, and
   simulator scope.
 - A written disk fault model before disk simulation code exists.

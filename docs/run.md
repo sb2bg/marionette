@@ -16,8 +16,16 @@ fn scenario(world: *mar.World) !void {
 }
 
 test "scenario is deterministic" {
+    const tags = [_][]const u8{ "scenario:smoke" };
+    const attributes = [_]mar.RunAttribute{
+        .{ .key = "requests", .value = .{ .uint = 1 } },
+    };
+
     var report = try mar.run(std.testing.allocator, .{
         .seed = 0x1234,
+        .profile_name = "smoke",
+        .tags = &tags,
+        .attributes = &attributes,
         .checks = &.{.{ .name = "trace exists", .check = traceExists }},
     }, scenario);
     defer report.deinit();
@@ -51,6 +59,7 @@ Failures are not returned as bare scenario errors because that would lose the
 trace. Instead, `mar.run` captures:
 
 - Seed and run options.
+- Profile name, tags, and typed attributes.
 - Failure kind.
 - First trace.
 - Second trace when a second run happened.
@@ -69,6 +78,46 @@ Failure kinds:
 Panics are different from error returns. Zig's default panic path may abort
 before Marionette can report a partial trace, so simulated failures should
 prefer error-returning invariant checks.
+
+`RunFailure.print()` writes one compact line to stderr. Tests should use
+`RunFailure.writeSummary(writer)`, which writes the same line to a caller-owned
+writer.
+
+## Metadata
+
+The seed is necessary but not sufficient once scenarios generate options from
+that seed. Use `profile_name`, `tags`, and `attributes` to make the expanded
+run shape visible:
+
+```zig
+const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
+const attributes = [_]mar.RunAttribute{
+    .{ .key = "replicas", .value = .{ .uint = 3 } },
+    .{ .key = "proposal_drop_percent", .value = .{ .uint = 20 } },
+};
+
+var report = try mar.run(std.testing.allocator, .{
+    .seed = 0x1234,
+    .profile_name = "replicated-register-smoke",
+    .tags = &tags,
+    .attributes = &attributes,
+}, scenario);
+```
+
+The runner records these entries before scenario code:
+
+```text
+event=1 run.profile name=replicated-register-smoke
+event=2 run.tag value=example:replicated_register
+event=3 run.tag value=scenario:smoke
+event=4 run.attribute key=replicas value=uint:3
+event=5 run.attribute key=proposal_drop_percent value=uint:20
+```
+
+Tags should be stable scalar labels. Attribute keys should be stable scalar
+text, and values should use the narrow typed union Marionette exposes. Do not
+put pointers, addresses, unordered dumps, or machine-local paths in run
+metadata.
 
 ## Checks
 

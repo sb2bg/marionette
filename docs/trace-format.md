@@ -24,9 +24,12 @@ Example:
 ```text
 marionette.trace format=text version=0
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1000000
-event=1 world.tick now_ns=1000000
-event=2 world.random_u64 value=10121301305976376037
-event=3 request.accepted id=42
+event=1 run.profile name=smoke
+event=2 run.tag value=scenario:smoke
+event=3 run.attribute key=packet_loss_percent value=uint:20
+event=4 world.tick now_ns=1000000
+event=5 world.random_u64 value=10121301305976376037
+event=6 request.accepted id=42
 ```
 
 Rules:
@@ -40,6 +43,9 @@ Rules:
 - Keys use lowercase words separated by `_`.
 - Values must be stable text for the same Marionette version, Zig version,
   target platform, user code, options, and seed.
+- Run attributes encode the Marionette scalar type in the value text:
+  `string:<text>`, `int:<i64>`, `uint:<u64>`, `bool:<true|false>`, or
+  `float:<f64>`.
 
 ## What Goes In
 

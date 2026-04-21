@@ -28,6 +28,9 @@ Phase 0 has:
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
 - `mar.run`, which executes a scenario twice and compares traces.
+- `RunOptions.profile_name`, tags, and `RunAttribute`, which make expanded
+  run facts replay-visible in traces and failure summaries without losing
+  scalar value types.
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
 - `mar.runWithState` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.
@@ -168,9 +171,10 @@ error-returning checks for simulated failures; a future custom panic hook can
 improve crash traces.
 
 Current `RunFailure` captures seed, options, failure kind, event counts, owned
-traces, error name when available, and check name when a named check failed. A
-future CLI wrapper should add an exact reproduction command once the
-command-line surface exists.
+traces, profile name, tags, typed attributes, error name when available, and
+check name when a named check failed. `RunFailure.writeSummary` is testable and backs
+`RunFailure.print`. A future CLI wrapper should add an exact reproduction
+command once the command-line surface exists.
 
 ## Exploration Strategy
 
@@ -181,6 +185,7 @@ replay contract, not good enough to claim deep distributed-systems coverage.
 Planned strategy layers:
 
 - Uniform random choices first.
+- Replay-visible profile tags and typed attributes before adding many knobs.
 - Weighted fault profiles after examples reveal real needs.
 - Coverage or state feedback only after there is a stable trace/event model.
 - Shrinking only after failures are represented as replayable event streams.
