@@ -1,4 +1,12 @@
-# Marionette
+<p align="center">
+  <a href="https://sb2bg.github.io/marionette/">
+    <img src="assets/transparent_logo_text.png" alt="Marionette" width="420">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://sb2bg.github.io/marionette/">Docs and blog</a>
+</p>
 
 Deterministic simulation testing for Zig.
 

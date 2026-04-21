@@ -5,9 +5,9 @@ work. It is not the final public network API yet.
 
 The goal is a deterministic network authority that can make distributed
 failures replayable from a seed. The first slice is intentionally small:
-messages can be delayed, dropped, queued, and delivered in a stable order.
-Partitions, replay recording, path clogging, node spawning, and the final
-scheduler API come later.
+messages can be delayed, dropped, queued, filtered by directed link state,
+partitioned, healed, and delivered in a stable order. Replay recording, path
+clogging, node spawning, and the final scheduler API come later.
 
 ## VOPR Lessons
 
@@ -60,6 +60,55 @@ while (try network.popReady(world)) |packet| {
 
 This is a low-level primitive for examples and early scheduler work. A future
 `SimulationEnv.network()` or node-scoped authority may wrap it.
+
+## Link Filters
+
+Links are directed. A disabled link drops ready packets at delivery time:
+
+```zig
+try network.setLink(world, 0, 1, false);
+```
+
+If a packet from node `0` to node `1` is already queued when the link is
+disabled, it remains queued. When it becomes ready, `popReady` drops it and
+records:
+
+```text
+network.drop id=<id> from=0 to=1 reason=link_disabled
+```
+
+This mirrors the VOPR-style idea that the network's link state at delivery can
+decide whether an in-flight packet makes it through.
+
+Re-enable a directed link with:
+
+```zig
+try network.setLink(world, 0, 1, true);
+```
+
+## Partitions
+
+Partitions are expressed as batches of directed link filters. The current
+helper disables both directions between two groups:
+
+```zig
+const left = [_]mar.NodeId{0};
+const right = [_]mar.NodeId{ 1, 2 };
+try network.partition(world, &left, &right);
+```
+
+This disables `0 -> 1`, `1 -> 0`, `0 -> 2`, and `2 -> 0`, while leaving
+traffic inside the right side alone.
+
+Heal all disabled links with:
+
+```zig
+try network.heal(world);
+```
+
+This is deliberately simple. Later network work can add asymmetric partitions,
+automatic partition schedules, liveness modes, and explicit node up/down
+state.
 
 ## Ordering
 
@@ -121,8 +170,6 @@ register example does with `register.message`.
 
 `UnstableNetwork` does not yet support:
 
-- Link filters.
-- Partitions.
 - Process up/down state.
 - Replay recording.
 - Packet duplication.
@@ -136,11 +183,6 @@ smallest useful packet core before growing.
 
 ## Next Step
 
-The next high-value addition is link filtering:
-
-- each directed link can be enabled or disabled;
-- disabled links drop packets deterministically and trace the reason;
-- partitions can be represented as batches of link-filter changes.
-
-That gives Marionette the first real distributed-fault shape without forcing
-the full scheduler or node API to exist yet.
+The next high-value addition is using partitions in a showcase scenario and
+then adding a small event loop that can drive network delivery without each
+example writing its own drain loop.

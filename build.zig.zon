@@ -10,6 +10,7 @@
         "build.zig",
         "build.zig.zon",
         "mkdocs.yml",
+        "assets",
         "docs",
         "examples",
         "src",

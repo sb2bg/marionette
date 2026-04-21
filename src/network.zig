@@ -2,8 +2,8 @@
 //!
 //! This is the first simulation-kernel slice inspired by TigerBeetle's VOPR
 //! packet simulator: messages enter a deterministic queue, seeded decisions
-//! choose loss and latency, and delivery order is keyed by
-//! `(deliver_at, packet_id)`.
+//! choose loss and latency, link filters can drop packets at delivery, and
+//! delivery order is keyed by `(deliver_at, packet_id)`.
 
 const std = @import("std");
 
@@ -19,6 +19,10 @@ pub const NodeId = u16;
 pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();
+
+        pub const Error = error{
+            LinkFilterFull,
+        } || scheduler.EventQueueError;
 
         /// Packet delivered by `popReady`.
         pub const Packet = struct {
@@ -38,7 +42,14 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
 
         const Queue = scheduler.EventQueue(Packet, capacity, packetLessThan);
 
+        const DisabledLink = struct {
+            from: NodeId,
+            to: NodeId,
+        };
+
         pending: Queue = .init(),
+        disabled_links: [capacity]DisabledLink = undefined,
+        disabled_link_count: usize = 0,
         next_packet_id: u64 = 0,
 
         /// Construct an empty network.
@@ -55,6 +66,59 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
         pub fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
             const packet = self.pending.peek() orelse return null;
             return packet.deliver_at;
+        }
+
+        /// Return whether a directed link is currently enabled.
+        pub fn linkEnabled(self: *const Self, from: NodeId, to: NodeId) bool {
+            return self.disabledLinkIndex(from, to) == null;
+        }
+
+        /// Enable or disable one directed link.
+        pub fn setLink(self: *Self, world: *World, from: NodeId, to: NodeId, enabled: bool) !void {
+            if (enabled) {
+                if (self.disabledLinkIndex(from, to)) |index| {
+                    self.disabled_link_count -= 1;
+                    self.disabled_links[index] = self.disabled_links[self.disabled_link_count];
+                }
+            } else if (self.disabledLinkIndex(from, to) == null) {
+                if (self.disabled_link_count == self.disabled_links.len) return error.LinkFilterFull;
+                self.disabled_links[self.disabled_link_count] = .{ .from = from, .to = to };
+                self.disabled_link_count += 1;
+            }
+
+            try world.record(
+                "network.link from={} to={} enabled={}",
+                .{ from, to, enabled },
+            );
+        }
+
+        /// Disable all directed links crossing between two groups.
+        pub fn partition(
+            self: *Self,
+            world: *World,
+            left: []const NodeId,
+            right: []const NodeId,
+        ) !void {
+            try world.record(
+                "network.partition left_count={} right_count={}",
+                .{ left.len, right.len },
+            );
+            for (left) |from| {
+                for (right) |to| {
+                    try self.setLink(world, from, to, false);
+                    try self.setLink(world, to, from, false);
+                }
+            }
+        }
+
+        /// Re-enable every disabled link.
+        pub fn heal(self: *Self, world: *World) !void {
+            const disabled_count = self.disabled_link_count;
+            self.disabled_link_count = 0;
+            try world.record(
+                "network.heal disabled_count={}",
+                .{disabled_count},
+            );
         }
 
         /// Submit one packet through the simulated network.
@@ -110,15 +174,32 @@ pub fn UnstableNetwork(comptime Payload: type, comptime capacity: usize) type {
 
         /// Pop the next ready packet and record its delivery.
         pub fn popReady(self: *Self, world: *World) !?Packet {
-            const packet = self.pending.peek() orelse return null;
-            if (packet.deliver_at > world.now()) return null;
+            while (true) {
+                const packet = self.pending.peek() orelse return null;
+                if (packet.deliver_at > world.now()) return null;
 
-            const ready = self.pending.pop().?;
-            try world.record(
-                "network.deliver id={} from={} to={} now_ns={}",
-                .{ ready.id, ready.from, ready.to, world.now() },
-            );
-            return ready;
+                const ready = self.pending.pop().?;
+                if (!self.linkEnabled(ready.from, ready.to)) {
+                    try world.record(
+                        "network.drop id={} from={} to={} reason=link_disabled",
+                        .{ ready.id, ready.from, ready.to },
+                    );
+                    continue;
+                }
+
+                try world.record(
+                    "network.deliver id={} from={} to={} now_ns={}",
+                    .{ ready.id, ready.from, ready.to, world.now() },
+                );
+                return ready;
+            }
+        }
+
+        fn disabledLinkIndex(self: *const Self, from: NodeId, to: NodeId) ?usize {
+            for (self.disabled_links[0..self.disabled_link_count], 0..) |link, index| {
+                if (link.from == from and link.to == to) return index;
+            }
+            return null;
         }
 
         fn latency(self: *Self, world: *World, options: SendOptions) !clock_module.Duration {
@@ -183,4 +264,52 @@ test "network: traces deterministic drops" {
 
     try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 drop_rate=1/1") != null);
+}
+
+test "network: disabled links drop ready packets at delivery" {
+    const Network = UnstableNetwork(TestPayload, 4);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init();
+    try network.setLink(&world, 0, 1, false);
+    try network.send(&world, 0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try world.runFor(10);
+
+    try std.testing.expectEqual(@as(?Network.Packet, null), try network.popReady(&world));
+    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.link from=0 to=1 enabled=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=link_disabled") != null);
+}
+
+test "network: partition disables crossing links and heal restores them" {
+    const Network = UnstableNetwork(TestPayload, 8);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init();
+    const left = [_]NodeId{0};
+    const right = [_]NodeId{ 1, 2 };
+
+    try network.partition(&world, &left, &right);
+    try std.testing.expect(!network.linkEnabled(0, 1));
+    try std.testing.expect(!network.linkEnabled(1, 0));
+    try std.testing.expect(!network.linkEnabled(0, 2));
+    try std.testing.expect(!network.linkEnabled(2, 0));
+    try std.testing.expect(network.linkEnabled(1, 2));
+
+    try network.heal(&world);
+    try std.testing.expect(network.linkEnabled(0, 1));
+    try std.testing.expect(network.linkEnabled(1, 0));
+
+    try network.send(&world, 0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try world.runFor(10);
+    const packet = (try network.popReady(&world)).?;
+    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
+
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.partition left_count=1 right_count=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal disabled_count=4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
 }

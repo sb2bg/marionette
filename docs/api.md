@@ -218,6 +218,22 @@ while (try network.popReady(world)) |packet| {
 `network.deliver`. Latency values must align with the world's tick size because
 Phase 0 simulated time advances in whole ticks.
 
+Directed links can be disabled and re-enabled:
+
+```zig
+try network.setLink(world, 0, 1, false);
+try network.setLink(world, 0, 1, true);
+```
+
+Partitions disable every directed link crossing between two groups:
+
+```zig
+const left = [_]mar.NodeId{0};
+const right = [_]mar.NodeId{ 1, 2 };
+try network.partition(world, &left, &right);
+try network.heal(world);
+```
+
 ## Seeds
 
 `mar.parseSeed` accepts decimal `u64` seeds and 40-character Git hashes:
