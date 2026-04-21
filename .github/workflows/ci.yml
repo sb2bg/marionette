@@ -19,5 +19,19 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
 
-      - name: Build and test
+      - name: Build
+        run: zig build
+
+  test:
+    name: Zig test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Test
         run: zig build test
