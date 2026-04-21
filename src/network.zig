@@ -307,7 +307,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             const drop_roll = try self.world.randomIntLessThan(u32, options.drop_rate.denominator);
             if (drop_roll < options.drop_rate.numerator) {
                 try self.world.record(
-                    "network.drop id={} from={} to={} drop_rate={}/{} roll={}",
+                    "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
                     .{
                         packet_id,
                         from,

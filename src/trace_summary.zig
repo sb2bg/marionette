@@ -95,7 +95,7 @@ pub const Summary = struct {
         }
 
         try writeCounters(writer, "trace.subsystem", self.subsystem_counts.items);
-        try writeTopEvents(writer, self.event_counts.items, 8);
+        try writeTopEvents(self.allocator, writer, self.event_counts.items, 8);
         try writeSingletons(writer, self.event_counts.items);
 
         try writer.print(
@@ -122,9 +122,11 @@ pub fn summarize(allocator: std.mem.Allocator, trace_bytes: []const u8) !Summary
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "marionette.trace ")) continue;
 
+        // Current events have <=8 fields; keep a generous fixed cap so malformed
+        // traces fail loudly instead of allocating unbounded parser state.
         var fields_buffer: [32][]const u8 = undefined;
         const event = try parseEventLine(line, &fields_buffer);
-        _ = event.index;
+        if (event.index != summary.total_events) return error.InvalidTraceEvent;
 
         summary.total_events += 1;
         try incrementCounter(allocator, &summary.event_counts, event.name);
@@ -139,11 +141,6 @@ pub fn summarize(allocator: std.mem.Allocator, trace_bytes: []const u8) !Summary
     sortCounters(summary.network_drop_reasons.items);
     sortLinks(summary.network_links.items);
     return summary;
-}
-
-/// Convenience wrapper around `Summary.writeSummary`.
-pub fn writeSummary(summary: Summary, writer: anytype) !void {
-    try summary.writeSummary(writer);
 }
 
 fn parseEventLine(line: []const u8, buffer: *[32][]const u8) TraceSummaryError!ParsedEvent {
@@ -219,35 +216,29 @@ fn writeCounters(writer: anytype, prefix: []const u8, counters: []const Counter)
     }
 }
 
-fn writeTopEvents(writer: anytype, events: []const Counter, limit: usize) !void {
-    var emitted: usize = 0;
-    while (emitted < events.len and emitted < limit) : (emitted += 1) {
-        var best_index: ?usize = null;
-        for (events, 0..) |event, index| {
-            if (isAlreadyTop(events, event, emitted)) continue;
-            if (best_index == null or eventMoreVoluminous(event, events[best_index.?])) {
-                best_index = index;
-            }
+fn writeTopEvents(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    events: []const Counter,
+    limit: usize,
+) !void {
+    const ranked = try allocator.dupe(Counter, events);
+    defer allocator.free(ranked);
+
+    std.mem.sort(Counter, ranked, {}, struct {
+        fn lessThan(_: void, a: Counter, b: Counter) bool {
+            return a.count > b.count or
+                (a.count == b.count and std.mem.lessThan(u8, a.name, b.name));
         }
-        const index = best_index orelse break;
+    }.lessThan);
+
+    const emitted_count = @min(ranked.len, limit);
+    for (ranked[0..emitted_count], 0..) |event, rank| {
         try writer.print(
             "trace.event_top rank={} name={s} count={}\n",
-            .{ emitted + 1, events[index].name, events[index].count },
+            .{ rank + 1, event.name, event.count },
         );
     }
-}
-
-fn isAlreadyTop(events: []const Counter, event: Counter, rank: usize) bool {
-    var previous: usize = 0;
-    for (events) |other| {
-        if (eventMoreVoluminous(other, event)) previous += 1;
-    }
-    return previous < rank;
-}
-
-fn eventMoreVoluminous(a: Counter, b: Counter) bool {
-    return a.count > b.count or
-        (a.count == b.count and std.mem.lessThan(u8, a.name, b.name));
 }
 
 fn writeSingletons(writer: anytype, events: []const Counter) !void {
@@ -303,6 +294,8 @@ fn recordTime(summary: *Summary, event: ParsedEvent) !void {
 }
 
 fn recordNetwork(summary: *Summary, event: ParsedEvent) !void {
+    // Keep this parser in lockstep with the current network trace schema in
+    // docs/network.md; missing required fields should surface as schema drift.
     if (std.mem.eql(u8, event.name, "network.send")) {
         summary.network_sends += 1;
         const from = try parseU16(event.field("from") orelse return error.InvalidTraceEvent);
@@ -318,11 +311,8 @@ fn recordNetwork(summary: *Summary, event: ParsedEvent) !void {
         const from = try parseU16(event.field("from") orelse return error.InvalidTraceEvent);
         const to = try parseU16(event.field("to") orelse return error.InvalidTraceEvent);
         (try linkFor(summary, from, to)).drops += 1;
-        if (event.field("reason")) |reason| {
-            try incrementCounter(summary.allocator, &summary.network_drop_reasons, reason);
-        } else if (event.field("drop_rate") != null) {
-            try incrementCounter(summary.allocator, &summary.network_drop_reasons, "send_drop");
-        }
+        const reason = event.field("reason") orelse return error.InvalidTraceEvent;
+        try incrementCounter(summary.allocator, &summary.network_drop_reasons, reason);
     }
 }
 
@@ -379,4 +369,39 @@ test "trace summary: summarizes run context and network events" {
         \\trace.network.link from=3 to=1 sends=0 deliveries=0 drops=1
         \\
     , output);
+}
+
+test "trace summary: rejects malformed event prefix" {
+    try std.testing.expectError(
+        error.InvalidTraceLine,
+        summarize(std.testing.allocator, "world.init seed=1\n"),
+    );
+}
+
+test "trace summary: rejects malformed field" {
+    try std.testing.expectError(
+        error.InvalidTraceLine,
+        summarize(std.testing.allocator, "event=0 world.init seed=1 broken\n"),
+    );
+}
+
+test "trace summary: rejects missing required event field" {
+    try std.testing.expectError(
+        error.InvalidTraceEvent,
+        summarize(std.testing.allocator, "event=0 world.tick\n"),
+    );
+}
+
+test "trace summary: rejects non-monotonic event index" {
+    try std.testing.expectError(
+        error.InvalidTraceEvent,
+        summarize(std.testing.allocator, "event=1 world.init seed=1\n"),
+    );
+}
+
+test "trace summary: rejects network drop without reason" {
+    try std.testing.expectError(
+        error.InvalidTraceEvent,
+        summarize(std.testing.allocator, "event=0 network.drop id=1 from=0 to=1\n"),
+    );
 }

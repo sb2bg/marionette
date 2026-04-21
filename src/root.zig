@@ -124,9 +124,6 @@ pub const TraceSummaryError = trace_summary_module.TraceSummaryError;
 /// Build an owned summary from line-oriented trace bytes.
 pub const summarize = trace_summary_module.summarize;
 
-/// Convenience wrapper around `Summary.writeSummary`.
-pub const writeSummary = trace_summary_module.writeSummary;
-
 test {
     _ = @import("env.zig");
     _ = @import("network.zig");

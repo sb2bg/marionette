@@ -89,11 +89,11 @@ after.
 - `Summary` contains: total event count excluding the trace header, final
   simulated timestamp (parsed from `world.tick now_ns` or `world.run_for end_ns`
   if the trace ever emitted one), counts grouped by subsystem (`world.*`,
-  `network.*`, `register.*`, etc.), counts per specific event name within the
-  top 8 most voluminous subsystems, a "singletons" list of event names that
+  `network.*`, `register.*`, etc.), the top 8 most voluminous event names,
+  a "singletons" list of event names that
   fired exactly once (long-tail surfacing).
 - Replay context is echoed at the top of the summary: `run.profile`,
-  `run.tag`, `run.attribute` pulled from the trace header.
+  `run.tag`, `run.attribute` pulled from the trace.
 - A dedicated network-aware breakdown: sends, drops by reason, deliveries,
   per-link send/deliver/drop counts.
 - A test verifies the summary on a known trace snapshot (use the existing
@@ -103,7 +103,7 @@ after.
 **Files likely to change:**
 
 - New: `src/trace_summary.zig`.
-- Modify: `src/root.zig` (export `Summary`, `summarize`, `writeSummary`).
+- Modify: `src/root.zig` (export `Summary` and `summarize`).
 - Modify: `tests/` (new snapshot test file).
 
 **Size:** ~300 lines including tests.

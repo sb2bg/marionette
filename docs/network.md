@@ -280,7 +280,7 @@ payload and protocol semantics.
 Current network trace events:
 
 - `network.send id={} from={} to={} deliver_at={} latency_ns={}`
-- `network.drop id={} from={} to={} drop_rate={}/{} roll={}`
+- `network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop`
 - `network.drop id={} from={} to={} reason=source_down`
 - `network.drop id={} from={} to={} reason=destination_down`
 - `network.drop id={} from={} to={} reason=link_disabled`
