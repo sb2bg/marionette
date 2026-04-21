@@ -11,16 +11,54 @@ const ns_per_ms: mar.Duration = 1_000_000;
 const replica_count = 3;
 const quorum = 2;
 const max_messages = 64;
+const normal_proposal_drop_percent = 20;
+const normal_retry_limit = 8;
 
 const checks = [_]mar.StateCheck(Cluster){
     .{ .name = "committed register is safe", .check = committedRegisterIsSafe },
+};
+
+const normal_tags = [_][]const u8{
+    "example:replicated_register",
+    "scenario:smoke",
+};
+
+const normal_attributes = [_]mar.RunAttribute{
+    .{ .key = "replicas", .value = .{ .uint = replica_count } },
+    .{ .key = "quorum", .value = .{ .uint = quorum } },
+    .{ .key = "max_messages", .value = .{ .uint = max_messages } },
+    .{ .key = "proposal_drop_percent", .value = .{ .uint = normal_proposal_drop_percent } },
+    .{ .key = "retry_limit", .value = .{ .uint = normal_retry_limit } },
+};
+
+const buggy_tags = [_][]const u8{
+    "example:replicated_register",
+    "scenario:bug",
+    "bug:forced_divergent_commit",
+};
+
+const common_attributes = [_]mar.RunAttribute{
+    .{ .key = "replicas", .value = .{ .uint = replica_count } },
+    .{ .key = "quorum", .value = .{ .uint = quorum } },
+};
+
+const conflict_tags = [_][]const u8{
+    "example:replicated_register",
+    "scenario:conflict",
+    "conflict:same_version_different_value",
 };
 
 /// Run the correct replicated-register scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     var report = try mar.runWithState(
         allocator,
-        .{ .seed = seed, .tick_ns = ns_per_ms },
+        .{
+            .seed = seed,
+            .tick_ns = ns_per_ms,
+            .profile_name = "replicated-register-smoke",
+            .tags = &normal_tags,
+            .attributes = &normal_attributes,
+        },
         Cluster,
         Cluster.init,
         scenario,
@@ -42,7 +80,13 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
     return mar.runWithState(
         allocator,
-        .{ .seed = seed, .tick_ns = ns_per_ms },
+        .{
+            .seed = seed,
+            .tick_ns = ns_per_ms,
+            .profile_name = "replicated-register-bug",
+            .tags = &buggy_tags,
+            .attributes = &common_attributes,
+        },
         Cluster,
         Cluster.init,
         buggyScenario,
@@ -54,7 +98,13 @@ pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport 
 pub fn runConflictScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     var report = try mar.runWithState(
         allocator,
-        .{ .seed = seed, .tick_ns = ns_per_ms },
+        .{
+            .seed = seed,
+            .tick_ns = ns_per_ms,
+            .profile_name = "replicated-register-conflict",
+            .tags = &conflict_tags,
+            .attributes = &common_attributes,
+        },
         Cluster,
         Cluster.init,
         conflictScenario,
@@ -80,8 +130,8 @@ fn scenario(world: *mar.World, cluster: *Cluster) !void {
     try cluster.write(world, .{
         .version = 1,
         .value = 41,
-        .proposal_drop_percent = 20,
-        .retry_limit = 8,
+        .proposal_drop_percent = normal_proposal_drop_percent,
+        .retry_limit = normal_retry_limit,
     });
 }
 

@@ -42,6 +42,12 @@ pub const EventQueueError = @import("scheduler.zig").EventQueueError;
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 
+/// Replay-visible typed attribute attached to a run.
+pub const RunAttribute = run_module.RunAttribute;
+
+/// Replay-visible scalar attribute value.
+pub const RunAttributeValue = run_module.RunAttributeValue;
+
 /// Named scenario check run by `run`.
 pub const Check = run_module.Check;
 

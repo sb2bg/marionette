@@ -16,6 +16,34 @@ pub const Check = struct {
     check: *const fn (*World) anyerror!void,
 };
 
+/// Replay-visible scalar attribute value.
+pub const RunAttributeValue = union(enum) {
+    string: []const u8,
+    int: i64,
+    uint: u64,
+    boolean: bool,
+    float: f64,
+
+    fn write(self: RunAttributeValue, writer: anytype) !void {
+        switch (self) {
+            .string => |value| try writer.print("string:{s}", .{value}),
+            .int => |value| try writer.print("int:{}", .{value}),
+            .uint => |value| try writer.print("uint:{}", .{value}),
+            .boolean => |value| try writer.print("bool:{}", .{value}),
+            .float => |value| try writer.print("float:{d}", .{value}),
+        }
+    }
+};
+
+/// Replay-visible typed attribute attached to a run.
+///
+/// Keys should be stable scalar text. Values keep their type so tooling does
+/// not need to infer meaning from presentation strings.
+pub const RunAttribute = struct {
+    key: []const u8,
+    value: RunAttributeValue,
+};
+
 /// Named scenario check over user-owned scenario state.
 pub fn StateCheck(comptime State: type) type {
     return struct {
@@ -34,6 +62,12 @@ pub const RunOptions = struct {
     start_ns: clock_module.Timestamp = 0,
     /// Nanoseconds advanced by one world tick.
     tick_ns: clock_module.Duration = clock_module.default_tick_ns,
+    /// Optional named profile, such as "smoke", "swarm", or "replay".
+    profile_name: ?[]const u8 = null,
+    /// Loose searchable labels.
+    tags: []const []const u8 = &.{},
+    /// Expanded typed run/profile facts needed to reproduce the scenario.
+    attributes: []const RunAttribute = &.{},
     /// Checks run after a successful scenario body.
     checks: []const Check = &.{},
 
@@ -97,26 +131,46 @@ pub const RunFailure = struct {
         self.* = undefined;
     }
 
-    /// Print a compact failure report.
-    pub fn print(self: RunFailure) void {
-        std.debug.print(
-            "marionette failure: kind={s} seed={} start_ns={} tick_ns={} first_events={} second_events={}",
+    /// Write a compact, stable failure summary.
+    pub fn writeSummary(self: RunFailure, writer: anytype) !void {
+        try writer.print(
+            "marionette failure: kind={s} seed={}",
+            .{ @tagName(self.kind), self.options.seed },
+        );
+        if (self.options.profile_name) |profile_name| {
+            try writer.print(" profile={s}", .{profile_name});
+        }
+        try writer.print(
+            " start_ns={} tick_ns={} first_events={} second_events={}",
             .{
-                @tagName(self.kind),
-                self.options.seed,
                 self.options.start_ns,
                 self.options.tick_ns,
                 self.first_event_count,
                 self.second_event_count,
             },
         );
+        for (self.options.tags) |tag| {
+            try writer.print(" tag={s}", .{tag});
+        }
+        for (self.options.attributes) |attribute| {
+            try writer.print(" {s}=", .{attribute.key});
+            try attribute.value.write(writer);
+        }
         if (self.error_name) |name| {
-            std.debug.print(" error={s}", .{name});
+            try writer.print(" error={s}", .{name});
         }
         if (self.check_name) |name| {
-            std.debug.print(" check={s}", .{name});
+            try writer.print(" check={s}", .{name});
         }
-        std.debug.print("\n", .{});
+        try writer.writeByte('\n');
+    }
+
+    /// Print a compact failure report.
+    pub fn print(self: RunFailure) void {
+        var buffer: [1024]u8 = undefined;
+        const stderr = std.debug.lockStderr(&buffer);
+        defer std.debug.unlockStderr();
+        self.writeSummary(&stderr.file_writer.interface) catch {};
     }
 };
 
@@ -267,6 +321,7 @@ fn runOnce(
 ) std.mem.Allocator.Error!RunOnceResult {
     var world = try World.init(allocator, options.worldOptions());
     defer world.deinit();
+    try recordRunContext(&world, options);
 
     scenario(&world) catch |err| {
         return .{ .failed = try failureFromWorld(
@@ -310,6 +365,7 @@ fn runOnceWithState(
 ) std.mem.Allocator.Error!RunOnceResult {
     var world = try World.init(allocator, options.worldOptions());
     defer world.deinit();
+    try recordRunContext(&world, options);
 
     var state = init_state();
     scenario(&world, &state) catch |err| {
@@ -355,6 +411,39 @@ fn runOnceWithState(
         .trace = try allocator.dupe(u8, world.traceBytes()),
         .event_count = world.nextEventIndex(),
     } };
+}
+
+fn recordRunContext(world: *World, options: RunOptions) std.mem.Allocator.Error!void {
+    if (options.profile_name) |profile_name| {
+        try world.record("run.profile name={s}", .{profile_name});
+    }
+    for (options.tags) |tag| {
+        try world.record("run.tag value={s}", .{tag});
+    }
+    for (options.attributes) |attribute| {
+        switch (attribute.value) {
+            .string => |value| try world.record(
+                "run.attribute key={s} value=string:{s}",
+                .{ attribute.key, value },
+            ),
+            .int => |value| try world.record(
+                "run.attribute key={s} value=int:{}",
+                .{ attribute.key, value },
+            ),
+            .uint => |value| try world.record(
+                "run.attribute key={s} value=uint:{}",
+                .{ attribute.key, value },
+            ),
+            .boolean => |value| try world.record(
+                "run.attribute key={s} value=bool:{}",
+                .{ attribute.key, value },
+            ),
+            .float => |value| try world.record(
+                "run.attribute key={s} value=float:{d}",
+                .{ attribute.key, value },
+            ),
+        }
+    }
 }
 
 fn failureFromWorld(
@@ -434,6 +523,68 @@ test "run: scenario errors preserve partial trace" {
             try std.testing.expectEqual(RunFailureKind.scenario_error, failure.kind);
             try std.testing.expectEqualStrings("Boom", failure.error_name.?);
             try std.testing.expectEqual(@as(u64, 2), failure.first_event_count);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.before_error") != null);
+        },
+    }
+}
+
+test "run: attributes and tags are traced before scenario code" {
+    const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
+    const attributes = [_]RunAttribute{
+        .{ .key = "replicas", .value = .{ .uint = 3 } },
+        .{ .key = "proposal_drop_percent", .value = .{ .uint = 20 } },
+        .{ .key = "faults_enabled", .value = .{ .boolean = true } },
+    };
+
+    var report = try run(std.testing.allocator, .{
+        .seed = 1234,
+        .profile_name = "smoke",
+        .tags = &tags,
+        .attributes = &attributes,
+    }, deterministicScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| {
+            try std.testing.expectEqual(@as(u64, 10), passed.event_count);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.profile name=smoke") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.tag value=example:replicated_register") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=replicas value=uint:3") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=proposal_drop_percent value=uint:20") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=faults_enabled value=bool:true") != null);
+        },
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+test "RunFailure: writeSummary includes replay attributes and tags" {
+    const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
+    const attributes = [_]RunAttribute{
+        .{ .key = "replicas", .value = .{ .uint = 3 } },
+        .{ .key = "proposal_drop_percent", .value = .{ .uint = 20 } },
+    };
+
+    var report = try run(std.testing.allocator, .{
+        .seed = 1234,
+        .profile_name = "smoke",
+        .tags = &tags,
+        .attributes = &attributes,
+    }, failingScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            var buffer: [512]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try failure.writeSummary(&writer);
+            const summary = writer.buffered();
+
+            try std.testing.expectEqualStrings(
+                "marionette failure: kind=scenario_error seed=1234 profile=smoke start_ns=0 tick_ns=1 first_events=7 second_events=0 tag=example:replicated_register tag=scenario:smoke replicas=uint:3 proposal_drop_percent=uint:20 error=Boom\n",
+                summary,
+            );
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "run.profile name=smoke") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.before_error") != null);
         },
     }
