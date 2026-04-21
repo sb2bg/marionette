@@ -1,12 +1,16 @@
-<a href="https://sb2bg.github.io/marionette/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/transparent_logo_text_dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="assets/transparent_logo_text.png">
-    <img src="assets/transparent_logo_text.png" alt="Marionette" width="420">
-  </picture>
-</a>
+<p align="center">
+  <a href="https://sb2bg.github.io/marionette/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/transparent_logo_text_dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/transparent_logo_text.png">
+      <img src="assets/transparent_logo_text.png" alt="Marionette" width="420">
+    </picture>
+  </a>
+</p>
 
-[Docs and blog](https://sb2bg.github.io/marionette/)
+<p align="center">
+  <a href="https://sb2bg.github.io/marionette/">Docs and blog</a>
+</p>
 
 Deterministic simulation testing for Zig.
 
