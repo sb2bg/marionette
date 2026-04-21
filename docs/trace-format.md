@@ -59,6 +59,8 @@ Rules:
 - Node-state changes use `network.node`.
 - Link-filter changes use `network.link`, `network.partition`, and
   `network.heal`. Link-only healing uses `network.heal_links`.
+- Path-clog changes use `network.clog`, `network.unclog`, and
+  `network.unclog_all`.
 
 ## What Goes In
 

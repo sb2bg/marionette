@@ -9,9 +9,9 @@ For the intended production/simulation API split, see
 The goal is a deterministic network authority that can make distributed
 failures replayable from a seed. The first slice is intentionally small:
 messages can be delayed, dropped, queued, filtered by directed link state,
-partitioned, healed, stopped, restarted, and delivered in a stable order.
-Replay recording, path clogging, node spawning, and the final scheduler API
-come later.
+clogged by directed path, partitioned, healed, stopped, restarted, and
+delivered in a stable order. Replay recording, node spawning, and the final
+scheduler API come later.
 
 ## VOPR Lessons
 
@@ -161,6 +161,37 @@ Re-enable a directed link with:
 try sim.network().setLink(0, 1, true);
 ```
 
+## Path Clogging
+
+Clogs are directed path faults. A clogged path keeps its packets queued until
+simulated time reaches the clog deadline, while other paths keep delivering:
+
+```zig
+try sim.network().clog(0, 1, 100 * ns_per_ms);
+```
+
+If a packet for `0 -> 1` is ready at `t=10ms` but the path is clogged until
+`t=100ms`, `popReady` skips that path and may deliver packets from other paths
+first. `nextDeliveryAt` reports the earliest time at which any queued packet
+can actually make progress, accounting for active clogs.
+
+Clear one path clog explicitly with:
+
+```zig
+try sim.network().unclog(0, 1);
+```
+
+Clear all active clogs with:
+
+```zig
+try sim.network().unclogAll();
+```
+
+Clogs also expire when simulated time reaches `until_ns`. `popReady` evolves
+that state before selecting a packet, and `sim.network().tick()` lets a future
+scheduler evolve time-based network faults at a tick boundary even when no
+packet is delivered.
+
 ## Partitions
 
 Partitions are expressed as batches of directed link filters. The current
@@ -182,8 +213,8 @@ try sim.network().heal();
 ```
 
 `heal` restores default network state by re-enabling links and marking nodes
-up. Use `healLinks` when a scenario needs to clear link filters without
-changing node state.
+up, and it clears active clogs. Use `healLinks` when a scenario needs to clear
+link filters without changing node state or path clogs.
 
 This is deliberately simple. Later network work can add asymmetric partitions,
 automatic partition schedules, and liveness modes.
@@ -244,8 +275,11 @@ Current network trace events:
 - `network.deliver id={} from={} to={} now_ns={}`
 - `network.node node={} up={}`
 - `network.link from={} to={} enabled={}`
+- `network.clog from={} to={} duration_ns={} until_ns={}`
+- `network.unclog from={} to={} active={}`
+- `network.unclog_all clogged_count={}`
 - `network.partition left_count={} right_count={}`
-- `network.heal disabled_count={} down_count={}`
+- `network.heal disabled_count={} down_count={} clogged_count={}`
 - `network.heal_links disabled_count={}`
 
 The payload is not dumped into the core network trace. User code should record
@@ -255,14 +289,15 @@ register example does with `register.message`.
 ## Fault Evolution
 
 Current packet loss is still a send-time decision, and partitions/node state
-are explicit scenario actions. That is enough for Phase 0 examples, but it is
-not the final VOPR-style fault model.
+are explicit scenario actions. Path clogs are time-based: the control plane
+sets a clog deadline, and the network evolves that state as simulated time
+advances. That is useful, but it is not the final VOPR-style fault scheduler.
 
 The next structural layer should be tick-evolved network state: partitions
-start and heal on simulator ticks, path clogs last for deterministic
-durations, and liveness mode can change network defaults for the rest of a
-run. The per-link queue topology exists so those faults can be added without
-rewriting the packet core again.
+start and heal on simulator ticks, clog probabilities fire per path, and
+liveness mode can change network defaults for the rest of a run. The per-link
+queue topology exists so those faults can be added without rewriting the
+packet core again.
 
 ## Current Limits
 
@@ -270,10 +305,9 @@ rewriting the packet core again.
 
 - Replay recording.
 - Packet duplication.
-- Path clogging.
 - Broadcast.
 - Node spawning.
-- Tick-evolved fault schedules.
+- Probabilistic tick-evolved fault schedules.
 - Network-level default send options.
 - Event-by-event scheduler callbacks.
 - Human summary rendering.

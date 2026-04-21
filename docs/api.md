@@ -246,6 +246,13 @@ try sim.network().setLink(0, 1, false);
 try sim.network().setLink(0, 1, true);
 ```
 
+Directed paths can also be clogged for a simulated duration:
+
+```zig
+try sim.network().clog(0, 1, 100 * ns_per_ms);
+try sim.network().unclog(0, 1);
+```
+
 Partitions disable every directed link crossing between two groups:
 
 ```zig

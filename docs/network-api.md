@@ -92,6 +92,7 @@ schedulers:
 
 ```zig
 try sim.network().setNode(1, false);
+try sim.network().clog(0, 1, 100 * ns_per_ms);
 try sim.network().partition(&left, &right);
 try sim.network().heal();
 ```
@@ -103,6 +104,7 @@ Today, these operations live on `UnstableNetworkSimulation.network()`:
 
 ```zig
 try sim.network().setNode(1, false);
+try sim.network().clog(0, 1, 100 * ns_per_ms);
 try sim.network().partition(&left, &right);
 try sim.network().heal();
 ```

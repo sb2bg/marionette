@@ -61,6 +61,21 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
                 try self.network.setLink(from, to, enabled);
             }
 
+            /// Clog one directed path until simulated time advances by `duration_ns`.
+            pub fn clog(self: Control, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
+                try self.network.clog(from, to, duration_ns);
+            }
+
+            /// Clear one directed path clog.
+            pub fn unclog(self: Control, from: NodeId, to: NodeId) !void {
+                try self.network.unclog(from, to);
+            }
+
+            /// Clear every directed path clog.
+            pub fn unclogAll(self: Control) !void {
+                try self.network.unclogAll();
+            }
+
             /// Disable all directed links crossing between two groups.
             pub fn partition(
                 self: Control,
@@ -78,6 +93,11 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             /// Re-enable every disabled link without changing node state.
             pub fn healLinks(self: Control) !void {
                 try self.network.healLinks();
+            }
+
+            /// Evolve time-based network fault state at the current simulated time.
+            pub fn tick(self: Control) !void {
+                try self.network.tick();
             }
         };
 
@@ -101,6 +121,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
         const Link = struct {
             enabled: bool = true,
+            clogged_until: clock_module.Timestamp = 0,
             pending: Queue = .init(),
         };
 
@@ -143,12 +164,13 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
         /// Return the timestamp of the next queued packet, if any.
         pub fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
-            var best: ?Packet = null;
+            var best: ?clock_module.Timestamp = null;
             for (&self.links) |*link| {
                 const packet = link.pending.peek() orelse continue;
-                if (best == null or packetLessThan(packet, best.?)) best = packet;
+                const ready_at = @max(packet.deliver_at, link.clogged_until);
+                if (best == null or ready_at < best.?) best = ready_at;
             }
-            return if (best) |packet| packet.deliver_at else null;
+            return best;
         }
 
         /// Return whether a directed link is currently enabled.
@@ -180,6 +202,40 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             );
         }
 
+        fn clog(self: *Self, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
+            std.debug.assert(duration_ns > 0);
+            std.debug.assert(duration_ns % self.world.clock().tick_ns == 0);
+
+            const until = self.world.now() + duration_ns;
+            const link = &self.links[self.pathIndex(from, to)];
+            link.clogged_until = @max(link.clogged_until, until);
+
+            try self.world.record(
+                "network.clog from={} to={} duration_ns={} until_ns={}",
+                .{ from, to, duration_ns, link.clogged_until },
+            );
+        }
+
+        fn unclog(self: *Self, from: NodeId, to: NodeId) !void {
+            const link = &self.links[self.pathIndex(from, to)];
+            const active = link.clogged_until > self.world.now();
+            link.clogged_until = 0;
+
+            try self.world.record(
+                "network.unclog from={} to={} active={}",
+                .{ from, to, active },
+            );
+        }
+
+        fn unclogAll(self: *Self) !void {
+            const clogged_count = self.cloggedLinkCount();
+            self.clearClogs();
+            try self.world.record(
+                "network.unclog_all clogged_count={}",
+                .{clogged_count},
+            );
+        }
+
         fn partition(
             self: *Self,
             left: []const NodeId,
@@ -203,11 +259,13 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         fn heal(self: *Self) !void {
             const disabled_count = self.disabledLinkCount();
             const down_count = self.downNodeCount();
+            const clogged_count = self.cloggedLinkCount();
             self.clearDisabledLinks();
+            self.clearClogs();
             self.clearDownNodes();
             try self.world.record(
-                "network.heal disabled_count={} down_count={}",
-                .{ disabled_count, down_count },
+                "network.heal disabled_count={} down_count={} clogged_count={}",
+                .{ disabled_count, down_count, clogged_count },
             );
         }
 
@@ -218,6 +276,10 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
                 "network.heal_links disabled_count={}",
                 .{disabled_count},
             );
+        }
+
+        fn tick(self: *Self) !void {
+            try self.expireClogs();
         }
 
         /// Submit one packet through the simulated network.
@@ -283,6 +345,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         /// Pop the next ready packet and record its delivery.
         pub fn popReady(self: *Self) !?Packet {
             while (true) {
+                try self.expireClogs();
                 const link_index = self.nextReadyLinkIndex() orelse return null;
                 const ready = self.links[link_index].pending.pop().?;
 
@@ -341,6 +404,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             for (&self.links, 0..) |*link, index| {
                 const packet = link.pending.peek() orelse continue;
                 if (packet.deliver_at > self.world.now()) continue;
+                if (link.clogged_until > self.world.now()) continue;
                 if (best_index == null or packetLessThan(packet, best_packet)) {
                     best_index = index;
                     best_packet = packet;
@@ -357,6 +421,10 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             for (&self.links) |*link| link.enabled = true;
         }
 
+        fn clearClogs(self: *Self) void {
+            for (&self.links) |*link| link.clogged_until = 0;
+        }
+
         fn clearDownNodes(self: *Self) void {
             for (&self.down_nodes) |*down| down.* = false;
         }
@@ -367,6 +435,29 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
                 if (!link.enabled) count += 1;
             }
             return count;
+        }
+
+        fn cloggedLinkCount(self: *const Self) usize {
+            var count: usize = 0;
+            const now_ns = self.world.now();
+            for (&self.links) |*link| {
+                if (link.clogged_until > now_ns) count += 1;
+            }
+            return count;
+        }
+
+        fn expireClogs(self: *Self) !void {
+            const now_ns = self.world.now();
+            for (&self.links, 0..) |*link, index| {
+                if (link.clogged_until == 0 or link.clogged_until > now_ns) continue;
+                const from: NodeId = @intCast(index / process_count);
+                const to: NodeId = @intCast(index % process_count);
+                link.clogged_until = 0;
+                try self.world.record(
+                    "network.unclog from={} to={} active=false",
+                    .{ from, to },
+                );
+            }
         }
 
         fn downNodeCount(self: *const Self) usize {
@@ -522,6 +613,73 @@ test "network simulation: control view owns fault orchestration" {
     try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.link from=0 to=1 enabled=false") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=link_disabled") != null);
+}
+
+test "network: clogged path waits while other paths deliver" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var sim = Sim.init(&world);
+    try sim.network().clog(0, 1, 30);
+    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try sim.packetCore().send(0, 2, .{ .value = 2 }, .{ .min_latency_ns = 10 });
+
+    try std.testing.expectEqual(@as(?clock_module.Timestamp, 10), sim.packetCore().nextDeliveryAt());
+    try world.runFor(10);
+    const first = (try sim.packetCore().popReady()).?;
+    try std.testing.expectEqual(@as(NodeId, 2), first.to);
+    try std.testing.expectEqual(@as(u64, 1), first.id);
+
+    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
+    try std.testing.expectEqual(@as(?clock_module.Timestamp, 30), sim.packetCore().nextDeliveryAt());
+
+    try world.runFor(20);
+    const second = (try sim.packetCore().popReady()).?;
+    try std.testing.expectEqual(@as(NodeId, 1), second.to);
+    try std.testing.expectEqual(@as(u64, 0), second.id);
+
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.clog from=0 to=1 duration_ns=30 until_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.unclog from=0 to=1 active=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=1 from=0 to=2 now_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1 now_ns=30") != null);
+}
+
+test "network: explicit unclog releases queued packets early" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var sim = Sim.init(&world);
+    try sim.network().clog(0, 1, 30);
+    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+
+    try world.runFor(10);
+    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
+    try sim.network().unclog(0, 1);
+
+    const packet = (try sim.packetCore().popReady()).?;
+    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.unclog from=0 to=1 active=true") != null);
+}
+
+test "network: heal clears active clogs" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var sim = Sim.init(&world);
+    try sim.network().clog(0, 1, 30);
+    try sim.network().heal();
+
+    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
+    try world.runFor(10);
+    const packet = (try sim.packetCore().popReady()).?;
+    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal disabled_count=0 down_count=0 clogged_count=1") != null);
 }
 
 test "network: disabled links drop ready packets at delivery" {
