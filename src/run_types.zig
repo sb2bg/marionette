@@ -3,7 +3,8 @@
 const std = @import("std");
 
 const clock_module = @import("clock.zig");
-const World = @import("world.zig").World;
+const world_module = @import("world.zig");
+const World = world_module.World;
 
 /// Named scenario check run by `mar.run`.
 ///
@@ -26,7 +27,10 @@ pub const RunAttributeValue = union(enum) {
 
     fn write(self: RunAttributeValue, writer: anytype) !void {
         switch (self) {
-            .string => |value| try writer.print("string:{s}", .{value}),
+            .string => |value| {
+                try writer.print("string:", .{});
+                try world_module.writeEscapedTraceText(writer, value, true);
+            },
             .int => |value| try writer.print("int:{}", .{value}),
             .uint => |value| try writer.print("uint:{}", .{value}),
             .boolean => |value| try writer.print("bool:{}", .{value}),
@@ -318,7 +322,8 @@ pub const RunFailure = struct {
             .{ @tagName(self.kind), self.options.seed },
         );
         if (self.options.profile_name) |profile_name| {
-            try writer.print(" profile={s}", .{profile_name});
+            try writer.print(" profile=", .{});
+            try world_module.writeEscapedTraceText(writer, profile_name, false);
         }
         try writer.print(
             " start_ns={} tick_ns={} first_events={} second_events={}",
@@ -330,17 +335,21 @@ pub const RunFailure = struct {
             },
         );
         for (self.options.tags) |tag| {
-            try writer.print(" tag={s}", .{tag});
+            try writer.print(" tag=", .{});
+            try world_module.writeEscapedTraceText(writer, tag, false);
         }
         for (self.options.attributes) |attribute| {
-            try writer.print(" {s}=", .{attribute.key});
+            try writer.writeByte(' ');
+            try world_module.writeEscapedTraceText(writer, attribute.key, false);
+            try writer.writeByte('=');
             try attribute.value.write(writer);
         }
         if (self.error_name) |name| {
             try writer.print(" error={s}", .{name});
         }
         if (self.check_name) |name| {
-            try writer.print(" check={s}", .{name});
+            try writer.print(" check=", .{});
+            try world_module.writeEscapedTraceText(writer, name, false);
         }
         try writer.writeByte('\n');
     }

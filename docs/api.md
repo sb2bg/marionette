@@ -125,6 +125,19 @@ Record service-level trace events:
 try world.record("request.accepted id={}", .{42});
 ```
 
+Use structured fields when a value comes from user text, paths, or other
+runtime bytes that may contain spaces or separators:
+
+```zig
+try world.recordFields("disk.open", &.{
+    mar.traceField("path", .{ .text = "/tmp/a b" }),
+    mar.traceField("mode", .{ .literal = "read" }),
+});
+```
+
+The text field is written as `path=/tmp/a%20b`; raw `World.record` remains
+strict and returns `error.InvalidTracePayload` for ambiguous formatted values.
+
 Read the trace:
 
 ```zig

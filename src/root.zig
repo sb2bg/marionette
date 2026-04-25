@@ -112,6 +112,15 @@ pub const RunError = run_module.RunError;
 /// Errors returned while writing deterministic trace records.
 pub const TraceError = run_module.TraceError;
 
+/// One structured trace field written by `World.recordFields`.
+pub const TraceField = @import("world.zig").TraceField;
+
+/// Replay-safe scalar trace value.
+pub const TraceValue = @import("world.zig").TraceValue;
+
+/// Build one structured trace field.
+pub const traceField = @import("world.zig").traceField;
+
 /// Run a scenario twice with the same seed and compare traces.
 pub const run = run_module.run;
 

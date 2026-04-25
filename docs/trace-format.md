@@ -45,12 +45,17 @@ Rules:
 - Keys use lowercase words separated by `_`.
 - Values must be non-empty stable text for the same Marionette version, Zig
   version, target platform, user code, options, and seed.
-- `World.record` asserts that event payloads are unambiguous: no leading,
-  trailing, or repeated spaces; every field after the event name must be
-  exactly `key=value`; keys may contain only lowercase ASCII, digits, and `_`;
-  values may not contain space, `=`, newline, carriage return, tab, or `\`.
+- `World.record` returns `error.InvalidTracePayload` if a formatted event
+  payload is ambiguous: no leading, trailing, or repeated spaces; every field
+  after the event name must be exactly `key=value`; keys may contain only
+  lowercase ASCII, digits, and `_`; values may not contain space, `=`, newline,
+  carriage return, tab, or `\`.
+- `World.recordFields` writes the same event shape from structured fields.
+  Text values are percent-encoded byte-by-byte for ambiguous bytes: space,
+  `=`, `%`, `\`, ASCII control bytes, and non-ASCII bytes become `%HH`.
+  Existing unambiguous ASCII such as `scenario:smoke` remains readable.
 - Run attributes encode the Marionette scalar type in the value text:
-  `string:<text>`, `int:<i64>`, `uint:<u64>`, `bool:<true|false>`, or
+  `string:<escaped-text>`, `int:<i64>`, `uint:<u64>`, `bool:<true|false>`, or
   `float:<f64>`.
 - BUGGIFY events use
   `buggify hook=<comptime-tag> rate=<numerator>/<denominator> roll=<value> fired=<bool>`.

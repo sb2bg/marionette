@@ -17,7 +17,10 @@ pub const RunResult = run_types.RunResult;
 pub const StateCheck = run_types.StateCheck;
 pub const runAttribute = run_types.runAttribute;
 pub const runAttributesFrom = run_types.runAttributesFrom;
+pub const TraceField = world_module.TraceField;
 pub const TraceError = world_module.TraceError;
+pub const TraceValue = world_module.TraceValue;
+pub const traceField = world_module.traceField;
 
 pub const RunError = std.mem.Allocator.Error || TraceError;
 
@@ -213,33 +216,53 @@ fn runOnceWithState(
 
 fn recordRunContext(world: *World, options: RunOptions) RunError!void {
     if (options.profile_name) |profile_name| {
-        try world.record("run.profile name={s}", .{profile_name});
+        try world.recordFields("run.profile", &.{
+            traceField("name", .{ .text = profile_name }),
+        });
     }
     for (options.tags) |tag| {
-        try world.record("run.tag value={s}", .{tag});
+        try world.recordFields("run.tag", &.{
+            traceField("value", .{ .text = tag }),
+        });
     }
     for (options.attributes) |attribute| {
         switch (attribute.value) {
-            .string => |value| try world.record(
-                "run.attribute key={s} value=string:{s}",
-                .{ attribute.key, value },
-            ),
-            .int => |value| try world.record(
-                "run.attribute key={s} value=int:{}",
-                .{ attribute.key, value },
-            ),
-            .uint => |value| try world.record(
-                "run.attribute key={s} value=uint:{}",
-                .{ attribute.key, value },
-            ),
-            .boolean => |value| try world.record(
-                "run.attribute key={s} value=bool:{}",
-                .{ attribute.key, value },
-            ),
-            .float => |value| try world.record(
-                "run.attribute key={s} value=float:{d}",
-                .{ attribute.key, value },
-            ),
+            .string => |value| try world.recordFields("run.attribute", &.{
+                traceField("key", .{ .text = attribute.key }),
+                traceField("value", .{ .typed_text = .{ .type_name = "string", .value = value } }),
+            }),
+            .int => |value| {
+                var buffer: [64]u8 = undefined;
+                const literal = std.fmt.bufPrint(&buffer, "int:{}", .{value}) catch unreachable;
+                try world.recordFields("run.attribute", &.{
+                    traceField("key", .{ .text = attribute.key }),
+                    traceField("value", .{ .literal = literal }),
+                });
+            },
+            .uint => |value| {
+                var buffer: [64]u8 = undefined;
+                const literal = std.fmt.bufPrint(&buffer, "uint:{}", .{value}) catch unreachable;
+                try world.recordFields("run.attribute", &.{
+                    traceField("key", .{ .text = attribute.key }),
+                    traceField("value", .{ .literal = literal }),
+                });
+            },
+            .boolean => |value| {
+                var buffer: [64]u8 = undefined;
+                const literal = std.fmt.bufPrint(&buffer, "bool:{}", .{value}) catch unreachable;
+                try world.recordFields("run.attribute", &.{
+                    traceField("key", .{ .text = attribute.key }),
+                    traceField("value", .{ .literal = literal }),
+                });
+            },
+            .float => |value| {
+                var buffer: [128]u8 = undefined;
+                const literal = std.fmt.bufPrint(&buffer, "float:{d}", .{value}) catch unreachable;
+                try world.recordFields("run.attribute", &.{
+                    traceField("key", .{ .text = attribute.key }),
+                    traceField("value", .{ .literal = literal }),
+                });
+            },
         }
     }
 }
@@ -366,16 +389,21 @@ test "run: attributes and tags are traced before scenario code" {
     }
 }
 
-test "run: invalid replay metadata is rejected before scenario code" {
+test "run: replay metadata text is escaped before scenario code" {
     const tags = [_][]const u8{"invalid tag"};
 
-    try std.testing.expectError(
-        error.InvalidTracePayload,
-        run(std.testing.allocator, .{
-            .seed = 1234,
-            .tags = &tags,
-        }, deterministicScenario),
-    );
+    var report = try run(std.testing.allocator, .{
+        .seed = 1234,
+        .tags = &tags,
+    }, deterministicScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| {
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.tag value=invalid%20tag") != null);
+        },
+        .failed => return error.UnexpectedRunFailure,
+    }
 }
 
 fn invalidTraceScenario(world: *World) !void {
@@ -473,6 +501,38 @@ test "RunFailure: owns replay metadata used by summaries" {
             try std.testing.expect(std.mem.indexOf(u8, summary, "tag=tag_a") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "mode=string:fast") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "check=fails") != null);
+        },
+    }
+}
+
+test "RunFailure: summary escapes replay metadata text" {
+    const tags = [_][]const u8{"tag with space"};
+    const attributes = [_]RunAttribute{
+        .{ .key = "mode name", .value = .{ .string = "fast mode" } },
+    };
+    const checks = [_]Check{.{ .name = "check name", .check = failingCheck }};
+
+    var report = try run(std.testing.allocator, .{
+        .seed = 1234,
+        .profile_name = "smoke test",
+        .tags = &tags,
+        .attributes = &attributes,
+        .checks = &checks,
+    }, deterministicScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            var buffer: [512]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try failure.writeSummary(&writer);
+            const summary = writer.buffered();
+
+            try std.testing.expect(std.mem.indexOf(u8, summary, "profile=smoke%20test") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "tag=tag%20with%20space") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "mode%20name=string:fast%20mode") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "check=check%20name") != null);
         },
     }
 }

@@ -15,6 +15,57 @@ pub const TraceError = error{
     InvalidTracePayload,
 };
 
+/// One structured trace field written by `World.recordFields`.
+pub const TraceField = struct {
+    key: []const u8,
+    value: TraceValue,
+};
+
+/// Replay-safe scalar trace value.
+pub const TraceValue = union(enum) {
+    /// Already-encoded stable value text. It is still validated before writing.
+    literal: []const u8,
+    /// User text encoded with Marionette percent escaping.
+    text: []const u8,
+    /// User text prefixed by a stable type name, such as `string:<text>`.
+    typed_text: TypedText,
+    int: i64,
+    uint: u64,
+    boolean: bool,
+    float: f64,
+
+    pub const TypedText = struct {
+        type_name: []const u8,
+        value: []const u8,
+    };
+};
+
+/// Build one structured trace field.
+pub fn traceField(key: []const u8, value: TraceValue) TraceField {
+    return .{ .key = key, .value = value };
+}
+
+/// Write text as an unambiguous trace value fragment.
+///
+/// Spaces, `=`, `%`, backslash, control bytes, and non-ASCII bytes are encoded
+/// as `%HH`. Empty bare text values are rejected because trace values must be
+/// non-empty; typed text may pass `allow_empty = true` because the type prefix
+/// keeps the final value non-empty.
+pub fn writeEscapedTraceText(writer: anytype, bytes: []const u8, allow_empty: bool) TraceError!void {
+    if (bytes.len == 0 and !allow_empty) return error.InvalidTracePayload;
+
+    const hex = "0123456789ABCDEF";
+    for (bytes) |byte| {
+        if (isPlainTraceTextByte(byte)) {
+            writer.writeByte(byte) catch return error.InvalidTracePayload;
+        } else {
+            writer.writeByte('%') catch return error.InvalidTracePayload;
+            writer.writeByte(hex[byte >> 4]) catch return error.InvalidTracePayload;
+            writer.writeByte(hex[byte & 0x0f]) catch return error.InvalidTracePayload;
+        }
+    }
+}
+
 /// Container for deterministic simulation engine state.
 ///
 /// `World` owns the fake clock, seeded random stream, and trace log used by
@@ -185,6 +236,31 @@ pub const World = struct {
         self.event_index += 1;
     }
 
+    /// Append one event with structured fields.
+    ///
+    /// Text values are percent-encoded so caller-provided strings can appear in
+    /// traces without breaking the line-oriented parser.
+    pub fn recordFields(
+        self: *World,
+        name: []const u8,
+        fields: []const TraceField,
+    ) (std.mem.Allocator.Error || TraceError)!void {
+        const start_len = self.trace_log.items.len;
+        errdefer self.trace_log.shrinkRetainingCapacity(start_len);
+
+        if (!isValidTraceName(name)) return error.InvalidTracePayload;
+
+        try self.trace_log.print(self.allocator, "event={} {s}", .{ self.event_index, name });
+        for (fields) |field| {
+            if (!isValidTraceKey(field.key)) return error.InvalidTracePayload;
+
+            try self.trace_log.print(self.allocator, " {s}=", .{field.key});
+            try self.writeTraceValue(field.value);
+        }
+        try self.trace_log.append(self.allocator, '\n');
+        self.event_index += 1;
+    }
+
     /// Return the trace bytes recorded so far.
     ///
     /// The returned slice is invalidated by later trace writes.
@@ -196,7 +272,53 @@ pub const World = struct {
     pub fn nextEventIndex(self: *const World) u64 {
         return self.event_index;
     }
+
+    fn writeTraceValue(self: *World, value: TraceValue) (std.mem.Allocator.Error || TraceError)!void {
+        switch (value) {
+            .literal => |literal| {
+                if (!isValidTraceValue(literal)) return error.InvalidTracePayload;
+                try self.trace_log.appendSlice(self.allocator, literal);
+            },
+            .text => |text| try self.appendEscapedTraceText(text, false),
+            .typed_text => |typed| {
+                if (!isValidTraceValue(typed.type_name)) return error.InvalidTracePayload;
+                try self.trace_log.print(self.allocator, "{s}:", .{typed.type_name});
+                try self.appendEscapedTraceText(typed.value, true);
+            },
+            .int => |int| try self.trace_log.print(self.allocator, "{}", .{int}),
+            .uint => |uint| try self.trace_log.print(self.allocator, "{}", .{uint}),
+            .boolean => |boolean| try self.trace_log.print(self.allocator, "{}", .{boolean}),
+            .float => |float| try self.trace_log.print(self.allocator, "{d}", .{float}),
+        }
+    }
+
+    fn appendEscapedTraceText(
+        self: *World,
+        bytes: []const u8,
+        allow_empty: bool,
+    ) (std.mem.Allocator.Error || TraceError)!void {
+        if (bytes.len == 0 and !allow_empty) return error.InvalidTracePayload;
+
+        const hex = "0123456789ABCDEF";
+        for (bytes) |byte| {
+            if (isPlainTraceTextByte(byte)) {
+                try self.trace_log.append(self.allocator, byte);
+            } else {
+                try self.trace_log.append(self.allocator, '%');
+                try self.trace_log.append(self.allocator, hex[byte >> 4]);
+                try self.trace_log.append(self.allocator, hex[byte & 0x0f]);
+            }
+        }
+    }
 };
+
+fn isPlainTraceTextByte(byte: u8) bool {
+    if (byte <= ' ' or byte >= 0x7f) return false;
+    return switch (byte) {
+        '=', '%', '\\' => false,
+        else => true,
+    };
+}
 
 fn isValidTracePayload(payload: []const u8) bool {
     if (payload.len == 0) return false;
@@ -375,6 +497,40 @@ test "world: invalid trace payload returns error and rolls back" {
     try std.testing.expectError(
         error.InvalidTracePayload,
         world.record("service.message value={s}", .{"hello world"}),
+    );
+    try std.testing.expectEqual(before_event_index, world.nextEventIndex());
+    try std.testing.expectEqualStrings(before_trace, world.traceBytes());
+}
+
+test "world: structured fields escape ambiguous text bytes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99 });
+    defer world.deinit();
+
+    try world.recordFields("service.path", &.{
+        traceField("path", .{ .text = "a b=c%\\\n" }),
+        traceField("label", .{ .typed_text = .{ .type_name = "string", .value = "" } }),
+    });
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "service.path path=a%20b%3Dc%25%5C%0A label=string:",
+    ) != null);
+}
+
+test "world: empty bare structured text rolls back" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99 });
+    defer world.deinit();
+
+    const before_trace = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(before_trace);
+    const before_event_index = world.nextEventIndex();
+
+    try std.testing.expectError(
+        error.InvalidTracePayload,
+        world.recordFields("service.path", &.{
+            traceField("path", .{ .text = "" }),
+        }),
     );
     try std.testing.expectEqual(before_event_index, world.nextEventIndex());
     try std.testing.expectEqualStrings(before_trace, world.traceBytes());
