@@ -29,24 +29,38 @@ the trace, and constrained enough that failures teach users something useful.
 
 ## Authority Shape
 
-The preferred shape is a disk authority owned by `World` and exposed through a
-narrow handle:
+The disk authority is owned by `World` and exposed to application code through
+the environment. Application code should depend on `env.disk()`, not on
+`World` internals:
 
 ```zig
-fn store(disk: *mar.Disk) !void {
-    try disk.write(.{ .file = .wal, .offset = 0, .bytes = "entry" });
+fn store(env: anytype, entry: []const u8) !void {
+    try env.disk().write(.{
+        .path = "wal.log",
+        .offset = 0,
+        .bytes = entry,
+    });
+    try env.disk().sync(.{ .path = "wal.log" });
 }
 ```
 
-In Phase 2, each `Node` should expose its own disk view:
+The test harness may still use `World` or a simulator-control handle to
+inspect disk state, inject scripted faults, or crash/restart the simulated
+disk. Those operations must not leak into the app-facing disk API.
+
+In later multi-node work, each simulated node should expose its own disk view:
 
 ```zig
-try node.disk().write(.{ .file = .wal, .offset = offset, .bytes = entry });
+try node.env().disk().write(.{ .path = "wal.log", .offset = offset, .bytes = entry });
 ```
 
 The shared `World` remains the owner of the clock, PRNG, global event index,
 and trace. The disk handle should not read wall-clock time, call host
 randomness, or use host filesystem state as a simulator decision source.
+
+The first public type name should be `Disk`. Smaller terms like `BlockDevice`
+are too narrow for a WAL/KV-store example, and broader terms like `Storage`
+are too vague.
 
 ## Operation Model
 
@@ -61,12 +75,20 @@ scheduling as tie breakers.
 
 Initial operation concepts:
 
-- File identity: stable user-declared file ids, not host paths.
+- File identity: logical path-like names (`[]const u8`) scoped to the
+  simulated disk. These are not host paths and must not read host filesystem
+  state. Trace output writes them through `recordFields` text escaping.
 - Offset and length: integer byte ranges.
-- Block or sector size: a configured simulation parameter.
+- Sector size: a configured simulation parameter, defaulting to 4096 bytes.
 - Pending operation: submitted work waiting for simulated latency.
 - Completed operation: result delivered to user code.
 - Crash window: submitted or partially completed writes affected by crash.
+
+The Phase 1 implementation should start synchronous from the user's
+perspective: a `write` or `read` may advance simulated time internally and then
+return. The model can still assign operation ids and latency so traces match
+the future scheduler shape. A later async scheduler can split submit/complete
+without changing trace ordering.
 
 ## Faults
 
@@ -104,20 +126,24 @@ strong budgets.
 ## Trace Events
 
 Disk traces should be stable text events until the trace format changes
-globally. Candidate events:
+globally. Disk code must use `World.recordFields` so logical paths and status
+strings are escaped consistently. Candidate Phase 1 events:
 
-- `disk.read.start op={} file={} offset={} len={}`
-- `disk.read.finish op={} status={} latency_ns={}`
-- `disk.write.start op={} file={} offset={} len={}`
-- `disk.write.finish op={} status={} latency_ns={}`
-- `disk.flush.start op={} file={}`
-- `disk.flush.finish op={} status={} latency_ns={}`
-- `disk.fault op={} kind={}`
-- `disk.crash_pending_write op={} outcome={}`
+- `disk.read op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
+- `disk.write op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
+- `disk.sync op=<u64> path=<escaped-text> status=<literal> latency_ns=<u64>`
+- `disk.fault op=<u64> path=<escaped-text> kind=<literal>`
+- `disk.crash pending_writes=<u64> landed=<u64> lost=<u64> torn=<u64>`
+
+Use status values such as `ok`, `io_error`, `corrupt`, and `torn`. Use fault
+kinds such as `read_error`, `write_error`, `corrupt_read`, `lost_write`, and
+`torn_write`.
 
 Trace fields must be scalar, deterministic, and independent of pointer
 identity. User bytes should not be dumped into the default trace unless a
 caller explicitly requests that, because it can make traces huge and unstable.
+Trace `len`, not byte contents. If a debugging mode later records payload
+hashes, the hash algorithm must be named and stable.
 
 ## Determinism Rules
 
@@ -128,15 +154,29 @@ caller explicitly requests that, because it can make traces huge and unstable.
 - Disk APIs must not call `std.crypto.random`, `/dev/urandom`, or wall-clock
   time.
 - Tests must compare same-seed disk traces byte-for-byte.
+- Checksums and record validation belong to user code in Phase 1. Marionette
+  may corrupt, tear, lose, or error operations, but it should not infer storage
+  format semantics.
+
+## Phase 1 Decisions
+
+- First type: `Disk`.
+- App-facing access: `env.disk()`.
+- File identity: logical path-like `[]const u8`, escaped in traces and never
+  resolved against the host filesystem by the simulator.
+- Default sector size: 4096 bytes.
+- Initial operations: `read`, `write`, `sync`, and explicit simulated crash.
+- Initial example: append-only WAL recovery.
+- User data: store bytes in memory, trace lengths and outcomes by default.
+- Checksums: user code owns them.
+- Recoverability budgets: start with a conservative single-node default and
+  explicit destructive mode; defer strong multi-replica budgets.
 
 ## Open Questions
 
-- What is the first public type: `Disk`, `Storage`, or a smaller `BlockDevice`?
-- Should Phase 1 use stable file ids only, or support path-like names?
-- What block size should examples use by default?
-- How much checksum behavior belongs in Marionette versus user code?
-- How should users declare recoverability budgets?
-- How will this wrap or align with future `std.Io` disk interfaces?
-
-Disk simulation should not start until these questions have enough answers to
-keep the first API narrow.
+- How closely should the production `Disk` adapter align with future `std.Io`
+  file APIs?
+- Should Phase 1 expose `create/delete/rename`, or should the first WAL
+  example avoid directory semantics entirely?
+- Should `sync` be per-file only, or should there also be a whole-disk sync?
+- What is the smallest explicit API for declaring recovery windows?

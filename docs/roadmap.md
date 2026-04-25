@@ -437,11 +437,13 @@ Do not commit to a shape before the second independent example forces it.
 
 ### Trace format is strict ASCII, line-oriented, validated at write time
 
-Keys and names are locked to `[a-z0-9_.]`. Values reject space, `=`,
-newlines, tabs, and backslash. The `isValidTracePayload` assert fires on
-every `record`. This keeps replay comparison byte-accurate and parsers
-trivial. Never add escaping; the assert forces us to design event shapes
-that don't need it.
+Keys and names are locked to `[a-z0-9_.]`. Raw `World.record` values reject
+space, `=`, newlines, tabs, and backslash, and return
+`error.InvalidTracePayload` when the formatted event is ambiguous.
+`World.recordFields` is the path for runtime text such as disk logical paths:
+it percent-escapes ambiguous bytes while preserving readable stable ASCII
+where possible. This keeps replay comparison byte-accurate and parsers
+simple without banning useful runtime labels.
 
 ### Topology is declared at comptime
 
