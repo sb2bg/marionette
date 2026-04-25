@@ -177,21 +177,22 @@ first:
 
 ```zig
 const Model = struct {
+    env: mar.SimulationEnv,
     committed: bool = false,
 
-    fn init() Model {
-        return .{};
+    fn init(world: *mar.World) Model {
+        return .{ .env = mar.SimulationEnv.init(world) };
     }
 };
 
-fn scenario(world: *mar.World, model: *Model) !void {
+fn scenario(model: *Model) !void {
     model.committed = true;
-    try world.record("model.commit", .{});
+    try model.env.record("model.commit", .{});
 }
 
-fn committed(world: *mar.World, model: *const Model) !void {
+fn committed(model: *const Model) !void {
     if (!model.committed) return error.NotCommitted;
-    try world.record("model.check committed=true", .{});
+    try model.env.record("model.check committed=true", .{});
 }
 
 const state_checks = [_]mar.StateCheck(Model){
@@ -207,6 +208,12 @@ var report = try mar.runWithState(
     &state_checks,
 );
 ```
+
+`init` receives the replay attempt's `World` so state can construct
+world-bound simulator authorities without a later bind step. It should not
+record trace events; scenario execution and checks own trace output. Stateful
+scenarios and state checks receive only state; put environment authorities on
+the state when they need to record or advance time.
 
 This is intentionally small. Future scheduler work can check invariants after
 every event or on quiescence, but the current API already gives failures a

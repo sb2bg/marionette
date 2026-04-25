@@ -41,6 +41,9 @@ pub const Env = env_module.Env;
 /// Probability that a BUGGIFY hook fires in simulation.
 pub const BuggifyRate = env_module.BuggifyRate;
 
+/// Errors returned by BUGGIFY runtime validation.
+pub const BuggifyError = env_module.BuggifyError;
+
 /// Production composition-root environment.
 pub const ProductionEnv = env_module.ProductionEnv;
 

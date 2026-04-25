@@ -191,14 +191,13 @@ pub fn runConflictScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     }
 }
 
-fn committedRegisterIsSafe(world: *mar.World, cluster: *const Cluster) !void {
-    try cluster.checkCommittedAgreement(world);
-    try cluster.checkCommittedQuorumAccepted(world);
+fn committedRegisterIsSafe(cluster: *const Cluster) !void {
+    try cluster.checkCommittedAgreement();
+    try cluster.checkCommittedQuorumAccepted();
 }
 
-fn scenario(world: *mar.World, cluster: *Cluster) !void {
-    cluster.bindWorld(world);
-    try cluster.write(world, .{
+fn scenario(cluster: *Cluster) !void {
+    try cluster.write(.{
         .version = 1,
         .value = 41,
         .proposal_drop_percent = normal_profile.proposal_drop_percent,
@@ -206,15 +205,13 @@ fn scenario(world: *mar.World, cluster: *Cluster) !void {
     });
 }
 
-fn buggyScenario(world: *mar.World, cluster: *Cluster) !void {
-    cluster.bindWorld(world);
-    try cluster.forceCommit(world, 0, 1, 41);
-    try cluster.forceCommit(world, 1, 1, 42);
+fn buggyScenario(cluster: *Cluster) !void {
+    try cluster.forceCommit(0, 1, 41);
+    try cluster.forceCommit(1, 1, 42);
 }
 
-fn partitionScenario(world: *mar.World, cluster: *Cluster) !void {
+fn partitionScenario(cluster: *Cluster) !void {
     std.debug.assert(partition_profile.partitioned_replica < replica_count);
-    cluster.bindWorld(world);
 
     const partitioned_replica: mar.NodeId = @intCast(partition_profile.partitioned_replica);
     const isolated = [_]mar.NodeId{partitioned_replica};
@@ -222,28 +219,27 @@ fn partitionScenario(world: *mar.World, cluster: *Cluster) !void {
     const majority_side_len = buildMajoritySide(partitioned_replica, &majority_side);
 
     try cluster.sim.network().partition(&isolated, majority_side[0..majority_side_len]);
-    try cluster.write(world, .{
+    try cluster.write(.{
         .version = 1,
         .value = 41,
         .retry_limit = partition_profile.retry_limit,
     });
     try cluster.sim.network().heal();
-    try cluster.write(world, .{
+    try cluster.write(.{
         .version = 1,
         .value = 41,
         .retry_limit = partition_profile.catchup_retry_limit,
     });
-    try cluster.checkReplicaCommitted(world, partitioned_replica, 1, 41);
+    try cluster.checkReplicaCommitted(partitioned_replica, 1, 41);
 }
 
-fn conflictScenario(world: *mar.World, cluster: *Cluster) !void {
-    cluster.bindWorld(world);
-    try cluster.write(world, .{
+fn conflictScenario(cluster: *Cluster) !void {
+    try cluster.write(.{
         .version = 1,
         .value = 41,
         .retry_limit = 1,
     });
-    try cluster.write(world, .{
+    try cluster.write(.{
         .version = 1,
         .value = 42,
         .retry_limit = 1,
@@ -298,6 +294,7 @@ const Simulation = mar.UnstableNetworkSimulation(MessagePayload, network_options
 const Network = Simulation.PacketCore;
 
 const Cluster = struct {
+    env: mar.SimulationEnv,
     replicas: [replica_count]Replica,
     sim: Simulation,
 
@@ -309,24 +306,21 @@ const Cluster = struct {
         retry_limit: u8 = 1,
     };
 
-    fn init() Cluster {
+    fn init(world: *mar.World) Cluster {
         return .{
+            .env = mar.SimulationEnv.init(world),
             .replicas = [_]Replica{.{}} ** replica_count,
-            .sim = undefined,
+            .sim = Simulation.init(world),
         };
     }
 
-    fn bindWorld(self: *Cluster, world: *mar.World) void {
-        self.sim = Simulation.init(world);
-    }
-
-    fn write(self: *Cluster, world: *mar.World, options: WriteOptions) !void {
+    fn write(self: *Cluster, options: WriteOptions) !void {
         std.debug.assert(options.proposal_drop_percent <= 100);
         std.debug.assert(options.commit_drop_percent <= 100);
         std.debug.assert(options.retry_limit > 0);
 
         var acked = [_]bool{false} ** replica_count;
-        try world.record(
+        try self.env.record(
             "register.write.start version={} value={} proposal_drop_percent={} retry_limit={}",
             .{ options.version, options.value, options.proposal_drop_percent, options.retry_limit },
         );
@@ -334,11 +328,10 @@ const Cluster = struct {
         for (0..options.retry_limit) |attempt| {
             if (countAcks(&acked) >= quorum) break;
 
-            try world.record("register.write.attempt index={}", .{attempt});
+            try self.env.record("register.write.attempt index={}", .{attempt});
             for (0..replica_count) |replica_index| {
                 if (acked[replica_index]) continue;
                 try self.send(
-                    world,
                     @intCast(replica_index),
                     .propose,
                     options.version,
@@ -351,20 +344,19 @@ const Cluster = struct {
 
         const ack_count = countAcks(&acked);
         if (ack_count < quorum) {
-            try world.record(
+            try self.env.record(
                 "register.write.no_quorum version={} acks={}",
                 .{ options.version, ack_count },
             );
             return;
         }
 
-        try world.record(
+        try self.env.record(
             "register.write.quorum version={} value={} acks={}",
             .{ options.version, options.value, ack_count },
         );
         for (0..replica_count) |replica_index| {
             try self.send(
-                world,
                 @intCast(replica_index),
                 .commit,
                 options.version,
@@ -377,7 +369,6 @@ const Cluster = struct {
 
     fn send(
         self: *Cluster,
-        world: *mar.World,
         to: mar.NodeId,
         kind: MessageKind,
         version: u64,
@@ -393,7 +384,7 @@ const Cluster = struct {
             .min_latency_ns = ns_per_ms,
             .latency_jitter_ns = 2 * ns_per_ms,
         });
-        try world.record("register.message kind={s} to={} version={} value={}", .{
+        try self.env.record("register.message kind={s} to={} version={} value={}", .{
             @tagName(kind),
             to,
             version,
@@ -413,14 +404,13 @@ const Cluster = struct {
         cluster: *Cluster,
         acked: ?*[replica_count]bool,
 
-        fn deliver(self: *@This(), world: *mar.World, packet: Network.Packet) !void {
-            try self.cluster.apply(world, packet, self.acked);
+        fn deliver(self: *@This(), _: *mar.World, packet: Network.Packet) !void {
+            try self.cluster.apply(packet, self.acked);
         }
     };
 
     fn apply(
         self: *Cluster,
-        world: *mar.World,
         packet: Network.Packet,
         acked: ?*[replica_count]bool,
     ) !void {
@@ -431,14 +421,14 @@ const Cluster = struct {
                 if (accepted) {
                     if (acked) |acks| acks[replica_index] = true;
                 }
-                try world.record(
+                try self.env.record(
                     "replica.accept replica={} version={} value={} accepted={}",
                     .{ packet.to, packet.payload.version, packet.payload.value, accepted },
                 );
             },
             .commit => {
                 const committed = self.replicas[replica_index].commit(packet.payload.version, packet.payload.value);
-                try world.record(
+                try self.env.record(
                     "replica.commit replica={} version={} value={} committed={}",
                     .{ packet.to, packet.payload.version, packet.payload.value, committed },
                 );
@@ -446,16 +436,16 @@ const Cluster = struct {
         }
     }
 
-    fn forceCommit(self: *Cluster, world: *mar.World, replica_index: usize, version: u64, value: u64) !void {
+    fn forceCommit(self: *Cluster, replica_index: usize, version: u64, value: u64) !void {
         self.replicas[replica_index].committed_version = version;
         self.replicas[replica_index].committed_value = value;
-        try world.record(
+        try self.env.record(
             "replica.commit replica={} version={} value={} forced=true",
             .{ replica_index, version, value },
         );
     }
 
-    fn checkCommittedAgreement(self: *const Cluster, world: *mar.World) !void {
+    fn checkCommittedAgreement(self: *const Cluster) !void {
         var committed_count: u8 = 0;
         var expected_version: u64 = 0;
         var expected_value: u64 = 0;
@@ -475,7 +465,7 @@ const Cluster = struct {
             if (replica.committed_version != expected_version or
                 replica.committed_value != expected_value)
             {
-                try world.record(
+                try self.env.record(
                     "register.invariant_violation kind=committed_divergence replica={} expected_version={} expected_value={} actual_version={} actual_value={}",
                     .{
                         replica_index,
@@ -489,19 +479,19 @@ const Cluster = struct {
             }
         }
 
-        try world.record(
+        try self.env.record(
             "register.check committed_agreement=ok committed_count={}",
             .{committed_count},
         );
     }
 
-    fn checkCommittedQuorumAccepted(self: *const Cluster, world: *mar.World) !void {
+    fn checkCommittedQuorumAccepted(self: *const Cluster) !void {
         for (self.replicas, 0..) |replica, replica_index| {
             if (replica.committed_version == 0) continue;
 
             const accepted_count = self.countAccepted(replica.committed_version, replica.committed_value);
             if (accepted_count < quorum) {
-                try world.record(
+                try self.env.record(
                     "register.invariant_violation kind=commit_without_accepted_quorum replica={} version={} value={} accepted_count={}",
                     .{ replica_index, replica.committed_version, replica.committed_value, accepted_count },
                 );
@@ -509,12 +499,11 @@ const Cluster = struct {
             }
         }
 
-        try world.record("register.check committed_quorum=ok", .{});
+        try self.env.record("register.check committed_quorum=ok", .{});
     }
 
     fn checkReplicaCommitted(
         self: *const Cluster,
-        world: *mar.World,
         replica_id: mar.NodeId,
         version: u64,
         value: u64,
@@ -522,14 +511,14 @@ const Cluster = struct {
         const replica_index: usize = @intCast(replica_id);
         const replica = self.replicas[replica_index];
         if (replica.committed_version != version or replica.committed_value != value) {
-            try world.record(
+            try self.env.record(
                 "register.invariant_violation kind=replica_not_committed replica={} expected_version={} expected_value={} actual_version={} actual_value={}",
                 .{ replica_id, version, value, replica.committed_version, replica.committed_value },
             );
             return error.ReplicaNotCommitted;
         }
 
-        try world.record(
+        try self.env.record(
             "register.check replica_committed=ok replica={} version={} value={}",
             .{ replica_id, version, value },
         );

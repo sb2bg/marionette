@@ -141,8 +141,9 @@ pub fn StateCheck(comptime State: type) type {
     return struct {
         /// Stable name included in failure reports.
         name: []const u8,
-        /// Check function. It may inspect state and record through the world.
-        check: *const fn (*World, *const State) anyerror!void,
+        /// Check function. It may inspect state and record through authorities
+        /// owned by the state.
+        check: *const fn (*const State) anyerror!void,
     };
 }
 

@@ -61,31 +61,35 @@ pub fn run(
 
 /// Run a stateful scenario twice with fresh state and compare traces.
 ///
-/// `init_state` is called once per replay attempt. Scenario state is not owned
-/// by `RunReport`, and Phase 0 state must not require a deinitializer.
+/// `init_state` is called once per replay attempt. Stateful scenarios receive
+/// only `*State`; store any environment authorities needed by the scenario in
+/// the state initializer. Scenario state is not owned by `RunReport`, and
+/// Phase 0 state must not require a deinitializer.
 pub fn runWithState(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
-    comptime init_state: fn () State,
-    comptime scenario: fn (*World, *State) anyerror!void,
+    comptime init_state: fn (*World) State,
+    comptime scenario: fn (*State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
 ) RunError!RunReport {
     return runTwiceWithState(allocator, options, State, init_state, scenario, state_checks);
 }
 
-const NoState = struct {};
+const NoState = struct {
+    world: *World,
+};
 
-fn initNoState() NoState {
-    return .{};
+fn initNoState(world: *World) NoState {
+    return .{ .world = world };
 }
 
 fn scenarioWithoutState(
     comptime scenario: fn (*World) anyerror!void,
-) fn (*World, *NoState) anyerror!void {
+) fn (*NoState) anyerror!void {
     return struct {
-        fn runScenario(world: *World, _: *NoState) anyerror!void {
-            try scenario(world);
+        fn runScenario(state: *NoState) anyerror!void {
+            try scenario(state.world);
         }
     }.runScenario;
 }
@@ -94,8 +98,8 @@ fn runTwiceWithState(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
-    comptime init_state: fn () State,
-    comptime scenario: fn (*World, *State) anyerror!void,
+    comptime init_state: fn (*World) State,
+    comptime scenario: fn (*State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
 ) RunError!RunReport {
     var first = try runOnceWithState(allocator, options, State, init_state, scenario, state_checks);
@@ -153,16 +157,16 @@ fn runOnceWithState(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
-    comptime init_state: fn () State,
-    comptime scenario: fn (*World, *State) anyerror!void,
+    comptime init_state: fn (*World) State,
+    comptime scenario: fn (*State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
 ) RunError!RunOnceResult {
     var world = try World.init(allocator, options.worldOptions());
     defer world.deinit();
     try recordRunContext(&world, options);
 
-    var state = init_state();
-    scenario(&world, &state) catch |err| {
+    var state = init_state(&world);
+    scenario(&state) catch |err| {
         return .{ .failed = try failureFromWorld(
             allocator,
             options,
@@ -174,7 +178,7 @@ fn runOnceWithState(
     };
 
     for (state_checks) |check| {
-        check.check(&world, &state) catch |err| {
+        check.check(&state) catch |err| {
             return .{ .failed = try failureFromWorld(
                 allocator,
                 options,
@@ -588,21 +592,22 @@ test "run: check failures preserve partial trace and check name" {
 }
 
 const CounterState = struct {
+    env: @import("env.zig").SimulationEnv,
     value: u8 = 0,
 
-    fn init() CounterState {
-        return .{};
+    fn init(world: *World) CounterState {
+        return .{ .env = .init(world) };
     }
 };
 
-fn counterScenario(world: *World, state: *CounterState) !void {
+fn counterScenario(state: *CounterState) !void {
     state.value += 1;
-    try world.record("state.value value={}", .{state.value});
+    try state.env.record("state.value value={}", .{state.value});
 }
 
-fn counterCheck(world: *World, state: *const CounterState) !void {
+fn counterCheck(state: *const CounterState) !void {
     if (state.value != 1) return error.BadCounter;
-    try world.record("state.check value={}", .{state.value});
+    try state.env.record("state.check value={}", .{state.value});
 }
 
 test "runWithState: checks inspect fresh scenario state" {
@@ -630,8 +635,8 @@ test "runWithState: checks inspect fresh scenario state" {
     }
 }
 
-fn failingCounterCheck(world: *World, state: *const CounterState) !void {
-    try world.record("state.check.fail value={}", .{state.value});
+fn failingCounterCheck(state: *const CounterState) !void {
+    try state.env.record("state.check.fail value={}", .{state.value});
     return error.StateInvariantBroken;
 }
 

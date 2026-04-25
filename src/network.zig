@@ -390,28 +390,6 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             }
         }
 
-        /// Drive queued packets until the network has no pending work.
-        ///
-        /// The delivery callback may enqueue more packets. This helper keeps
-        /// advancing simulated time to the next packet and delivering ready
-        /// packets until the queue is empty.
-        pub fn drainUntilIdle(
-            self: *Self,
-            context: anytype,
-            comptime deliver: fn (@TypeOf(context), *World, Packet) anyerror!void,
-        ) !void {
-            while (true) {
-                while (try self.popReady()) |packet| {
-                    try deliver(context, self.world, packet);
-                }
-
-                const deliver_at = self.nextDeliveryAt() orelse break;
-                if (deliver_at > self.world.now()) {
-                    try self.world.runFor(deliver_at - self.world.now());
-                }
-            }
-        }
-
         // Scanning per-link heads is deliberate for Phase 0 capacities. A
         // later scheduler can add an index/heap over active paths without
         // changing the per-link queue model needed for clogging.
@@ -577,9 +555,9 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
 
         /// Drive queued packets until the network has no pending work.
         ///
-        /// Prefer this wrapper over `packetCore().drainUntilIdle` when time may
-        /// advance, because it routes time movement through the outer
-        /// simulation tick before delivering ready packets.
+        /// Time movement routes through the outer simulation tick before
+        /// delivering ready packets, so future probabilistic network faults
+        /// evolve at the same boundary as the clock.
         pub fn drainUntilIdle(
             self: *Self,
             context: anytype,
@@ -955,14 +933,14 @@ test "network: restarted destination can receive queued packets" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
 }
 
-test "network: drainUntilIdle advances time and delivers queued packets" {
-    const Network = UnstableNetwork(TestPayload, test_options);
+test "network simulation: drainUntilIdle advances time and delivers queued packets" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
 
     const DeliveryLog = struct {
         values: [4]u64 = undefined,
         count: usize = 0,
 
-        fn deliver(self: *@This(), _: *World, packet: Network.Packet) !void {
+        fn deliver(self: *@This(), _: *World, packet: Sim.PacketCore.Packet) !void {
             self.values[self.count] = packet.payload.value;
             self.count += 1;
         }
@@ -971,16 +949,16 @@ test "network: drainUntilIdle advances time and delivers queued packets" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var network = Network.init(&world);
+    var sim = Sim.init(&world);
     var log: DeliveryLog = .{};
 
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 20 });
-    try network.send(0, 1, .{ .value = 2 }, .{ .min_latency_ns = 10 });
-    try network.drainUntilIdle(&log, DeliveryLog.deliver);
+    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 20 });
+    try sim.packetCore().send(0, 1, .{ .value = 2 }, .{ .min_latency_ns = 10 });
+    try sim.drainUntilIdle(&log, DeliveryLog.deliver);
 
     try std.testing.expectEqual(@as(usize, 2), log.count);
     try std.testing.expectEqual(@as(u64, 2), log.values[0]);
     try std.testing.expectEqual(@as(u64, 1), log.values[1]);
     try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
-    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), sim.packetCore().pendingCount());
 }

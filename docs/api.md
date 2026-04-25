@@ -76,9 +76,10 @@ fn scenario(world: *mar.World) !void {
 Phase 0 environments expose `clock()`, `random()`, and `buggify()`.
 `ProductionEnv.buggify` always returns `false`. `SimulationEnv.buggify` takes
 a `BuggifyRate`, draws through the world's PRNG, and records the hook
-decision. The hook only decides whether the fault fires; user code still owns
-the domain behavior, such as dropping a packet, delaying an operation, or
-returning a simulated disk error.
+decision. Invalid runtime rates return `error.InvalidRate` before drawing from
+the PRNG or recording a hook event. The hook only decides whether the fault
+fires; user code still owns the domain behavior, such as dropping a packet,
+delaying an operation, or returning a simulated disk error.
 
 `SimulationEnv` also exposes `tick()`, `runFor()`, and `record()` as
 convenience wrappers around the backing world for scenario code. Future disk
@@ -390,19 +391,20 @@ Stateful scenarios can use `mar.runWithState` and `mar.StateCheck(State)`:
 
 ```zig
 const Model = struct {
+    env: mar.SimulationEnv,
     committed: bool = false,
 
-    fn init() Model {
-        return .{};
+    fn init(world: *mar.World) Model {
+        return .{ .env = mar.SimulationEnv.init(world) };
     }
 };
 
-fn scenario(world: *mar.World, model: *Model) !void {
+fn scenario(model: *Model) !void {
     model.committed = true;
-    try world.record("model.commit", .{});
+    try model.env.record("model.commit", .{});
 }
 
-fn committed(world: *mar.World, model: *const Model) !void {
+fn committed(model: *const Model) !void {
     if (!model.committed) return error.NotCommitted;
 }
 
@@ -421,8 +423,12 @@ var report = try mar.runWithState(
 defer report.deinit();
 ```
 
-`runWithState` initializes fresh state for each replay attempt. Phase 0 state
-must be plain value state that does not require a deinitializer.
+`runWithState` initializes fresh state for each replay attempt and passes the
+attempt's `World` into the initializer. Initializers may construct world-bound
+simulator authorities, but should not record trace events. Stateful scenarios
+and state checks receive only state; put environment authorities on the state
+when they need to record or advance time. Phase 0 state must be plain value
+state that does not require a deinitializer.
 
 The return value is `mar.RunReport`:
 

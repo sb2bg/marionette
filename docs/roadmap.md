@@ -5,7 +5,7 @@ done, and what is deliberately deferred. It is written so that a contributor
 can pick a task and know exactly what "done" looks like.
 
 If you are a contributor: start with [Active Work Queue](#active-work-queue)
-and pick any unassigned item. The top four are the most load-bearing.
+and pick any unassigned item. The top items are the most load-bearing.
 
 If you are jumping back into the project after a break: read
 [Current Status](#current-status) first, then
@@ -24,8 +24,8 @@ project treats Phase 0 as closed.
 This is a deliberate inversion of the original roadmap order. The network
 primitives turned out to be the most interesting correctness story to prove
 early, and the replicated-register example pulled in that direction. Phase 1
-(disk) work resumes after active network item 4 unless an adopter needs
-single-node storage testing sooner.
+(disk) is now ready to resume; probabilistic network faults remain valuable
+but are no longer a disk blocker.
 
 The current network surface is:
 
@@ -37,11 +37,12 @@ The current network surface is:
   (simulator-control view).
 - `sim.tick()`: outer tick that advances `World` and evolves subsystem fault
   state. `sim.runFor(duration)` steps tick by tick rather than jumping time.
+- `sim.drainUntilIdle(...)`: the only public network drain helper, routing
+  time movement through `sim.tick()`.
 
 What is not built yet: app-facing `env.network()`, probabilistic tick-evolved
-network faults, trace summary rendering, disk, crash/restart simulation,
-liveness mode, named simulation profiles, linearizability checker, time-travel
-debugging.
+network faults, disk, crash/restart simulation, liveness mode, named simulation
+profiles, linearizability checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -49,11 +50,15 @@ debugging.
 - `Clock`: production (host IO clock) and simulation (fake tick-based).
 - `Random`: seeded PRNG wrapper.
 - `mar.run` / `mar.runWithState`: twice-and-compare deterministic runner.
+  Stateful initializers receive the replay attempt's `World`; stateful
+  scenarios and checks receive only state.
 - `RunOptions`, `RunFailure`, `RunReport`, `StateCheck`, named `Check`.
 - Replay-visible run profile, tags, and typed attributes.
 - `mar.tidy` linter for banned direct calls.
-- `BuggifyRate` + `env.buggify(hook, rate)` with enum-hook checks.
+- `BuggifyRate` + `env.buggify(hook, rate)` with enum-hook checks and
+  runtime rate validation in simulation.
 - Trace format with per-line validation (`isValidTracePayload`).
+- Trace summary renderer (`mar.summarize`, `Summary.writeSummary`).
 - Seed parser for decimal seeds and 40-character Git hashes.
 
 ### Shipped, marked unstable
@@ -65,15 +70,17 @@ Unstable types will change without deprecation cycles until Phase 2 closes.
 
 ---
 
-## Active Work Queue
+## Recently Completed
 
-Ordered by priority. Each entry has acceptance criteria, a rough size, and the
-design context. Pick from the top unless coordinating otherwise.
+These items were finished during the pre-disk stabilization pass.
 
-### 1. Trace summary renderer
+### Completed: Trace summary renderer
 
-**Why now:** `sim.runFor` emits one `world.tick` event per tick. Once
-probabilistic faults land in item 4, per-tick event volume grows again. The
+**Status:** Done. `mar.summarize` and `Summary.writeSummary` are exported and
+covered by tests.
+
+**Why it mattered:** `sim.runFor` emits one `world.tick` event per tick. Once
+probabilistic faults land, per-tick event volume grows again. The
 summary layer has to exist before trace volume outpaces human reading, not
 after.
 
@@ -119,20 +126,17 @@ after.
 
 ---
 
-### 2. Fix `Cluster.sim = undefined` / `bindWorld` pattern
+### Completed: Fix `Cluster.sim = undefined` / `bindWorld` pattern
 
-**Why now:** The replicated-register example has a `Cluster.init()` that
-leaves `sim: Simulation = undefined`, then relies on `bindWorld(world)` being
-called before any scenario body touches it. This is safe today only because
-`runWithState` orders calls correctly. It will bite the moment a second
-example needs the same setup. Fixing it while the example is still small and
-while you're already looking at trace output (during item 1) is cheap.
+**Status:** Done. `runWithState` now passes `*World` into state
+initialization, stateful scenarios/checks receive only state, and the
+replicated-register example constructs `Cluster.sim` inside
+`Cluster.init(world)`.
 
 **Scope:**
 
-- Change `runWithState`'s `init_state: fn() State` signature to pass `*World`
-  into state initialization. Either: (a) `init_state: fn(*World) State`, or
-  (b) add a second entry point `runWithStateAndWorld` and keep the old one.
+- Change `runWithState`'s `init_state` signature to
+  `fn(*World) State`.
 - Migrate the replicated-register example to construct `Cluster` fully in
   `init`, removing `bindWorld` entirely.
 
@@ -153,15 +157,16 @@ while you're already looking at trace output (during item 1) is cheap.
 
 **Size:** ~100 lines.
 
-**Design note:** Option (a) is cleaner; option (b) avoids breaking any
-external callers. Given that Marionette has no external callers yet, pick
-(a).
+**Design note:** Marionette had no external callers yet, so the existing
+entry point changed instead of adding a compatibility wrapper.
 
 ---
 
-### 3. Delete `PacketCore.drainUntilIdle`
+### Completed: Delete `PacketCore.drainUntilIdle`
 
-**Why now:** After item 4 lands, `sim.drainUntilIdle` must be the only drain
+**Status:** Done. `sim.drainUntilIdle` is the only public network drain helper.
+
+**Why it mattered:** `sim.drainUntilIdle` must be the only drain
 path, because the packet-core version bypasses `sim.tick()` and silently
 skips probabilistic fault evolution. Delete it before probabilistic faults
 make the bypass dangerous.
@@ -185,11 +190,50 @@ make the bypass dangerous.
 
 ---
 
-### 4. Probabilistic tick-evolved network faults with stability floors
+## Active Work Queue
 
-**Why now:** The outer `sim.tick()` is built and items 1-3 unblock safe
-development. This is the next piece that makes VOPR-style swarm testing
-possible.
+Ordered by priority. Each entry has acceptance criteria, a rough size, and the
+design context. Pick from the top unless coordinating otherwise.
+
+### 1. Disk authority, no faults
+
+**Why now:** The pre-disk cleanup is done, and disk is the next missing
+simulator authority needed for single-node durability examples.
+
+**Scope:**
+
+- Implement a `World`-owned disk authority with logical files.
+- Stable file ids and operation ids.
+- Sector-aligned offsets with a 4096-byte default sector size.
+- In-memory sparse backing storage.
+- Deterministic min + jitter latency, shaped like network latency.
+- Trace events for submitted and completed operations.
+- No read/write/corruption/crash faults yet.
+
+**Acceptance criteria:**
+
+- Replaying the same seed produces byte-identical disk traces.
+- Reads observe prior completed writes.
+- Sparse unwritten regions read as zero bytes.
+- Invalid unaligned offsets or lengths return runtime errors.
+- No disk API reaches through to host `std.fs`.
+
+**Files likely to change:**
+
+- New: `src/disk.zig`.
+- Modify: `src/root.zig`.
+- Modify: `docs/disk-fault-model.md` if implementation names differ from the
+  current design note.
+
+**Size:** ~300 lines including tests.
+
+---
+
+### 2. Probabilistic tick-evolved network faults with stability floors
+
+**Why now:** The outer `sim.tick()` is built and the packet-core drain bypass
+is gone. This is the next piece that makes VOPR-style swarm testing possible,
+but it no longer blocks the first disk slice.
 
 **Scope:**
 
@@ -281,8 +325,8 @@ learning task.
 
 ## Phase 1: Disk
 
-Paused. Resume after item 4 lands, or earlier if an adopter needs single-node
-storage testing. Items 5 through 8 are network backlog, not blockers for disk.
+Active. The first disk slice is also listed at the top of the active work
+queue. Network items in the near-term backlog are not blockers for disk.
 
 Read `docs/disk-fault-model.md` before starting any of these. The sub-tasks
 below are ordered so each one is useful on its own.

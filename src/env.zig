@@ -8,6 +8,10 @@ const std = @import("std");
 const clock_module = @import("clock.zig");
 const World = @import("world.zig").World;
 
+pub const BuggifyError = error{
+    InvalidRate,
+};
+
 /// Environment selected at comptime.
 pub fn Env(comptime mode: clock_module.Mode) type {
     return switch (mode) {
@@ -43,9 +47,9 @@ pub const BuggifyRate = struct {
         return .{ .numerator = 1, .denominator = denominator };
     }
 
-    pub fn validate(self: BuggifyRate) void {
-        std.debug.assert(self.denominator > 0);
-        std.debug.assert(self.numerator <= self.denominator);
+    pub fn validate(self: BuggifyRate) BuggifyError!void {
+        if (self.denominator == 0) return error.InvalidRate;
+        if (self.numerator > self.denominator) return error.InvalidRate;
     }
 };
 
@@ -131,7 +135,7 @@ pub const SimulationEnv = struct {
     /// simulator owns the randomness and records the decision so failures are
     /// replayable. Production envs always return false.
     pub fn buggify(self: *SimulationEnv, comptime hook: anytype, rate: BuggifyRate) !bool {
-        rate.validate();
+        try rate.validate();
 
         const roll = try self.world.randomIntLessThan(u32, rate.denominator);
         const fired = roll < rate.numerator;
@@ -153,7 +157,7 @@ pub const SimulationEnv = struct {
     }
 
     /// Record one trace event through the backing world.
-    pub fn record(self: *SimulationEnv, comptime fmt: []const u8, args: anytype) !void {
+    pub fn record(self: *const SimulationEnv, comptime fmt: []const u8, args: anytype) !void {
         try self.world.record(fmt, args);
     }
 };
@@ -223,4 +227,22 @@ test "env: buggify supports always and never rates" {
 
     try std.testing.expect(try env.buggify(.always_fault, .always()));
     try std.testing.expect(!try env.buggify(.never_fault, .never()));
+}
+
+test "env: simulation buggify rejects invalid runtime rates" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var env = SimulationEnv.init(&world);
+
+    try std.testing.expectError(
+        error.InvalidRate,
+        env.buggify(.bad_rate, .{ .numerator = 1, .denominator = 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidRate,
+        env.buggify(.bad_rate, .{ .numerator = 2, .denominator = 1 }),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") == null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=bad_rate") == null);
 }
