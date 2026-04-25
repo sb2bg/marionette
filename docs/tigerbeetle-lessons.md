@@ -111,19 +111,23 @@ Marionette's network around path state is what lets you model asymmetric
 partitions, per-path capacity, path clogs, packet replay, per-command
 filtering, and deterministic delivery ordering. Node-level APIs are fine as an
 ergonomic layer on top, but the internals need to be path-shaped from day
-one.
+one. `docs/network.md` is the source of truth for Marionette's current
+network model and the VOPR comparison.
 
 ### 7. Faults need stability, not just probability
 
 VOPR's network partitions have partition and unpartition probabilities and
-stability durations. Replica crashes and restarts have crash and restart
-probabilities and stability durations. This avoids unrealistic flicker and
-lets tests explore "long enough to matter" failure windows.
+stability durations. Its packet simulator also clogs paths from the simulator
+tick using a probability and duration distribution. Replica crashes and
+restarts have crash and restart probabilities and stability durations. This
+avoids unrealistic flicker and lets tests explore "long enough to matter"
+failure windows.
 
 Marionette's fault model should follow the same pattern. Every recurring
 fault type needs at least a probability, a minimum duration or cooldown, a
 scope, and a trace event when state changes. A Bernoulli decision every tick
-isn't enough to find interesting bugs.
+isn't enough to find interesting bugs. For network specifically, the next
+layer is a runtime `NetworkFaultOptions` profile separate from static topology.
 
 ### 8. Storage faults need a fault model
 
@@ -136,8 +140,10 @@ That's why their disk tests find real bugs instead of drowning in impossible
 worlds. Marionette's future `Disk` API needs to start narrower than "randomly
 fail reads and writes" and grow from a documented model: corruption, IO
 errors, latency, crash during pending write, optional misdirection, and an
-explicit recoverability budget. I've already started sketching this in
-`docs/disk-fault-model.md` and want the doc to land before the code.
+explicit recoverability budget. `docs/disk-fault-model.md` is the source of
+truth for the first Marionette version of that model: generic logical paths
+and WAL recovery first, VOPR-style fault atlases later after more examples
+justify the abstraction.
 
 ### 9. Checkers are separate components
 
