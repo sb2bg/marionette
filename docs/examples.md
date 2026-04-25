@@ -2,41 +2,12 @@
 
 Examples are small enough to read quickly, but they exercise the real
 Marionette APIs. Each example should become useful input for deterministic
-replay tests.
-
-## Rate Limiter
-
-Source: [`examples/rate_limiter.zig`](https://github.com/sb2bg/marionette/blob/main/examples/rate_limiter.zig)
+replay tests. The example set is intentionally small while the API is
+experimental.
 
 The examples module root is [`examples/root.zig`](https://github.com/sb2bg/marionette/blob/main/examples/root.zig).
 Add new examples there so `zig build test` picks them up without hard-coding
 each example in `build.zig`.
-
-The rate limiter is a token bucket with jittered refill scheduling. It uses:
-
-- `SimulationEnv` as the scenario composition root.
-- `env.clock().now()` to decide when refills are due.
-- `env.random().intLessThan(...)` to jitter the next refill time without
-  modulo bias and with trace visibility in simulation.
-- `env.record(...)` to produce a replayable trace.
-- `mar.run(...)` to execute the scenario twice and compare traces.
-
-Run it with the rest of the test suite:
-
-```sh
-zig build test
-```
-
-The useful entry point for later determinism tests is:
-
-```zig
-const trace = try rate_limiter.runScenario(allocator, 0xC0FFEE);
-defer allocator.free(trace);
-```
-
-`runScenario` delegates to `mar.run`, so every call already performs
-twice-and-compare replay. Calling it with different seeds may produce different
-traces because the refill schedule is jittered from the seeded random stream.
 
 ## Retry Queue
 
