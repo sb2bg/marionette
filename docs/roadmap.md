@@ -24,8 +24,8 @@ project treats Phase 0 as closed.
 This is a deliberate inversion of the original roadmap order. The network
 primitives turned out to be the most interesting correctness story to prove
 early, and the replicated-register example pulled in that direction. Phase 1
-now has the first no-fault disk authority; probabilistic network faults remain
-valuable but are not a disk blocker.
+now has a deterministic disk authority with replayable faults and crash/restart;
+probabilistic network faults remain valuable but are not a disk blocker.
 
 The current network surface is:
 
@@ -42,13 +42,13 @@ The current network surface is:
 
 The current disk surface is:
 
-- `mar.Disk`: no-fault in-memory disk authority with logical paths,
-  sector-aligned reads/writes, sparse sectors, deterministic latency, operation
-  ids, and trace events.
+- `mar.Disk`: in-memory disk authority with logical paths, sector-aligned
+  reads/writes, sparse sectors, deterministic latency, operation ids, trace
+  events, read/write IO errors, corrupt reads, scripted sector corruption, and
+  crash/restart simulation for pending writes.
 
 What is not built yet: app-facing `env.network()`/`env.disk()`, probabilistic
-tick-evolved network faults, disk read/write/corruption faults, disk crash
-behavior, crash/restart simulation, liveness mode, named simulation profiles,
+tick-evolved network faults, liveness mode, named simulation profiles,
 linearizability checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
@@ -64,7 +64,8 @@ linearizability checker, time-travel debugging.
 - `mar.tidy` linter for banned direct calls.
 - `BuggifyRate` + `env.buggify(hook, rate)` with enum-hook checks and
   runtime rate validation in simulation.
-- `mar.Disk`: no-fault deterministic disk authority.
+- `mar.Disk`: deterministic disk authority with replayable faults and
+  crash/restart simulation.
 - Trace format with per-line validation (`isValidTracePayload`).
 - Trace summary renderer (`mar.summarize`, `Summary.writeSummary`).
 - Seed parser for decimal seeds and 40-character Git hashes.
@@ -146,7 +147,47 @@ after.
 - Sparse in-memory sectors.
 - Deterministic min + jitter latency.
 - Trace events for `read`, `write`, and `sync`.
-- No read/write/corruption/crash faults yet.
+- Crash faults landed later as a separate completed slice.
+
+---
+
+### Completed: Disk read/write/corruption faults
+
+**Status:** Done. `mar.DiskFaultOptions` is exported and covered by unit
+tests.
+
+**Scope:**
+
+- Runtime `DiskFaultOptions` profile separate from `DiskOptions`.
+- `BuggifyRate`-governed read errors, write errors, and corrupt reads.
+- Explicit `corruptSector(path, offset)` simulator-control API for scripted
+  sector corruption.
+- Trace-visible fault decisions with rate, roll, and fired fields.
+- Default no-fault behavior unchanged.
+
+**Follow-up:** crash-during-pending-write simulation landed as the next slice.
+
+---
+
+### Completed: Disk crash-during-pending-write model
+
+**Status:** Done. `mar.Disk` now tracks pending writes and exposes
+simulator-control `crash` and `restart`.
+
+**Scope:**
+
+- Successful writes are visible to later reads immediately, but remain pending
+  until `sync`.
+- `sync(path)` commits pending writes for that logical path and traces how
+  many writes became durable.
+- `crash` deterministically lands, loses, or tears pending writes according to
+  `DiskFaultOptions`.
+- `restart` brings the disk back up; while crashed, `read`, `write`, and
+  `sync` return `error.DiskCrashed`.
+- Crash decisions and resulting write outcomes are trace-visible.
+
+**Remaining gap:** a disk-backed service example that proves recovery behavior
+against this model.
 
 ---
 
@@ -219,33 +260,38 @@ make the bypass dangerous.
 Ordered by priority. Each entry has acceptance criteria, a rough size, and the
 design context. Pick from the top unless coordinating otherwise.
 
-### 1. Disk read/write faults
+### 1. Disk-backed WAL recovery example
 
-**Why now:** The no-fault disk authority exists. The next value is making
-single-node durability examples exercise replayable storage failures.
+**Why now:** The disk authority now has the fault surface needed to test
+single-node durability. The next value is proving that surface against a small
+storage-shaped example instead of only unit tests.
 
 **Scope:**
 
-- Add a runtime `DiskFaultOptions` profile separate from `DiskOptions`.
-- Per-sector read error, write error, and corruption probabilities.
-- Explicit simulator-control API for scripted sector corruption.
-- Trace every fault decision and state change.
-- Keep default no-fault behavior unchanged.
+- Add one focused example, either append-only WAL recovery or a tiny KV store
+  backed by an append-only log.
+- Use `mar.Disk` for all storage behavior.
+- Exercise synced records, unsynced records, lost pending writes, torn writes,
+  and corrupt reads.
+- Define the recovery invariant in the example checker rather than adding a
+  generic fault atlas yet.
 
 **Acceptance criteria:**
 
-- Same seed and options produce byte-identical disk fault traces.
-- Read and write fault rates are validated at runtime.
-- Corrupt reads are trace-visible and deterministic.
-- Scripted corruption targets one logical path and sector.
-- Fault-free disk tests keep passing unchanged.
+- Synced records are recovered exactly once.
+- Unsynced records may be absent or rejected if torn/corrupt.
+- The example has at least one deterministic failing seed with a documented
+  bug mode and one fixed/expected-success mode.
+- The README/docs examples list includes the new example.
 
 **Files likely to change:**
 
-- `src/disk.zig`.
-- `docs/disk-fault-model.md`.
+- `examples/`.
+- `build.zig`.
+- `docs/examples.md`.
+- `README.md`.
 
-**Size:** ~250 lines including tests.
+**Size:** ~300-700 lines including tests/example code.
 
 ---
 
@@ -253,7 +299,7 @@ single-node durability examples exercise replayable storage failures.
 
 **Why now:** The outer `sim.tick()` is built and the packet-core drain bypass
 is gone. This is the next piece that makes VOPR-style swarm testing possible,
-but it no longer blocks the first disk slice.
+but it no longer blocks the disk-backed recovery example.
 
 **Scope:**
 
@@ -345,8 +391,9 @@ learning task.
 
 ## Phase 1: Disk
 
-Active. The first disk slice is also listed at the top of the active work
-queue. Network items in the near-term backlog are not blockers for disk.
+Active. The disk-backed recovery example is also listed at the top of the
+active work queue. Network items in the near-term backlog are not blockers for
+disk.
 
 Read `docs/disk-fault-model.md` before starting any of these. The sub-tasks
 below are ordered so each one is useful on its own.
@@ -363,15 +410,19 @@ submitted and completed operation.
 
 ### 10. Disk read/write faults
 
+Done.
+
 Per-sector fault bitmap. `BuggifyRate`-governed read fault, write fault,
 and corruption probabilities. Explicit `sim.disk().corruptSector(file,
 offset)` simulator-control API for scripted faults.
 
 ### 11. Crash-during-pending-write model
 
-Pending writes that a crash can land, not land, or partially land per
-sector. The crash-fault probability rises while writes are pending, per the
-VOPR lesson.
+Done.
+
+Pending writes that a crash can land, not land, or partially land. Crash
+outcome rates live in `DiskFaultOptions`; a future scheduler/fault profile can
+make crash probability rise while writes are pending, per the VOPR lesson.
 
 Acceptance criteria should be phrased as disk/recovery invariants, not a
 fault atlas: flushed writes are never lost, acknowledged unflushed writes may

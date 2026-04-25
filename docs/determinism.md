@@ -12,7 +12,7 @@ interfaces:
 
 - Time through `ProductionEnv`, `SimulationEnv`, or `Clock`.
 - Randomness through an environment, seeded `Random`, or `World`.
-- Disk through the future Disk interface.
+- Disk through Marionette's Disk authority.
 - Network through the future Network interface.
 - Scheduling through the future scheduler.
 
@@ -26,7 +26,7 @@ These are banned in simulated code:
 - `std.Random` without an explicit seed.
 - `std.crypto.random`
 - `std.Thread.spawn`
-- Filesystem calls outside the future Disk interface.
+- Filesystem calls outside Marionette's Disk authority.
 - Network calls outside the future Network interface.
 - Pointer identity as a source of ordering or hashing.
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.

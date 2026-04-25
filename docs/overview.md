@@ -9,10 +9,11 @@ the same execution from the same seed.
 
 Marionette is still experimental, but the core replay loop is real: seeded
 randomness, simulated time, trace logging, twice-and-compare replay, trace
-summaries, named post-scenario checks, and a no-fault deterministic disk
-authority. It also has an unstable deterministic network sketch for examples,
-while the stable app-facing network API is still being designed. Disk faults,
-a real scheduler, and richer replay tooling are planned.
+summaries, named post-scenario checks, and a deterministic disk authority with
+replayable faults and crash/restart simulation. It also has an unstable
+deterministic network sketch for examples, while the stable app-facing network
+API is still being designed. A real scheduler and richer replay tooling are
+planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
 the replay artifact bytes, see [Trace Format](trace-format.md). For

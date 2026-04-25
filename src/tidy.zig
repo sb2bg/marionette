@@ -47,11 +47,11 @@ pub const default_patterns = [_]Pattern{
     .{ .needle = "std.time", .reason = "use ProductionEnv, SimulationEnv, or World.clock()", .match = .prefix },
     .{ .needle = "std.Thread", .reason = "simulated components must be single-threaded", .match = .prefix },
     .{ .needle = "std.crypto.random", .reason = "use seeded Marionette randomness", .match = .prefix },
-    .{ .needle = "std.fs.cwd", .reason = "route filesystem access through the future Disk interface" },
-    .{ .needle = "std.fs.openFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
-    .{ .needle = "std.fs.createFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
-    .{ .needle = "std.fs.copyFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
-    .{ .needle = "std.fs.deleteFileAbsolute", .reason = "route filesystem access through the future Disk interface" },
+    .{ .needle = "std.fs.cwd", .reason = "route filesystem access through Marionette disk authority" },
+    .{ .needle = "std.fs.openFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
+    .{ .needle = "std.fs.createFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
+    .{ .needle = "std.fs.copyFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
+    .{ .needle = "std.fs.deleteFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.net", .reason = "route network access through the future Network interface", .match = .prefix },
 };
 

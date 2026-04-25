@@ -1,8 +1,10 @@
 # Disk Fault Model
 
-This is the design note for Marionette's disk simulation work. The first
-no-fault `mar.Disk` authority exists; the fault and crash model described here
-is still being built.
+This is the design note for Marionette's disk simulation work. `mar.Disk`
+currently supports deterministic logical files, latency, read/write IO errors,
+probabilistic corrupt reads, scripted sector corruption, and crash/restart
+simulation for pending writes. Generic recoverability budgets are still being
+built.
 
 The goal is a deterministic, recoverability-aware disk authority that can test
 real storage code without pretending to model every filesystem or device
@@ -96,7 +98,7 @@ simulator can then order pending work by:
 That ordering avoids pointer addresses, hash-map iteration order, and host
 scheduling as tie breakers.
 
-Implemented no-fault operation concepts:
+Implemented operation concepts:
 
 - File identity: logical path-like names (`[]const u8`) scoped to the
   simulated disk. These are not host paths and must not read host filesystem
@@ -105,11 +107,15 @@ Implemented no-fault operation concepts:
 - Sector size: a configured simulation parameter, defaulting to 4096 bytes.
 - Completed operation: result delivered to user code after deterministic
   synchronous latency.
-
-Future operation concepts:
-
-- Pending operation: submitted work waiting for simulated latency.
-- Crash window: submitted or partially completed writes affected by crash.
+- Runtime fault profile: `DiskFaultOptions` controls read errors, write
+  errors, corrupt reads, lost pending writes, and torn pending writes with
+  validated `BuggifyRate` values.
+- Scripted sector corruption: harness code can mark one logical path/sector as
+  corrupt with `corruptSector`.
+- Pending writes: successful writes are visible to later reads immediately,
+  but they are not durable until `sync`.
+- Crash window: `crash` processes pending writes, then marks the disk down
+  until `restart`.
 
 The Phase 1 implementation should start synchronous from the user's
 perspective: a `write` or `read` may advance simulated time internally and then
@@ -124,11 +130,13 @@ ordering, or failure behavior.
 
 ## Faults
 
-Initial faults should be small and explicit:
+Initial faults are small and explicit:
 
 - Latency: operation completes at a deterministic future timestamp.
 - IO error: read/write returns a simulated disk error.
 - Corruption: read returns bytes that differ from the durable model.
+- Scripted corruption: a specific logical sector is marked corrupt by the
+  harness.
 - Torn write: a crash leaves only part of a write durable.
 - Lost pending write: a crash drops an acknowledged-pending write before it
   becomes durable.
@@ -164,19 +172,22 @@ can lift that pattern out of examples.
 
 ## Trace Events
 
-Disk traces should be stable text events until the trace format changes
-globally. Disk code must use `World.recordFields` so logical paths and status
-strings are escaped consistently. Candidate Phase 1 events:
+Disk traces are stable text events until the trace format changes globally.
+Disk code must use `World.recordFields` so logical paths and status strings
+are escaped consistently. Current events:
 
 - `disk.read op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
 - `disk.write op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
-- `disk.sync op=<u64> path=<escaped-text> status=<literal> latency_ns=<u64>`
-- `disk.fault op=<u64> path=<escaped-text> kind=<literal>`
+- `disk.sync op=<u64> path=<escaped-text> status=<literal> committed_writes=<u64> latency_ns=<u64>`
+- `disk.fault op=<u64> path=<escaped-text> kind=<literal> rate=<literal> roll=<u64> fired=<bool>`
+- `disk.fault path=<escaped-text> offset=<u64> kind=scripted_corruption`
+- `disk.crash_write op=<u64> path=<escaped-text> offset=<u64> len=<u64> result=<literal>`
 - `disk.crash pending_writes=<u64> landed=<u64> lost=<u64> torn=<u64>`
+- `disk.restart status=ok`
 
 Use status values such as `ok`, `io_error`, `corrupt`, and `torn`. Use fault
-kinds such as `read_error`, `write_error`, `corrupt_read`, `lost_write`, and
-`torn_write`.
+kinds such as `read_error`, `write_error`, `corrupt_read`,
+`crash_lost_write`, and `crash_torn_write`.
 
 Trace fields must be scalar, deterministic, and independent of pointer
 identity. User bytes should not be dumped into the default trace unless a
@@ -204,8 +215,9 @@ hashes, the hash algorithm must be named and stable.
 - File identity: logical path-like `[]const u8`, escaped in traces and never
   resolved against the host filesystem by the simulator.
 - Default sector size: 4096 bytes.
-- Initial operations: `read`, `write`, and `sync` are implemented. Explicit
-  simulated crash is next.
+- Initial operations: `read`, `write`, `sync`, `crash`, and `restart` are
+  implemented. Read/write IO errors, corrupt reads, scripted sector
+  corruption, lost pending writes, and torn pending writes are implemented.
 - Initial example: append-only WAL recovery.
 - User data: store bytes in memory, trace lengths and outcomes by default.
 - Checksums: user code owns them.

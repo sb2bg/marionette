@@ -206,11 +206,11 @@ not pointer identity or hash-map iteration.
 
 ## Disk
 
-`mar.Disk` is the first deterministic disk authority. It is a no-fault
-simulator slice: logical files, sector-aligned reads and writes, sparse
-in-memory sectors, deterministic latency, operation ids, and trace events.
-Disk faults, crash behavior, production adapters, and `env.disk()` are not
-implemented yet.
+`mar.Disk` is the first deterministic disk authority: logical files,
+sector-aligned reads and writes, sparse in-memory sectors, deterministic
+latency, operation ids, trace events, and replayable read/write/corruption
+faults. It also has simulator-control crash/restart operations for pending
+writes. Production adapters and `env.disk()` are not implemented yet.
 
 Construct it from a simulation `World`:
 
@@ -248,7 +248,62 @@ escaped through `World.recordFields` in trace events:
 ```text
 disk.write op=0 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.read op=1 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
-disk.sync op=2 path=wal.log status=ok latency_ns=1000000
+disk.sync op=2 path=wal.log status=ok committed_writes=1 latency_ns=1000000
+```
+
+Faults are disabled by default. Enable them with `mar.DiskFaultOptions`:
+
+```zig
+try disk.setFaults(.{
+    .read_error_rate = .oneIn(100),
+    .write_error_rate = .oneIn(100),
+    .corrupt_read_rate = .oneIn(1_000),
+    .crash_lost_write_rate = .oneIn(10),
+    .crash_torn_write_rate = .oneIn(10),
+});
+```
+
+Invalid rates return `error.InvalidRate`. Read and write errors return
+`error.ReadError` and `error.WriteError` after deterministic latency. Fault
+decisions are traced when their rate is non-zero:
+
+```text
+disk.fault op=3 path=wal.log kind=write_error rate=1/100 roll=42 fired=false
+disk.fault op=4 path=wal.log kind=read_error rate=1/100 roll=0 fired=true
+disk.read op=4 path=wal.log offset=0 len=4096 status=io_error latency_ns=1000000
+```
+
+`corrupt_read_rate` corrupts only the returned buffer; it does not mutate the
+durable in-memory model. Harnesses can inject persistent scripted sector
+corruption with:
+
+```zig
+try disk.corruptSector("wal.log", 0);
+```
+
+That simulator-control API records `disk.fault ... kind=scripted_corruption`;
+later reads covering that sector return `status=corrupt`.
+
+Writes are visible to later reads immediately, but they are pending until
+`sync`. A crash processes pending writes according to the crash fault profile:
+each pending write may land, be lost, or be torn. Synced writes are already
+committed and are not lost by crash.
+
+```zig
+try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
+try disk.crash(.{});
+try disk.restart(.{});
+```
+
+While crashed, `read`, `write`, and `sync` return `error.DiskCrashed`.
+Crash outcomes are trace-visible:
+
+```text
+disk.fault op=3 path=wal.log kind=crash_lost_write rate=1/10 roll=7 fired=false
+disk.fault op=3 path=wal.log kind=crash_torn_write rate=1/10 roll=0 fired=true
+disk.crash_write op=3 path=wal.log offset=0 len=4096 result=torn
+disk.crash pending_writes=1 landed=0 lost=0 torn=1
+disk.restart status=ok
 ```
 
 ## Network
