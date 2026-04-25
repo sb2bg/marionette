@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const run_types = @import("run_types.zig");
+const world_module = @import("world.zig");
 const World = @import("world.zig").World;
 
 pub const Check = run_types.Check;
@@ -16,6 +17,12 @@ pub const RunResult = run_types.RunResult;
 pub const StateCheck = run_types.StateCheck;
 pub const runAttribute = run_types.runAttribute;
 pub const runAttributesFrom = run_types.runAttributesFrom;
+pub const TraceError = world_module.TraceError;
+
+pub const RunError = std.mem.Allocator.Error || TraceError;
+
+const cloneRunOptions = run_types.cloneRunOptions;
+const deinitRunOptions = run_types.deinitRunOptions;
 
 const RunOnceResult = union(enum) {
     passed: RunResult,
@@ -39,7 +46,7 @@ pub fn run(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime scenario: fn (*World) anyerror!void,
-) std.mem.Allocator.Error!RunReport {
+) RunError!RunReport {
     const no_state_checks = [_]StateCheck(NoState){};
     return runTwiceWithState(
         allocator,
@@ -62,7 +69,7 @@ pub fn runWithState(
     comptime init_state: fn () State,
     comptime scenario: fn (*World, *State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
-) std.mem.Allocator.Error!RunReport {
+) RunError!RunReport {
     return runTwiceWithState(allocator, options, State, init_state, scenario, state_checks);
 }
 
@@ -89,7 +96,7 @@ fn runTwiceWithState(
     comptime init_state: fn () State,
     comptime scenario: fn (*World, *State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
-) std.mem.Allocator.Error!RunReport {
+) RunError!RunReport {
     var first = try runOnceWithState(allocator, options, State, init_state, scenario, state_checks);
     switch (first) {
         .failed => |failure| return .{ .failed = failure },
@@ -101,9 +108,12 @@ fn runTwiceWithState(
     switch (second) {
         .failed => |failure| {
             const passed = first.passed;
+            var failure_options = failure.options;
+            if (failure.owns_options) deinitRunOptions(allocator, &failure_options);
             return .{ .failed = .{
                 .allocator = allocator,
-                .options = options,
+                .options = passed.options,
+                .owns_options = passed.owns_options,
                 .first_trace = passed.trace,
                 .second_trace = failure.first_trace,
                 .first_event_count = passed.event_count,
@@ -111,6 +121,7 @@ fn runTwiceWithState(
                 .kind = failure.kind,
                 .error_name = failure.error_name,
                 .check_name = failure.check_name,
+                .owns_check_name = failure.owns_check_name,
             } };
         },
         .passed => {},
@@ -118,11 +129,13 @@ fn runTwiceWithState(
     errdefer second.deinit();
 
     const first_passed = first.passed;
-    const second_passed = second.passed;
+    var second_passed = second.passed;
     if (!std.mem.eql(u8, first_passed.trace, second_passed.trace)) {
+        if (second_passed.owns_options) deinitRunOptions(allocator, &second_passed.options);
         return .{ .failed = .{
             .allocator = allocator,
-            .options = options,
+            .options = first_passed.options,
+            .owns_options = first_passed.owns_options,
             .kind = .determinism_mismatch,
             .first_trace = first_passed.trace,
             .second_trace = second_passed.trace,
@@ -131,7 +144,7 @@ fn runTwiceWithState(
         } };
     }
 
-    allocator.free(second_passed.trace);
+    second_passed.deinit();
     return .{ .passed = first_passed };
 }
 
@@ -142,7 +155,7 @@ fn runOnceWithState(
     comptime init_state: fn () State,
     comptime scenario: fn (*World, *State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
-) std.mem.Allocator.Error!RunOnceResult {
+) RunError!RunOnceResult {
     var world = try World.init(allocator, options.worldOptions());
     defer world.deinit();
     try recordRunContext(&world, options);
@@ -185,15 +198,20 @@ fn runOnceWithState(
         };
     }
 
+    const trace = try allocator.dupe(u8, world.traceBytes());
+    errdefer allocator.free(trace);
+    const owned_options = try cloneRunOptions(allocator, options);
+
     return .{ .passed = .{
         .allocator = allocator,
-        .options = options,
-        .trace = try allocator.dupe(u8, world.traceBytes()),
+        .options = owned_options,
+        .owns_options = true,
+        .trace = trace,
         .event_count = world.nextEventIndex(),
     } };
 }
 
-fn recordRunContext(world: *World, options: RunOptions) std.mem.Allocator.Error!void {
+fn recordRunContext(world: *World, options: RunOptions) RunError!void {
     if (options.profile_name) |profile_name| {
         try world.record("run.profile name={s}", .{profile_name});
     }
@@ -234,14 +252,25 @@ fn failureFromWorld(
     err: anyerror,
     check_name: ?[]const u8,
 ) std.mem.Allocator.Error!RunFailure {
+    const trace = try allocator.dupe(u8, world.traceBytes());
+    errdefer allocator.free(trace);
+
+    var owned_options = try cloneRunOptions(allocator, options);
+    errdefer deinitRunOptions(allocator, &owned_options);
+
+    const owned_check_name = if (check_name) |name| try allocator.dupe(u8, name) else null;
+    errdefer if (owned_check_name) |name| allocator.free(name);
+
     return .{
         .allocator = allocator,
-        .options = options,
+        .options = owned_options,
+        .owns_options = true,
         .kind = kind,
-        .first_trace = try allocator.dupe(u8, world.traceBytes()),
+        .first_trace = trace,
         .first_event_count = world.nextEventIndex(),
         .error_name = @errorName(err),
-        .check_name = check_name,
+        .check_name = owned_check_name,
+        .owns_check_name = owned_check_name != null,
     };
 }
 
@@ -337,6 +366,37 @@ test "run: attributes and tags are traced before scenario code" {
     }
 }
 
+test "run: invalid replay metadata is rejected before scenario code" {
+    const tags = [_][]const u8{"invalid tag"};
+
+    try std.testing.expectError(
+        error.InvalidTracePayload,
+        run(std.testing.allocator, .{
+            .seed = 1234,
+            .tags = &tags,
+        }, deterministicScenario),
+    );
+}
+
+fn invalidTraceScenario(world: *World) !void {
+    try world.record("scenario.message value={s}", .{"hello world"});
+}
+
+test "run: invalid scenario trace is reported as scenario failure" {
+    var report = try run(std.testing.allocator, .{ .seed = 1234 }, invalidTraceScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.scenario_error, failure.kind);
+            try std.testing.expectEqualStrings("InvalidTracePayload", failure.error_name.?);
+            try std.testing.expectEqual(@as(u64, 1), failure.first_event_count);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "hello world") == null);
+        },
+    }
+}
+
 test "RunFailure: writeSummary includes replay attributes and tags" {
     const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
     const attributes = [_]RunAttribute{
@@ -366,6 +426,53 @@ test "RunFailure: writeSummary includes replay attributes and tags" {
             );
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "run.profile name=smoke") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.before_error") != null);
+        },
+    }
+}
+
+test "RunFailure: owns replay metadata used by summaries" {
+    var profile_buf = [_]u8{ 's', 'm', 'o', 'k', 'e' };
+    var tag_buf = [_]u8{ 't', 'a', 'g', '_', 'a' };
+    var key_buf = [_]u8{ 'm', 'o', 'd', 'e' };
+    var value_buf = [_]u8{ 'f', 'a', 's', 't' };
+    var check_name_buf = [_]u8{ 'f', 'a', 'i', 'l', 's' };
+
+    const attributes = [_]RunAttribute{
+        .{
+            .key = key_buf[0..],
+            .value = .{ .string = value_buf[0..] },
+        },
+    };
+    const tags = [_][]const u8{tag_buf[0..]};
+    const checks = [_]Check{.{ .name = check_name_buf[0..], .check = failingCheck }};
+
+    var report = try run(std.testing.allocator, .{
+        .seed = 1234,
+        .profile_name = profile_buf[0..],
+        .tags = &tags,
+        .attributes = &attributes,
+        .checks = &checks,
+    }, deterministicScenario);
+    defer report.deinit();
+
+    @memcpy(profile_buf[0..], "other");
+    @memcpy(tag_buf[0..], "tag_b");
+    @memcpy(key_buf[0..], "xxxx");
+    @memcpy(value_buf[0..], "slow");
+    @memcpy(check_name_buf[0..], "nope!");
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            var buffer: [512]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try failure.writeSummary(&writer);
+            const summary = writer.buffered();
+
+            try std.testing.expect(std.mem.indexOf(u8, summary, "profile=smoke") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "tag=tag_a") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "mode=string:fast") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "check=fails") != null);
         },
     }
 }

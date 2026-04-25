@@ -9,6 +9,12 @@ const std = @import("std");
 const clock_module = @import("clock.zig");
 const random_module = @import("random.zig");
 
+/// Errors returned while writing deterministic trace records.
+pub const TraceError = error{
+    /// The formatted trace payload is not a valid line-oriented trace event.
+    InvalidTracePayload,
+};
+
 /// Container for deterministic simulation engine state.
 ///
 /// `World` owns the fake clock, seeded random stream, and trace log used by
@@ -57,7 +63,7 @@ pub const World = struct {
     };
 
     /// Construct a world with deterministic time, randomness, and tracing.
-    pub fn init(allocator: std.mem.Allocator, options: Options) !World {
+    pub fn init(allocator: std.mem.Allocator, options: Options) std.mem.Allocator.Error!World {
         var world: World = .{
             .allocator = allocator,
             .sim_clock = .init(.{
@@ -71,10 +77,13 @@ pub const World = struct {
         errdefer world.deinit();
 
         try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=0\n");
-        try world.record(
+        world.record(
             "world.init seed={} start_ns={} tick_ns={}",
             .{ options.seed, options.start_ns, options.tick_ns },
-        );
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidTracePayload => unreachable,
+        };
 
         return world;
     }
@@ -162,14 +171,16 @@ pub const World = struct {
     ///
     /// The format string should not include a trailing newline; `record`
     /// adds one so trace records stay line-oriented and comparable.
-    pub fn record(self: *World, comptime fmt: []const u8, args: anytype) !void {
+    pub fn record(self: *World, comptime fmt: []const u8, args: anytype) (std.mem.Allocator.Error || TraceError)!void {
         const start_len = self.trace_log.items.len;
         errdefer self.trace_log.shrinkRetainingCapacity(start_len);
 
         try self.trace_log.print(self.allocator, "event={} ", .{self.event_index});
         const payload_start = self.trace_log.items.len;
         try self.trace_log.print(self.allocator, fmt, args);
-        std.debug.assert(isValidTracePayload(self.trace_log.items[payload_start..]));
+        if (!isValidTracePayload(self.trace_log.items[payload_start..])) {
+            return error.InvalidTracePayload;
+        }
         try self.trace_log.append(self.allocator, '\n');
         self.event_index += 1;
     }
@@ -348,6 +359,22 @@ test "world: failed record rolls back bytes and event index" {
     try std.testing.expectError(
         error.OutOfMemory,
         world.record("service.large value={s}", .{large_value[0..]}),
+    );
+    try std.testing.expectEqual(before_event_index, world.nextEventIndex());
+    try std.testing.expectEqualStrings(before_trace, world.traceBytes());
+}
+
+test "world: invalid trace payload returns error and rolls back" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99 });
+    defer world.deinit();
+
+    const before_trace = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(before_trace);
+    const before_event_index = world.nextEventIndex();
+
+    try std.testing.expectError(
+        error.InvalidTracePayload,
+        world.record("service.message value={s}", .{"hello world"}),
     );
     try std.testing.expectEqual(before_event_index, world.nextEventIndex());
     try std.testing.expectEqualStrings(before_trace, world.traceBytes());

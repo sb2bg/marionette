@@ -168,16 +168,102 @@ pub const RunOptions = struct {
     }
 };
 
+pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.mem.Allocator.Error!RunOptions {
+    var cloned: RunOptions = .{
+        .seed = options.seed,
+        .start_ns = options.start_ns,
+        .tick_ns = options.tick_ns,
+    };
+    errdefer deinitRunOptions(allocator, &cloned);
+
+    if (options.profile_name) |profile_name| {
+        cloned.profile_name = try allocator.dupe(u8, profile_name);
+    }
+
+    if (options.tags.len > 0) {
+        const tags = try allocator.alloc([]const u8, options.tags.len);
+        cloned.tags = tags;
+        for (tags) |*tag| tag.* = &.{};
+        for (options.tags, 0..) |tag, index| {
+            tags[index] = try allocator.dupe(u8, tag);
+        }
+    }
+
+    if (options.attributes.len > 0) {
+        const attributes = try allocator.alloc(RunAttribute, options.attributes.len);
+        cloned.attributes = attributes;
+        for (attributes) |*attribute| {
+            attribute.* = .{ .key = &.{}, .value = .{ .uint = 0 } };
+        }
+        for (options.attributes, 0..) |attribute, index| {
+            attributes[index].key = try allocator.dupe(u8, attribute.key);
+            attributes[index].value = try cloneRunAttributeValue(allocator, attribute.value);
+        }
+    }
+
+    if (options.checks.len > 0) {
+        const checks = try allocator.alloc(Check, options.checks.len);
+        cloned.checks = checks;
+        for (checks) |*check| {
+            check.* = .{ .name = &.{}, .check = undefined };
+        }
+        for (options.checks, 0..) |check, index| {
+            checks[index] = .{
+                .name = try allocator.dupe(u8, check.name),
+                .check = check.check,
+            };
+        }
+    }
+
+    return cloned;
+}
+
+pub fn deinitRunOptions(allocator: std.mem.Allocator, options: *RunOptions) void {
+    if (options.profile_name) |profile_name| allocator.free(profile_name);
+    for (options.tags) |tag| allocator.free(tag);
+    allocator.free(options.tags);
+    for (options.attributes) |attribute| {
+        allocator.free(attribute.key);
+        deinitRunAttributeValue(allocator, attribute.value);
+    }
+    allocator.free(options.attributes);
+    for (options.checks) |check| allocator.free(check.name);
+    allocator.free(options.checks);
+    options.* = undefined;
+}
+
+fn cloneRunAttributeValue(
+    allocator: std.mem.Allocator,
+    value: RunAttributeValue,
+) std.mem.Allocator.Error!RunAttributeValue {
+    return switch (value) {
+        .string => |string| .{ .string = try allocator.dupe(u8, string) },
+        .int => |int| .{ .int = int },
+        .uint => |uint| .{ .uint = uint },
+        .boolean => |boolean| .{ .boolean = boolean },
+        .float => |float| .{ .float = float },
+    };
+}
+
+fn deinitRunAttributeValue(allocator: std.mem.Allocator, value: RunAttributeValue) void {
+    switch (value) {
+        .string => |string| allocator.free(string),
+        .int, .uint, .boolean, .float => {},
+    }
+}
+
 /// Successful scenario result.
 pub const RunResult = struct {
     allocator: std.mem.Allocator,
     options: RunOptions,
+    owns_options: bool = false,
     trace: []u8,
     event_count: u64,
 
     /// Release the owned trace.
     pub fn deinit(self: *RunResult) void {
         self.allocator.free(self.trace);
+        if (self.owns_options) deinitRunOptions(self.allocator, &self.options);
         self.* = undefined;
     }
 
@@ -204,6 +290,7 @@ pub const RunFailureKind = enum {
 pub const RunFailure = struct {
     allocator: std.mem.Allocator,
     options: RunOptions,
+    owns_options: bool = false,
     kind: RunFailureKind,
     first_trace: []u8,
     second_trace: []u8 = &.{},
@@ -211,11 +298,16 @@ pub const RunFailure = struct {
     second_event_count: u64 = 0,
     error_name: ?[]const u8 = null,
     check_name: ?[]const u8 = null,
+    owns_check_name: bool = false,
 
     /// Release owned traces.
     pub fn deinit(self: *RunFailure) void {
         self.allocator.free(self.first_trace);
         self.allocator.free(self.second_trace);
+        if (self.owns_options) deinitRunOptions(self.allocator, &self.options);
+        if (self.owns_check_name) {
+            if (self.check_name) |name| self.allocator.free(name);
+        }
         self.* = undefined;
     }
 

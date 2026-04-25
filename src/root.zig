@@ -103,6 +103,12 @@ pub const RunFailureKind = run_module.RunFailureKind;
 /// Result of `run`: either a verified replay or a failure report.
 pub const RunReport = run_module.RunReport;
 
+/// Errors returned by the deterministic scenario runner itself.
+pub const RunError = run_module.RunError;
+
+/// Errors returned while writing deterministic trace records.
+pub const TraceError = run_module.TraceError;
+
 /// Run a scenario twice with the same seed and compare traces.
 pub const run = run_module.run;
 
