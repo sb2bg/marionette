@@ -1,11 +1,12 @@
 //! Deterministic in-memory disk authority.
 //!
-//! This is the first no-fault disk slice: logical files, sector-aligned
-//! reads/writes, deterministic latency, operation ids, and trace events.
+//! Logical files, sector-aligned reads/writes, deterministic latency,
+//! operation ids, trace events, replayable faults, and crash/restart.
 
 const std = @import("std");
 
 const clock_module = @import("clock.zig");
+const env_module = @import("env.zig");
 const World = @import("world.zig").World;
 const traceField = @import("world.zig").traceField;
 
@@ -13,13 +14,25 @@ pub const DiskError = error{
     InvalidAlignment,
     InvalidDuration,
     InvalidPath,
+    InvalidRate,
     InvalidRange,
+    DiskCrashed,
+    ReadError,
+    WriteError,
 } || std.mem.Allocator.Error || @import("world.zig").TraceError;
 
 pub const DiskOptions = struct {
     sector_size: u64 = 4096,
     min_latency_ns: clock_module.Duration = clock_module.default_tick_ns,
     latency_jitter_ns: clock_module.Duration = 0,
+};
+
+pub const DiskFaultOptions = struct {
+    read_error_rate: env_module.BuggifyRate = .never(),
+    write_error_rate: env_module.BuggifyRate = .never(),
+    corrupt_read_rate: env_module.BuggifyRate = .never(),
+    crash_lost_write_rate: env_module.BuggifyRate = .never(),
+    crash_torn_write_rate: env_module.BuggifyRate = .never(),
 };
 
 pub const Disk = struct {
@@ -41,6 +54,10 @@ pub const Disk = struct {
         path: []const u8,
     };
 
+    pub const Crash = struct {};
+
+    pub const Restart = struct {};
+
     const File = struct {
         path: []u8,
         sectors: std.ArrayList(Sector) = .empty,
@@ -56,6 +73,7 @@ pub const Disk = struct {
     const Sector = struct {
         index: u64,
         bytes: []u8,
+        corrupt: bool = false,
 
         fn deinit(self: *Sector, allocator: std.mem.Allocator) void {
             allocator.free(self.bytes);
@@ -63,10 +81,26 @@ pub const Disk = struct {
         }
     };
 
+    const PendingWrite = struct {
+        op_id: u64,
+        path: []u8,
+        offset: u64,
+        bytes: []u8,
+
+        fn deinit(self: *PendingWrite, allocator: std.mem.Allocator) void {
+            allocator.free(self.path);
+            allocator.free(self.bytes);
+            self.* = undefined;
+        }
+    };
+
     world: *World,
     options: DiskOptions,
+    faults: DiskFaultOptions = .{},
     files: std.ArrayList(File) = .empty,
+    pending_writes: std.ArrayList(PendingWrite) = .empty,
     next_op_id: u64 = 0,
+    crashed: bool = false,
 
     pub fn init(world: *World, options: DiskOptions) DiskError!Self {
         try validateOptions(world, options);
@@ -79,19 +113,68 @@ pub const Disk = struct {
     pub fn deinit(self: *Self) void {
         for (self.files.items) |*file| file.deinit(self.world.allocator);
         self.files.deinit(self.world.allocator);
+        for (self.pending_writes.items) |*pending| pending.deinit(self.world.allocator);
+        self.pending_writes.deinit(self.world.allocator);
         self.* = undefined;
+    }
+
+    pub fn setFaults(self: *Self, faults: DiskFaultOptions) DiskError!void {
+        try validateFaultRate(faults.read_error_rate);
+        try validateFaultRate(faults.write_error_rate);
+        try validateFaultRate(faults.corrupt_read_rate);
+        try validateFaultRate(faults.crash_lost_write_rate);
+        try validateFaultRate(faults.crash_torn_write_rate);
+        self.faults = faults;
+    }
+
+    pub fn corruptSector(self: *Self, path: []const u8, offset: u64) DiskError!void {
+        try self.validatePath(path);
+        try self.validateRange(offset, @intCast(self.options.sector_size));
+
+        const file = try self.getOrCreateFile(path);
+        const sector = try self.getOrCreateSector(file, offset / self.options.sector_size);
+        sector.corrupt = true;
+
+        try self.world.recordFields("disk.fault", &.{
+            traceField("path", .{ .text = path }),
+            traceField("offset", .{ .uint = offset }),
+            traceField("kind", .{ .literal = "scripted_corruption" }),
+        });
     }
 
     pub fn read(self: *Self, options: Read) DiskError!void {
         try self.validatePath(options.path);
         try self.validateRange(options.offset, options.buffer.len);
+        try self.ensureRunning();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
+
+        if (try self.rollFault(op_id, options.path, "read_error", self.faults.read_error_rate)) {
+            try self.recordRangeOp(
+                "disk.read",
+                op_id,
+                options.path,
+                options.offset,
+                options.buffer.len,
+                "io_error",
+                latency_ns,
+            );
+            return error.ReadError;
+        }
+
         @memset(options.buffer, 0);
 
         if (self.findFile(options.path)) |file| {
             try self.readSectors(file, options.offset, options.buffer);
+        }
+        self.overlayPendingWrites(options.path, options.offset, options.buffer);
+
+        const corrupt = self.rangeHasCorruption(options.path, options.offset, options.buffer.len) or
+            try self.rollFault(op_id, options.path, "corrupt_read", self.faults.corrupt_read_rate);
+        const status = if (corrupt) "corrupt" else "ok";
+        if (corrupt and options.buffer.len > 0) {
+            options.buffer[0] ^= 0xff;
         }
 
         try self.recordRangeOp(
@@ -100,7 +183,7 @@ pub const Disk = struct {
             options.path,
             options.offset,
             options.buffer.len,
-            "ok",
+            status,
             latency_ns,
         );
     }
@@ -108,11 +191,24 @@ pub const Disk = struct {
     pub fn write(self: *Self, options: Write) DiskError!void {
         try self.validatePath(options.path);
         try self.validateRange(options.offset, options.bytes.len);
+        try self.ensureRunning();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
-        const file = try self.getOrCreateFile(options.path);
-        try self.writeSectors(file, options.offset, options.bytes);
+        if (try self.rollFault(op_id, options.path, "write_error", self.faults.write_error_rate)) {
+            try self.recordRangeOp(
+                "disk.write",
+                op_id,
+                options.path,
+                options.offset,
+                options.bytes.len,
+                "io_error",
+                latency_ns,
+            );
+            return error.WriteError;
+        }
+
+        try self.appendPendingWrite(op_id, options.path, options.offset, options.bytes);
 
         try self.recordRangeOp(
             "disk.write",
@@ -127,15 +223,72 @@ pub const Disk = struct {
 
     pub fn sync(self: *Self, options: Sync) DiskError!void {
         try self.validatePath(options.path);
+        try self.ensureRunning();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
+        const committed = try self.commitPendingWrites(options.path);
 
         try self.world.recordFields("disk.sync", &.{
             traceField("op", .{ .uint = op_id }),
             traceField("path", .{ .text = options.path }),
             traceField("status", .{ .literal = "ok" }),
+            traceField("committed_writes", .{ .uint = committed }),
             traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+    }
+
+    pub fn crash(self: *Self, _: Crash) DiskError!void {
+        try self.ensureRunning();
+
+        const pending_count = self.pending_writes.items.len;
+        var landed: u64 = 0;
+        var lost: u64 = 0;
+        var torn: u64 = 0;
+
+        for (self.pending_writes.items) |*pending| {
+            if (try self.rollFault(
+                pending.op_id,
+                pending.path,
+                "crash_lost_write",
+                self.faults.crash_lost_write_rate,
+            )) {
+                lost += 1;
+                try self.recordCrashWrite(pending, "lost");
+                continue;
+            }
+
+            if (try self.rollFault(
+                pending.op_id,
+                pending.path,
+                "crash_torn_write",
+                self.faults.crash_torn_write_rate,
+            )) {
+                try self.applyTornWrite(pending);
+                torn += 1;
+                try self.recordCrashWrite(pending, "torn");
+                continue;
+            }
+
+            try self.applyFullWrite(pending);
+            landed += 1;
+            try self.recordCrashWrite(pending, "landed");
+        }
+        self.clearPendingWrites();
+        self.crashed = true;
+
+        try self.world.recordFields("disk.crash", &.{
+            traceField("pending_writes", .{ .uint = @intCast(pending_count) }),
+            traceField("landed", .{ .uint = landed }),
+            traceField("lost", .{ .uint = lost }),
+            traceField("torn", .{ .uint = torn }),
+        });
+    }
+
+    pub fn restart(self: *Self, _: Restart) DiskError!void {
+        self.crashed = false;
+        try self.world.recordFields("disk.restart", &.{
+            traceField("status", .{ .literal = "ok" }),
         });
     }
 
@@ -147,8 +300,17 @@ pub const Disk = struct {
         if (options.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
     }
 
+    fn validateFaultRate(rate: env_module.BuggifyRate) DiskError!void {
+        if (rate.denominator == 0) return error.InvalidRate;
+        if (rate.numerator > rate.denominator) return error.InvalidRate;
+    }
+
     fn validatePath(_: *const Self, path: []const u8) DiskError!void {
         if (path.len == 0) return error.InvalidPath;
+    }
+
+    fn ensureRunning(self: *const Self) DiskError!void {
+        if (self.crashed) return error.DiskCrashed;
     }
 
     fn validateRange(self: *const Self, offset: u64, len: usize) DiskError!void {
@@ -186,6 +348,38 @@ pub const Disk = struct {
         return self.options.min_latency_ns + jitter_ticks * tick_ns;
     }
 
+    fn rollFault(
+        self: *Self,
+        op_id: u64,
+        path: []const u8,
+        kind: []const u8,
+        rate: env_module.BuggifyRate,
+    ) DiskError!bool {
+        try validateFaultRate(rate);
+        if (rate.numerator == 0) return false;
+
+        const roll = try self.world.randomIntLessThan(u32, rate.denominator);
+        const fired = roll < rate.numerator;
+
+        var rate_buffer: [32]u8 = undefined;
+        const rate_literal = std.fmt.bufPrint(
+            &rate_buffer,
+            "{}/{}",
+            .{ rate.numerator, rate.denominator },
+        ) catch unreachable;
+
+        try self.world.recordFields("disk.fault", &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = path }),
+            traceField("kind", .{ .literal = kind }),
+            traceField("rate", .{ .literal = rate_literal }),
+            traceField("roll", .{ .uint = roll }),
+            traceField("fired", .{ .literal = if (fired) "true" else "false" }),
+        });
+
+        return fired;
+    }
+
     fn findFile(self: *Self, path: []const u8) ?*File {
         for (self.files.items) |*file| {
             if (std.mem.eql(u8, file.path, path)) return file;
@@ -201,6 +395,63 @@ pub const Disk = struct {
 
         try self.files.append(self.world.allocator, .{ .path = owned_path });
         return &self.files.items[self.files.items.len - 1];
+    }
+
+    fn appendPendingWrite(
+        self: *Self,
+        op_id: u64,
+        path: []const u8,
+        offset: u64,
+        bytes: []const u8,
+    ) DiskError!void {
+        const owned_path = try self.world.allocator.dupe(u8, path);
+        errdefer self.world.allocator.free(owned_path);
+
+        const owned_bytes = try self.world.allocator.dupe(u8, bytes);
+        errdefer self.world.allocator.free(owned_bytes);
+
+        try self.pending_writes.append(self.world.allocator, .{
+            .op_id = op_id,
+            .path = owned_path,
+            .offset = offset,
+            .bytes = owned_bytes,
+        });
+    }
+
+    fn commitPendingWrites(self: *Self, path: []const u8) DiskError!u64 {
+        var committed: u64 = 0;
+        var index: usize = 0;
+        while (index < self.pending_writes.items.len) {
+            if (!std.mem.eql(u8, self.pending_writes.items[index].path, path)) {
+                index += 1;
+                continue;
+            }
+
+            try self.applyFullWrite(&self.pending_writes.items[index]);
+            var pending = self.pending_writes.orderedRemove(index);
+            pending.deinit(self.world.allocator);
+            committed += 1;
+        }
+
+        return committed;
+    }
+
+    fn clearPendingWrites(self: *Self) void {
+        for (self.pending_writes.items) |*pending| pending.deinit(self.world.allocator);
+        self.pending_writes.clearRetainingCapacity();
+    }
+
+    fn applyFullWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
+        const file = try self.getOrCreateFile(pending.path);
+        try self.writeSectors(file, pending.offset, pending.bytes);
+    }
+
+    fn applyTornWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
+        const torn_len = pending.bytes.len / 2;
+        if (torn_len == 0) return;
+
+        const file = try self.getOrCreateFile(pending.path);
+        try self.writeBytes(file, pending.offset, pending.bytes[0..torn_len]);
     }
 
     fn findSector(_: *Self, file: *File, index: u64) ?*Sector {
@@ -238,17 +489,78 @@ pub const Disk = struct {
         }
     }
 
-    fn writeSectors(self: *Self, file: *File, offset: u64, bytes: []const u8) DiskError!void {
-        var remaining = bytes;
+    fn rangeHasCorruption(self: *Self, path: []const u8, offset: u64, len: usize) bool {
+        const file = self.findFile(path) orelse return false;
+        var remaining = len;
         var sector_index = offset / self.options.sector_size;
         const sector_size: usize = @intCast(self.options.sector_size);
 
-        while (remaining.len > 0) {
-            const sector = try self.getOrCreateSector(file, sector_index);
-            @memcpy(sector.bytes, remaining[0..sector_size]);
-            remaining = remaining[sector_size..];
+        while (remaining > 0) {
+            if (self.findSector(file, sector_index)) |sector| {
+                if (sector.corrupt) return true;
+            }
+            remaining -= sector_size;
             sector_index += 1;
         }
+
+        return false;
+    }
+
+    fn overlayPendingWrites(self: *Self, path: []const u8, offset: u64, buffer: []u8) void {
+        const read_start = offset;
+        const read_end = read_start + buffer.len;
+
+        for (self.pending_writes.items) |*pending| {
+            if (!std.mem.eql(u8, pending.path, path)) continue;
+
+            const write_start = pending.offset;
+            const write_end = write_start + pending.bytes.len;
+            const overlap_start = @max(read_start, write_start);
+            const overlap_end = @min(read_end, write_end);
+            if (overlap_start >= overlap_end) continue;
+
+            const dst_start: usize = @intCast(overlap_start - read_start);
+            const src_start: usize = @intCast(overlap_start - write_start);
+            const overlap_len: usize = @intCast(overlap_end - overlap_start);
+            @memcpy(
+                buffer[dst_start..][0..overlap_len],
+                pending.bytes[src_start..][0..overlap_len],
+            );
+        }
+    }
+
+    fn writeSectors(self: *Self, file: *File, offset: u64, bytes: []const u8) DiskError!void {
+        try self.writeBytes(file, offset, bytes);
+    }
+
+    fn writeBytes(self: *Self, file: *File, offset: u64, bytes: []const u8) DiskError!void {
+        var remaining = bytes;
+        var cursor = offset;
+        const sector_size: usize = @intCast(self.options.sector_size);
+
+        while (remaining.len > 0) {
+            const sector_index = cursor / self.options.sector_size;
+            const sector_offset: usize = @intCast(cursor % self.options.sector_size);
+            const writable = @min(sector_size - sector_offset, remaining.len);
+            const sector = try self.getOrCreateSector(file, sector_index);
+            @memcpy(sector.bytes[sector_offset..][0..writable], remaining[0..writable]);
+            remaining = remaining[writable..];
+            cursor += writable;
+        }
+    }
+
+    fn recordCrashWrite(
+        self: *Self,
+        pending: *const PendingWrite,
+        result: []const u8,
+    ) DiskError!void {
+        try self.world.recordFields("disk.crash_write", &.{
+            traceField("op", .{ .uint = pending.op_id }),
+            traceField("path", .{ .text = pending.path }),
+            traceField("offset", .{ .uint = pending.offset }),
+            traceField("len", .{ .uint = @intCast(pending.bytes.len) }),
+            traceField("result", .{ .literal = result }),
+        });
     }
 
     fn recordRangeOp(
@@ -310,7 +622,7 @@ test "disk: sync consumes operation ids and escapes logical paths" {
 
     try disk.sync(.{ .path = "dir/wal 1.log" });
 
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.sync op=0 path=dir/wal%201.log status=ok latency_ns=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.sync op=0 path=dir/wal%201.log status=ok committed_writes=0 latency_ns=1") != null);
 }
 
 test "disk: rejects invalid paths, ranges, and latency options" {
@@ -372,4 +684,335 @@ test "disk: latency jitter is deterministic and traced" {
     try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
     try std.testing.expect(std.mem.indexOf(u8, a.traceBytes(), "world.random_int_less_than type=u64 less_than=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a.traceBytes(), "disk.write op=0 path=wal.log offset=0 len=4 status=ok latency_ns=") != null);
+}
+
+test "disk: write errors do not mutate durable sectors" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.setFaults(.{ .write_error_rate = .always() });
+    try std.testing.expectError(error.WriteError, disk.write(.{
+        .path = "wal.log",
+        .offset = 0,
+        .bytes = "zzzz",
+    }));
+
+    try disk.setFaults(.{});
+    var buffer = [_]u8{0xff} ** 4;
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 4, &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=0 path=wal.log kind=write_error rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.write op=0 path=wal.log offset=0 len=4 status=io_error latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=ok latency_ns=10") != null);
+}
+
+test "disk: read errors return before filling buffer" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.setFaults(.{ .read_error_rate = .always() });
+
+    var buffer = [_]u8{ 'x', 'x', 'x', 'x' };
+    try std.testing.expectError(error.ReadError, disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    }));
+
+    try std.testing.expectEqualStrings("xxxx", &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=1 path=wal.log kind=read_error rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=io_error latency_ns=10") != null);
+}
+
+test "disk: corrupt read faults do not mutate durable sectors" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.setFaults(.{ .corrupt_read_rate = .always() });
+
+    var corrupt_buffer = [_]u8{0} ** 4;
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &corrupt_buffer,
+    });
+    try std.testing.expect(!std.mem.eql(u8, "abcd", &corrupt_buffer));
+
+    try disk.setFaults(.{});
+    var clean_buffer = [_]u8{0} ** 4;
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &clean_buffer,
+    });
+    try std.testing.expectEqualStrings("abcd", &clean_buffer);
+
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=1 path=wal.log kind=corrupt_read rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=corrupt latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=2 path=wal.log offset=0 len=4 status=ok latency_ns=10") != null);
+}
+
+test "disk: scripted sector corruption persists across reads" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.corruptSector("wal.log", 0);
+
+    var buffer = [_]u8{0} ** 4;
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expect(!std.mem.eql(u8, "abcd", &buffer));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault path=wal.log offset=0 kind=scripted_corruption") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=corrupt latency_ns=10") != null);
+}
+
+test "disk: rejects invalid fault rates" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{});
+    defer disk.deinit();
+
+    try std.testing.expectError(error.InvalidRate, disk.setFaults(.{
+        .read_error_rate = .{ .numerator = 1, .denominator = 0 },
+    }));
+    try std.testing.expectError(error.InvalidRate, disk.setFaults(.{
+        .write_error_rate = .{ .numerator = 2, .denominator = 1 },
+    }));
+}
+
+test "disk: fault traces are deterministic for the same seed" {
+    var a = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
+    defer a.deinit();
+    var b = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
+    defer b.deinit();
+
+    var disk_a = try Disk.init(&a, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+        .latency_jitter_ns = 20,
+    });
+    defer disk_a.deinit();
+    var disk_b = try Disk.init(&b, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+        .latency_jitter_ns = 20,
+    });
+    defer disk_b.deinit();
+
+    const faults: DiskFaultOptions = .{
+        .read_error_rate = .oneIn(2),
+        .write_error_rate = .oneIn(2),
+        .corrupt_read_rate = .oneIn(2),
+    };
+    try disk_a.setFaults(faults);
+    try disk_b.setFaults(faults);
+
+    disk_a.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" }) catch |err| switch (err) {
+        error.WriteError => {},
+        else => return err,
+    };
+    disk_b.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" }) catch |err| switch (err) {
+        error.WriteError => {},
+        else => return err,
+    };
+
+    var buffer_a = [_]u8{0} ** 4;
+    disk_a.read(.{ .path = "wal.log", .offset = 0, .buffer = &buffer_a }) catch |err| switch (err) {
+        error.ReadError => {},
+        else => return err,
+    };
+
+    var buffer_b = [_]u8{0} ** 4;
+    disk_b.read(.{ .path = "wal.log", .offset = 0, .buffer = &buffer_b }) catch |err| switch (err) {
+        error.ReadError => {},
+        else => return err,
+    };
+
+    try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
+}
+
+test "disk: sync makes pending writes survive crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.sync(.{ .path = "wal.log" });
+    try disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try disk.crash(.{});
+    try disk.restart(.{});
+
+    var buffer = [_]u8{0} ** 4;
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualStrings("abcd", &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.sync op=1 path=wal.log status=ok committed_writes=1 latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=0 landed=0 lost=0 torn=0") != null);
+}
+
+test "disk: crash can lose unflushed pending writes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try disk.crash(.{});
+    try disk.restart(.{});
+
+    var buffer = [_]u8{0xff} ** 4;
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 4, &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=0 path=wal.log kind=crash_lost_write rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=0 path=wal.log offset=0 len=4 result=lost") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=1 landed=0 lost=1 torn=0") != null);
+}
+
+test "disk: crash can tear unflushed pending writes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "wxyz" });
+    try disk.sync(.{ .path = "wal.log" });
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.setFaults(.{ .crash_torn_write_rate = .always() });
+    try disk.crash(.{});
+    try disk.restart(.{});
+
+    var buffer = [_]u8{0} ** 4;
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualStrings("abyz", &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=2 path=wal.log kind=crash_torn_write rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=2 path=wal.log offset=0 len=4 result=torn") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=1 landed=0 lost=0 torn=1") != null);
+}
+
+test "disk: crashed disk rejects operations until restart" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.crash(.{});
+
+    var buffer = [_]u8{0} ** 4;
+    try std.testing.expectError(error.DiskCrashed, disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    }));
+    try std.testing.expectError(error.DiskCrashed, disk.write(.{
+        .path = "wal.log",
+        .offset = 0,
+        .bytes = "abcd",
+    }));
+    try std.testing.expectError(error.DiskCrashed, disk.sync(.{ .path = "wal.log" }));
+
+    try disk.restart(.{});
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+}
+
+test "disk: crash traces are deterministic for the same seed" {
+    var a = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
+    defer a.deinit();
+    var b = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
+    defer b.deinit();
+
+    var disk_a = try Disk.init(&a, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+        .latency_jitter_ns = 20,
+    });
+    defer disk_a.deinit();
+    var disk_b = try Disk.init(&b, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+        .latency_jitter_ns = 20,
+    });
+    defer disk_b.deinit();
+
+    const faults: DiskFaultOptions = .{
+        .crash_lost_write_rate = .oneIn(2),
+        .crash_torn_write_rate = .oneIn(2),
+    };
+    try disk_a.setFaults(faults);
+    try disk_b.setFaults(faults);
+
+    try disk_a.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk_b.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk_a.crash(.{});
+    try disk_b.crash(.{});
+
+    try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
 }

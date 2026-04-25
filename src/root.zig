@@ -42,6 +42,9 @@ pub const Disk = disk_module.Disk;
 /// Configuration for one deterministic disk authority.
 pub const DiskOptions = disk_module.DiskOptions;
 
+/// Fault rates and corruption controls for one deterministic disk authority.
+pub const DiskFaultOptions = disk_module.DiskFaultOptions;
+
 /// Errors returned by the deterministic disk authority.
 pub const DiskError = disk_module.DiskError;
 
