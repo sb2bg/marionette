@@ -49,13 +49,13 @@ The full example lives in
 
 ## Status
 
-Phase 0. Time, seeded randomness, trace logging, replay checks, and named
-world/state scenario checks are being built now. `ProductionEnv` and
-`SimulationEnv` move authority selection to the composition root. Run tags and
-typed attributes are trace-visible so failing seeds can carry their expanded
-profile. An unstable deterministic network sketch exists for examples, but the
-stable network API is still being designed. Disk, a real scheduler, shrinking,
-and time-travel debugging are planned, not implemented.
+Experimental. Time, seeded randomness, trace logging, replay checks, named
+scenario checks, trace summaries, and environment-based authority passing are
+implemented. Run tags and typed attributes are trace-visible so failing seeds
+can carry their expanded profile. An unstable deterministic network simulator
+exists for examples, but the stable app-facing network API is still being
+designed. Disk, a real scheduler, shrinking, and time-travel debugging are
+planned, not implemented.
 
 The API is not stable. Do not use this in production yet.
 
@@ -98,8 +98,9 @@ explicit allocators, no runtime magic.
 - [Blog](docs/blog/index.md)
 
 Current examples include a retry queue with a duplicate-completion bug, a rate
-limiter, and a small replicated-register showcase that exercises seeded message
-drops, deterministic delivery, and state checks.
+Current examples include a retry queue with a duplicate-completion bug and a
+small replicated-register showcase that exercises seeded message drops,
+deterministic delivery, and state checks.
 
 ## Is This For Me?
 
@@ -113,7 +114,8 @@ interfaces.
 
 ## Installation
 
-Not published yet. Phase 0 is source-only while the core API settles.
+Not published yet. Marionette is source-only while the experimental API
+settles.
 
 ## License
 
