@@ -6,12 +6,12 @@ const examples = @import("examples");
 const iterations = 1000;
 const seed = 0xC0FFEE;
 
-pub fn expectRateLimiterDeterministic(allocator: std.mem.Allocator) !void {
-    const baseline = try examples.rate_limiter.runScenario(allocator, seed);
+pub fn expectRetryQueueDeterministic(allocator: std.mem.Allocator) !void {
+    const baseline = try examples.retry_queue.runScenario(allocator, seed);
     defer allocator.free(baseline);
 
     for (1..iterations) |iteration| {
-        const replay = try examples.rate_limiter.runScenario(allocator, seed);
+        const replay = try examples.retry_queue.runScenario(allocator, seed);
         defer allocator.free(replay);
 
         std.testing.expectEqualStrings(baseline, replay) catch |err| {

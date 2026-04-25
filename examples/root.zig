@@ -3,19 +3,8 @@
 const std = @import("std");
 const mar = @import("marionette");
 
-pub const rate_limiter = @import("rate_limiter.zig");
 pub const retry_queue = @import("retry_queue.zig");
 pub const replicated_register = @import("replicated_register.zig");
-pub const buggify_fault_hook = @import("buggify_fault_hook.zig");
-
-test "examples: rate limiter scenario is replayable" {
-    const a = try rate_limiter.runScenario(std.testing.allocator, 0xC0FFEE);
-    defer std.testing.allocator.free(a);
-    const b = try rate_limiter.runScenario(std.testing.allocator, 0xC0FFEE);
-    defer std.testing.allocator.free(b);
-
-    try std.testing.expectEqualStrings(a, b);
-}
 
 test "examples: retry queue scenario is replayable" {
     const a = try retry_queue.runScenario(std.testing.allocator, 0xC0FFEE);

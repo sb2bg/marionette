@@ -54,12 +54,7 @@ fn runScenario(
     mode: Mode,
     expect_failure: bool,
 ) !void {
-    if (std.mem.eql(u8, scenario, "rate-limiter")) {
-        const trace = try examples.rate_limiter.runScenario(allocator, seed);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "retry-queue")) {
+    if (std.mem.eql(u8, scenario, "retry-queue")) {
         const trace = try examples.retry_queue.runScenario(allocator, seed);
         defer allocator.free(trace);
         if (expect_failure) return expectedFailureDidNotHappen();
@@ -80,11 +75,6 @@ fn runScenario(
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "replicated-register-conflict")) {
         const trace = try examples.replicated_register.runConflictScenario(allocator, seed);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "buggify-fault-hook")) {
-        const trace = try examples.buggify_fault_hook.runScenario(allocator, seed);
         defer allocator.free(trace);
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
@@ -145,14 +135,12 @@ fn usage(exe_name: []const u8) noreturn {
         \\usage: {s} <scenario> [--seed <seed>] [--summary|--trace] [--expect-failure]
         \\
         \\scenarios:
-        \\  rate-limiter
         \\  retry-queue
         \\  retry-queue-bug
         \\  replicated-register
         \\  replicated-register-bug
         \\  replicated-register-partition
         \\  replicated-register-conflict
-        \\  buggify-fault-hook
         \\
     ,
         .{exe_name},

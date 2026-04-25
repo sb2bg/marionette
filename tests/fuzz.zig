@@ -5,10 +5,10 @@ const examples = @import("examples");
 
 const iterations = 1000;
 
-pub fn expectRateLimiterFuzz(allocator: std.mem.Allocator) !void {
+pub fn expectRetryQueueFuzz(allocator: std.mem.Allocator) !void {
     for (0..iterations) |iteration| {
         const seed = seedForIteration(iteration);
-        const trace = examples.rate_limiter.runScenario(allocator, seed) catch |err| {
+        const trace = examples.retry_queue.runScenario(allocator, seed) catch |err| {
             std.debug.print("fuzz failure: seed={} iteration={}\n", .{ seed, iteration });
             return err;
         };

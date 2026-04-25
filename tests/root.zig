@@ -7,11 +7,11 @@ pub const fuzz = @import("fuzz.zig");
 pub const trace_summary = @import("trace_summary.zig");
 
 test "tests: fixed-seed determinism" {
-    try determinism.expectRateLimiterDeterministic(std.testing.allocator);
+    try determinism.expectRetryQueueDeterministic(std.testing.allocator);
 }
 
 test "tests: many-seed fuzz smoke" {
-    try fuzz.expectRateLimiterFuzz(std.testing.allocator);
+    try fuzz.expectRetryQueueFuzz(std.testing.allocator);
 }
 
 test "tests: replicated register trace summary snapshot" {
