@@ -13,23 +13,51 @@ clogged by directed path, partitioned, healed, stopped, restarted, and
 delivered in a stable order. Replay recording, node spawning, and the final
 scheduler API come later.
 
-## VOPR Lessons
+## VOPR Comparison
 
-TigerBeetle's VOPR network is built around a packet simulator. The important
-portable lessons for Marionette are:
+TigerBeetle's VOPR network is built around `PacketSimulator`, a deterministic
+packet core with one link for every directed source-target path. Each link owns
+a queue, a command filter, an optional packet drop predicate, an optional
+recording filter, and path clog state. Global packet simulator options include
+node/client counts, seed, latency distribution, packet loss, packet replay,
+automatic partition settings, partition stability, unpartition stability,
+per-path capacity, and path clog probability/duration.
+
+The portable lessons for Marionette are:
 
 - Treat the network as simulator-owned machinery, not real sockets.
-- Give every packet a stable id.
-- Queue packets per directed link, with deterministic ordering inside each
-  path and stable tie-breaking across paths.
-- Make latency and packet loss seeded simulator decisions.
-- Trace sends, drops, and deliveries separately.
-- Keep more advanced fault modes layered on top of a small packet core.
+- Keep packet send/delivery separate from simulator-control faults.
+- Queue packets per directed path, not in one global network bucket.
+- Give every packet a replay-visible identity.
+- Make latency, loss, replay, clogs, and partitions seeded simulator decisions.
+- Evolve random network faults only from the simulator tick.
+- Trace sends, drops, deliveries, and state changes separately.
+- Layer advanced faults on top of a small packet core.
+
+The current `UnstableNetwork` already follows the core shape: fixed topology,
+per-directed-path queues, path-local capacity, stable packet ids, seeded
+latency/drop decisions, explicit link filters, explicit partitions, path clogs,
+node up/down state, and delivery order by `(deliver_at, packet_id)`.
+
+The main differences are deliberate:
+
+- VOPR has tick-evolved automatic partitions and unclogs with stability
+  windows; Marionette only has explicit scenario actions plus clog expiration.
+- VOPR can replay packets and record selected command classes for later
+  replay; Marionette has whole-run seed replay but no packet-sequence replay.
+- VOPR has command-aware link filters and optional per-link drop predicates;
+  Marionette is payload-generic and does not know user protocol commands yet.
+- VOPR uses an exponential latency model with a minimum; Marionette currently
+  uses uniform tick-aligned jitter.
+- VOPR can randomly drop an already queued packet when a path is over
+  capacity; Marionette returns queue-capacity errors from the packet core.
+- VOPR's automatic partitions are replica/node-focused; Marionette's manual
+  `partition` helper can target any configured process, including clients.
 
 Marionette should not copy TigerBeetle's full harness. TigerBeetle has a
-production protocol, message pools, client/replica process identities, replay
-recording, partitions, clogging, and liveness-specific modes. Marionette needs
-the same shape in spirit, but with a smaller generic API.
+production protocol, message pools, client/replica process identities, command
+classes, replay recording, and liveness-specific modes. Marionette needs the
+same discipline in a generic API, not the same product-specific surface.
 
 ## Current API
 
@@ -97,10 +125,10 @@ The topology is fixed when the network type is instantiated:
 .client_count = 1,
 ```
 
-All node-shaped APIs assert that ids are inside `0..node_count + client_count`.
+All node-shaped APIs reject ids outside `0..node_count + client_count`.
 That gives the simulator a known universe for partitions, per-link queues,
-node state, and future liveness cores. It also makes invalid topology use fail
-loudly instead of silently creating new processes by accident.
+node state, and future liveness cores. It also makes invalid topology use
+return `InvalidNode` instead of silently creating new processes by accident.
 
 Each directed path owns its own queue and enabled/disabled state. `popReady`
 scans the heads of all path queues and picks the ready packet with the lowest
@@ -234,8 +262,8 @@ map iteration order, and wall-clock time must never decide delivery order.
 
 Network latency is measured in nanoseconds, but it must align with the
 world's tick size. Phase 0 simulated time advances in whole ticks, so
-`UnstableNetwork` asserts that `min_latency_ns` and `latency_jitter_ns` are
-whole multiples of the world's tick.
+`UnstableNetwork` rejects `min_latency_ns` and `latency_jitter_ns` values that
+are not whole multiples of the world's tick.
 
 When using `UnstableNetworkSimulation`, prefer:
 
@@ -317,6 +345,25 @@ stability floor, and liveness mode can change network defaults for the rest of
 a run. The per-link queue topology exists so those faults can be added without
 rewriting the packet core again.
 
+The first fault profile should be separate from static topology:
+
+```zig
+const faults = mar.NetworkFaultOptions{
+    .packet_loss_rate = .percent(1),
+    .partition_rate = .percent(1),
+    .unpartition_rate = .percent(5),
+    .partition_min_ticks = 20,
+    .unpartition_min_ticks = 20,
+    .path_clog_rate = .percent(1),
+    .path_clog_duration_mean_ns = 50 * ns_per_ms,
+};
+```
+
+Exact names are not committed. The important split is that `NetworkOptions`
+describes what exists, while the fault profile describes how the simulator may
+perturb it during a run. Random rolls belong in `sim.tick()`, never
+`popReady`, `pendingCount`, `nextDeliveryAt`, or other observation methods.
+
 ## Current Limits
 
 `UnstableNetwork` does not yet support:
@@ -327,6 +374,10 @@ rewriting the packet core again.
 - Node spawning.
 - Probabilistic tick-evolved fault schedules.
 - Network-level default send options.
+- Command-aware or user-classified link filters.
+- Per-link drop predicates.
+- Exponential or profile-selected latency distributions.
+- Capacity-overflow policies other than returning `EventQueueFull`.
 - Event-by-event scheduler callbacks.
 - Human summary rendering.
 
@@ -335,7 +386,16 @@ smallest useful packet core before growing.
 
 ## Next Step
 
-The next high-value addition is the app-facing/control split described in
-`network-api.md`, followed by tick-evolved fault state on top of these per-link
-queues. `UnstableNetwork` is still a simulator primitive; examples should not
-teach it as the final production network surface.
+The next high-value addition before disk is a runtime network fault profile on
+top of the existing per-link queues:
+
+1. Add `NetworkFaultOptions` separate from static `NetworkOptions`.
+2. Move packet loss defaults from every send call into that profile while still
+   allowing per-send overrides for focused examples.
+3. Add tick-evolved automatic partitions with stability floors.
+4. Add tick-evolved per-path clogs with profile-selected duration.
+
+The app-facing/control split in `network-api.md` still matters, but the packet
+core is already close enough to host fault profiles. `UnstableNetwork` remains
+a simulator primitive; examples should not teach it as the final production
+network surface.
