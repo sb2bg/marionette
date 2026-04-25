@@ -27,6 +27,26 @@ the trace, and constrained enough that failures teach users something useful.
 - Transparent interception of direct filesystem calls.
 - Unbounded double faults that make recovery impossible by construction.
 
+## VOPR Lessons
+
+TigerBeetle's VOPR storage simulator is deliberately protocol-aware. It keeps
+simulated storage in memory, queues reads and writes with simulated latency,
+tracks faulty sectors, can misdirect writes, and can fault targets of pending
+writes during crash. More importantly, its cluster-level fault atlas decides
+which replicas and storage regions are eligible for faults so the simulator
+does not manufacture impossible worlds where every recoverable copy is
+destroyed at once.
+
+Marionette should adapt that lesson, not copy the whole design. TigerBeetle can
+name zones such as superblock, WAL headers, WAL prepares, and grid blocks
+because VOPR is product-specific. Marionette's Phase 1 `Disk` should stay
+generic: logical paths, byte ranges, sector size, pending writes, and explicit
+fault profiles. Product-specific recoverability still belongs to examples and
+checks until enough examples justify a generic fault-atlas API.
+
+The immediate rule is: no unconstrained "random disk chaos" default. Every
+destructive disk fault needs a scope, a budget, and a trace event.
+
 ## Authority Shape
 
 The disk authority is owned by `World` and exposed to application code through
@@ -90,6 +110,11 @@ return. The model can still assign operation ids and latency so traces match
 the future scheduler shape. A later async scheduler can split submit/complete
 without changing trace ordering.
 
+The backing implementation should be an in-memory durable model. Production
+adapters may later route the same narrow API to host filesystem calls, but the
+simulator itself should not depend on the host filesystem for data, metadata,
+ordering, or failure behavior.
+
 ## Faults
 
 Initial faults should be small and explicit:
@@ -101,9 +126,11 @@ Initial faults should be small and explicit:
 - Lost pending write: a crash drops an acknowledged-pending write before it
   becomes durable.
 
-Later faults can include misdirected writes, stale reads, reordered flushes,
-and more specific media behavior, but only after the basic model is traceable
-and tested.
+Later faults can include misdirected writes, stale reads, byte-level
+corruption, reordered flushes, and more specific media behavior, but only after
+the basic model is traceable and tested. Misdirected writes should be a named
+fault type rather than being collapsed into generic corruption, because they
+test whether user code validates record identity and location.
 
 ## Recoverability
 
@@ -122,6 +149,11 @@ The first profiles should be conservative:
 The exact recovery-window API is undecided. Users may need to declare durable
 regions, replicas, checkpoints, or commit points before Marionette can enforce
 strong budgets.
+
+For Phase 1, the append-only WAL example should define its own recovery window
+in the checker: flushed records are durable truth; unflushed records may be
+lost, torn, or corrupted according to the profile. A later generic fault atlas
+can lift that pattern out of examples.
 
 ## Trace Events
 
@@ -171,6 +203,7 @@ hashes, the hash algorithm must be named and stable.
 - Checksums: user code owns them.
 - Recoverability budgets: start with a conservative single-node default and
   explicit destructive mode; defer strong multi-replica budgets.
+- Misdirected writes: document as a future named fault, not Phase 1 default.
 
 ## Open Questions
 
@@ -180,3 +213,5 @@ hashes, the hash algorithm must be named and stable.
   example avoid directory semantics entirely?
 - Should `sync` be per-file only, or should there also be a whole-disk sync?
 - What is the smallest explicit API for declaring recovery windows?
+- What is the first reusable shape for a VOPR-style fault atlas once
+  Marionette has more than one storage example?
