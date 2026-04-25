@@ -56,6 +56,21 @@ fn traceExists(world: *mar.World) !void {
 
 Call `report.deinit()` when done.
 
+## Example Runner
+
+The repository includes a small runner for replaying built-in examples from a
+seed:
+
+```sh
+zig build run-example -- replicated-register --seed 12648430 --summary
+zig build run-example -- replicated-register --seed 12648430 --trace
+zig build run-example -- retry-queue-bug --seed 12648430 --expect-failure
+```
+
+`--summary` renders `mar.summarize` output for passing traces. `--trace` prints
+the raw trace. Known-bug scenarios return nonzero when they fail unless
+`--expect-failure` is supplied.
+
 ## Failure Reports
 
 Failures are not returned as bare scenario errors because that would lose the

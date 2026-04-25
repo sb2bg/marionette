@@ -24,6 +24,26 @@ pub fn build(b: *std.Build) void {
     const example_tests = b.addTest(.{ .root_module = examples_mod });
     const run_example_tests = b.addRunArtifact(example_tests);
 
+    const run_examples_mod = b.createModule(.{
+        .root_source_file = b.path("src/main_run.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    run_examples_mod.addImport("marionette", mod);
+    run_examples_mod.addImport("examples", examples_mod);
+
+    const run_examples_exe = b.addExecutable(.{
+        .name = "marionette-run",
+        .root_module = run_examples_mod,
+    });
+    b.installArtifact(run_examples_exe);
+
+    const run_examples_cmd = b.addRunArtifact(run_examples_exe);
+    if (b.args) |args| run_examples_cmd.addArgs(args);
+
+    const run_examples_step = b.step("run-example", "Run a Marionette example by seed");
+    run_examples_step.dependOn(&run_examples_cmd.step);
+
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),
         .target = target,
@@ -45,5 +65,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_example_tests.step);
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_examples_exe.step);
     test_step.dependOn(&tidy.step);
 }
