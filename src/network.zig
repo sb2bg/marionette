@@ -15,6 +15,22 @@ const World = @import("world.zig").World;
 /// Stable simulated node/process identifier.
 pub const NodeId = u16;
 
+/// Errors returned by unstable network runtime validation.
+pub const NetworkError = error{
+    /// A node/process id is outside the configured topology.
+    InvalidNode,
+    /// A duration is zero where progress requires a positive interval, not
+    /// aligned to the world's tick, or would overflow simulated time.
+    InvalidDuration,
+    /// A send drop rate has an invalid numerator/denominator pair.
+    InvalidRate,
+};
+
+fn validateRate(rate: env_module.BuggifyRate) NetworkError!void {
+    if (rate.denominator == 0) return error.InvalidRate;
+    if (rate.numerator > rate.denominator) return error.InvalidRate;
+}
+
 /// Fixed topology and per-path capacity for one unstable network instance.
 pub const NetworkOptions = struct {
     /// Number of simulated service/replica nodes.
@@ -45,7 +61,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
         pub const process_count = configured_process_count;
         pub const path_count = process_count * process_count;
-        pub const Error = scheduler.EventQueueError;
+        pub const Error = NetworkError || scheduler.EventQueueError;
 
         /// Simulator-control view for network fault orchestration.
         pub const Control = struct {
@@ -169,18 +185,18 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         }
 
         /// Return whether a directed link is currently enabled.
-        pub fn linkEnabled(self: *const Self, from: NodeId, to: NodeId) bool {
-            return self.links[self.pathIndex(from, to)].enabled;
+        pub fn linkEnabled(self: *const Self, from: NodeId, to: NodeId) NetworkError!bool {
+            return self.links[try self.pathIndex(from, to)].enabled;
         }
 
         /// Return whether a simulated node/process is currently up.
-        pub fn nodeUp(self: *const Self, node: NodeId) bool {
-            self.assertNode(node);
+        pub fn nodeUp(self: *const Self, node: NodeId) NetworkError!bool {
+            try self.validateNode(node);
             return !self.down_nodes[@intCast(node)];
         }
 
         fn setNode(self: *Self, node: NodeId, up: bool) !void {
-            self.assertNode(node);
+            try self.validateNode(node);
             self.down_nodes[@intCast(node)] = !up;
 
             try self.world.record(
@@ -190,7 +206,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         }
 
         fn setLink(self: *Self, from: NodeId, to: NodeId, enabled: bool) !void {
-            self.setLinkState(from, to, enabled);
+            try self.setLinkState(from, to, enabled);
             try self.world.record(
                 "network.link from={} to={} enabled={}",
                 .{ from, to, enabled },
@@ -198,11 +214,13 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         }
 
         fn clog(self: *Self, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
-            std.debug.assert(duration_ns > 0);
-            std.debug.assert(duration_ns % self.world.clock().tick_ns == 0);
+            try self.validatePositiveTickDuration(duration_ns);
+            if (std.math.maxInt(clock_module.Timestamp) - self.world.now() < duration_ns) {
+                return error.InvalidDuration;
+            }
 
             const until = self.world.now() + duration_ns;
-            const link = &self.links[self.pathIndex(from, to)];
+            const link = &self.links[try self.pathIndex(from, to)];
             link.clogged_until = @max(link.clogged_until, until);
 
             try self.world.record(
@@ -212,7 +230,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         }
 
         fn unclog(self: *Self, from: NodeId, to: NodeId) !void {
-            const link = &self.links[self.pathIndex(from, to)];
+            const link = &self.links[try self.pathIndex(from, to)];
             const active = link.clogged_until > self.world.now();
             link.clogged_until = 0;
 
@@ -236,8 +254,8 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             left: []const NodeId,
             right: []const NodeId,
         ) !void {
-            self.assertNodes(left);
-            self.assertNodes(right);
+            try self.validateNodes(left);
+            try self.validateNodes(right);
 
             try self.world.record(
                 "network.partition left_count={} right_count={}",
@@ -245,8 +263,8 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             );
             for (left) |from| {
                 for (right) |to| {
-                    self.setLinkState(from, to, false);
-                    self.setLinkState(to, from, false);
+                    try self.setLinkState(from, to, false);
+                    try self.setLinkState(to, from, false);
                 }
             }
         }
@@ -289,14 +307,15 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             payload: Payload,
             options: SendOptions,
         ) !void {
-            self.assertNode(from);
-            self.assertNode(to);
-            options.drop_rate.validate();
+            try self.validateNode(from);
+            try self.validateNode(to);
+            try validateRate(options.drop_rate);
+            try self.validateLatencyOptions(options);
 
             const packet_id = self.next_packet_id;
             self.next_packet_id += 1;
 
-            if (!self.nodeUp(from)) {
+            if (!try self.nodeUp(from)) {
                 try self.world.record(
                     "network.drop id={} from={} to={} reason=source_down",
                     .{ packet_id, from, to },
@@ -321,6 +340,9 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             }
 
             const latency_ns = try self.latency(options);
+            if (std.math.maxInt(clock_module.Timestamp) - self.world.now() < latency_ns) {
+                return error.InvalidDuration;
+            }
             const deliver_at = self.world.now() + latency_ns;
             const packet: Packet = .{
                 .id = packet_id,
@@ -329,7 +351,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
                 .deliver_at = deliver_at,
                 .payload = payload,
             };
-            try self.links[self.pathIndex(from, to)].pending.push(packet);
+            try self.links[try self.pathIndex(from, to)].pending.push(packet);
 
             try self.world.record(
                 "network.send id={} from={} to={} deliver_at={} latency_ns={}",
@@ -344,7 +366,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
                 const link_index = self.nextReadyLinkIndex() orelse return null;
                 const ready = self.links[link_index].pending.pop().?;
 
-                if (!self.nodeUp(ready.to)) {
+                if (!try self.nodeUp(ready.to)) {
                     try self.world.record(
                         "network.drop id={} from={} to={} reason=destination_down",
                         .{ ready.id, ready.from, ready.to },
@@ -352,7 +374,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
                     continue;
                 }
 
-                if (!self.linkEnabled(ready.from, ready.to)) {
+                if (!try self.linkEnabled(ready.from, ready.to)) {
                     try self.world.record(
                         "network.drop id={} from={} to={} reason=link_disabled",
                         .{ ready.id, ready.from, ready.to },
@@ -408,8 +430,8 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             return best_index;
         }
 
-        fn setLinkState(self: *Self, from: NodeId, to: NodeId, enabled: bool) void {
-            self.links[self.pathIndex(from, to)].enabled = enabled;
+        fn setLinkState(self: *Self, from: NodeId, to: NodeId, enabled: bool) NetworkError!void {
+            self.links[try self.pathIndex(from, to)].enabled = enabled;
         }
 
         fn clearDisabledLinks(self: *Self) void {
@@ -463,24 +485,33 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             return count;
         }
 
-        fn pathIndex(self: *const Self, from: NodeId, to: NodeId) usize {
-            self.assertNode(from);
-            self.assertNode(to);
+        fn pathIndex(self: *const Self, from: NodeId, to: NodeId) NetworkError!usize {
+            try self.validateNode(from);
+            try self.validateNode(to);
             return @as(usize, from) * process_count + @as(usize, to);
         }
 
-        fn assertNodes(self: *const Self, nodes: []const NodeId) void {
-            for (nodes) |node| self.assertNode(node);
+        fn validateNodes(self: *const Self, nodes: []const NodeId) NetworkError!void {
+            for (nodes) |node| try self.validateNode(node);
         }
 
-        fn assertNode(_: *const Self, node: NodeId) void {
-            std.debug.assert(@as(usize, node) < process_count);
+        fn validateNode(_: *const Self, node: NodeId) NetworkError!void {
+            if (@as(usize, node) >= process_count) return error.InvalidNode;
+        }
+
+        fn validatePositiveTickDuration(self: *const Self, duration_ns: clock_module.Duration) NetworkError!void {
+            if (duration_ns == 0) return error.InvalidDuration;
+            if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
+        }
+
+        fn validateLatencyOptions(self: *const Self, options: SendOptions) NetworkError!void {
+            const tick_ns = self.world.clock().tick_ns;
+            if (options.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
+            if (options.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
         }
 
         fn latency(self: *Self, options: SendOptions) !clock_module.Duration {
             const tick_ns = self.world.clock().tick_ns;
-            std.debug.assert(options.min_latency_ns % tick_ns == 0);
-            std.debug.assert(options.latency_jitter_ns % tick_ns == 0);
 
             if (options.latency_jitter_ns == 0) return options.min_latency_ns;
 
@@ -536,7 +567,7 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
         /// Advance simulated time by whole ticks and evolve network faults.
         pub fn runFor(self: *Self, duration_ns: clock_module.Duration) !void {
             const tick_ns = self.packet_core.world.clock().tick_ns;
-            std.debug.assert(duration_ns % tick_ns == 0);
+            if (duration_ns % tick_ns != 0) return error.InvalidDuration;
 
             var remaining = duration_ns;
             while (remaining > 0) : (remaining -= tick_ns) {
@@ -631,6 +662,72 @@ test "network: queue capacity is per directed path" {
 
     try network.send(0, 2, .{ .value = 3 }, .{ .min_latency_ns = 10 });
     try std.testing.expectEqual(@as(usize, 2), network.pendingCount());
+}
+
+test "network: invalid nodes are runtime errors" {
+    const Network = UnstableNetwork(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init(&world);
+    const invalid_node: NodeId = @intCast(Network.process_count);
+
+    try std.testing.expectError(error.InvalidNode, network.nodeUp(invalid_node));
+    try std.testing.expectError(error.InvalidNode, network.linkEnabled(0, invalid_node));
+    try std.testing.expectError(error.InvalidNode, network.control().setNode(invalid_node, false));
+    try std.testing.expectError(
+        error.InvalidNode,
+        network.send(0, invalid_node, .{ .value = 1 }, .{ .min_latency_ns = 10 }),
+    );
+}
+
+test "network: invalid durations are runtime errors" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var sim = Sim.init(&world);
+
+    try std.testing.expectError(error.InvalidDuration, sim.network().clog(0, 1, 0));
+    try std.testing.expectError(error.InvalidDuration, sim.network().clog(0, 1, 11));
+    try std.testing.expectError(
+        error.InvalidDuration,
+        sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 11 }),
+    );
+    try std.testing.expectError(
+        error.InvalidDuration,
+        sim.packetCore().send(0, 1, .{ .value = 1 }, .{
+            .min_latency_ns = 10,
+            .latency_jitter_ns = 11,
+        }),
+    );
+    try std.testing.expectError(error.InvalidDuration, sim.runFor(11));
+}
+
+test "network: invalid drop rates are runtime errors" {
+    const Network = UnstableNetwork(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var network = Network.init(&world);
+
+    try std.testing.expectError(
+        error.InvalidRate,
+        network.send(0, 1, .{ .value = 1 }, .{
+            .drop_rate = .{ .numerator = 1, .denominator = 0 },
+            .min_latency_ns = 10,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidRate,
+        network.send(0, 1, .{ .value = 1 }, .{
+            .drop_rate = .{ .numerator = 2, .denominator = 1 },
+            .min_latency_ns = 10,
+        }),
+    );
 }
 
 test "network simulation: control view owns fault orchestration" {
@@ -764,17 +861,17 @@ test "network: partition disables crossing links and heal resets network state" 
 
     try network.control().partition(&left, &right);
     try network.control().setNode(2, false);
-    try std.testing.expect(!network.linkEnabled(0, 1));
-    try std.testing.expect(!network.linkEnabled(1, 0));
-    try std.testing.expect(!network.linkEnabled(0, 2));
-    try std.testing.expect(!network.linkEnabled(2, 0));
-    try std.testing.expect(network.linkEnabled(1, 2));
-    try std.testing.expect(!network.nodeUp(2));
+    try std.testing.expect(!try network.linkEnabled(0, 1));
+    try std.testing.expect(!try network.linkEnabled(1, 0));
+    try std.testing.expect(!try network.linkEnabled(0, 2));
+    try std.testing.expect(!try network.linkEnabled(2, 0));
+    try std.testing.expect(try network.linkEnabled(1, 2));
+    try std.testing.expect(!try network.nodeUp(2));
 
     try network.control().heal();
-    try std.testing.expect(network.linkEnabled(0, 1));
-    try std.testing.expect(network.linkEnabled(1, 0));
-    try std.testing.expect(network.nodeUp(2));
+    try std.testing.expect(try network.linkEnabled(0, 1));
+    try std.testing.expect(try network.linkEnabled(1, 0));
+    try std.testing.expect(try network.nodeUp(2));
 
     try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
     try world.runFor(10);
@@ -798,8 +895,8 @@ test "network: healLinks leaves node state unchanged" {
     try network.control().setNode(1, false);
 
     try network.control().healLinks();
-    try std.testing.expect(network.linkEnabled(0, 1));
-    try std.testing.expect(!network.nodeUp(1));
+    try std.testing.expect(try network.linkEnabled(0, 1));
+    try std.testing.expect(!try network.nodeUp(1));
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal_links disabled_count=1") != null);
 }
 
@@ -810,10 +907,10 @@ test "network: down source cannot send" {
     defer world.deinit();
 
     var network = Network.init(&world);
-    try std.testing.expect(network.nodeUp(0));
+    try std.testing.expect(try network.nodeUp(0));
 
     try network.control().setNode(0, false);
-    try std.testing.expect(!network.nodeUp(0));
+    try std.testing.expect(!try network.nodeUp(0));
 
     try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
     try std.testing.expectEqual(@as(usize, 0), network.pendingCount());

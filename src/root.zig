@@ -29,6 +29,9 @@ pub const Timestamp = clock_module.Timestamp;
 /// Stable simulated node/process identifier.
 pub const NodeId = @import("network.zig").NodeId;
 
+/// Errors returned by unstable network runtime validation.
+pub const UnstableNetworkError = @import("network.zig").NetworkError;
+
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
 
