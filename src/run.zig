@@ -17,15 +17,13 @@ pub const RunResult = run_types.RunResult;
 pub const StateCheck = run_types.StateCheck;
 pub const runAttribute = run_types.runAttribute;
 pub const runAttributesFrom = run_types.runAttributesFrom;
-pub const TraceField = world_module.TraceField;
 pub const TraceError = world_module.TraceError;
-pub const TraceValue = world_module.TraceValue;
-pub const traceField = world_module.traceField;
 
 pub const RunError = std.mem.Allocator.Error || TraceError;
 
 const cloneRunOptions = run_types.cloneRunOptions;
 const deinitRunOptions = run_types.deinitRunOptions;
+const traceField = world_module.traceField;
 
 const RunOnceResult = union(enum) {
     passed: RunResult,

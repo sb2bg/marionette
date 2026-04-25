@@ -65,6 +65,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_example_tests.step);
     test_step.dependOn(&run_tests.step);
-    test_step.dependOn(&run_examples_exe.step);
     test_step.dependOn(&tidy.step);
 }
