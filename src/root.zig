@@ -3,6 +3,7 @@
 //! Public API entry point.
 
 const clock_module = @import("clock.zig");
+const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
@@ -34,6 +35,15 @@ pub const UnstableNetworkError = @import("network.zig").NetworkError;
 
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
+
+/// Deterministic in-memory disk authority.
+pub const Disk = disk_module.Disk;
+
+/// Configuration for one deterministic disk authority.
+pub const DiskOptions = disk_module.DiskOptions;
+
+/// Errors returned by the deterministic disk authority.
+pub const DiskError = disk_module.DiskError;
 
 /// Return the environment implementation for a comptime mode.
 pub const Env = env_module.Env;
@@ -146,6 +156,7 @@ pub const TraceSummaryError = trace_summary_module.TraceSummaryError;
 pub const summarize = trace_summary_module.summarize;
 
 test {
+    _ = @import("disk.zig");
     _ = @import("env.zig");
     _ = @import("network.zig");
     _ = @import("run.zig");

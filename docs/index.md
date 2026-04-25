@@ -10,12 +10,13 @@ Make rare bugs repeat themselves.
 ## Status
 
 Marionette is experimental. Time, seeded randomness, trace logging, replay
-checks, named scenario checks, trace summaries, and trace-visible run context
-are implemented. An unstable deterministic network sketch exists for examples.
+checks, named scenario checks, trace summaries, trace-visible run context, and
+a no-fault deterministic disk authority are implemented. An unstable
+deterministic network sketch exists for examples.
 
-Disk, a real scheduler, shrinking, and time-travel debugging are planned, not
-implemented. The API is not stable, and Marionette is not ready for production
-use.
+Disk faults, a real scheduler, shrinking, and time-travel debugging are
+planned, not implemented. The API is not stable, and Marionette is not ready
+for production use.
 
 ## Start Here
 

@@ -1,7 +1,8 @@
 # Disk Fault Model
 
-This is a design note for future disk simulation work. It is not a public disk
-API yet.
+This is the design note for Marionette's disk simulation work. The first
+no-fault `mar.Disk` authority exists; the fault and crash model described here
+is still being built.
 
 The goal is a deterministic, recoverability-aware disk authority that can test
 real storage code without pretending to model every filesystem or device
@@ -49,8 +50,9 @@ destructive disk fault needs a scope, a budget, and a trace event.
 
 ## Authority Shape
 
-The disk authority is owned by `World` and exposed to application code through
-the environment. Application code should depend on `env.disk()`, not on
+The current `mar.Disk` authority is constructed from `World` by the simulation
+harness or scenario state. The intended app-facing shape is still environment
+based: application code should eventually depend on `env.disk()`, not on
 `World` internals:
 
 ```zig
@@ -64,9 +66,10 @@ fn store(env: anytype, entry: []const u8) !void {
 }
 ```
 
-The test harness may still use `World` or a simulator-control handle to
-inspect disk state, inject scripted faults, or crash/restart the simulated
-disk. Those operations must not leak into the app-facing disk API.
+The test harness may still construct `Disk` from `World` or use a
+simulator-control handle to inspect disk state, inject scripted faults, or
+crash/restart the simulated disk. Those operations must not leak into the
+app-facing disk API.
 
 In later multi-node work, each simulated node should expose its own disk view:
 
@@ -93,15 +96,19 @@ simulator can then order pending work by:
 That ordering avoids pointer addresses, hash-map iteration order, and host
 scheduling as tie breakers.
 
-Initial operation concepts:
+Implemented no-fault operation concepts:
 
 - File identity: logical path-like names (`[]const u8`) scoped to the
   simulated disk. These are not host paths and must not read host filesystem
   state. Trace output writes them through `recordFields` text escaping.
 - Offset and length: integer byte ranges.
 - Sector size: a configured simulation parameter, defaulting to 4096 bytes.
+- Completed operation: result delivered to user code after deterministic
+  synchronous latency.
+
+Future operation concepts:
+
 - Pending operation: submitted work waiting for simulated latency.
-- Completed operation: result delivered to user code.
 - Crash window: submitted or partially completed writes affected by crash.
 
 The Phase 1 implementation should start synchronous from the user's
@@ -197,7 +204,8 @@ hashes, the hash algorithm must be named and stable.
 - File identity: logical path-like `[]const u8`, escaped in traces and never
   resolved against the host filesystem by the simulator.
 - Default sector size: 4096 bytes.
-- Initial operations: `read`, `write`, `sync`, and explicit simulated crash.
+- Initial operations: `read`, `write`, and `sync` are implemented. Explicit
+  simulated crash is next.
 - Initial example: append-only WAL recovery.
 - User data: store bytes in memory, trace lengths and outcomes by default.
 - Checksums: user code owns them.

@@ -52,10 +52,10 @@ The full example lives in
 Experimental. Time, seeded randomness, trace logging, replay checks, named
 scenario checks, trace summaries, and environment-based authority passing are
 implemented. Run tags and typed attributes are trace-visible so failing seeds
-can carry their expanded profile. An unstable deterministic network simulator
-exists for examples, but the stable app-facing network API is still being
-designed. Disk, a real scheduler, shrinking, and time-travel debugging are
-planned, not implemented.
+can carry their expanded profile. No-fault deterministic disk and unstable
+network simulators exist, while disk faults and the stable app-facing network
+API are still being designed. A real scheduler, shrinking, and time-travel
+debugging are planned, not implemented.
 
 The API is not stable. Do not use this in production yet.
 

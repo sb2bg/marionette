@@ -20,12 +20,12 @@ architectural calls.
 **Phase 0 (proof of concept) is effectively complete.** Pending a formal audit, the
 project treats Phase 0 as closed.
 
-**Phase 2 (multi-node network) is partially built ahead of Phase 1 (disk).**
+**Phase 2 (multi-node network) is partially built alongside Phase 1 (disk).**
 This is a deliberate inversion of the original roadmap order. The network
 primitives turned out to be the most interesting correctness story to prove
 early, and the replicated-register example pulled in that direction. Phase 1
-(disk) is now ready to resume; probabilistic network faults remain valuable
-but are no longer a disk blocker.
+now has the first no-fault disk authority; probabilistic network faults remain
+valuable but are not a disk blocker.
 
 The current network surface is:
 
@@ -40,9 +40,16 @@ The current network surface is:
 - `sim.drainUntilIdle(...)`: the only public network drain helper, routing
   time movement through `sim.tick()`.
 
-What is not built yet: app-facing `env.network()`, probabilistic tick-evolved
-network faults, disk, crash/restart simulation, liveness mode, named simulation
-profiles, linearizability checker, time-travel debugging.
+The current disk surface is:
+
+- `mar.Disk`: no-fault in-memory disk authority with logical paths,
+  sector-aligned reads/writes, sparse sectors, deterministic latency, operation
+  ids, and trace events.
+
+What is not built yet: app-facing `env.network()`/`env.disk()`, probabilistic
+tick-evolved network faults, disk read/write/corruption faults, disk crash
+behavior, crash/restart simulation, liveness mode, named simulation profiles,
+linearizability checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -57,6 +64,7 @@ profiles, linearizability checker, time-travel debugging.
 - `mar.tidy` linter for banned direct calls.
 - `BuggifyRate` + `env.buggify(hook, rate)` with enum-hook checks and
   runtime rate validation in simulation.
+- `mar.Disk`: no-fault deterministic disk authority.
 - Trace format with per-line validation (`isValidTracePayload`).
 - Trace summary renderer (`mar.summarize`, `Summary.writeSummary`).
 - Seed parser for decimal seeds and 40-character Git hashes.
@@ -123,6 +131,22 @@ after.
 - Do not try to interpret payloads semantically. Count what you see, group by
   the prefix up to the first `.` in the event name.
 - Output format should be grep-friendly (one fact per line, stable key order).
+
+---
+
+### Completed: Disk authority, no faults
+
+**Status:** Done. `mar.Disk` is exported and covered by unit tests.
+
+**Scope:**
+
+- Logical files addressed by trace-escaped paths.
+- Operation ids.
+- Sector-aligned offsets with a 4096-byte default sector size.
+- Sparse in-memory sectors.
+- Deterministic min + jitter latency.
+- Trace events for `read`, `write`, and `sync`.
+- No read/write/corruption/crash faults yet.
 
 ---
 
@@ -195,37 +219,33 @@ make the bypass dangerous.
 Ordered by priority. Each entry has acceptance criteria, a rough size, and the
 design context. Pick from the top unless coordinating otherwise.
 
-### 1. Disk authority, no faults
+### 1. Disk read/write faults
 
-**Why now:** The pre-disk cleanup is done, and disk is the next missing
-simulator authority needed for single-node durability examples.
+**Why now:** The no-fault disk authority exists. The next value is making
+single-node durability examples exercise replayable storage failures.
 
 **Scope:**
 
-- Implement a `World`-owned disk authority with logical files.
-- Stable file ids and operation ids.
-- Sector-aligned offsets with a 4096-byte default sector size.
-- In-memory sparse backing storage.
-- Deterministic min + jitter latency, shaped like network latency.
-- Trace events for submitted and completed operations.
-- No read/write/corruption/crash faults yet.
+- Add a runtime `DiskFaultOptions` profile separate from `DiskOptions`.
+- Per-sector read error, write error, and corruption probabilities.
+- Explicit simulator-control API for scripted sector corruption.
+- Trace every fault decision and state change.
+- Keep default no-fault behavior unchanged.
 
 **Acceptance criteria:**
 
-- Replaying the same seed produces byte-identical disk traces.
-- Reads observe prior completed writes.
-- Sparse unwritten regions read as zero bytes.
-- Invalid unaligned offsets or lengths return runtime errors.
-- No disk API reaches through to host `std.fs`.
+- Same seed and options produce byte-identical disk fault traces.
+- Read and write fault rates are validated at runtime.
+- Corrupt reads are trace-visible and deterministic.
+- Scripted corruption targets one logical path and sector.
+- Fault-free disk tests keep passing unchanged.
 
 **Files likely to change:**
 
-- New: `src/disk.zig`.
-- Modify: `src/root.zig`.
-- Modify: `docs/disk-fault-model.md` if implementation names differ from the
-  current design note.
+- `src/disk.zig`.
+- `docs/disk-fault-model.md`.
 
-**Size:** ~300 lines including tests.
+**Size:** ~250 lines including tests.
 
 ---
 
@@ -333,8 +353,10 @@ below are ordered so each one is useful on its own.
 
 ### 9. `Disk` authority, no faults
 
-Implement a `World`-owned disk authority with `write`, `read`, stable file
-ids, per-operation ids, sector-aligned offsets, in-memory backing buffer
+Done.
+
+Implement a `World`-owned disk authority with `write`, `read`, stable logical
+file identities, per-operation ids, sector-aligned offsets, in-memory backing buffer
 (sparse map, not a big flat allocation). Deterministic latency via a min +
 jitter model, same shape as network latency. Trace events for every
 submitted and completed operation.

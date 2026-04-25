@@ -1,6 +1,7 @@
 # API
 
-This document describes the current Phase 0 API. The API is not stable yet.
+This document describes the current experimental API. The API is not stable
+yet.
 
 ## `Random`
 
@@ -202,6 +203,53 @@ try queue.push(.{ .ready_at = 10, .id = 1 });
 Callers provide the ordering function explicitly. For distributed simulation,
 that ordering should be based on stable fields such as `(ready_at, event_id)`,
 not pointer identity or hash-map iteration.
+
+## Disk
+
+`mar.Disk` is the first deterministic disk authority. It is a no-fault
+simulator slice: logical files, sector-aligned reads and writes, sparse
+in-memory sectors, deterministic latency, operation ids, and trace events.
+Disk faults, crash behavior, production adapters, and `env.disk()` are not
+implemented yet.
+
+Construct it from a simulation `World`:
+
+```zig
+var disk = try mar.Disk.init(world, .{
+    .sector_size = 4096,
+    .min_latency_ns = 1_000_000,
+    .latency_jitter_ns = 2_000_000,
+});
+defer disk.deinit();
+```
+
+Write and read logical paths:
+
+```zig
+try disk.write(.{
+    .path = "wal.log",
+    .offset = 0,
+    .bytes = sector_bytes,
+});
+
+try disk.read(.{
+    .path = "wal.log",
+    .offset = 0,
+    .buffer = sector_buffer,
+});
+
+try disk.sync(.{ .path = "wal.log" });
+```
+
+Offsets and lengths must be whole multiples of `sector_size`. Reads from
+unwritten sectors return zero bytes. Logical paths are not host paths and are
+escaped through `World.recordFields` in trace events:
+
+```text
+disk.write op=0 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
+disk.read op=1 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
+disk.sync op=2 path=wal.log status=ok latency_ns=1000000
+```
 
 ## Network
 

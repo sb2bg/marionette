@@ -49,6 +49,9 @@ Phase 0 has:
   `(deliver_at, packet_id)` delivery order.
 - `mar.UnstableNetworkSimulation`, a small owner wrapper that separates
   harness packet-core send/delivery from simulator-control fault operations.
+- `mar.Disk`, a no-fault deterministic disk authority with logical paths,
+  sector-aligned reads/writes, sparse in-memory sectors, deterministic
+  latency, operation ids, and trace events.
 - `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
@@ -58,7 +61,7 @@ Phase 0 has:
 Phase 0 does not yet have:
 
 - A scheduler.
-- Disk simulation.
+- Disk faults or crash-during-write simulation.
 - Event-by-event invariant checking.
 - Liveness checking.
 - Seed shrinking.
