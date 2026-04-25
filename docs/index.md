@@ -9,9 +9,9 @@ Make rare bugs repeat themselves.
 
 ## Status
 
-Marionette is in Phase 0. Time, seeded randomness, trace logging, replay
-checks, named world/state scenario checks, and trace-visible run context are
-being built now. An unstable deterministic network sketch exists for examples.
+Marionette is experimental. Time, seeded randomness, trace logging, replay
+checks, named scenario checks, trace summaries, and trace-visible run context
+are implemented. An unstable deterministic network sketch exists for examples.
 
 Disk, a real scheduler, shrinking, and time-travel debugging are planned, not
 implemented. The API is not stable, and Marionette is not ready for production

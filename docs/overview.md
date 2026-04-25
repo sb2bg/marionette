@@ -7,11 +7,12 @@ randomness, disk, and network. In production, that environment routes to direct
 operations. In simulation, it routes through a controlled world that can replay
 the same execution from the same seed.
 
-Phase 0 is intentionally small. Today Marionette has seeded randomness,
-simulated time, trace logging, twice-and-compare replay, and named world/state
-post-scenario checks. It also has an unstable deterministic network sketch for
-examples, while the stable app-facing network API is still being designed.
-Disk simulation, a real scheduler, and richer replay tooling are planned.
+Marionette is still experimental, but the core replay loop is real: seeded
+randomness, simulated time, trace logging, twice-and-compare replay, trace
+summaries, and named post-scenario checks. It also has an unstable
+deterministic network sketch for examples, while the stable app-facing network
+API is still being designed. Disk simulation, a real scheduler, and richer
+replay tooling are planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
 the replay artifact bytes, see [Trace Format](trace-format.md). For

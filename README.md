@@ -97,7 +97,6 @@ explicit allocators, no runtime magic.
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
 - [Blog](docs/blog/index.md)
 
-Current examples include a retry queue with a duplicate-completion bug, a rate
 Current examples include a retry queue with a duplicate-completion bug and a
 small replicated-register showcase that exercises seeded message drops,
 deterministic delivery, and state checks.

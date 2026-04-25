@@ -297,10 +297,10 @@ state checkers. It is useful because it makes the future scheduler, network,
 and checker APIs concrete, but it is not a proof that Marionette can test real
 distributed systems.
 
-The stronger proof example should be a small replicated protocol, not only a
-rate limiter or register. A 500-line Raft, VSR, or primary-backup KV store that
-Marionette can break and replay would prove the library much better than toy
-examples.
+The stronger proof example should be a small replicated protocol, not only the
+current register showcase. A 500-line Raft, VSR, or primary-backup KV store
+that Marionette can break and replay would prove the library much better than
+toy examples.
 
 Until that exists, Marionette is promising infrastructure, not proven DST.
 

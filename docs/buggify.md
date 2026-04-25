@@ -25,8 +25,6 @@ production behavior.
 
 ## Worked Fault Hook
 
-Source: [`examples/buggify_fault_hook.zig`](https://github.com/sb2bg/marionette/blob/main/examples/buggify_fault_hook.zig)
-
 ```zig
 pub fn sendPacket(env: anytype, packet_id: u64) !void {
     const latency_ns = try env.random().intLessThan(mar.Duration, 1_000);
