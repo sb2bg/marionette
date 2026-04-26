@@ -246,6 +246,12 @@ const env: mar.Env = .{
 missing or short files as zero-filled sectors, and uses the same sector
 alignment checks as `SimDisk`.
 
+The `io` argument is the production host I/O backend used by `RealDisk` to
+perform filesystem calls. It is not Marionette's simulator hook. Simulated
+tests should use the `Disk` returned by `world.simulate(...).env.disk`; harness
+code keeps the matching `DiskControl` for faults, crash, restart, and
+corruption.
+
 Application code receives `Env` with an attached `Disk` field and uses only the
 app-facing operations:
 

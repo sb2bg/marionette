@@ -140,6 +140,13 @@ pub const DiskCrash = struct {};
 
 pub const DiskRestart = struct {};
 
+/// Production adapter from a real root directory into Marionette's app-facing
+/// `Disk` capability.
+///
+/// The `io` field is the host I/O backend used to execute filesystem calls. It
+/// is not the simulation hook: deterministic tests should use `SimDisk`
+/// directly through `Env.disk`, with fault/crash authority kept on
+/// `DiskControl`.
 pub const RealDisk = struct {
     const Self = @This();
 
@@ -147,10 +154,14 @@ pub const RealDisk = struct {
         sector_size: u64 = 4096,
     };
 
+    /// Root directory that all disk paths are resolved beneath.
     root: std.Io.Dir,
+    /// Host I/O backend for real filesystem operations.
     io: std.Io,
     options: Options,
 
+    /// Build a production disk adapter. `root` remains owned by the caller and
+    /// must outlive this `RealDisk`.
     pub fn init(root: std.Io.Dir, io: std.Io, options: Options) DiskError!Self {
         if (options.sector_size == 0) return error.InvalidAlignment;
         if (options.sector_size > std.math.maxInt(usize)) return error.InvalidRange;

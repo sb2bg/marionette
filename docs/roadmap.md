@@ -233,7 +233,7 @@ APIs.
 ### Completed: App-facing simulation disk capability
 
 **Status:** Done. `World.simulate` exposes an app-facing disk capability
-through `AppEnv.disk`.
+through `Env.disk`.
 
 **Scope:**
 
