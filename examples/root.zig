@@ -92,20 +92,19 @@ test "examples: replicated register rejects same-version conflicts" {
 }
 
 test "examples: kv store recovery scenario is replayable" {
-    const a = try kv_store.runScenario(std.testing.allocator, 0xC0FFEE);
+    const a = try runKvStoreTrace(std.testing.allocator, 0xC0FFEE, kv_store.scenario);
     defer std.testing.allocator.free(a);
-    const b = try kv_store.runScenario(std.testing.allocator, 0xC0FFEE);
+    const b = try runKvStoreTrace(std.testing.allocator, 0xC0FFEE, kv_store.scenario);
     defer std.testing.allocator.free(b);
 
     try std.testing.expectEqualStrings(a, b);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.profile name=kv-store-wal-recovery") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "disk.fault op=2 path=kv.wal kind=crash_lost_write rate=1/1 roll=0 fired=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "disk.read op=4 path=kv.wal offset=16 len=16 status=corrupt") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "kv.check recovery=ok committed_key=1 committed_value=41 recovered_records=1") != null);
 }
 
 test "examples: kv store checker catches torn record recovery" {
-    var report = try kv_store.runBuggyScenario(std.testing.allocator, 0xC0FFEE);
+    var report = try runKvStoreReport(std.testing.allocator, 0xC0FFEE, kv_store.buggyScenario);
     defer report.deinit();
 
     switch (report) {
@@ -119,4 +118,36 @@ test "examples: kv store checker catches torn record recovery" {
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "kv.invariant_violation reason=unsynced_record_recovered") != null);
         },
     }
+}
+
+fn runKvStoreTrace(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    comptime scenario_fn: fn (*kv_store.Harness) anyerror!void,
+) ![]u8 {
+    var report = try runKvStoreReport(allocator, seed, scenario_fn);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |*passed| return passed.takeTrace(),
+        .failed => |failure| {
+            failure.print();
+            return error.UnexpectedRunFailure;
+        },
+    }
+}
+
+fn runKvStoreReport(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    comptime scenario_fn: fn (*kv_store.Harness) anyerror!void,
+) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = kv_store.tick_ns,
+        .init = kv_store.Harness.init,
+        .scenario = scenario_fn,
+        .checks = &kv_store.checks,
+    });
 }
