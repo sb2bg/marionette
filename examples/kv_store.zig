@@ -1,127 +1,47 @@
-//! Tiny disk-backed KV recovery showcase.
+//! Marionette example: WAL recovery under crash + corruption.
 //!
-//! This is not a production KV store. It is a compact durability example for
-//! `mar.Disk`: fixed-size WAL records, sync as the durability boundary,
-//! crash/restart through harness control, corrupt reads, and a deliberately
-//! buggy recovery path.
+//! - `Harness` holds simulator state that outlives one scenario.
+//! - `scenario` drives writes, faults, crash, restart, and recovery.
+//! - `checks` assert the invariant after the scenario runs.
+//! - `expectPass` / `expectFuzz` / `expectFailure` are the runners.
 
 const std = @import("std");
 const mar = @import("marionette");
 
-const ns_per_ms: mar.Duration = 1_000_000;
+pub const tick_ns: mar.Duration = 1_000_000;
 const wal_path = "kv.wal";
 const record_size = 16;
 const scenario_write_count = 2;
-const max_records = scenario_write_count;
 const magic: u32 = 0x4d4b5631;
+const committed_key: u32 = 1;
+const committed_value: u32 = 41;
+const volatile_key: u32 = 2;
+const volatile_value: u32 = 99;
 
-const Profile = struct {
-    record_size: u64,
-    committed_key: u32,
-    committed_value: u32,
-    volatile_key: u32,
-    volatile_value: u32,
-};
-
-comptime {
-    std.debug.assert(max_records == scenario_write_count);
-}
-
-const profile: Profile = .{
-    .record_size = record_size,
-    .committed_key = 1,
-    .committed_value = 41,
-    .volatile_key = 2,
-    .volatile_value = 99,
-};
-
-const tags = [_][]const u8{
-    "example:kv_store",
-    "scenario:wal_recovery",
-};
-
-const buggy_tags = [_][]const u8{
-    "example:kv_store",
-    "scenario:bug",
-    "bug:accept_torn_record",
-};
-
-const attributes = mar.runAttributesFrom(profile);
-
-const checks = [_]mar.StateCheck(Harness){
+pub const checks = [_]mar.StateCheck(Harness){
     .{ .name = "synced records recover and unsynced records are rejected", .check = recoveredStateIsSafe },
 };
 
-/// Run the correct WAL recovery scenario and return an owned trace.
-pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithStateInit(
-        allocator,
-        .{
-            .seed = seed,
-            .tick_ns = ns_per_ms,
-            .profile_name = "kv-store-wal-recovery",
-            .tags = &tags,
-            .attributes = &attributes,
-        },
-        Harness,
-        Harness.init,
-        scenario,
-        &checks,
-    );
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |*passed| return passed.takeTrace(),
-        .failed => |failure| {
-            failure.print();
-            return error.KVStoreScenarioFailed;
-        },
-    }
-}
-
-/// Run a deliberately buggy recovery scenario.
-pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runWithStateInit(
-        allocator,
-        .{
-            .seed = seed,
-            .tick_ns = ns_per_ms,
-            .profile_name = "kv-store-wal-recovery-bug",
-            .tags = &buggy_tags,
-            .attributes = &attributes,
-        },
-        Harness,
-        Harness.init,
-        buggyScenario,
-        &checks,
-    );
-}
-
-fn scenario(harness: *Harness) !void {
-    try harness.store.put(profile.committed_key, profile.committed_value, .sync);
+pub fn scenario(harness: *Harness) !void {
+    try harness.store.put(committed_key, committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try harness.store.put(profile.volatile_key, profile.volatile_value, .no_sync);
-    std.debug.assert(harness.store.next_offset == scenario_write_count * record_size);
+    try harness.store.put(volatile_key, volatile_value, .no_sync);
     try harness.control.disk.crash(.{});
     try harness.control.disk.restart(.{});
     try harness.control.disk.corruptSector(wal_path, record_size);
     try harness.store.recover(.strict);
 }
 
-fn buggyScenario(harness: *Harness) !void {
-    try harness.store.put(profile.committed_key, profile.committed_value, .sync);
+pub fn buggyScenario(harness: *Harness) !void {
+    try harness.store.put(committed_key, committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
-    try harness.store.put(profile.volatile_key, profile.volatile_value, .no_sync);
-    std.debug.assert(harness.store.next_offset == scenario_write_count * record_size);
+    try harness.store.put(volatile_key, volatile_value, .no_sync);
     try harness.control.disk.crash(.{});
     try harness.control.disk.restart(.{});
     try harness.store.recover(.buggy_accept_magic_only);
 }
 
 fn recoveredStateIsSafe(harness: *const Harness) !void {
-    const committed_key = profile.committed_key;
-    const committed_value = profile.committed_value;
-    const volatile_key = profile.volatile_key;
     const store = &harness.store;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
@@ -155,14 +75,14 @@ const Entry = struct {
     value: u32,
 };
 
-const Harness = struct {
+pub const Harness = struct {
     store: KVStore,
     control: mar.SimControl,
 
-    fn init(world: *mar.World) !Harness {
+    pub fn init(world: *mar.World) !Harness {
         const sim = try world.simulate(.{ .disk = .{
             .sector_size = record_size,
-            .min_latency_ns = ns_per_ms,
+            .min_latency_ns = tick_ns,
         } });
 
         return .{
@@ -173,18 +93,20 @@ const Harness = struct {
 };
 
 const KVStore = struct {
-    env: mar.AppEnv,
+    env: mar.Env,
     next_offset: u64 = 0,
-    recovered: [max_records]Entry = undefined,
+    recovered: [scenario_write_count]Entry = undefined,
     recovered_count: u8 = 0,
 
-    fn init(env: mar.AppEnv) KVStore {
+    fn init(env: mar.Env) KVStore {
         return .{
             .env = env,
         };
     }
 
     fn put(self: *KVStore, key: u32, value: u32, sync_mode: SyncMode) !void {
+        std.debug.assert(self.next_offset / record_size < scenario_write_count);
+
         var bytes = [_]u8{0} ** record_size;
         encodeRecord(&bytes, .{ .key = key, .value = value });
 
@@ -210,7 +132,7 @@ const KVStore = struct {
         self.recovered_count = 0;
 
         var index: u64 = 0;
-        while (index < max_records) : (index += 1) {
+        while (index < scenario_write_count) : (index += 1) {
             const offset = index * record_size;
             var bytes = [_]u8{0} ** record_size;
             try self.env.disk.read(.{
@@ -292,4 +214,38 @@ fn readU32(bytes: []const u8) u32 {
         (@as(u32, bytes[1]) << 8) |
         (@as(u32, bytes[2]) << 16) |
         (@as(u32, bytes[3]) << 24);
+}
+
+test "kv store: recovery passes through expectation helper" {
+    try mar.expectPass(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .tick_ns = tick_ns,
+        .init = Harness.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
+}
+
+test "kv store: recovery fuzz smoke" {
+    try mar.expectFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .seeds = 16,
+        .tick_ns = tick_ns,
+        .init = Harness.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
+}
+
+test "kv store: buggy recovery fails through expectation helper" {
+    try mar.expectFailure(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .tick_ns = tick_ns,
+        .init = Harness.init,
+        .scenario = buggyScenario,
+        .checks = &checks,
+    });
 }
