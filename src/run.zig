@@ -49,11 +49,12 @@ pub fn run(
     comptime scenario: fn (*World) anyerror!void,
 ) RunError!RunReport {
     const no_state_checks = [_]StateCheck(NoState){};
-    return runTwiceWithState(
+    return runTwiceWithStateLifecycle(
         allocator,
         options,
         NoState,
-        initNoState,
+        infallibleStateInit(NoState, initNoState),
+        noopStateDeinit(NoState),
         scenarioWithoutState(scenario),
         &no_state_checks,
     );
@@ -63,8 +64,7 @@ pub fn run(
 ///
 /// `init_state` is called once per replay attempt. Stateful scenarios receive
 /// only `*State`; store any environment authorities needed by the scenario in
-/// the state initializer. Scenario state is not owned by `RunReport`, and
-/// Phase 0 state must not require a deinitializer.
+/// the state initializer.
 pub fn runWithState(
     allocator: std.mem.Allocator,
     options: RunOptions,
@@ -73,7 +73,40 @@ pub fn runWithState(
     comptime scenario: fn (*State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
 ) RunError!RunReport {
-    return runTwiceWithState(allocator, options, State, init_state, scenario, state_checks);
+    return runTwiceWithStateLifecycle(
+        allocator,
+        options,
+        State,
+        infallibleStateInit(State, init_state),
+        noopStateDeinit(State),
+        scenario,
+        state_checks,
+    );
+}
+
+/// Run a stateful scenario with fallible initialization and explicit teardown.
+///
+/// `init_state` and `deinit_state` are called once per replay attempt. Init,
+/// scenario, and check errors are returned as `RunReport.failed` with the
+/// partial trace preserved. Teardown must be infallible.
+pub fn runWithStateLifecycle(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    comptime State: type,
+    comptime init_state: fn (*World) anyerror!State,
+    comptime deinit_state: fn (*State) void,
+    comptime scenario: fn (*State) anyerror!void,
+    comptime state_checks: []const StateCheck(State),
+) RunError!RunReport {
+    return runTwiceWithStateLifecycle(
+        allocator,
+        options,
+        State,
+        init_state,
+        deinit_state,
+        scenario,
+        state_checks,
+    );
 }
 
 const NoState = struct {
@@ -94,22 +127,40 @@ fn scenarioWithoutState(
     }.runScenario;
 }
 
-fn runTwiceWithState(
+fn infallibleStateInit(
+    comptime State: type,
+    comptime init_state: fn (*World) State,
+) fn (*World) anyerror!State {
+    return struct {
+        fn init(world: *World) anyerror!State {
+            return init_state(world);
+        }
+    }.init;
+}
+
+fn noopStateDeinit(comptime State: type) fn (*State) void {
+    return struct {
+        fn deinit(_: *State) void {}
+    }.deinit;
+}
+
+fn runTwiceWithStateLifecycle(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
-    comptime init_state: fn (*World) State,
+    comptime init_state: fn (*World) anyerror!State,
+    comptime deinit_state: fn (*State) void,
     comptime scenario: fn (*State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
 ) RunError!RunReport {
-    var first = try runOnceWithState(allocator, options, State, init_state, scenario, state_checks);
+    var first = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
     switch (first) {
         .failed => |failure| return .{ .failed = failure },
         .passed => {},
     }
     errdefer first.deinit();
 
-    var second = try runOnceWithState(allocator, options, State, init_state, scenario, state_checks);
+    var second = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
     switch (second) {
         .failed => |failure| {
             const passed = first.passed;
@@ -153,11 +204,12 @@ fn runTwiceWithState(
     return .{ .passed = first_passed };
 }
 
-fn runOnceWithState(
+fn runOnceWithStateLifecycle(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
-    comptime init_state: fn (*World) State,
+    comptime init_state: fn (*World) anyerror!State,
+    comptime deinit_state: fn (*State) void,
     comptime scenario: fn (*State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
 ) RunError!RunOnceResult {
@@ -165,7 +217,18 @@ fn runOnceWithState(
     defer world.deinit();
     try recordRunContext(&world, options);
 
-    var state = init_state(&world);
+    var state = init_state(&world) catch |err| {
+        return .{ .failed = try failureFromWorld(
+            allocator,
+            options,
+            .scenario_error,
+            &world,
+            err,
+            null,
+        ) };
+    };
+    defer deinit_state(&state);
+
     scenario(&state) catch |err| {
         return .{ .failed = try failureFromWorld(
             allocator,
@@ -663,6 +726,98 @@ test "runWithState: check failures preserve partial trace and check name" {
             try std.testing.expectEqualStrings("counter fails", failure.check_name.?);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "state.value value=1") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "state.check.fail value=1") != null);
+        },
+    }
+}
+
+var lifecycle_deinit_count: u8 = 0;
+
+const LifecycleState = struct {
+    env: @import("env.zig").SimulationEnv,
+    value: u8 = 0,
+
+    fn init(world: *World) !LifecycleState {
+        return .{ .env = .init(world) };
+    }
+
+    fn deinit(_: *LifecycleState) void {
+        lifecycle_deinit_count += 1;
+    }
+};
+
+fn lifecycleScenario(state: *LifecycleState) !void {
+    state.value += 1;
+    try state.env.record("lifecycle.value value={}", .{state.value});
+}
+
+fn lifecycleCheck(state: *const LifecycleState) !void {
+    if (state.value != 1) return error.BadLifecycleState;
+    try state.env.record("lifecycle.check value={}", .{state.value});
+}
+
+test "runWithStateLifecycle: deinitializes each replay attempt" {
+    lifecycle_deinit_count = 0;
+    const state_checks = [_]StateCheck(LifecycleState){
+        .{ .name = "lifecycle is one", .check = lifecycleCheck },
+    };
+
+    var report = try runWithStateLifecycle(
+        std.testing.allocator,
+        .{ .seed = 1234 },
+        LifecycleState,
+        LifecycleState.init,
+        LifecycleState.deinit,
+        lifecycleScenario,
+        &state_checks,
+    );
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| {
+            try std.testing.expectEqual(@as(u8, 2), lifecycle_deinit_count);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "lifecycle.value value=1") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "lifecycle.check value=1") != null);
+        },
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+const FallibleInitState = struct {
+    fn init(_: *World) !FallibleInitState {
+        return error.InitFailed;
+    }
+
+    fn deinit(_: *FallibleInitState) void {
+        lifecycle_deinit_count += 1;
+    }
+};
+
+fn unreachableLifecycleScenario(_: *FallibleInitState) !void {
+    return error.UnreachableScenario;
+}
+
+test "runWithStateLifecycle: init errors become scenario failures" {
+    lifecycle_deinit_count = 0;
+    const state_checks = [_]StateCheck(FallibleInitState){};
+
+    var report = try runWithStateLifecycle(
+        std.testing.allocator,
+        .{ .seed = 1234 },
+        FallibleInitState,
+        FallibleInitState.init,
+        FallibleInitState.deinit,
+        unreachableLifecycleScenario,
+        &state_checks,
+    );
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.scenario_error, failure.kind);
+            try std.testing.expectEqualStrings("InitFailed", failure.error_name.?);
+            try std.testing.expectEqual(@as(u8, 0), lifecycle_deinit_count);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "world.init") != null);
         },
     }
 }

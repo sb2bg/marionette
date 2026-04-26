@@ -530,8 +530,25 @@ defer report.deinit();
 attempt's `World` into the initializer. Initializers may construct world-bound
 simulator authorities, but should not record trace events. Stateful scenarios
 and state checks receive only state; put environment authorities on the state
-when they need to record or advance time. Phase 0 state must be plain value
-state that does not require a deinitializer.
+when they need to record or advance time.
+
+Use `mar.runWithStateLifecycle` when initialization can fail or the state owns
+resources:
+
+```zig
+var report = try mar.runWithStateLifecycle(
+    std.testing.allocator,
+    .{ .seed = 0x1234 },
+    Model,
+    Model.initFallible,
+    Model.deinit,
+    scenario,
+    &state_checks,
+);
+```
+
+Lifecycle init errors are captured as scenario failures. The deinitializer is
+called once per replay attempt and must be infallible.
 
 The return value is `mar.RunReport`:
 

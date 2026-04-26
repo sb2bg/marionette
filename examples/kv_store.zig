@@ -48,7 +48,7 @@ const checks = [_]mar.StateCheck(Store){
 
 /// Run the correct WAL recovery scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithState(
+    var report = try mar.runWithStateLifecycle(
         allocator,
         .{
             .seed = seed,
@@ -59,6 +59,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         },
         Store,
         Store.init,
+        Store.deinit,
         scenario,
         &checks,
     );
@@ -75,7 +76,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 
 /// Run a deliberately buggy recovery scenario.
 pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runWithState(
+    return mar.runWithStateLifecycle(
         allocator,
         .{
             .seed = seed,
@@ -86,14 +87,13 @@ pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport 
         },
         Store,
         Store.init,
+        Store.deinit,
         buggyScenario,
         &checks,
     );
 }
 
 fn scenario(store: *Store) !void {
-    defer store.disk.deinit();
-
     try store.put(profile.committed_key, profile.committed_value, .sync);
     try store.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try store.put(profile.volatile_key, profile.volatile_value, .no_sync);
@@ -104,8 +104,6 @@ fn scenario(store: *Store) !void {
 }
 
 fn buggyScenario(store: *Store) !void {
-    defer store.disk.deinit();
-
     try store.put(profile.committed_key, profile.committed_value, .sync);
     try store.disk.setFaults(.{ .crash_torn_write_rate = .always() });
     try store.put(profile.volatile_key, profile.volatile_value, .no_sync);
@@ -157,14 +155,18 @@ const Store = struct {
     recovered: [max_records]Entry = undefined,
     recovered_count: u8 = 0,
 
-    fn init(world: *mar.World) Store {
+    fn init(world: *mar.World) !Store {
         return .{
             .env = mar.SimulationEnv.init(world),
-            .disk = mar.Disk.init(world, .{
+            .disk = try mar.Disk.init(world, .{
                 .sector_size = record_size,
                 .min_latency_ns = ns_per_ms,
-            }) catch unreachable,
+            }),
         };
+    }
+
+    fn deinit(self: *Store) void {
+        self.disk.deinit();
     }
 
     fn put(self: *Store, key_value: u64, value_value: u64, sync_mode: SyncMode) !void {

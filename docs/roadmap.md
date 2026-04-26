@@ -58,7 +58,8 @@ linearizability checker, time-travel debugging.
 - `World`: clock, seeded PRNG, trace log, event indexes.
 - `Clock`: production (host IO clock) and simulation (fake tick-based).
 - `Random`: seeded PRNG wrapper.
-- `mar.run` / `mar.runWithState`: twice-and-compare deterministic runner.
+- `mar.run` / `mar.runWithState` / `mar.runWithStateLifecycle`:
+  twice-and-compare deterministic runner.
   Stateful initializers receive the replay attempt's `World`; stateful
   scenarios and checks receive only state.
 - `RunOptions`, `RunFailure`, `RunReport`, `StateCheck`, named `Check`.
@@ -344,6 +345,48 @@ and the first disk-backed recovery example is now in place.
 
 Items that are queued but not in the active hot path. Pick these up when the
 active queue is drained or when they become blocking.
+
+### 2. Environment-owned disk authority
+
+The KV example validated `mar.Disk`, but it still constructs disk directly in
+state. Add the smallest `SimulationEnv` disk ownership/access pattern once a
+second disk-backed example or the production adapter shape gives enough signal.
+
+Acceptance criteria:
+
+- App code can depend on `env.disk()` instead of direct `mar.Disk` construction.
+- Tests can still access simulator-control operations such as `crash`,
+  `restart`, and `corruptSector` without leaking them into app code.
+- Disk lifecycle is owned by the environment or state lifecycle, not by
+  scenario-local cleanup.
+
+### 3. Recovery windows and disk fault budgets
+
+The KV example encodes recoverability in its checker. That is fine for the
+first example, but reusable disk profiles need an explicit vocabulary for
+"durable truth" and "allowed damage."
+
+Acceptance criteria:
+
+- Document a minimal recovery-window concept using the KV example as the
+  worked case.
+- Keep generic enforcement out of `mar.Disk` until at least one more storage
+  example exists.
+- Define how destructive disk fault budgets interact with synced vs unsynced
+  writes.
+
+### 4. WAL record framing guidance
+
+The KV example hand-rolls fixed-size records and checksums. Do not promote a
+library helper yet, but document the pattern so users do not accidentally test
+storage without record identity validation.
+
+Acceptance criteria:
+
+- Add a short guide showing magic, key/sequence, payload, and checksum fields.
+- Explain why corrupt/torn reads should be detected by user code, not inferred
+  by Marionette.
+- Link the guide from the KV example docs.
 
 ### 5. Crash / restart simulation
 

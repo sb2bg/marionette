@@ -215,6 +215,41 @@ record trace events; scenario execution and checks own trace output. Stateful
 scenarios and state checks receive only state; put environment authorities on
 the state when they need to record or advance time.
 
+Use `mar.runWithStateLifecycle` when state initialization can fail or when
+state owns authorities that must be torn down:
+
+```zig
+const Store = struct {
+    env: mar.SimulationEnv,
+    disk: mar.Disk,
+
+    fn init(world: *mar.World) !Store {
+        return .{
+            .env = mar.SimulationEnv.init(world),
+            .disk = try mar.Disk.init(world, .{}),
+        };
+    }
+
+    fn deinit(self: *Store) void {
+        self.disk.deinit();
+    }
+};
+
+var report = try mar.runWithStateLifecycle(
+    allocator,
+    .{ .seed = 0x1234 },
+    Store,
+    Store.init,
+    Store.deinit,
+    scenario,
+    &state_checks,
+);
+```
+
+Lifecycle init errors are reported as scenario failures with the partial trace
+preserved. The deinitializer runs once per replay attempt and must be
+infallible.
+
 This is intentionally small. Future scheduler work can check invariants after
 every event or on quiescence, but the current API already gives failures a
 stable name, preserved trace, and direct access to structured scenario state.

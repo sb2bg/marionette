@@ -39,8 +39,9 @@ Phase 0 has:
   same scalar run profile struct a scenario uses. Field names are exported
   attribute keys, and runtime behavior must not depend on derived attributes.
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
-- `mar.runWithState` and `mar.StateCheck`, which let checks inspect structured
-  scenario state initialized fresh for each replay attempt.
+- `mar.runWithState`, `mar.runWithStateLifecycle`, and `mar.StateCheck`, which
+  let checks inspect structured scenario state initialized fresh for each
+  replay attempt.
 - `mar.UnstableEventQueue`, a fixed-capacity deterministic event queue sketch for
   stable `(ready_at, event_id)`-style ordering.
 - `mar.UnstableNetwork`, a fixed-topology deterministic network sketch with

@@ -143,6 +143,9 @@ pub const run = run_module.run;
 /// Run a stateful scenario twice with fresh state and compare traces.
 pub const runWithState = run_module.runWithState;
 
+/// Run a stateful scenario with fallible initialization and explicit teardown.
+pub const runWithStateLifecycle = run_module.runWithStateLifecycle;
+
 /// Errors returned while parsing a user-supplied seed.
 pub const SeedParseError = seed_module.SeedParseError;
 
