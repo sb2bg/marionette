@@ -7,7 +7,12 @@ const std = @import("std");
 
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
-const World = @import("world.zig").World;
+const world_module = @import("world.zig");
+const World = world_module.World;
+
+pub const ClockError = std.mem.Allocator.Error || world_module.TraceError;
+pub const RandomError = std.mem.Allocator.Error || world_module.TraceError;
+pub const TracerError = std.mem.Allocator.Error || world_module.TraceError;
 
 pub const BuggifyError = error{
     InvalidRate,
@@ -54,14 +59,14 @@ pub const Clock = struct {
 
     pub const VTable = struct {
         now: *const fn (*anyopaque) clock_module.Timestamp,
-        sleep: *const fn (*anyopaque, clock_module.Duration) anyerror!void,
+        sleep: *const fn (*anyopaque, clock_module.Duration) ClockError!void,
     };
 
     pub fn now(self: Clock) clock_module.Timestamp {
         return self.vtable.now(self.ptr);
     }
 
-    pub fn sleep(self: Clock, duration_ns: clock_module.Duration) !void {
+    pub fn sleep(self: Clock, duration_ns: clock_module.Duration) ClockError!void {
         try self.vtable.sleep(self.ptr, duration_ns);
     }
 
@@ -95,7 +100,7 @@ pub const Clock = struct {
         return worldClock(ptr).now();
     }
 
-    fn worldClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) anyerror!void {
+    fn worldClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) ClockError!void {
         try worldClock(ptr).runFor(duration_ns);
     }
 
@@ -103,7 +108,7 @@ pub const Clock = struct {
         return productionClock(ptr).now();
     }
 
-    fn productionClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) anyerror!void {
+    fn productionClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) ClockError!void {
         productionClock(ptr).sleep(duration_ns);
     }
 };
@@ -113,27 +118,23 @@ pub const Random = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        random_u64: *const fn (*anyopaque) anyerror!u64,
-        boolean: *const fn (*anyopaque) anyerror!bool,
-        int_less_than_u32: *const fn (*anyopaque, u32) anyerror!u32,
-        int_less_than_u64: *const fn (*anyopaque, u64) anyerror!u64,
+        random_u64: *const fn (*anyopaque) RandomError!u64,
+        boolean: *const fn (*anyopaque) RandomError!bool,
+        int_less_than_u64: *const fn (*anyopaque, u64) RandomError!u64,
     };
 
     /// Draw an untraced `u64` from host entropy.
-    pub fn randomU64(self: Random) !u64 {
+    pub fn randomU64(self: Random) RandomError!u64 {
         return self.vtable.random_u64(self.ptr);
     }
 
     /// Draw an untraced boolean from host entropy.
-    pub fn boolean(self: Random) !bool {
+    pub fn boolean(self: Random) RandomError!bool {
         return self.vtable.boolean(self.ptr);
     }
 
     /// Draw an unbiased integer in the range `0 <= value < less_than`.
-    pub fn intLessThan(self: Random, comptime T: type, less_than: T) !T {
-        if (T == u32) {
-            return self.vtable.int_less_than_u32(self.ptr, less_than);
-        }
+    pub fn intLessThan(self: Random, comptime T: type, less_than: T) RandomError!T {
         const value = try self.vtable.int_less_than_u64(self.ptr, @intCast(less_than));
         return @intCast(value);
     }
@@ -149,14 +150,12 @@ pub const Random = struct {
     const world_random_vtable: VTable = .{
         .random_u64 = worldRandomU64,
         .boolean = worldRandomBool,
-        .int_less_than_u32 = worldRandomIntLessThanU32,
         .int_less_than_u64 = worldRandomIntLessThanU64,
     };
 
     const production_random_vtable: VTable = .{
         .random_u64 = productionRandomU64,
         .boolean = productionRandomBool,
-        .int_less_than_u32 = productionRandomIntLessThanU32,
         .int_less_than_u64 = productionRandomIntLessThanU64,
     };
 
@@ -168,56 +167,105 @@ pub const Random = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn worldRandomU64(ptr: *anyopaque) anyerror!u64 {
+    fn worldRandomU64(ptr: *anyopaque) RandomError!u64 {
         return worldRandom(ptr).randomU64();
     }
 
-    fn worldRandomBool(ptr: *anyopaque) anyerror!bool {
+    fn worldRandomBool(ptr: *anyopaque) RandomError!bool {
         return worldRandom(ptr).randomBool();
     }
 
-    fn worldRandomIntLessThanU32(ptr: *anyopaque, less_than: u32) anyerror!u32 {
-        return worldRandom(ptr).randomIntLessThan(u32, less_than);
-    }
-
-    fn worldRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) anyerror!u64 {
+    fn worldRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) RandomError!u64 {
         return worldRandom(ptr).randomIntLessThan(u64, less_than);
     }
 
-    fn productionRandomU64(ptr: *anyopaque) anyerror!u64 {
+    fn productionRandomU64(ptr: *anyopaque) RandomError!u64 {
         return productionRandom(ptr).interface().int(u64);
     }
 
-    fn productionRandomBool(ptr: *anyopaque) anyerror!bool {
+    fn productionRandomBool(ptr: *anyopaque) RandomError!bool {
         return productionRandom(ptr).interface().boolean();
     }
 
-    fn productionRandomIntLessThanU32(ptr: *anyopaque, less_than: u32) anyerror!u32 {
-        return productionRandom(ptr).interface().intRangeLessThan(u32, 0, less_than);
-    }
-
-    fn productionRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) anyerror!u64 {
+    fn productionRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) RandomError!u64 {
         return productionRandom(ptr).interface().intRangeLessThan(u64, 0, less_than);
     }
 };
 
 pub const Tracer = struct {
-    world: ?*World = null,
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        should_record: *const fn (*anyopaque) bool,
+        allocator: *const fn (*anyopaque) std.mem.Allocator,
+        record_payload: *const fn (*anyopaque, []const u8) TracerError!void,
+    };
 
     pub fn none() Tracer {
-        return .{};
+        return .{ .ptr = &noop_tracer_ctx, .vtable = &noop_tracer_vtable };
     }
 
     pub fn fromWorld(world: *World) Tracer {
-        return .{ .world = world };
+        return .{ .ptr = world, .vtable = &world_tracer_vtable };
     }
 
-    pub fn record(self: Tracer, comptime fmt: []const u8, args: anytype) !void {
-        if (self.world) |world| {
-            try world.record(fmt, args);
-        }
+    pub fn record(self: Tracer, comptime fmt: []const u8, args: anytype) TracerError!void {
+        if (!self.vtable.should_record(self.ptr)) return;
+        const allocator = self.vtable.allocator(self.ptr);
+        const payload = try std.fmt.allocPrint(allocator, fmt, args);
+        defer allocator.free(payload);
+        try self.vtable.record_payload(self.ptr, payload);
     }
+
+    const world_tracer_vtable: VTable = .{
+        .should_record = worldTracerShouldRecord,
+        .allocator = worldTracerAllocator,
+        .record_payload = worldTracerRecordPayload,
+    };
+
+    const noop_tracer_vtable: VTable = .{
+        .should_record = noopTracerShouldRecord,
+        .allocator = noopTracerAllocator,
+        .record_payload = noopTracerRecordPayload,
+    };
+
+    fn worldTracer(ptr: *anyopaque) *World {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn worldTracerShouldRecord(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn worldTracerAllocator(ptr: *anyopaque) std.mem.Allocator {
+        return worldTracer(ptr).allocator;
+    }
+
+    fn worldTracerRecordPayload(ptr: *anyopaque, payload: []const u8) TracerError!void {
+        const world = worldTracer(ptr);
+        const start_len = world.trace_log.items.len;
+        errdefer world.trace_log.shrinkRetainingCapacity(start_len);
+
+        if (!world_module.isValidTracePayload(payload)) return error.InvalidTracePayload;
+        try world.trace_log.print(world.allocator, "event={} ", .{world.event_index});
+        try world.trace_log.appendSlice(world.allocator, payload);
+        try world.trace_log.append(world.allocator, '\n');
+        world.event_index += 1;
+    }
+
+    fn noopTracerShouldRecord(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn noopTracerAllocator(_: *anyopaque) std.mem.Allocator {
+        return std.heap.smp_allocator;
+    }
+
+    fn noopTracerRecordPayload(_: *anyopaque, _: []const u8) TracerError!void {}
 };
+
+var noop_tracer_ctx: u8 = 0;
 
 pub const Env = struct {
     disk: disk_module.Disk,
@@ -318,7 +366,7 @@ test "env: production exposes production authorities" {
     var clock: clock_module.ProductionClock = .init();
     var source: std.Random.IoSource = .{ .io = std.Options.debug_io };
     const env: Env = .{
-        .disk = undefined,
+        .disk = .unavailable(),
         .clock = .fromProduction(&clock),
         .random = .fromProduction(&source),
         .tracer = .none(),
@@ -326,6 +374,7 @@ test "env: production exposes production authorities" {
 
     _ = env.clock.now();
     _ = try env.random.intLessThan(u8, 10);
+    try std.testing.expectError(error.DiskUnavailable, env.disk.sync(.{ .path = "wal.log" }));
     try std.testing.expect(!try env.buggify(.drop_packet, .percent(50)));
 }
 
@@ -336,7 +385,7 @@ test "env: simulation buggify is traced" {
     const sim = try world.simulate(.{});
     _ = try sim.env.buggify(.drop_packet, .percent(20));
 
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u32 less_than=100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u64 less_than=100") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet rate=20/100 roll=") != null);
 }
 
