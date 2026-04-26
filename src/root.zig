@@ -63,6 +63,12 @@ pub const ProductionEnv = env_module.ProductionEnv;
 /// Simulation composition-root environment backed by a `World`.
 pub const SimulationEnv = env_module.SimulationEnv;
 
+/// App-facing simulation disk authority exposed by `SimulationEnv.disk()`.
+pub const SimulationDisk = env_module.SimulationDisk;
+
+/// Errors returned by optional simulation environment authorities.
+pub const SimulationEnvError = env_module.SimulationEnvError;
+
 /// Production random view backed by host entropy.
 pub const ProductionRandom = env_module.ProductionRandom;
 

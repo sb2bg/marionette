@@ -53,25 +53,26 @@ destructive disk fault needs a scope, a budget, and a trace event.
 ## Authority Shape
 
 The current `mar.Disk` authority is constructed from `World` by the simulation
-harness or scenario state. The intended app-facing shape is still environment
-based: application code should eventually depend on `env.disk()`, not on
-`World` internals:
+harness or scenario state. Simulation application code can receive an attached
+app-facing disk view through `env.disk()` instead of depending on `World`
+internals:
 
 ```zig
 fn store(env: anytype, entry: []const u8) !void {
-    try env.disk().write(.{
+    const disk = try env.disk();
+    try disk.write(.{
         .path = "wal.log",
         .offset = 0,
         .bytes = entry,
     });
-    try env.disk().sync(.{ .path = "wal.log" });
+    try disk.sync(.{ .path = "wal.log" });
 }
 ```
 
 The test harness may still construct `Disk` from `World` or use a
 simulator-control handle to inspect disk state, inject scripted faults, or
 crash/restart the simulated disk. Those operations must not leak into the
-app-facing disk API.
+app-facing disk API. The production `env.disk()` adapter is still deferred.
 
 In later multi-node work, each simulated node should expose its own disk view:
 

@@ -150,23 +150,32 @@ const Entry = struct {
 
 const Store = struct {
     env: mar.SimulationEnv,
-    disk: mar.Disk,
+    disk: *mar.Disk,
+    allocator: std.mem.Allocator,
     next_offset: u64 = 0,
     recovered: [max_records]Entry = undefined,
     recovered_count: u8 = 0,
 
     fn init(world: *mar.World) !Store {
+        const disk = try world.allocator.create(mar.Disk);
+        errdefer world.allocator.destroy(disk);
+
+        disk.* = try mar.Disk.init(world, .{
+            .sector_size = record_size,
+            .min_latency_ns = ns_per_ms,
+        });
+        errdefer disk.deinit();
+
         return .{
-            .env = mar.SimulationEnv.init(world),
-            .disk = try mar.Disk.init(world, .{
-                .sector_size = record_size,
-                .min_latency_ns = ns_per_ms,
-            }),
+            .env = mar.SimulationEnv.init(world, .{ .disk = disk }),
+            .disk = disk,
+            .allocator = world.allocator,
         };
     }
 
     fn deinit(self: *Store) void {
         self.disk.deinit();
+        self.allocator.destroy(self.disk);
     }
 
     fn put(self: *Store, key_value: u64, value_value: u64, sync_mode: SyncMode) !void {
@@ -177,7 +186,8 @@ const Store = struct {
         encodeRecord(&bytes, .{ .key = key, .value = value });
 
         const offset = self.next_offset;
-        try self.disk.write(.{
+        const disk = try self.env.disk();
+        try disk.write(.{
             .path = wal_path,
             .offset = offset,
             .bytes = &bytes,
@@ -185,7 +195,7 @@ const Store = struct {
         self.next_offset += record_size;
 
         if (sync_mode == .sync) {
-            try self.disk.sync(.{ .path = wal_path });
+            try disk.sync(.{ .path = wal_path });
         }
 
         try self.env.record(
@@ -198,10 +208,11 @@ const Store = struct {
         self.recovered_count = 0;
 
         var index: u64 = 0;
+        const disk = try self.env.disk();
         while (index < max_records) : (index += 1) {
             const offset = index * record_size;
             var bytes = [_]u8{0} ** record_size;
-            try self.disk.read(.{
+            try disk.read(.{
                 .path = wal_path,
                 .offset = offset,
                 .buffer = &bytes,

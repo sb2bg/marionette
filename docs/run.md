@@ -181,7 +181,7 @@ const Model = struct {
     committed: bool = false,
 
     fn init(world: *mar.World) Model {
-        return .{ .env = mar.SimulationEnv.init(world) };
+        return .{ .env = mar.SimulationEnv.init(world, .{}) };
     }
 };
 
@@ -225,7 +225,7 @@ const Store = struct {
 
     fn init(world: *mar.World) !Store {
         return .{
-            .env = mar.SimulationEnv.init(world),
+            .env = mar.SimulationEnv.init(world, .{}),
             .disk = try mar.Disk.init(world, .{}),
         };
     }

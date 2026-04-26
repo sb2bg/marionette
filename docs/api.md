@@ -66,7 +66,7 @@ authorities:
 
 ```zig
 fn scenario(world: *mar.World) !void {
-    var env = mar.SimulationEnv.init(world);
+    var env = mar.SimulationEnv.init(world, .{});
     try service(&env);
 }
 ```
@@ -82,13 +82,13 @@ the PRNG or recording a hook event. The hook only decides whether the fault
 fires; user code still owns the domain behavior, such as dropping a packet,
 delaying an operation, or returning a simulated disk error.
 
-`SimulationEnv` also exposes `tick()`, `runFor()`, and `record()` as
-convenience wrappers around the backing world for scenario code. Future disk
-and network authorities should be added to this environment shape instead of
-relying on auto-detection. Marionette does not currently expose a public
-extension point for alternate production authority routing; keeping that closed
-avoids locking in a large user-implemented interface while the authority
-surface is still growing.
+`SimulationEnv` also exposes `tick()`, `runFor()`, `record()`, and an optional
+app-facing `disk()` view when it is constructed with a disk authority. Network
+authorities should follow this environment shape instead of relying on
+auto-detection. Marionette does not currently expose a public extension point
+for alternate production authority routing; keeping that closed avoids locking
+in a large user-implemented interface while the authority surface is still
+growing.
 
 ## `World`
 
@@ -210,7 +210,7 @@ not pointer identity or hash-map iteration.
 sector-aligned reads and writes, sparse in-memory sectors, deterministic
 latency, operation ids, trace events, and replayable read/write/corruption
 faults. It also has simulator-control crash/restart operations for pending
-writes. Production adapters and `env.disk()` are not implemented yet.
+writes. Production adapters are not implemented yet.
 
 Construct it from a simulation `World`:
 
@@ -240,6 +240,27 @@ try disk.read(.{
 
 try disk.sync(.{ .path = "wal.log" });
 ```
+
+Application code in simulation can receive a `SimulationEnv` with an attached
+disk and use only the app-facing operations:
+
+```zig
+var disk_authority = try mar.Disk.init(world, .{});
+defer disk_authority.deinit();
+
+var env = mar.SimulationEnv.init(world, .{ .disk = &disk_authority });
+
+fn appendRecord(env: *mar.SimulationEnv, sector_bytes: []const u8) !void {
+    const disk = try env.disk();
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
+    try disk.sync(.{ .path = "wal.log" });
+}
+```
+
+The `SimulationEnv.disk()` view exposes `read`, `write`, and `sync`.
+Simulator-control operations such as `setFaults`, `crash`, `restart`, and
+`corruptSector` remain on the owned `mar.Disk` handle kept by the harness or
+scenario state. `ProductionEnv.disk()` is still deferred.
 
 Offsets and lengths must be whole multiples of `sector_size`. Reads from
 unwritten sectors return zero bytes. Logical paths are not host paths and are
@@ -498,7 +519,7 @@ const Model = struct {
     committed: bool = false,
 
     fn init(world: *mar.World) Model {
-        return .{ .env = mar.SimulationEnv.init(world) };
+        return .{ .env = mar.SimulationEnv.init(world, .{}) };
     }
 };
 

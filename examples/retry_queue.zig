@@ -150,7 +150,7 @@ const RetryQueue = struct {
     completion_count: u8 = 0,
 
     fn init(world: *mar.World) RetryQueue {
-        return .{ .env = mar.SimulationEnv.init(world) };
+        return .{ .env = mar.SimulationEnv.init(world, .{}) };
     }
 
     fn makeReady(self: *RetryQueue, job_id: u64) !void {

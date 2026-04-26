@@ -308,7 +308,7 @@ const Cluster = struct {
 
     fn init(world: *mar.World) Cluster {
         return .{
-            .env = mar.SimulationEnv.init(world),
+            .env = mar.SimulationEnv.init(world, .{}),
             .replicas = [_]Replica{.{}} ** replica_count,
             .sim = Simulation.init(world),
         };

@@ -6,10 +6,15 @@
 const std = @import("std");
 
 const clock_module = @import("clock.zig");
+const disk_module = @import("disk.zig");
 const World = @import("world.zig").World;
 
 pub const BuggifyError = error{
     InvalidRate,
+};
+
+pub const SimulationEnvError = error{
+    MissingDisk,
 };
 
 /// Environment selected at comptime.
@@ -113,10 +118,15 @@ pub const ProductionEnv = struct {
 /// Simulation environment backed by a `World`.
 pub const SimulationEnv = struct {
     world: *World,
+    disk_authority: ?*disk_module.Disk = null,
 
-    /// Construct a simulation environment from a world.
-    pub fn init(world: *World) SimulationEnv {
-        return .{ .world = world };
+    pub const Options = struct {
+        disk: ?*disk_module.Disk = null,
+    };
+
+    /// Construct a simulation environment from a world and optional authorities.
+    pub fn init(world: *World, options: Options) SimulationEnv {
+        return .{ .world = world, .disk_authority = options.disk };
     }
 
     /// Return the world's simulated clock authority.
@@ -127,6 +137,15 @@ pub const SimulationEnv = struct {
     /// Return the world's traced random authority.
     pub fn random(self: *SimulationEnv) World.TracedRandom {
         return self.world.tracedRandom();
+    }
+
+    /// Return the app-facing disk authority.
+    ///
+    /// Simulator-control operations such as `setFaults`, `crash`, `restart`,
+    /// and `corruptSector` stay on the owned `mar.Disk` handle, not on the
+    /// environment view passed to application code.
+    pub fn disk(self: *SimulationEnv) SimulationEnvError!SimulationDisk {
+        return .{ .authority = self.disk_authority orelse return error.MissingDisk };
     }
 
     /// Draw and trace a simulation-only fault hook.
@@ -162,6 +181,22 @@ pub const SimulationEnv = struct {
     }
 };
 
+pub const SimulationDisk = struct {
+    authority: *disk_module.Disk,
+
+    pub fn read(self: SimulationDisk, options: disk_module.Disk.Read) disk_module.DiskError!void {
+        try self.authority.read(options);
+    }
+
+    pub fn write(self: SimulationDisk, options: disk_module.Disk.Write) disk_module.DiskError!void {
+        try self.authority.write(options);
+    }
+
+    pub fn sync(self: SimulationDisk, options: disk_module.Disk.Sync) disk_module.DiskError!void {
+        try self.authority.sync(options);
+    }
+};
+
 fn hookName(comptime hook: anytype) []const u8 {
     const Hook = @TypeOf(hook);
     return switch (@typeInfo(Hook)) {
@@ -179,13 +214,50 @@ test "env: simulation routes through world authorities" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world);
+    var env = SimulationEnv.init(&world, .{});
     try env.tick();
     _ = try env.random().intLessThan(u64, 100);
 
     try std.testing.expectEqual(@as(clock_module.Timestamp, 10), env.clock().now());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
+}
+
+test "env: simulation disk requires an attached authority" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var env = SimulationEnv.init(&world, .{});
+    try std.testing.expectError(error.MissingDisk, env.disk());
+}
+
+test "env: simulation exposes app-facing disk operations" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk_authority = try disk_module.Disk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk_authority.deinit();
+
+    var env = SimulationEnv.init(&world, .{ .disk = &disk_authority });
+    try (try env.disk()).write(.{
+        .path = "wal.log",
+        .offset = 0,
+        .bytes = "abcd",
+    });
+
+    var buffer = [_]u8{0} ** 4;
+    try (try env.disk()).read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualStrings("abcd", &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.write op=0 path=wal.log offset=0 len=4 status=ok latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=ok latency_ns=10") != null);
 }
 
 test "env: production exposes production authorities" {
@@ -200,7 +272,7 @@ test "env: simulation buggify is traced" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world);
+    var env = SimulationEnv.init(&world, .{});
     _ = try env.buggify(.drop_packet, .percent(20));
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u32 less_than=100") != null);
@@ -213,7 +285,7 @@ test "env: buggify accepts typed enum hooks" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world);
+    var env = SimulationEnv.init(&world, .{});
     _ = try env.buggify(Hook.drop_packet, .percent(20));
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet") != null);
@@ -223,7 +295,7 @@ test "env: buggify supports always and never rates" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world);
+    var env = SimulationEnv.init(&world, .{});
 
     try std.testing.expect(try env.buggify(.always_fault, .always()));
     try std.testing.expect(!try env.buggify(.never_fault, .never()));
@@ -233,7 +305,7 @@ test "env: simulation buggify rejects invalid runtime rates" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world);
+    var env = SimulationEnv.init(&world, .{});
 
     try std.testing.expectError(
         error.InvalidRate,

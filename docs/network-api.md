@@ -71,7 +71,7 @@ In simulation:
 
 ```zig
 fn scenario(world: *mar.World) !void {
-    var env = mar.SimulationEnv.init(world);
+    var env = mar.SimulationEnv.init(world, .{});
     try service(&env);
 }
 ```

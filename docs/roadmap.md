@@ -46,12 +46,14 @@ The current disk surface is:
   reads/writes, sparse sectors, deterministic latency, operation ids, trace
   events, read/write IO errors, corrupt reads, scripted sector corruption, and
   crash/restart simulation for pending writes.
+- `SimulationEnv.disk()`: app-facing simulation disk view exposing only
+  `read`, `write`, and `sync`; simulator-control operations stay on `mar.Disk`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 
-What is not built yet: app-facing `env.network()`/`env.disk()`, probabilistic
-tick-evolved network faults, liveness mode, named simulation profiles,
-linearizability checker, time-travel debugging.
+What is not built yet: production `env.disk()`, app-facing `env.network()`,
+probabilistic tick-evolved network faults, liveness mode, named simulation
+profiles, linearizability checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -69,6 +71,7 @@ linearizability checker, time-travel debugging.
   runtime rate validation in simulation.
 - `mar.Disk`: deterministic disk authority with replayable faults and
   crash/restart simulation.
+- `SimulationEnv.disk()`: app-facing simulation disk wrapper.
 - Trace format with per-line validation (`isValidTracePayload`).
 - Trace summary renderer (`mar.summarize`, `Summary.writeSummary`).
 - Seed parser for decimal seeds and 40-character Git hashes.
@@ -214,6 +217,25 @@ recoverability-budget API.
 
 ---
 
+### Completed: App-facing simulation disk authority
+
+**Status:** Done. `SimulationEnv.disk()` exposes an app-facing disk wrapper
+when the environment is constructed with a `mar.Disk`.
+
+**Scope:**
+
+- App code can depend on `env.disk()` for `read`, `write`, and `sync`.
+- Tests and harnesses still access simulator-control operations such as
+  `setFaults`, `crash`, `restart`, and `corruptSector` through the owned
+  `mar.Disk`.
+- The KV example routes app storage calls through `env.disk()`.
+- Disk lifecycle stays with state lifecycle for now.
+
+**Follow-up:** production `env.disk()` and fully environment-owned disk
+construction remain deferred until the production adapter shape is clearer.
+
+---
+
 ### Completed: Fix `Cluster.sim = undefined` / `bindWorld` pattern
 
 **Status:** Done. `runWithState` now passes `*World` into state
@@ -346,21 +368,7 @@ and the first disk-backed recovery example is now in place.
 Items that are queued but not in the active hot path. Pick these up when the
 active queue is drained or when they become blocking.
 
-### 2. Environment-owned disk authority
-
-The KV example validated `mar.Disk`, but it still constructs disk directly in
-state. Add the smallest `SimulationEnv` disk ownership/access pattern once a
-second disk-backed example or the production adapter shape gives enough signal.
-
-Acceptance criteria:
-
-- App code can depend on `env.disk()` instead of direct `mar.Disk` construction.
-- Tests can still access simulator-control operations such as `crash`,
-  `restart`, and `corruptSector` without leaking them into app code.
-- Disk lifecycle is owned by the environment or state lifecycle, not by
-  scenario-local cleanup.
-
-### 3. Recovery windows and disk fault budgets
+### 2. Recovery windows and disk fault budgets
 
 The KV example encodes recoverability in its checker. That is fine for the
 first example, but reusable disk profiles need an explicit vocabulary for
@@ -375,7 +383,7 @@ Acceptance criteria:
 - Define how destructive disk fault budgets interact with synced vs unsynced
   writes.
 
-### 4. WAL record framing guidance
+### 3. WAL record framing guidance
 
 The KV example hand-rolls fixed-size records and checksums. Do not promote a
 library helper yet, but document the pattern so users do not accidentally test

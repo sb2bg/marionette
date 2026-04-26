@@ -659,7 +659,7 @@ const CounterState = struct {
     value: u8 = 0,
 
     fn init(world: *World) CounterState {
-        return .{ .env = .init(world) };
+        return .{ .env = .init(world, .{}) };
     }
 };
 
@@ -737,7 +737,7 @@ const LifecycleState = struct {
     value: u8 = 0,
 
     fn init(world: *World) !LifecycleState {
-        return .{ .env = .init(world) };
+        return .{ .env = .init(world, .{}) };
     }
 
     fn deinit(_: *LifecycleState) void {

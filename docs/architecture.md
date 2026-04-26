@@ -13,7 +13,7 @@ Given the same Marionette version, Zig version, target platform, user code,
 simulation options, and seed, a Marionette simulation must produce the same
 declared result and byte-identical Marionette trace across repeated runs. The
 guarantee applies only to behavior routed through Marionette-controlled
-authorities: simulated time, seeded randomness, future disk, future network,
+authorities: simulated time, seeded randomness, disk, future network,
 future scheduling, and explicit trace events. Marionette does not guarantee
 stability for host wall-clock time, OS thread scheduling, stack or heap
 addresses, pointer identity, unordered map iteration, external syscalls, data
@@ -147,7 +147,7 @@ test "single request is replayable" {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 0x1234 });
     defer world.deinit();
 
-    var env = mar.SimulationEnv.init(&world);
+    var env = mar.SimulationEnv.init(&world, .{});
     const latency_ns = try client(&env);
     try env.record("client.request latency_ns={}", .{latency_ns});
 }
