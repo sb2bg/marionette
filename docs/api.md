@@ -45,50 +45,31 @@ constructing individual authorities itself:
 
 ```zig
 fn service(env: anytype) !void {
-    const now = env.clock().now();
-    const jitter = try env.random().intLessThan(mar.Duration, 1_000);
+    const now = env.clock.now();
+    const jitter = try env.random.intLessThan(mar.Duration, 1_000);
     if (try env.buggify(.slow_path, .oneIn(10))) {
-        env.clock().sleep(jitter);
+        try env.clock.sleep(jitter);
     }
     _ = .{ now, jitter };
 }
 ```
 
-Production chooses production authorities once at the composition root:
+`mar.Env`/`mar.AppEnv` is one concrete app-facing capability bundle. Its disk,
+clock, random, and tracer authorities are fields, not lazy accessors.
 
-```zig
-var env = mar.ProductionEnv.init(.{});
-try service(&env);
-```
-
-Simulation borrows a `World` and routes through traced deterministic
-authorities:
+Simulation builds app and harness views together through `World.simulate`:
 
 ```zig
 fn scenario(world: *mar.World) !void {
-    var env = mar.SimulationEnv.init(world, .{});
-    try service(&env);
+    const sim = try world.simulate(.{});
+    try service(sim.env);
 }
 ```
 
-`mar.Env(.production)` aliases `mar.ProductionEnv`.
-`mar.Env(.simulation)` aliases `mar.SimulationEnv`.
-
-Phase 0 environments expose `clock()`, `random()`, and `buggify()`.
-`ProductionEnv.buggify` always returns `false`. `SimulationEnv.buggify` takes
-a `BuggifyRate`, draws through the world's PRNG, and records the hook
-decision. Invalid runtime rates return `error.InvalidRate` before drawing from
-the PRNG or recording a hook event. The hook only decides whether the fault
-fires; user code still owns the domain behavior, such as dropping a packet,
-delaying an operation, or returning a simulated disk error.
-
-`SimulationEnv` also exposes `tick()`, `runFor()`, `record()`, and an optional
-app-facing `disk()` view when it is constructed with a disk authority. Network
-authorities should follow this environment shape instead of relying on
-auto-detection. Marionette does not currently expose a public extension point
-for alternate production authority routing; keeping that closed avoids locking
-in a large user-implemented interface while the authority surface is still
-growing.
+`sim.env` is passed to application code. `sim.control` is kept by the harness
+for simulator-only actions such as advancing time or crashing disk.
+`env.buggify` draws through the env's random capability only when the env was
+built by simulation; production env construction is still being shaped.
 
 ## `World`
 
@@ -98,9 +79,9 @@ growing.
 - One seeded `Random`.
 - One trace log.
 
-Application code should usually receive `SimulationEnv`, not `World` directly.
-Scenarios and harnesses use `World` to construct envs, drive time, and inspect
-trace bytes.
+Application code should usually receive `AppEnv`, not `World` directly.
+Scenarios and harnesses use `World` to construct simulations, drive time, and
+inspect trace bytes.
 
 Create a world with an explicit allocator:
 
@@ -171,7 +152,7 @@ does not teach modulo bias.
 
 Low-level harness code that should not receive the whole `World` can take a
 narrow traced random authority. Application code should usually use
-`env.random()` instead:
+`env.random` instead:
 
 ```zig
 const random = world.tracedRandom();
@@ -206,21 +187,24 @@ not pointer identity or hash-map iteration.
 
 ## Disk
 
-`mar.Disk` is the first deterministic disk authority: logical files,
-sector-aligned reads and writes, sparse in-memory sectors, deterministic
-latency, operation ids, trace events, and replayable read/write/corruption
-faults. It also has simulator-control crash/restart operations for pending
-writes. Production adapters are not implemented yet.
+`mar.Disk` is the app-facing disk capability. It is a concrete, storable
+handle with `read`, `write`, and `sync`. `mar.SimDisk` is the deterministic
+in-memory simulator behind that handle: logical files, sector-aligned
+reads/writes, sparse sectors, deterministic latency, operation ids, trace
+events, replayable read/write/corruption faults, and crash/restart behavior
+for pending writes. Production adapters are not implemented yet.
 
-Construct it from a simulation `World`:
+Construct a world-owned simulator bundle, then hand app code only the disk
+capability:
 
 ```zig
-var disk = try mar.Disk.init(world, .{
+const sim = try world.simulate(.{ .disk = .{
     .sector_size = 4096,
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
-});
-defer disk.deinit();
+} });
+
+const disk = sim.env.disk;
 ```
 
 Write and read logical paths:
@@ -241,26 +225,24 @@ try disk.read(.{
 try disk.sync(.{ .path = "wal.log" });
 ```
 
-Application code in simulation can receive a `SimulationEnv` with an attached
-disk and use only the app-facing operations:
+Application code receives `AppEnv` with an attached `Disk` field and uses only
+the app-facing operations:
 
 ```zig
-var disk_authority = try mar.Disk.init(world, .{});
-defer disk_authority.deinit();
+const sim = try world.simulate(.{
+    .disk = .{ .sector_size = 4096 },
+});
 
-var env = mar.SimulationEnv.init(world, .{ .disk = &disk_authority });
-
-fn appendRecord(env: *mar.SimulationEnv, sector_bytes: []const u8) !void {
-    const disk = try env.disk();
-    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
-    try disk.sync(.{ .path = "wal.log" });
+fn appendRecord(env: mar.AppEnv, sector_bytes: []const u8) !void {
+    try env.disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
+    try env.disk.sync(.{ .path = "wal.log" });
 }
 ```
 
-The `SimulationEnv.disk()` view exposes `read`, `write`, and `sync`.
+The `AppEnv.disk` view exposes `read`, `write`, and `sync`.
 Simulator-control operations such as `setFaults`, `crash`, `restart`, and
-`corruptSector` remain on the owned `mar.Disk` handle kept by the harness or
-scenario state. `ProductionEnv.disk()` is still deferred.
+`corruptSector` remain on `mar.DiskControl`, exposed through
+`sim.control.disk`, and are kept by the harness or scenario state.
 
 Offsets and lengths must be whole multiples of `sector_size`. Reads from
 unwritten sectors return zero bytes. Logical paths are not host paths and are
@@ -272,10 +254,11 @@ disk.read op=1 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.sync op=2 path=wal.log status=ok committed_writes=1 latency_ns=1000000
 ```
 
-Faults are disabled by default. Enable them with `mar.DiskFaultOptions`:
+Faults are disabled by default. Enable them through `mar.DiskControl`:
 
 ```zig
-try disk.setFaults(.{
+const control = sim.control.disk;
+try control.setFaults(.{
     .read_error_rate = .oneIn(100),
     .write_error_rate = .oneIn(100),
     .corrupt_read_rate = .oneIn(1_000),
@@ -299,7 +282,7 @@ durable in-memory model. Harnesses can inject persistent scripted sector
 corruption with:
 
 ```zig
-try disk.corruptSector("wal.log", 0);
+try control.corruptSector("wal.log", 0);
 ```
 
 That simulator-control API records `disk.fault ... kind=scripted_corruption`;
@@ -312,8 +295,8 @@ committed and are not lost by crash.
 
 ```zig
 try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
-try disk.crash(.{});
-try disk.restart(.{});
+try control.crash(.{});
+try control.restart(.{});
 ```
 
 While crashed, `read`, `write`, and `sync` return `error.DiskCrashed`.
@@ -515,11 +498,12 @@ Stateful scenarios can use `mar.runWithState` and `mar.StateCheck(State)`:
 
 ```zig
 const Model = struct {
-    env: mar.SimulationEnv,
+    env: mar.AppEnv,
     committed: bool = false,
 
     fn init(world: *mar.World) Model {
-        return .{ .env = mar.SimulationEnv.init(world, .{}) };
+        const sim = world.simulate(.{}) catch unreachable;
+        return .{ .env = sim.env };
     }
 };
 

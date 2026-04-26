@@ -42,16 +42,22 @@ The current network surface is:
 
 The current disk surface is:
 
-- `mar.Disk`: in-memory disk authority with logical paths, sector-aligned
+- `mar.Disk`: app-facing capability exposing only `read`, `write`, and
+  `sync`.
+- `mar.SimDisk`: in-memory disk simulator with logical paths, sector-aligned
   reads/writes, sparse sectors, deterministic latency, operation ids, trace
-  events, read/write IO errors, corrupt reads, scripted sector corruption, and
-  crash/restart simulation for pending writes.
-- `SimulationEnv.disk()`: app-facing simulation disk view exposing only
-  `read`, `write`, and `sync`; simulator-control operations stay on `mar.Disk`.
+  events, read/write IO errors, corrupt reads, and crash/restart behavior for
+  pending writes.
+- `mar.DiskControl`: harness-facing fault, scripted corruption, crash, and
+  restart authority over the same `SimDisk` backing state.
+- `World.simulate(...)`: constructs world-owned simulator resources and
+  returns `{ env: AppEnv, control: SimControl }`.
+- `AppEnv.disk`: app-facing simulation disk view exposing only `read`,
+  `write`, and `sync`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 
-What is not built yet: production `env.disk()`, app-facing `env.network()`,
+What is not built yet: production disk adapter, app-facing `env.network`,
 probabilistic tick-evolved network faults, liveness mode, named simulation
 profiles, linearizability checker, time-travel debugging.
 
@@ -69,9 +75,12 @@ profiles, linearizability checker, time-travel debugging.
 - `mar.tidy` linter for banned direct calls.
 - `BuggifyRate` + `env.buggify(hook, rate)` with enum-hook checks and
   runtime rate validation in simulation.
-- `mar.Disk`: deterministic disk authority with replayable faults and
+- `mar.Disk`: concrete app-facing disk capability.
+- `mar.SimDisk`: deterministic disk simulator with replayable faults and
   crash/restart simulation.
-- `SimulationEnv.disk()`: app-facing simulation disk wrapper.
+- `mar.DiskControl`: simulator-control disk capability.
+- `World.simulate`: world-owned simulator construction.
+- `AppEnv.disk`: app-facing simulation disk capability.
 - Trace format with per-line validation (`isValidTracePayload`).
 - Trace summary renderer (`mar.summarize`, `Summary.writeSummary`).
 - Seed parser for decimal seeds and 40-character Git hashes.
@@ -141,9 +150,9 @@ after.
 
 ---
 
-### Completed: Disk authority, no faults
+### Completed: Disk capability and simulator, no faults
 
-**Status:** Done. `mar.Disk` is exported and covered by unit tests.
+**Status:** Done. `mar.SimDisk` is exported and covered by unit tests.
 
 **Scope:**
 
@@ -177,8 +186,8 @@ tests.
 
 ### Completed: Disk crash-during-pending-write model
 
-**Status:** Done. `mar.Disk` now tracks pending writes and exposes
-simulator-control `crash` and `restart`.
+**Status:** Done. `mar.SimDisk` now tracks pending writes and exposes
+simulator-control `crash` and `restart` through `mar.DiskControl`.
 
 **Scope:**
 
@@ -192,8 +201,8 @@ simulator-control `crash` and `restart`.
   `sync` return `error.DiskCrashed`.
 - Crash decisions and resulting write outcomes are trace-visible.
 
-**Remaining gap:** a disk-backed service example that proves recovery behavior
-against this model.
+**Next dependency:** use the WAL example to shape reusable recovery-window and
+fault-budget APIs.
 
 ---
 
@@ -204,7 +213,8 @@ example CLI.
 
 **Scope:**
 
-- Fixed-size append-only WAL records backed by `mar.Disk`.
+- Fixed-size append-only WAL records backed by the app-facing `mar.Disk`
+  capability.
 - One synced record that must recover exactly once.
 - One unsynced record that may be lost, torn, or rejected after corruption.
 - A strict recovery mode that validates checksums.
@@ -212,27 +222,27 @@ example CLI.
   only the magic value.
 - Named checker catches the unsafe recovery behavior.
 
-**Follow-up:** use this example to guide any future `env.disk()` shape and
-recoverability-budget API.
+**Follow-up:** use this example to guide recovery-window and fault-budget
+APIs.
 
 ---
 
-### Completed: App-facing simulation disk authority
+### Completed: App-facing simulation disk capability
 
-**Status:** Done. `SimulationEnv.disk()` exposes an app-facing disk wrapper
-when the environment is constructed with a `mar.Disk`.
+**Status:** Done. `World.simulate` exposes an app-facing disk capability
+through `AppEnv.disk`.
 
 **Scope:**
 
-- App code can depend on `env.disk()` for `read`, `write`, and `sync`.
-- Tests and harnesses still access simulator-control operations such as
-  `setFaults`, `crash`, `restart`, and `corruptSector` through the owned
-  `mar.Disk`.
-- The KV example routes app storage calls through `env.disk()`.
-- Disk lifecycle stays with state lifecycle for now.
+- App code can depend on `env.disk` for `read`, `write`, and `sync`.
+- Tests and harnesses access simulator-control operations such as `setFaults`,
+  `crash`, `restart`, and `corruptSector` through `mar.DiskControl`.
+- The KV example keeps app storage calls on `env.disk` and keeps simulator
+  control on `SimControl`.
+- Disk lifecycle is owned by `World`.
 
-**Follow-up:** production `env.disk()` and fully environment-owned disk
-construction remain deferred until the production adapter shape is clearer.
+**Follow-up:** production disk adapter remains deferred until the production
+adapter shape is clearer.
 
 ---
 
@@ -436,22 +446,22 @@ disk.
 Read `docs/disk-fault-model.md` before starting any of these. The sub-tasks
 below are ordered so each one is useful on its own.
 
-### 9. `Disk` authority, no faults
+### 9. `Disk` capability and `SimDisk` authority, no faults
 
 Done.
 
-Implement a `World`-owned disk authority with `write`, `read`, stable logical
-file identities, per-operation ids, sector-aligned offsets, in-memory backing buffer
-(sparse map, not a big flat allocation). Deterministic latency via a min +
-jitter model, same shape as network latency. Trace events for every
-submitted and completed operation.
+Implement a `World`-backed disk simulator plus an app-facing capability with
+`write`, `read`, stable logical file identities, per-operation ids,
+sector-aligned offsets, in-memory backing buffer (sparse map, not a big flat
+allocation). Deterministic latency via a min + jitter model, same shape as
+network latency. Trace events for every submitted and completed operation.
 
 ### 10. Disk read/write faults
 
 Done.
 
 Per-sector fault bitmap. `BuggifyRate`-governed read fault, write fault,
-and corruption probabilities. Explicit `sim.disk().corruptSector(file,
+and corruption probabilities. Explicit `sim.control.disk.corruptSector(file,
 offset)` simulator-control API for scripted faults.
 
 ### 11. Crash-during-pending-write model

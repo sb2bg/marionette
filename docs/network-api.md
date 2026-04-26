@@ -60,19 +60,12 @@ fn service(env: anytype) !void {
 }
 ```
 
-In production:
-
-```zig
-var env = mar.ProductionEnv.init(.{});
-try service(&env);
-```
-
 In simulation:
 
 ```zig
 fn scenario(world: *mar.World) !void {
-    var env = mar.SimulationEnv.init(world, .{});
-    try service(&env);
+    const sim = try world.simulate(.{});
+    try service(sim.env);
 }
 ```
 
@@ -111,13 +104,13 @@ try sim.network().heal();
 
 That is acceptable for Phase 0 because examples are still close to the
 simulation kernel. The important constraint is that fault orchestration is now
-separate from the packet core's send/delivery path. A later `SimulationEnv` or
-scheduler layer should wrap this again so examples stop depending on the
+separate from the packet core's send/delivery path. A later `AppEnv` network
+capability should wrap this again so examples stop depending on the
 unstable network simulator type directly.
 
 ## Production Path
 
-`ProductionEnv.network()` is not implemented yet.
+Production network adapters are not implemented yet.
 
 The likely production path is an adapter over Zig's IO and networking APIs.
 Marionette should not freeze that adapter before Zig's `std.Io` direction is
@@ -131,12 +124,12 @@ stable enough to build on. The current rule is:
 
 ## Simulation Path
 
-`SimulationEnv.network()` is also not implemented yet.
+`AppEnv.network` is also not implemented yet.
 
 The likely simulation path is:
 
 ```text
-SimulationEnv.network()
+AppEnv.network
   -> app-facing node or endpoint authority
   -> simulator-owned scheduler/network state
   -> UnstableNetwork-like packet core

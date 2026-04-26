@@ -27,8 +27,9 @@ Phase 0 has:
 - `World`, which owns one simulated clock, one seeded PRNG, and one trace log
   as harness-owned simulation engine state.
 - `Clock(.production)` and `Clock(.simulation)`.
-- `ProductionEnv`, `SimulationEnv`, and `Env(mode)`, which move authority
-  selection to the application composition root.
+- `AppEnv` / `Env`, one concrete app-facing bundle of disk, clock, random,
+  and tracer capabilities.
+- `SimControl`, the harness-facing counterpart for simulator-only controls.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
 - `mar.run`, which executes a scenario twice and compares traces.
@@ -50,10 +51,13 @@ Phase 0 has:
   `(deliver_at, packet_id)` delivery order.
 - `mar.UnstableNetworkSimulation`, a small owner wrapper that separates
   harness packet-core send/delivery from simulator-control fault operations.
-- `mar.Disk`, a deterministic disk authority with logical paths,
+- `mar.Disk`, an app-facing disk capability for `read`, `write`, and `sync`.
+- `mar.SimDisk`, a deterministic disk simulator with logical paths,
   sector-aligned reads/writes, sparse in-memory sectors, deterministic
   latency, operation ids, trace events, read/write IO errors, corrupt reads,
   scripted sector corruption, and crash/restart simulation for pending writes.
+- `mar.DiskControl`, the harness-facing fault, corruption, crash, and restart
+  authority produced by `SimDisk.control()`.
 - `parseSeed`, which accepts decimal seeds and 40-character Git hashes.
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
@@ -63,7 +67,6 @@ Phase 0 has:
 Phase 0 does not yet have:
 
 - A scheduler.
-- A disk-backed example service.
 - Event-by-event invariant checking.
 - Liveness checking.
 - Seed shrinking.
@@ -73,8 +76,8 @@ Phase 0 does not yet have:
 
 Marionette is a library-first simulator. User code should pass explicit
 authorities at the top of the program instead of reaching for host globals.
-The intended application shape is to choose `ProductionEnv` or `SimulationEnv`
-once at the composition root and pass that environment into the main loop.
+The intended application shape is to construct an app-facing `Env` once at the
+composition root and pass that environment into the main loop.
 Marionette should not auto-detect the environment from globals, environment
 variables, thread-locals, or build flags.
 
@@ -138,8 +141,8 @@ const std = @import("std");
 const mar = @import("marionette");
 
 fn client(env: anytype) !u64 {
-    const latency_ns = try env.random().intLessThan(u64, 1_000_000);
-    env.clock().sleep(latency_ns);
+    const latency_ns = try env.random.intLessThan(u64, 1_000_000);
+    try env.clock.sleep(latency_ns);
     return latency_ns;
 }
 
@@ -147,9 +150,9 @@ test "single request is replayable" {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 0x1234 });
     defer world.deinit();
 
-    var env = mar.SimulationEnv.init(&world, .{});
-    const latency_ns = try client(&env);
-    try env.record("client.request latency_ns={}", .{latency_ns});
+    const sim = try world.simulate(.{});
+    const latency_ns = try client(sim.env);
+    try sim.env.record("client.request latency_ns={}", .{latency_ns});
 }
 ```
 

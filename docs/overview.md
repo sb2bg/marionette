@@ -51,8 +51,8 @@ Users must route time, randomness, disk, and network through Marionette's
 interfaces. That discipline is the product.
 
 Marionette does not auto-detect whether code is running in production or
-simulation. The application chooses `ProductionEnv` or `SimulationEnv` once at
-the composition root and passes that environment into the main loop.
+simulation. The application receives an explicit `Env` from the composition
+root; simulation harnesses build one with `world.simulate`.
 
 ## Why Zig
 

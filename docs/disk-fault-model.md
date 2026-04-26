@@ -1,10 +1,10 @@
 # Disk Fault Model
 
-This is the design note for Marionette's disk simulation work. `mar.Disk`
-currently supports deterministic logical files, latency, read/write IO errors,
-probabilistic corrupt reads, scripted sector corruption, and crash/restart
-simulation for pending writes. Generic recoverability budgets are still being
-built.
+This is the design note for Marionette's disk simulation work. `mar.Disk` is
+the app-facing disk capability. `mar.SimDisk` currently supports
+deterministic logical files, latency, read/write IO errors, probabilistic
+corrupt reads, scripted sector corruption, and crash/restart simulation for
+pending writes. Generic recoverability budgets are still being built.
 
 The goal is a deterministic, recoverability-aware disk authority that can test
 real storage code without pretending to model every filesystem or device
@@ -52,41 +52,46 @@ destructive disk fault needs a scope, a budget, and a trace event.
 
 ## Authority Shape
 
-The current `mar.Disk` authority is constructed from `World` by the simulation
-harness or scenario state. Simulation application code can receive an attached
-app-facing disk view through `env.disk()` instead of depending on `World`
-internals:
+The current `mar.SimDisk` simulator is constructed from `World` by the
+simulation harness or scenario state. It produces two capabilities over the
+same backing state:
+
+- `mar.Disk`: app-facing `read`, `write`, and `sync`.
+- `mar.DiskControl`: harness-facing faults, crash/restart, and scripted
+  corruption.
+
+Simulation application code receives an attached app-facing disk through
+`env.disk` instead of depending on `World` internals:
 
 ```zig
 fn store(env: anytype, entry: []const u8) !void {
-    const disk = try env.disk();
-    try disk.write(.{
+    try env.disk.write(.{
         .path = "wal.log",
         .offset = 0,
         .bytes = entry,
     });
-    try disk.sync(.{ .path = "wal.log" });
+    try env.disk.sync(.{ .path = "wal.log" });
 }
 ```
 
-The test harness may still construct `Disk` from `World` or use a
-simulator-control handle to inspect disk state, inject scripted faults, or
-crash/restart the simulated disk. Those operations must not leak into the
-app-facing disk API. The production `env.disk()` adapter is still deferred.
+The test harness gets `DiskControl` from `world.simulate(...).control.disk` to
+inspect disk state, inject scripted faults, or crash/restart the simulated
+disk. Those operations must not leak into the app-facing disk API.
 
 In later multi-node work, each simulated node should expose its own disk view:
 
 ```zig
-try node.env().disk().write(.{ .path = "wal.log", .offset = offset, .bytes = entry });
+try node.env().disk.write(.{ .path = "wal.log", .offset = offset, .bytes = entry });
 ```
 
 The shared `World` remains the owner of the clock, PRNG, global event index,
 and trace. The disk handle should not read wall-clock time, call host
 randomness, or use host filesystem state as a simulator decision source.
 
-The first public type name should be `Disk`. Smaller terms like `BlockDevice`
-are too narrow for a WAL/KV-store example, and broader terms like `Storage`
-are too vague.
+The app-facing public type name should be `Disk`. Smaller terms like
+`BlockDevice` are too narrow for a WAL/KV-store example, and broader terms
+like `Storage` are too vague. Simulator-specific construction and control live
+on `SimDisk` and `DiskControl`.
 
 ## Operation Model
 
@@ -211,14 +216,18 @@ hashes, the hash algorithm must be named and stable.
 
 ## Phase 1 Decisions
 
-- First type: `Disk`.
-- App-facing access: `env.disk()`.
+- App-facing type: `Disk`.
+- Simulator implementation type: `SimDisk`.
+- Harness-control type: `DiskControl`.
+- App-facing access: `env.disk`.
 - File identity: logical path-like `[]const u8`, escaped in traces and never
   resolved against the host filesystem by the simulator.
 - Default sector size: 4096 bytes.
-- Initial operations: `read`, `write`, `sync`, `crash`, and `restart` are
-  implemented. Read/write IO errors, corrupt reads, scripted sector
-  corruption, lost pending writes, and torn pending writes are implemented.
+- Initial app operations: `read`, `write`, and `sync` are implemented.
+- Initial harness-control operations: `setFaults`, `corruptSector`, `crash`,
+  and `restart` are implemented. Read/write IO errors, corrupt reads, scripted
+  sector corruption, lost pending writes, and torn pending writes are
+  implemented.
 - Initial example: append-only WAL recovery.
 - User data: store bytes in memory, trace lengths and outcomes by default.
 - Checksums: user code owns them.

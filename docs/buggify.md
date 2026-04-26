@@ -11,11 +11,13 @@ if (try env.buggify(.drop_packet, .percent(20))) {
 }
 ```
 
-`ProductionEnv.buggify` always returns `false`. `SimulationEnv.buggify` draws
-through the world's single PRNG according to the supplied `BuggifyRate` and
-records `buggify hook=<name> rate=<n>/<d> roll=<value> fired=<bool>` in the
-trace. Invalid runtime rates return `error.InvalidRate` before any random draw
-or hook trace event.
+Production envs should construct `Env` with buggify disabled, so
+`env.buggify` always returns `false`. Simulation envs returned by
+`world.simulate` draw through the world's single PRNG according to the supplied
+`BuggifyRate` and record
+`buggify hook=<name> rate=<n>/<d> roll=<value> fired=<bool>` in the trace.
+Invalid runtime rates return `error.InvalidRate` before any random draw or
+hook trace event.
 
 Users can call `buggify` because application code knows domain-specific fault
 points a generic simulator cannot infer. A hook can guard behavior such as
@@ -27,8 +29,8 @@ production behavior.
 
 ```zig
 pub fn sendPacket(env: anytype, packet_id: u64) !void {
-    const latency_ns = try env.random().intLessThan(mar.Duration, 1_000);
-    env.clock().sleep(latency_ns);
+    const latency_ns = try env.random.intLessThan(mar.Duration, 1_000);
+    try env.clock.sleep(latency_ns);
 
     if (try env.buggify(.drop_packet, .percent(20))) {
         return SendError.PacketDropped;

@@ -10,9 +10,9 @@ Marionette trace. If it does not, the library has failed.
 Simulated code must route non-deterministic behavior through Marionette
 interfaces:
 
-- Time through `ProductionEnv`, `SimulationEnv`, or `Clock`.
+- Time through `Env.clock`, `SimControl`, or `World`.
 - Randomness through an environment, seeded `Random`, or `World`.
-- Disk through Marionette's Disk authority.
+- Disk through Marionette's `Disk` capability.
 - Network through the future Network interface.
 - Scheduling through the future scheduler.
 
@@ -26,7 +26,7 @@ These are banned in simulated code:
 - `std.Random` without an explicit seed.
 - `std.crypto.random`
 - `std.Thread.spawn`
-- Filesystem calls outside Marionette's Disk authority.
+- Filesystem calls outside Marionette's `Disk` capability.
 - Network calls outside the future Network interface.
 - Pointer identity as a source of ordering or hashing.
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.
@@ -43,8 +43,8 @@ Marionette enforces determinism in four layers.
 1. API design.
 
    The intended path should be the easiest path. Users should have no reason
-   to reach for host time when `ProductionEnv`, `SimulationEnv`, or
-   `World.clock()` is already in hand.
+   to reach for host time when `Env.clock`, `SimControl`, or `World.clock()`
+   is already in hand.
 
 2. Build-integrated linter.
 

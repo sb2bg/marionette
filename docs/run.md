@@ -177,11 +177,12 @@ first:
 
 ```zig
 const Model = struct {
-    env: mar.SimulationEnv,
+    env: mar.AppEnv,
     committed: bool = false,
 
     fn init(world: *mar.World) Model {
-        return .{ .env = mar.SimulationEnv.init(world, .{}) };
+        const sim = world.simulate(.{}) catch unreachable;
+        return .{ .env = sim.env };
     }
 };
 
@@ -215,40 +216,37 @@ record trace events; scenario execution and checks own trace output. Stateful
 scenarios and state checks receive only state; put environment authorities on
 the state when they need to record or advance time.
 
-Use `mar.runWithStateLifecycle` when state initialization can fail or when
-state owns authorities that must be torn down:
+Use `mar.runWithStateInit` when state initialization can fail but simulator
+resources are owned by `World` through `world.simulate`:
 
 ```zig
 const Store = struct {
-    env: mar.SimulationEnv,
-    disk: mar.Disk,
+    env: mar.AppEnv,
+    control: mar.SimControl,
 
     fn init(world: *mar.World) !Store {
-        return .{
-            .env = mar.SimulationEnv.init(world, .{}),
-            .disk = try mar.Disk.init(world, .{}),
-        };
-    }
+        const sim = try world.simulate(.{});
 
-    fn deinit(self: *Store) void {
-        self.disk.deinit();
+        return .{
+            .env = sim.env,
+            .control = sim.control,
+        };
     }
 };
 
-var report = try mar.runWithStateLifecycle(
+var report = try mar.runWithStateInit(
     allocator,
     .{ .seed = 0x1234 },
     Store,
     Store.init,
-    Store.deinit,
     scenario,
     &state_checks,
 );
 ```
 
-Lifecycle init errors are reported as scenario failures with the partial trace
-preserved. The deinitializer runs once per replay attempt and must be
-infallible.
+Init errors are reported as scenario failures with the partial trace
+preserved. Use `mar.runWithStateLifecycle` only when state owns non-world
+resources that need an explicit infallible deinitializer.
 
 This is intentionally small. Future scheduler work can check invariants after
 every event or on quiescence, but the current API already gives failures a
