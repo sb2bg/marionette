@@ -60,11 +60,20 @@ pub const Env = env_module.Env;
 /// App-facing clock capability.
 pub const EnvClock = env_module.Clock;
 
+/// Errors returned by clock capabilities.
+pub const ClockError = env_module.ClockError;
+
 /// App-facing random capability.
 pub const EnvRandom = env_module.Random;
 
+/// Errors returned by random capabilities.
+pub const EnvRandomError = env_module.RandomError;
+
 /// App-facing trace capability.
 pub const Tracer = env_module.Tracer;
+
+/// Errors returned by trace capabilities.
+pub const TracerError = env_module.TracerError;
 
 /// Simulator-control capability bundle.
 pub const SimControl = env_module.SimControl;
