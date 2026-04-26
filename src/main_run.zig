@@ -79,16 +79,48 @@ fn runScenario(
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "kv-store")) {
-        const trace = try examples.kv_store.runScenario(allocator, seed);
+        const trace = try runKvStoreTrace(allocator, seed, examples.kv_store.scenario);
         defer allocator.free(trace);
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "kv-store-bug")) {
-        try printReport(try examples.kv_store.runBuggyScenario(allocator, seed), expect_failure);
+        try printReport(try runKvStoreReport(allocator, seed, examples.kv_store.buggyScenario), expect_failure);
     } else {
         std.debug.print("unknown scenario: {s}\n", .{scenario});
         std.process.exit(2);
     }
+}
+
+fn runKvStoreTrace(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    comptime scenario_fn: fn (*examples.kv_store.Harness) anyerror!void,
+) ![]u8 {
+    var report = try runKvStoreReport(allocator, seed, scenario_fn);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |*passed| return passed.takeTrace(),
+        .failed => |failure| {
+            failure.print();
+            return error.UnexpectedRunFailure;
+        },
+    }
+}
+
+fn runKvStoreReport(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    comptime scenario_fn: fn (*examples.kv_store.Harness) anyerror!void,
+) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = examples.kv_store.tick_ns,
+        .init = examples.kv_store.Harness.init,
+        .scenario = scenario_fn,
+        .checks = &examples.kv_store.checks,
+    });
 }
 
 fn printTraceOrSummary(
