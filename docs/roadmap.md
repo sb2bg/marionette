@@ -46,6 +46,8 @@ The current disk surface is:
   reads/writes, sparse sectors, deterministic latency, operation ids, trace
   events, read/write IO errors, corrupt reads, scripted sector corruption, and
   crash/restart simulation for pending writes.
+- `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
+  checksum-validating mode and a deliberately buggy torn-record recovery mode.
 
 What is not built yet: app-facing `env.network()`/`env.disk()`, probabilistic
 tick-evolved network faults, liveness mode, named simulation profiles,
@@ -191,6 +193,26 @@ against this model.
 
 ---
 
+### Completed: Disk-backed WAL recovery example
+
+**Status:** Done. `examples/kv_store.zig` is covered by example tests and the
+example CLI.
+
+**Scope:**
+
+- Fixed-size append-only WAL records backed by `mar.Disk`.
+- One synced record that must recover exactly once.
+- One unsynced record that may be lost, torn, or rejected after corruption.
+- A strict recovery mode that validates checksums.
+- A deliberately buggy recovery mode that accepts a torn record by checking
+  only the magic value.
+- Named checker catches the unsafe recovery behavior.
+
+**Follow-up:** use this example to guide any future `env.disk()` shape and
+recoverability-budget API.
+
+---
+
 ### Completed: Fix `Cluster.sim = undefined` / `bindWorld` pattern
 
 **Status:** Done. `runWithState` now passes `*World` into state
@@ -260,46 +282,11 @@ make the bypass dangerous.
 Ordered by priority. Each entry has acceptance criteria, a rough size, and the
 design context. Pick from the top unless coordinating otherwise.
 
-### 1. Disk-backed WAL recovery example
-
-**Why now:** The disk authority now has the fault surface needed to test
-single-node durability. The next value is proving that surface against a small
-storage-shaped example instead of only unit tests.
-
-**Scope:**
-
-- Add one focused example, either append-only WAL recovery or a tiny KV store
-  backed by an append-only log.
-- Use `mar.Disk` for all storage behavior.
-- Exercise synced records, unsynced records, lost pending writes, torn writes,
-  and corrupt reads.
-- Define the recovery invariant in the example checker rather than adding a
-  generic fault atlas yet.
-
-**Acceptance criteria:**
-
-- Synced records are recovered exactly once.
-- Unsynced records may be absent or rejected if torn/corrupt.
-- The example has at least one deterministic failing seed with a documented
-  bug mode and one fixed/expected-success mode.
-- The README/docs examples list includes the new example.
-
-**Files likely to change:**
-
-- `examples/`.
-- `build.zig`.
-- `docs/examples.md`.
-- `README.md`.
-
-**Size:** ~300-700 lines including tests/example code.
-
----
-
-### 2. Probabilistic tick-evolved network faults with stability floors
+### 1. Probabilistic tick-evolved network faults with stability floors
 
 **Why now:** The outer `sim.tick()` is built and the packet-core drain bypass
 is gone. This is the next piece that makes VOPR-style swarm testing possible,
-but it no longer blocks the disk-backed recovery example.
+and the first disk-backed recovery example is now in place.
 
 **Scope:**
 
@@ -431,6 +418,8 @@ trace-visible and reproducible, and replaying the same seed preserves the
 same crash outcomes byte-for-byte.
 
 ### 12. Single-node example service that uses the disk
+
+Done.
 
 A small append-only log, or a tiny KV store, that survives crash-faults at
 any write boundary. This is the Phase 1 done-signal.

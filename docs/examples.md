@@ -45,6 +45,49 @@ Phase 0 loop Marionette is proving first: seeded choices, simulated time,
 trace-visible behavior, and a named checker that preserves the failure
 context.
 
+## KV Store
+
+Source: [`examples/kv_store.zig`](https://github.com/sb2bg/marionette/blob/main/examples/kv_store.zig)
+
+The KV store is the first disk-backed example. It is intentionally tiny: a
+fixed-size append-only WAL where each sector is one record with a magic value,
+key, value, and checksum. It exists to exercise `mar.Disk`, not to be a real
+database.
+
+The correct scenario:
+
+- Writes and syncs one committed record.
+- Writes a second unsynced record.
+- Crashes the disk so the unsynced record is lost.
+- Restarts the disk.
+- Injects scripted corruption into the second sector.
+- Recovers by scanning records and validating checksums.
+- Checks that the synced record is recovered exactly once and the unsynced
+  record is rejected.
+
+Run it with:
+
+```sh
+zig build run-example -- kv-store --seed 12648430 --summary
+```
+
+The deliberately buggy scenario accepts any record with the right magic value,
+ignoring the checksum. A torn write leaves enough bytes for the magic and key
+to look plausible, and the named checker catches that the unsynced record was
+recovered:
+
+```sh
+zig build run-example -- kv-store-bug --seed 12648430 --expect-failure
+```
+
+Useful trace events include:
+
+```text
+disk.crash_write op=2 path=kv.wal offset=16 len=16 result=torn
+kv.recover.record offset=16 key=2 value=0 mode=buggy_accept_magic_only
+kv.invariant_violation reason=unsynced_record_recovered
+```
+
 ## Replicated Register
 
 Source: [`examples/replicated_register.zig`](https://github.com/sb2bg/marionette/blob/main/examples/replicated_register.zig)

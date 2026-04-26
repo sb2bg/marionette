@@ -64,6 +64,8 @@ The API is not stable. Do not use this in production yet.
 
 ```sh
 zig build test
+zig build run-example -- kv-store --seed 12648430 --summary
+zig build run-example -- kv-store-bug --seed 12648430 --expect-failure
 zig build run-example -- replicated-register --seed 12648430 --summary
 zig build run-example -- retry-queue-bug --seed 12648430 --expect-failure
 ```

@@ -78,6 +78,13 @@ fn runScenario(
         defer allocator.free(trace);
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
+    } else if (std.mem.eql(u8, scenario, "kv-store")) {
+        const trace = try examples.kv_store.runScenario(allocator, seed);
+        defer allocator.free(trace);
+        if (expect_failure) return expectedFailureDidNotHappen();
+        try printTraceOrSummary(allocator, trace, mode);
+    } else if (std.mem.eql(u8, scenario, "kv-store-bug")) {
+        try printReport(try examples.kv_store.runBuggyScenario(allocator, seed), expect_failure);
     } else {
         std.debug.print("unknown scenario: {s}\n", .{scenario});
         std.process.exit(2);
@@ -141,6 +148,8 @@ fn usage(exe_name: []const u8) noreturn {
         \\  replicated-register-bug
         \\  replicated-register-partition
         \\  replicated-register-conflict
+        \\  kv-store
+        \\  kv-store-bug
         \\
     ,
         .{exe_name},
