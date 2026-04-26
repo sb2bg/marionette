@@ -57,9 +57,9 @@ The current disk surface is:
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 
-What is not built yet: production disk adapter, app-facing `env.network`,
-probabilistic tick-evolved network faults, liveness mode, named simulation
-profiles, linearizability checker, time-travel debugging.
+What is not built yet: app-facing `env.network`, probabilistic tick-evolved
+network faults, liveness mode, named simulation profiles, linearizability
+checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -243,9 +243,7 @@ through `AppEnv.disk`.
 - The KV example keeps app storage calls on `env.disk` and keeps simulator
   control on `SimControl`.
 - Disk lifecycle is owned by `World`.
-
-**Follow-up:** production disk adapter remains deferred until the production
-adapter shape is clearer.
+- `mar.RealDisk`: production disk adapter backed by a real root directory.
 
 ---
 

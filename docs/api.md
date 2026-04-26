@@ -69,7 +69,8 @@ fn scenario(world: *mar.World) !void {
 `sim.env` is passed to application code. `sim.control` is kept by the harness
 for simulator-only actions such as advancing time or crashing disk.
 `env.buggify` draws through the env's random capability only when the env was
-built by simulation; production env construction is still being shaped.
+built by simulation; production envs construct the same app-facing capability
+bundle with production adapters such as `mar.RealDisk`.
 
 ## `World`
 
@@ -190,8 +191,9 @@ handle with `read`, `write`, and `sync`. `mar.SimDisk` is the deterministic
 in-memory simulator behind that handle: logical files, sector-aligned
 reads/writes, sparse sectors, deterministic latency, operation ids, trace
 events, replayable read/write/corruption faults, and crash/restart behavior
-for pending writes. Production storage adapters are not implemented yet;
-`mar.Disk.unavailable()` is the honest null-object for envs without storage.
+for pending writes. `mar.RealDisk` is the production adapter backed by a real
+root directory. `mar.Disk.unavailable()` remains the honest null-object for
+envs without storage.
 
 Construct a world-owned simulator bundle, then hand app code only the disk
 capability:
@@ -227,6 +229,22 @@ try disk.read(.{
 
 try disk.sync(.{ .path = "wal.log" });
 ```
+
+Construct a production disk by scoping it to a root directory:
+
+```zig
+var disk = try mar.RealDisk.init(root_dir, io, .{ .sector_size = 4096 });
+const env: mar.Env = .{
+    .disk = disk.disk(),
+    .clock = mar.EnvClock.fromProduction(&clock),
+    .random = mar.EnvRandom.fromProduction(&random_source),
+    .tracer = mar.EnvTracer.none(),
+};
+```
+
+`RealDisk` accepts relative paths, creates parent directories on write, reads
+missing or short files as zero-filled sectors, and uses the same sector
+alignment checks as `SimDisk`.
 
 Application code receives `Env` with an attached `Disk` field and uses only the
 app-facing operations:

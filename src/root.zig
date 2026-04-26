@@ -45,6 +45,9 @@ pub const DiskControl = disk_module.DiskControl;
 /// Deterministic in-memory disk simulator.
 pub const SimDisk = disk_module.SimDisk;
 
+/// Production disk adapter backed by a real root directory.
+pub const RealDisk = disk_module.RealDisk;
+
 /// Configuration for one deterministic disk simulator.
 pub const DiskOptions = disk_module.DiskOptions;
 

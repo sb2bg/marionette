@@ -363,10 +363,14 @@ test "env: simulation exposes app-facing disk operations" {
 }
 
 test "env: production exposes production authorities" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try disk_module.RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
     var clock: clock_module.ProductionClock = .init();
     var source: std.Random.IoSource = .{ .io = std.Options.debug_io };
     const env: Env = .{
-        .disk = .unavailable(),
+        .disk = disk.disk(),
         .clock = .fromProduction(&clock),
         .random = .fromProduction(&source),
         .tracer = .none(),
@@ -374,7 +378,11 @@ test "env: production exposes production authorities" {
 
     _ = env.clock.now();
     _ = try env.random.intLessThan(u8, 10);
-    try std.testing.expectError(error.DiskUnavailable, env.disk.sync(.{ .path = "wal.log" }));
+    try env.disk.write(.{ .path = "prod/wal.log", .offset = 0, .bytes = "abcd" });
+    try env.disk.sync(.{ .path = "prod/wal.log" });
+    var buffer = [_]u8{0} ** 4;
+    try env.disk.read(.{ .path = "prod/wal.log", .offset = 0, .buffer = &buffer });
+    try std.testing.expectEqualStrings("abcd", &buffer);
     try std.testing.expect(!try env.buggify(.drop_packet, .percent(50)));
 }
 

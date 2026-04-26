@@ -140,6 +140,203 @@ pub const DiskCrash = struct {};
 
 pub const DiskRestart = struct {};
 
+pub const RealDisk = struct {
+    const Self = @This();
+
+    pub const Options = struct {
+        sector_size: u64 = 4096,
+    };
+
+    root: std.Io.Dir,
+    io: std.Io,
+    options: Options,
+
+    pub fn init(root: std.Io.Dir, io: std.Io, options: Options) DiskError!Self {
+        if (options.sector_size == 0) return error.InvalidAlignment;
+        if (options.sector_size > std.math.maxInt(usize)) return error.InvalidRange;
+        return .{
+            .root = root,
+            .io = io,
+            .options = options,
+        };
+    }
+
+    pub fn disk(self: *Self) Disk {
+        return .{ .ptr = self, .vtable = &disk_vtable };
+    }
+
+    pub fn deinit(_: *Self) void {}
+
+    fn read(self: *Self, options: Disk.Read) DiskError!void {
+        try self.validatePath(options.path);
+        try self.validateRange(options.offset, options.buffer.len);
+
+        @memset(options.buffer, 0);
+
+        var file = self.root.openFile(self.io, options.path, .{
+            .mode = .read_only,
+            .allow_directory = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return mapOpenReadError(err),
+        };
+        defer file.close(self.io);
+
+        const read_len = file.readPositionalAll(self.io, options.buffer, options.offset) catch |err| {
+            return mapReadError(err);
+        };
+        if (read_len < options.buffer.len) {
+            @memset(options.buffer[read_len..], 0);
+        }
+    }
+
+    fn write(self: *Self, options: Disk.Write) DiskError!void {
+        try self.validatePath(options.path);
+        try self.validateRange(options.offset, options.bytes.len);
+        try self.ensureParentDirs(options.path);
+
+        var file = self.root.createFile(self.io, options.path, .{
+            .read = true,
+            .truncate = false,
+        }) catch |err| {
+            return mapOpenWriteError(err);
+        };
+        defer file.close(self.io);
+
+        file.writePositionalAll(self.io, options.bytes, options.offset) catch |err| {
+            return mapWriteError(err);
+        };
+    }
+
+    fn sync(self: *Self, options: Disk.Sync) DiskError!void {
+        try self.validatePath(options.path);
+
+        var file = self.root.openFile(self.io, options.path, .{
+            .mode = .read_write,
+            .allow_directory = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return mapOpenWriteError(err),
+        };
+        defer file.close(self.io);
+
+        file.sync(self.io) catch |err| {
+            return mapSyncError(err);
+        };
+    }
+
+    fn ensureParentDirs(self: *Self, path: []const u8) DiskError!void {
+        const parent = std.fs.path.dirname(path) orelse return;
+        if (parent.len == 0) return;
+        self.root.createDirPath(self.io, parent) catch |err| {
+            return mapCreateDirError(err);
+        };
+    }
+
+    fn validatePath(_: *const Self, path: []const u8) DiskError!void {
+        if (path.len == 0) return error.InvalidPath;
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
+        if (std.fs.path.isAbsolute(path)) return error.InvalidPath;
+        var iterator = std.mem.splitAny(u8, path, "/\\");
+        while (iterator.next()) |component| {
+            if (std.mem.eql(u8, component, "..")) return error.InvalidPath;
+        }
+    }
+
+    fn validateRange(self: *const Self, offset: u64, len: usize) DiskError!void {
+        const len_u64: u64 = @intCast(len);
+        if (offset % self.options.sector_size != 0) return error.InvalidAlignment;
+        if (len_u64 % self.options.sector_size != 0) return error.InvalidAlignment;
+        if (std.math.maxInt(u64) - offset < len_u64) return error.InvalidRange;
+    }
+
+    const disk_vtable: Disk.VTable = .{
+        .read = diskRead,
+        .write = diskWrite,
+        .sync = diskSync,
+    };
+
+    fn fromOpaque(ptr: *anyopaque) *Self {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn diskRead(ptr: *anyopaque, options: Disk.Read) DiskError!void {
+        try fromOpaque(ptr).read(options);
+    }
+
+    fn diskWrite(ptr: *anyopaque, options: Disk.Write) DiskError!void {
+        try fromOpaque(ptr).write(options);
+    }
+
+    fn diskSync(ptr: *anyopaque, options: Disk.Sync) DiskError!void {
+        try fromOpaque(ptr).sync(options);
+    }
+};
+
+fn mapOpenReadError(err: std.Io.File.OpenError) DiskError {
+    return switch (err) {
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.IsDir,
+        error.NotDir,
+        error.SymLinkLoop,
+        => error.InvalidPath,
+        else => error.ReadError,
+    };
+}
+
+fn mapOpenWriteError(err: std.Io.File.OpenError) DiskError {
+    return switch (err) {
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.IsDir,
+        error.NotDir,
+        error.SymLinkLoop,
+        => error.InvalidPath,
+        else => error.WriteError,
+    };
+}
+
+fn mapReadError(err: std.Io.File.ReadPositionalError) DiskError {
+    return switch (err) {
+        error.AccessDenied,
+        error.NotOpenForReading,
+        error.IsDir,
+        error.Unseekable,
+        => error.InvalidPath,
+        else => error.ReadError,
+    };
+}
+
+fn mapWriteError(err: std.Io.File.WritePositionalError) DiskError {
+    return switch (err) {
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.NotOpenForWriting,
+        error.Unseekable,
+        => error.InvalidPath,
+        else => error.WriteError,
+    };
+}
+
+fn mapSyncError(err: std.Io.File.SyncError) DiskError {
+    return switch (err) {
+        error.AccessDenied => error.InvalidPath,
+        else => error.WriteError,
+    };
+}
+
+fn mapCreateDirError(err: std.Io.Dir.CreateDirPathError) DiskError {
+    return switch (err) {
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.NotDir,
+        error.SymLinkLoop,
+        => error.InvalidPath,
+        else => error.WriteError,
+    };
+}
+
 pub const SimDisk = struct {
     const Self = @This();
     const ResolvedOptions = struct {
@@ -771,6 +968,57 @@ test "disk: writes and reads sector-aligned logical files" {
     try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.write op=0 path=wal.log offset=4 len=4 status=ok latency_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=8 status=ok latency_ns=10") != null);
+}
+
+test "disk: real disk writes, reads, zero-fills, syncs, and creates parent directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    try app_disk.write(.{
+        .path = "accounts/wal.log",
+        .offset = 4,
+        .bytes = "abcd",
+    });
+    try app_disk.sync(.{ .path = "accounts/wal.log" });
+
+    var buffer = [_]u8{0xff} ** 8;
+    try app_disk.read(.{
+        .path = "accounts/wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualStrings("\x00\x00\x00\x00abcd", &buffer);
+}
+
+test "disk: real disk rejects invalid paths and unaligned ranges" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    var buffer = [_]u8{0} ** 4;
+    try std.testing.expectError(error.InvalidPath, app_disk.read(.{
+        .path = "../wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    }));
+    try std.testing.expectError(error.InvalidAlignment, app_disk.write(.{
+        .path = "wal.log",
+        .offset = 1,
+        .bytes = "abcd",
+    }));
+    try std.testing.expectError(error.InvalidAlignment, app_disk.write(.{
+        .path = "wal.log",
+        .offset = 0,
+        .bytes = "abc",
+    }));
 }
 
 test "disk: sync consumes operation ids and escapes logical paths" {
