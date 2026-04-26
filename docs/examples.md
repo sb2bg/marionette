@@ -88,6 +88,41 @@ kv.recover.record offset=16 key=2 value=0 mode=buggy_accept_magic_only
 kv.invariant_violation reason=unsynced_record_recovered
 ```
 
+## Idempotency Bug
+
+Source: [`examples/idempotency_bug.zig`](https://github.com/sb2bg/marionette/blob/main/examples/idempotency_bug.zig)
+
+The idempotency bug is a small seed-sensitive replay demo. It models two
+account-local deposits. The service has a subtle bug: it dedupes request IDs
+globally, even though request IDs are only required to be unique per account.
+
+Most seeds choose distinct request IDs and pass. Seeds that reuse the same
+request ID across two accounts suppress the second deposit, and the checker
+catches the lost update.
+
+Run a passing seed:
+
+```sh
+zig build run-example -- idempotency-bug --seed 12648430 --summary
+```
+
+Replay a failing seed:
+
+```sh
+zig build run-example -- idempotency-bug --seed 13 --expect-failure
+```
+
+Use `--trace` with the failing seed to print the same failure trace each time.
+
+Useful trace events include:
+
+```text
+buggify hook=reuse_request_id_across_accounts
+idempotency.requests alice_id=... bob_id=... reused=true
+idempotency.deposit account=bob ... accepted=false reason=global_duplicate
+idempotency.invariant_violation
+```
+
 ## Replicated Register
 
 Source: [`examples/replicated_register.zig`](https://github.com/sb2bg/marionette/blob/main/examples/replicated_register.zig)

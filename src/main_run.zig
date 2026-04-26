@@ -85,6 +85,8 @@ fn runScenario(
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "kv-store-bug")) {
         try printReport(try runKvStoreReport(allocator, seed, examples.kv_store.buggyScenario), expect_failure);
+    } else if (std.mem.eql(u8, scenario, "idempotency-bug")) {
+        try printSeedSensitiveReport(allocator, try runIdempotencyBugReport(allocator, seed), mode, expect_failure);
     } else {
         std.debug.print("unknown scenario: {s}\n", .{scenario});
         std.process.exit(2);
@@ -121,6 +123,49 @@ fn runKvStoreReport(
         .scenario = scenario_fn,
         .checks = &examples.kv_store.checks,
     });
+}
+
+fn runIdempotencyBugReport(
+    allocator: std.mem.Allocator,
+    seed: u64,
+) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .init = examples.idempotency_bug.Harness.init,
+        .scenario = examples.idempotency_bug.scenario,
+        .checks = &examples.idempotency_bug.checks,
+    });
+}
+
+fn printSeedSensitiveReport(
+    allocator: std.mem.Allocator,
+    report: mar.RunReport,
+    mode: Mode,
+    expect_failure: bool,
+) !void {
+    var owned_report = report;
+    defer owned_report.deinit();
+
+    switch (owned_report) {
+        .passed => |*passed| {
+            if (expect_failure) return expectedFailureDidNotHappen();
+            const trace = passed.takeTrace();
+            defer allocator.free(trace);
+            try printTraceOrSummary(allocator, trace, mode);
+        },
+        .failed => |failure| {
+            if (expect_failure and mode == .trace) {
+                std.debug.print("{s}", .{failure.first_trace});
+            } else {
+                var buffer: [4096]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(&buffer);
+                try failure.writeSummary(&writer);
+                std.debug.print("{s}", .{writer.buffered()});
+            }
+            if (!expect_failure) std.process.exit(1);
+        },
+    }
 }
 
 fn printTraceOrSummary(
@@ -182,6 +227,7 @@ fn usage(exe_name: []const u8) noreturn {
         \\  replicated-register-conflict
         \\  kv-store
         \\  kv-store-bug
+        \\  idempotency-bug
         \\
     ,
         .{exe_name},

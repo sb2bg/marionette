@@ -6,6 +6,7 @@ const mar = @import("marionette");
 pub const retry_queue = @import("retry_queue.zig");
 pub const replicated_register = @import("replicated_register.zig");
 pub const kv_store = @import("kv_store.zig");
+pub const idempotency_bug = @import("idempotency_bug.zig");
 
 test "examples: retry queue scenario is replayable" {
     const a = try retry_queue.runScenario(std.testing.allocator, 0xC0FFEE);
@@ -118,6 +119,66 @@ test "examples: kv store checker catches torn record recovery" {
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "kv.invariant_violation reason=unsynced_record_recovered") != null);
         },
     }
+}
+
+test "examples: idempotency bug is seed-sensitive" {
+    try mar.expectPass(.{
+        .allocator = std.testing.allocator,
+        .seed = idempotency_bug.passing_seed,
+        .init = idempotency_bug.Harness.init,
+        .scenario = idempotency_bug.scenario,
+        .checks = &idempotency_bug.checks,
+    });
+
+    try mar.expectFailure(.{
+        .allocator = std.testing.allocator,
+        .seed = idempotency_bug.failing_seed,
+        .init = idempotency_bug.Harness.init,
+        .scenario = idempotency_bug.scenario,
+        .checks = &idempotency_bug.checks,
+    });
+}
+
+test "examples: idempotency bug failing seed is replayable" {
+    var a = try idempotency_bug.runReport(std.testing.allocator, idempotency_bug.failing_seed);
+    defer a.deinit();
+    var b = try idempotency_bug.runReport(std.testing.allocator, idempotency_bug.failing_seed);
+    defer b.deinit();
+
+    const a_trace = switch (a) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| failure.first_trace,
+    };
+    const b_trace = switch (b) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| failure.first_trace,
+    };
+
+    try std.testing.expectEqualStrings(a_trace, b_trace);
+    try std.testing.expect(std.mem.indexOf(u8, a_trace, "idempotency.deposit account=bob") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a_trace, "reason=global_duplicate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a_trace, "idempotency.invariant_violation") != null);
+}
+
+test "examples: idempotency seed search finds the bug" {
+    var found_failure = false;
+
+    for (0..32) |seed| {
+        var report = try idempotency_bug.runReport(std.testing.allocator, seed);
+        defer report.deinit();
+
+        switch (report) {
+            .passed => {},
+            .failed => |failure| {
+                try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
+                try std.testing.expectEqualStrings("AccountDepositLost", failure.error_name.?);
+                found_failure = true;
+                break;
+            },
+        }
+    }
+
+    try std.testing.expect(found_failure);
 }
 
 fn runKvStoreTrace(
