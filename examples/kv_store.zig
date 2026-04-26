@@ -11,16 +11,21 @@ const mar = @import("marionette");
 const ns_per_ms: mar.Duration = 1_000_000;
 const wal_path = "kv.wal";
 const record_size = 16;
-const max_records = 2;
+const scenario_write_count = 2;
+const max_records = scenario_write_count;
 const magic: u32 = 0x4d4b5631;
 
 const Profile = struct {
     record_size: u64,
-    committed_key: u64,
-    committed_value: u64,
-    volatile_key: u64,
-    volatile_value: u64,
+    committed_key: u32,
+    committed_value: u32,
+    volatile_key: u32,
+    volatile_value: u32,
 };
+
+comptime {
+    std.debug.assert(max_records == scenario_write_count);
+}
 
 const profile: Profile = .{
     .record_size = record_size,
@@ -96,6 +101,7 @@ fn scenario(harness: *Harness) !void {
     try harness.store.put(profile.committed_key, profile.committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try harness.store.put(profile.volatile_key, profile.volatile_value, .no_sync);
+    std.debug.assert(harness.store.next_offset == scenario_write_count * record_size);
     try harness.control.disk.crash(.{});
     try harness.control.disk.restart(.{});
     try harness.control.disk.corruptSector(wal_path, record_size);
@@ -106,15 +112,16 @@ fn buggyScenario(harness: *Harness) !void {
     try harness.store.put(profile.committed_key, profile.committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
     try harness.store.put(profile.volatile_key, profile.volatile_value, .no_sync);
+    std.debug.assert(harness.store.next_offset == scenario_write_count * record_size);
     try harness.control.disk.crash(.{});
     try harness.control.disk.restart(.{});
     try harness.store.recover(.buggy_accept_magic_only);
 }
 
 fn recoveredStateIsSafe(harness: *const Harness) !void {
-    const committed_key: u32 = @intCast(profile.committed_key);
-    const committed_value: u32 = @intCast(profile.committed_value);
-    const volatile_key: u32 = @intCast(profile.volatile_key);
+    const committed_key = profile.committed_key;
+    const committed_value = profile.committed_value;
+    const volatile_key = profile.volatile_key;
     const store = &harness.store;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
@@ -177,10 +184,7 @@ const KVStore = struct {
         };
     }
 
-    fn put(self: *KVStore, key_value: u64, value_value: u64, sync_mode: SyncMode) !void {
-        const key: u32 = @intCast(key_value);
-        const value: u32 = @intCast(value_value);
-
+    fn put(self: *KVStore, key: u32, value: u32, sync_mode: SyncMode) !void {
         var bytes = [_]u8{0} ** record_size;
         encodeRecord(&bytes, .{ .key = key, .value = value });
 
