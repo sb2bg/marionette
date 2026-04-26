@@ -60,6 +60,22 @@ fn recoveredStateIsSafe(harness: *const Harness) !void {
     );
 }
 
+fn writeAndRecover(env: mar.Env) !KVStore {
+    var store = KVStore.init(env);
+    try store.put(committed_key, committed_value, .sync);
+    try store.put(volatile_key, volatile_value, .no_sync);
+    try store.recover(.strict);
+    return store;
+}
+
+fn expectBothRecordsRecovered(store: *const KVStore) !void {
+    try std.testing.expectEqual(@as(u8, 2), store.recovered_count);
+    try std.testing.expectEqual(@as(u8, 1), store.countKey(committed_key));
+    try std.testing.expectEqual(@as(?u32, committed_value), store.valueFor(committed_key));
+    try std.testing.expectEqual(@as(u8, 1), store.countKey(volatile_key));
+    try std.testing.expectEqual(@as(?u32, volatile_value), store.valueFor(volatile_key));
+}
+
 const SyncMode = enum {
     no_sync,
     sync,
@@ -248,4 +264,32 @@ test "kv store: buggy recovery fails through expectation helper" {
         .scenario = buggyScenario,
         .checks = &checks,
     });
+}
+
+test "kv store: same app code runs on simulated and real disks" {
+    var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xC0FFEE, .tick_ns = tick_ns });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{
+        .sector_size = record_size,
+        .min_latency_ns = tick_ns,
+    } });
+    var sim_store = try writeAndRecover(sim.env);
+    try expectBothRecordsRecovered(&sim_store);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var real_disk = try mar.RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = record_size });
+    var clock: mar.ProductionClock = .init();
+    var random_source: std.Random.IoSource = .{ .io = std.testing.io };
+    const prod_env: mar.Env = .{
+        .disk = real_disk.disk(),
+        .clock = .fromProduction(&clock),
+        .random = .fromProduction(&random_source),
+        .tracer = .none(),
+    };
+
+    var prod_store = try writeAndRecover(prod_env);
+    try expectBothRecordsRecovered(&prod_store);
 }
