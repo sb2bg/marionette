@@ -177,6 +177,8 @@ tests.
 - `BuggifyRate`-governed read errors, write errors, and corrupt reads.
 - Explicit `corruptSector(path, offset)` simulator-control API for scripted
   sector corruption.
+- `DiskOptions.min_latency_ns = null` defaults to the world's tick duration;
+  explicit values are not rewritten.
 - Trace-visible fault decisions with rate, roll, and fired fields.
 - Default no-fault behavior unchanged.
 

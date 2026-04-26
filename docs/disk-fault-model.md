@@ -223,6 +223,8 @@ hashes, the hash algorithm must be named and stable.
 - File identity: logical path-like `[]const u8`, escaped in traces and never
   resolved against the host filesystem by the simulator.
 - Default sector size: 4096 bytes.
+- Default minimum latency: omitted means "match the world's tick duration";
+  explicit values are preserved and validated against the tick size.
 - Initial app operations: `read`, `write`, and `sync` are implemented.
 - Initial harness-control operations: `setFaults`, `corruptSector`, `crash`,
   and `restart` are implemented. Read/write IO errors, corrupt reads, scripted

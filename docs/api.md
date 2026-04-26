@@ -150,13 +150,11 @@ const index = try world.randomIntLessThan(u64, 1_000_000);
 `randomIntLessThan` uses Zig's rejection-sampling bounded integer helper, so it
 does not teach modulo bias.
 
-Low-level harness code that should not receive the whole `World` can take a
-narrow traced random authority. Application code should usually use
-`env.random` instead:
+Application code should usually use `env.random` instead of receiving the
+whole `World`:
 
 ```zig
-const random = world.tracedRandom();
-const latency_ns = try random.intLessThan(u64, 1_000_000);
+const latency_ns = try env.random.intLessThan(u64, 1_000_000);
 ```
 
 ## Event Queue
@@ -192,7 +190,8 @@ handle with `read`, `write`, and `sync`. `mar.SimDisk` is the deterministic
 in-memory simulator behind that handle: logical files, sector-aligned
 reads/writes, sparse sectors, deterministic latency, operation ids, trace
 events, replayable read/write/corruption faults, and crash/restart behavior
-for pending writes. Production adapters are not implemented yet.
+for pending writes. Production storage adapters are not implemented yet;
+`mar.Disk.unavailable()` is the honest null-object for envs without storage.
 
 Construct a world-owned simulator bundle, then hand app code only the disk
 capability:
@@ -206,6 +205,10 @@ const sim = try world.simulate(.{ .disk = .{
 
 const disk = sim.env.disk;
 ```
+
+If `DiskOptions.min_latency_ns` is omitted, it defaults to the world's tick
+duration. Passing a concrete value keeps that exact value and validates it
+against the tick size.
 
 Write and read logical paths:
 
