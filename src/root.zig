@@ -173,6 +173,21 @@ pub const runWithStateInit = run_module.runWithStateInit;
 /// Run a stateful scenario with fallible initialization and explicit teardown.
 pub const runWithStateLifecycle = run_module.runWithStateLifecycle;
 
+/// Run a scenario through the struct-config runner.
+pub const runCase = run_module.runCase;
+
+/// Expect a struct-config scenario to pass.
+pub const expectPass = run_module.expectPass;
+
+/// Expect a struct-config scenario to fail.
+pub const expectFailure = run_module.expectFailure;
+
+/// Expect a struct-config scenario to pass over many seeds.
+pub const expectFuzz = run_module.expectFuzz;
+
+/// Errors returned by expectation helpers.
+pub const ExpectRunError = run_module.ExpectRunError;
+
 /// Errors returned while parsing a user-supplied seed.
 pub const SeedParseError = seed_module.SeedParseError;
 
