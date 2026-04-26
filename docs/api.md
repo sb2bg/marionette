@@ -230,27 +230,29 @@ try disk.read(.{
 try disk.sync(.{ .path = "wal.log" });
 ```
 
-Construct a production disk by scoping it to a root directory:
+Construct a production capability bundle by scoping it to a root directory:
 
 ```zig
-var disk = try mar.RealDisk.init(root_dir, io, .{ .sector_size = 4096 });
-const env: mar.Env = .{
-    .disk = disk.disk(),
-    .clock = mar.EnvClock.fromProduction(&clock),
-    .random = mar.EnvRandom.fromProduction(&random_source),
-    .tracer = mar.EnvTracer.none(),
-};
+var production = try mar.Production.init(.{
+    .root_dir = root_dir,
+    .io = io,
+    .disk = .{ .sector_size = 4096 },
+});
+defer production.deinit();
+
+const env = production.env();
 ```
 
-`RealDisk` accepts relative paths, creates parent directories on write, reads
-missing or short files as zero-filled sectors, and uses the same sector
-alignment checks as `SimDisk`.
+`Production` owns the production capability adapters and exposes the same
+`Env` shape that simulation returns. Its disk adapter accepts relative paths,
+creates parent directories on write, reads missing or short files as
+zero-filled sectors, and uses the same sector alignment checks as `SimDisk`.
 
-The `io` argument is the production host I/O backend used by `RealDisk` to
-perform filesystem calls. It is not Marionette's simulator hook. Simulated
-tests should use the `Disk` returned by `world.simulate(...).env.disk`; harness
-code keeps the matching `DiskControl` for faults, crash, restart, and
-corruption.
+The `io` argument is the production host I/O backend used to perform
+filesystem calls and provide host randomness. It is not Marionette's simulator
+hook. Simulated tests should use the `Disk` returned by
+`world.simulate(...).env.disk`; harness code keeps the matching `DiskControl`
+for faults, crash, restart, and corruption.
 
 Application code receives `Env` with an attached `Disk` field and uses only the
 app-facing operations:

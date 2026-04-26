@@ -298,6 +298,46 @@ pub const Env = struct {
     }
 };
 
+pub const Production = struct {
+    disk: disk_module.RealDisk,
+    clock: clock_module.ProductionClock,
+    random_source: std.Random.IoSource,
+    tracer: Tracer,
+
+    pub const Options = struct {
+        /// Root directory that production disk paths are resolved beneath.
+        /// The caller owns this directory and must keep it alive.
+        root_dir: std.Io.Dir,
+        /// Host I/O backend used by production capabilities.
+        io: std.Io,
+        disk: disk_module.RealDisk.Options = .{},
+        tracer: ?Tracer = null,
+    };
+
+    pub fn init(options: Options) disk_module.DiskError!Production {
+        return .{
+            .disk = try disk_module.RealDisk.init(options.root_dir, options.io, options.disk),
+            .clock = .init(),
+            .random_source = .{ .io = options.io },
+            .tracer = options.tracer orelse .none(),
+        };
+    }
+
+    pub fn env(self: *Production) Env {
+        return .{
+            .disk = self.disk.disk(),
+            .clock = .fromProduction(&self.clock),
+            .random = .fromProduction(&self.random_source),
+            .tracer = self.tracer,
+        };
+    }
+
+    pub fn deinit(self: *Production) void {
+        self.disk.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const SimControl = struct {
     disk: disk_module.DiskControl,
     world: *World,
@@ -362,15 +402,14 @@ test "env: production exposes production authorities" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var disk = try disk_module.RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
-    var clock: clock_module.ProductionClock = .init();
-    var source: std.Random.IoSource = .{ .io = std.Options.debug_io };
-    const env: Env = .{
-        .disk = disk.disk(),
-        .clock = .fromProduction(&clock),
-        .random = .fromProduction(&source),
-        .tracer = .none(),
-    };
+    var production = try Production.init(.{
+        .root_dir = tmp.dir,
+        .io = std.testing.io,
+        .disk = .{ .sector_size = 4 },
+    });
+    defer production.deinit();
+
+    const env = production.env();
 
     _ = env.clock.now();
     _ = try env.random.intLessThan(u8, 10);

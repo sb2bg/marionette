@@ -244,6 +244,8 @@ through `Env.disk`.
   control on `SimControl`.
 - Disk lifecycle is owned by `World`.
 - `mar.RealDisk`: production disk adapter backed by a real root directory.
+- `mar.Production`: production composition root that owns production
+  capabilities and exposes `Env`.
 
 ---
 

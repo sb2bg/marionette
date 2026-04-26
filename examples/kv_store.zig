@@ -280,16 +280,13 @@ test "kv store: same app code runs on simulated and real disks" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var real_disk = try mar.RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = record_size });
-    var clock: mar.ProductionClock = .init();
-    var random_source: std.Random.IoSource = .{ .io = std.testing.io };
-    const prod_env: mar.Env = .{
-        .disk = real_disk.disk(),
-        .clock = .fromProduction(&clock),
-        .random = .fromProduction(&random_source),
-        .tracer = .none(),
-    };
+    var production = try mar.Production.init(.{
+        .root_dir = tmp.dir,
+        .io = std.testing.io,
+        .disk = .{ .sector_size = record_size },
+    });
+    defer production.deinit();
 
-    var prod_store = try writeAndRecover(prod_env);
+    var prod_store = try writeAndRecover(production.env());
     try expectBothRecordsRecovered(&prod_store);
 }
