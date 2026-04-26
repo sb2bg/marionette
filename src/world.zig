@@ -102,26 +102,6 @@ pub const World = struct {
         tick_ns: clock_module.Duration = clock_module.default_tick_ns,
     };
 
-    /// Narrow traced-random authority derived from a world.
-    pub const TracedRandom = struct {
-        world: *World,
-
-        /// Draw a traced `u64`.
-        pub fn randomU64(self: TracedRandom) !u64 {
-            return self.world.randomU64();
-        }
-
-        /// Draw a traced boolean.
-        pub fn boolean(self: TracedRandom) !bool {
-            return self.world.randomBool();
-        }
-
-        /// Draw a traced unbiased integer in the range `0 <= value < less_than`.
-        pub fn intLessThan(self: TracedRandom, comptime T: type, less_than: T) !T {
-            return self.world.randomIntLessThan(T, less_than);
-        }
-    };
-
     /// Construct a world with deterministic time, randomness, and tracing.
     pub fn init(allocator: std.mem.Allocator, options: Options) std.mem.Allocator.Error!World {
         var world: World = .{
@@ -173,15 +153,10 @@ pub const World = struct {
 
     /// Build app and harness views over world-owned simulator resources.
     pub fn simulate(self: *World, options: SimulateOptions) disk_module.DiskError!Simulation {
-        var disk_options = options.disk;
-        if (disk_options.min_latency_ns == clock_module.default_tick_ns and self.sim_clock.tick_ns != clock_module.default_tick_ns) {
-            disk_options.min_latency_ns = self.sim_clock.tick_ns;
-        }
-
         const sim_disk = try self.allocator.create(disk_module.SimDisk);
         errdefer self.allocator.destroy(sim_disk);
 
-        sim_disk.* = try disk_module.SimDisk.init(self, disk_options);
+        sim_disk.* = try disk_module.SimDisk.init(self, options.disk);
         errdefer sim_disk.deinit();
 
         try self.teardowns.append(self.allocator, .{
@@ -226,14 +201,6 @@ pub const World = struct {
     /// for simulator choices.
     pub fn unsafeUntracedRandom(self: *World) std.Random {
         return self.rng.random();
-    }
-
-    /// Return the traced random authority.
-    ///
-    /// Prefer `AppEnv.random` in application code. This is a
-    /// low-level world authority for harnesses and env implementations.
-    pub fn tracedRandom(self: *World) TracedRandom {
-        return .{ .world = self };
     }
 
     /// Draw a traced `u64` from the world's seeded random stream.
@@ -385,7 +352,7 @@ fn isPlainTraceTextByte(byte: u8) bool {
     };
 }
 
-fn isValidTracePayload(payload: []const u8) bool {
+pub fn isValidTracePayload(payload: []const u8) bool {
     if (payload.len == 0) return false;
     if (payload[0] == ' ' or payload[payload.len - 1] == ' ') return false;
 
