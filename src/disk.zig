@@ -11,6 +11,7 @@ const World = @import("world.zig").World;
 const traceField = @import("world.zig").traceField;
 
 pub const DiskError = error{
+    DiskUnavailable,
     InvalidAlignment,
     InvalidDuration,
     InvalidPath,
@@ -23,7 +24,7 @@ pub const DiskError = error{
 
 pub const DiskOptions = struct {
     sector_size: u64 = 4096,
-    min_latency_ns: clock_module.Duration = clock_module.default_tick_ns,
+    min_latency_ns: ?clock_module.Duration = null,
     latency_jitter_ns: clock_module.Duration = 0,
 };
 
@@ -44,49 +45,73 @@ pub const Disk = struct {
     pub const Sync = DiskSync;
 
     pub const VTable = struct {
-        read: *const fn (*anyopaque, Read) anyerror!void,
-        write: *const fn (*anyopaque, Write) anyerror!void,
-        sync: *const fn (*anyopaque, Sync) anyerror!void,
+        read: *const fn (*anyopaque, Read) DiskError!void,
+        write: *const fn (*anyopaque, Write) DiskError!void,
+        sync: *const fn (*anyopaque, Sync) DiskError!void,
     };
 
-    pub fn read(self: Disk, options: Read) !void {
+    pub fn read(self: Disk, options: Read) DiskError!void {
         try self.vtable.read(self.ptr, options);
     }
 
-    pub fn write(self: Disk, options: Write) !void {
+    pub fn write(self: Disk, options: Write) DiskError!void {
         try self.vtable.write(self.ptr, options);
     }
 
-    pub fn sync(self: Disk, options: Sync) !void {
+    pub fn sync(self: Disk, options: Sync) DiskError!void {
         try self.vtable.sync(self.ptr, options);
     }
+
+    pub fn unavailable() Disk {
+        return .{ .ptr = &unavailable_disk_ctx, .vtable = &unavailable_disk_vtable };
+    }
 };
+
+var unavailable_disk_ctx: u8 = 0;
+
+const unavailable_disk_vtable: Disk.VTable = .{
+    .read = unavailableRead,
+    .write = unavailableWrite,
+    .sync = unavailableSync,
+};
+
+fn unavailableRead(_: *anyopaque, _: Disk.Read) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableWrite(_: *anyopaque, _: Disk.Write) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableSync(_: *anyopaque, _: Disk.Sync) DiskError!void {
+    return error.DiskUnavailable;
+}
 
 pub const DiskControl = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
-        set_faults: *const fn (*anyopaque, DiskFaultOptions) anyerror!void,
-        corrupt_sector: *const fn (*anyopaque, []const u8, u64) anyerror!void,
-        crash: *const fn (*anyopaque, DiskCrash) anyerror!void,
-        restart: *const fn (*anyopaque, DiskRestart) anyerror!void,
+        set_faults: *const fn (*anyopaque, DiskFaultOptions) DiskError!void,
+        corrupt_sector: *const fn (*anyopaque, []const u8, u64) DiskError!void,
+        crash: *const fn (*anyopaque, DiskCrash) DiskError!void,
+        restart: *const fn (*anyopaque, DiskRestart) DiskError!void,
         disk: *const fn (*anyopaque) Disk,
     };
 
-    pub fn setFaults(self: DiskControl, faults: DiskFaultOptions) !void {
+    pub fn setFaults(self: DiskControl, faults: DiskFaultOptions) DiskError!void {
         try self.vtable.set_faults(self.ptr, faults);
     }
 
-    pub fn corruptSector(self: DiskControl, path: []const u8, offset: u64) !void {
+    pub fn corruptSector(self: DiskControl, path: []const u8, offset: u64) DiskError!void {
         try self.vtable.corrupt_sector(self.ptr, path, offset);
     }
 
-    pub fn crash(self: DiskControl, options: DiskCrash) !void {
+    pub fn crash(self: DiskControl, options: DiskCrash) DiskError!void {
         try self.vtable.crash(self.ptr, options);
     }
 
-    pub fn restart(self: DiskControl, options: DiskRestart) !void {
+    pub fn restart(self: DiskControl, options: DiskRestart) DiskError!void {
         try self.vtable.restart(self.ptr, options);
     }
 
@@ -117,6 +142,11 @@ pub const DiskRestart = struct {};
 
 pub const SimDisk = struct {
     const Self = @This();
+    const ResolvedOptions = struct {
+        sector_size: u64,
+        min_latency_ns: clock_module.Duration,
+        latency_jitter_ns: clock_module.Duration,
+    };
 
     pub const Read = DiskRead;
     pub const Write = DiskWrite;
@@ -161,7 +191,7 @@ pub const SimDisk = struct {
     };
 
     world: *World,
-    options: DiskOptions,
+    options: ResolvedOptions,
     faults: DiskFaultOptions = .{},
     files: std.ArrayList(File) = .empty,
     pending_writes: std.ArrayList(PendingWrite) = .empty,
@@ -169,10 +199,10 @@ pub const SimDisk = struct {
     crashed: bool = false,
 
     pub fn init(world: *World, options: DiskOptions) DiskError!Self {
-        try validateOptions(world, options);
+        const resolved_options = try resolveOptions(world, options);
         return .{
             .world = world,
-            .options = options,
+            .options = resolved_options,
         };
     }
 
@@ -366,12 +396,18 @@ pub const SimDisk = struct {
         });
     }
 
-    fn validateOptions(world: *World, options: DiskOptions) DiskError!void {
+    fn resolveOptions(world: *World, options: DiskOptions) DiskError!ResolvedOptions {
         if (options.sector_size == 0) return error.InvalidAlignment;
         if (options.sector_size > std.math.maxInt(usize)) return error.InvalidRange;
+        const min_latency_ns = options.min_latency_ns orelse world.clock().tick_ns;
         const tick_ns = world.clock().tick_ns;
-        if (options.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
+        if (min_latency_ns % tick_ns != 0) return error.InvalidDuration;
         if (options.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
+        return .{
+            .sector_size = options.sector_size,
+            .min_latency_ns = min_latency_ns,
+            .latency_jitter_ns = options.latency_jitter_ns,
+        };
     }
 
     fn validateFaultRate(rate: env_module.BuggifyRate) DiskError!void {
@@ -675,31 +711,31 @@ pub const SimDisk = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn diskRead(ptr: *anyopaque, options: Disk.Read) anyerror!void {
+    fn diskRead(ptr: *anyopaque, options: Disk.Read) DiskError!void {
         try fromOpaque(ptr).read(options);
     }
 
-    fn diskWrite(ptr: *anyopaque, options: Disk.Write) anyerror!void {
+    fn diskWrite(ptr: *anyopaque, options: Disk.Write) DiskError!void {
         try fromOpaque(ptr).write(options);
     }
 
-    fn diskSync(ptr: *anyopaque, options: Disk.Sync) anyerror!void {
+    fn diskSync(ptr: *anyopaque, options: Disk.Sync) DiskError!void {
         try fromOpaque(ptr).sync(options);
     }
 
-    fn controlSetFaults(ptr: *anyopaque, faults: DiskFaultOptions) anyerror!void {
+    fn controlSetFaults(ptr: *anyopaque, faults: DiskFaultOptions) DiskError!void {
         try fromOpaque(ptr).setFaults(faults);
     }
 
-    fn controlCorruptSector(ptr: *anyopaque, path: []const u8, offset: u64) anyerror!void {
+    fn controlCorruptSector(ptr: *anyopaque, path: []const u8, offset: u64) DiskError!void {
         try fromOpaque(ptr).corruptSector(path, offset);
     }
 
-    fn controlCrash(ptr: *anyopaque, options: DiskCrash) anyerror!void {
+    fn controlCrash(ptr: *anyopaque, options: DiskCrash) DiskError!void {
         try fromOpaque(ptr).crash(options);
     }
 
-    fn controlRestart(ptr: *anyopaque, options: DiskRestart) anyerror!void {
+    fn controlRestart(ptr: *anyopaque, options: DiskRestart) DiskError!void {
         try fromOpaque(ptr).restart(options);
     }
 
@@ -760,6 +796,10 @@ test "disk: rejects invalid paths, ranges, and latency options" {
     try std.testing.expectError(
         error.InvalidDuration,
         SimDisk.init(&world, .{ .min_latency_ns = 11 }),
+    );
+    try std.testing.expectError(
+        error.InvalidDuration,
+        SimDisk.init(&world, .{ .min_latency_ns = clock_module.default_tick_ns }),
     );
 
     var disk = try SimDisk.init(&world, .{ .sector_size = 4, .min_latency_ns = 10 });
