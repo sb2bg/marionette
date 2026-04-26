@@ -52,7 +52,7 @@ Source: [`examples/kv_store.zig`](https://github.com/sb2bg/marionette/blob/main/
 The KV store is the first disk-backed example. It is intentionally tiny: a
 fixed-size append-only WAL where each sector is one record with a magic value,
 key, value, and checksum. It exists to exercise `mar.Disk` plus the
-`mar.SimDisk`/`mar.DiskControl` harness split, not to be a real database.
+`Env`/`SimControl` harness split, not to be a real database.
 
 The correct scenario:
 

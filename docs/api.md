@@ -54,8 +54,8 @@ fn service(env: anytype) !void {
 }
 ```
 
-`mar.Env`/`mar.AppEnv` is one concrete app-facing capability bundle. Its disk,
-clock, random, and tracer authorities are fields, not lazy accessors.
+`mar.Env` is the concrete app-facing capability bundle. Its disk, clock,
+random, and tracer authorities are fields, not lazy accessors.
 
 Simulation builds app and harness views together through `World.simulate`:
 
@@ -79,7 +79,7 @@ built by simulation; production env construction is still being shaped.
 - One seeded `Random`.
 - One trace log.
 
-Application code should usually receive `AppEnv`, not `World` directly.
+Application code should usually receive `Env`, not `World` directly.
 Scenarios and harnesses use `World` to construct simulations, drive time, and
 inspect trace bytes.
 
@@ -228,21 +228,21 @@ try disk.read(.{
 try disk.sync(.{ .path = "wal.log" });
 ```
 
-Application code receives `AppEnv` with an attached `Disk` field and uses only
-the app-facing operations:
+Application code receives `Env` with an attached `Disk` field and uses only the
+app-facing operations:
 
 ```zig
 const sim = try world.simulate(.{
     .disk = .{ .sector_size = 4096 },
 });
 
-fn appendRecord(env: mar.AppEnv, sector_bytes: []const u8) !void {
+fn appendRecord(env: mar.Env, sector_bytes: []const u8) !void {
     try env.disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
     try env.disk.sync(.{ .path = "wal.log" });
 }
 ```
 
-The `AppEnv.disk` view exposes `read`, `write`, and `sync`.
+The `Env.disk` view exposes `read`, `write`, and `sync`.
 Simulator-control operations such as `setFaults`, `crash`, `restart`, and
 `corruptSector` remain on `mar.DiskControl`, exposed through
 `sim.control.disk`, and are kept by the harness or scenario state.
@@ -497,11 +497,13 @@ var report = try mar.run(std.testing.allocator, .{
 defer report.deinit();
 ```
 
-Stateful scenarios can use `mar.runWithState` and `mar.StateCheck(State)`:
+Stateful scenarios should usually use the struct-config runner. It infers the
+state type from the initializer, and run metadata such as `profile_name`,
+`tags`, and `attributes` is optional:
 
 ```zig
 const Model = struct {
-    env: mar.AppEnv,
+    env: mar.Env,
     committed: bool = false,
 
     fn init(world: *mar.World) Model {
@@ -523,40 +525,46 @@ const state_checks = [_]mar.StateCheck(Model){
     .{ .name = "committed", .check = committed },
 };
 
-var report = try mar.runWithState(
-    std.testing.allocator,
-    .{ .seed = 0x1234 },
-    Model,
-    Model.init,
-    scenario,
-    &state_checks,
-);
+var report = try mar.runCase(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .init = Model.init,
+    .scenario = scenario,
+    .checks = &state_checks,
+});
 defer report.deinit();
 ```
 
-`runWithState` initializes fresh state for each replay attempt and passes the
+`runCase` initializes fresh state for each replay attempt and passes the
 attempt's `World` into the initializer. Initializers may construct world-bound
 simulator authorities, but should not record trace events. Stateful scenarios
 and state checks receive only state; put environment authorities on the state
 when they need to record or advance time.
 
-Use `mar.runWithStateLifecycle` when initialization can fail or the state owns
-resources:
+Tests that only need pass/fail behavior can skip report handling:
 
 ```zig
-var report = try mar.runWithStateLifecycle(
-    std.testing.allocator,
-    .{ .seed = 0x1234 },
-    Model,
-    Model.initFallible,
-    Model.deinit,
-    scenario,
-    &state_checks,
-);
+try mar.expectPass(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .init = Model.init,
+    .scenario = scenario,
+    .checks = &state_checks,
+});
+
+try mar.expectFuzz(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .seeds = 1000,
+    .init = Model.init,
+    .scenario = scenario,
+    .checks = &state_checks,
+});
 ```
 
-Lifecycle init errors are captured as scenario failures. The deinitializer is
-called once per replay attempt and must be infallible.
+Use `mar.expectFailure` when proving a checker catches a known-buggy scenario.
+The older positional runners remain available for code that needs explicit
+lifecycle teardown or world-only scenarios.
 
 The return value is `mar.RunReport`:
 

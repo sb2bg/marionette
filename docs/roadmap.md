@@ -66,7 +66,8 @@ profiles, linearizability checker, time-travel debugging.
 - `World`: clock, seeded PRNG, trace log, event indexes.
 - `Clock`: production (host IO clock) and simulation (fake tick-based).
 - `Random`: seeded PRNG wrapper.
-- `mar.run` / `mar.runWithState` / `mar.runWithStateLifecycle`:
+- `mar.run`, `mar.runCase`, `mar.expectPass`, `mar.expectFailure`,
+  `mar.expectFuzz`, `mar.runWithState`, and `mar.runWithStateLifecycle`:
   twice-and-compare deterministic runner.
   Stateful initializers receive the replay attempt's `World`; stateful
   scenarios and checks receive only state.

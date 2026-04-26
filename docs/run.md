@@ -171,13 +171,13 @@ var report = try mar.run(std.testing.allocator, .{
 }, scenario);
 ```
 
-Stateful scenarios should use `mar.runWithState`. The state initializer runs
-once per replay attempt, so the second run starts from the same state as the
-first:
+Stateful scenarios should usually use `mar.runCase`. The state initializer
+runs once per replay attempt, so the second run starts from the same state as
+the first:
 
 ```zig
 const Model = struct {
-    env: mar.AppEnv,
+    env: mar.Env,
     committed: bool = false,
 
     fn init(world: *mar.World) Model {
@@ -200,14 +200,13 @@ const state_checks = [_]mar.StateCheck(Model){
     .{ .name = "committed", .check = committed },
 };
 
-var report = try mar.runWithState(
-    std.testing.allocator,
-    .{ .seed = 0x1234 },
-    Model,
-    Model.init,
-    scenario,
-    &state_checks,
-);
+var report = try mar.runCase(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .init = Model.init,
+    .scenario = scenario,
+    .checks = &state_checks,
+});
 ```
 
 `init` receives the replay attempt's `World` so state can construct
@@ -216,12 +215,11 @@ record trace events; scenario execution and checks own trace output. Stateful
 scenarios and state checks receive only state; put environment authorities on
 the state when they need to record or advance time.
 
-Use `mar.runWithStateInit` when state initialization can fail but simulator
-resources are owned by `World` through `world.simulate`:
+Use `mar.expectPass` when the test only needs to fail loudly on a bad run:
 
 ```zig
 const Store = struct {
-    env: mar.AppEnv,
+    env: mar.Env,
     control: mar.SimControl,
 
     fn init(world: *mar.World) !Store {
@@ -234,19 +232,32 @@ const Store = struct {
     }
 };
 
-var report = try mar.runWithStateInit(
-    allocator,
-    .{ .seed = 0x1234 },
-    Store,
-    Store.init,
-    scenario,
-    &state_checks,
-);
+try mar.expectPass(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .init = Store.init,
+    .scenario = scenario,
+    .checks = &state_checks,
+});
 ```
 
-Init errors are reported as scenario failures with the partial trace
-preserved. Use `mar.runWithStateLifecycle` only when state owns non-world
-resources that need an explicit infallible deinitializer.
+Use `mar.expectFuzz` to run many deterministic seeds and report the failing
+seed if one fails:
+
+```zig
+try mar.expectFuzz(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .seeds = 1000,
+    .init = Store.init,
+    .scenario = scenario,
+    .checks = &state_checks,
+});
+```
+
+Use `mar.expectFailure` when proving a checker catches a known-buggy scenario.
+Use `mar.runWithStateLifecycle` only when state owns non-world resources that
+need an explicit infallible deinitializer.
 
 This is intentionally small. Future scheduler work can check invariants after
 every event or on quiescence, but the current API already gives failures a
