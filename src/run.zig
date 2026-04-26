@@ -20,6 +20,11 @@ pub const runAttributesFrom = run_types.runAttributesFrom;
 pub const TraceError = world_module.TraceError;
 
 pub const RunError = std.mem.Allocator.Error || TraceError;
+pub const ExpectError = error{
+    ExpectedRunFailure,
+    ExpectedRunPass,
+};
+pub const ExpectRunError = RunError || ExpectError;
 
 const cloneRunOptions = run_types.cloneRunOptions;
 const deinitRunOptions = run_types.deinitRunOptions;
@@ -132,6 +137,70 @@ pub fn runWithStateLifecycle(
     );
 }
 
+/// Run one struct-config scenario case.
+///
+/// Required fields:
+/// - `allocator`
+/// - `init: fn (*World) State` or `fn (*World) !State`
+/// - `scenario: fn (*State) !void`
+///
+/// Optional fields mirror `RunOptions`: `seed`, `start_ns`, `tick_ns`,
+/// `profile_name`, `tags`, `attributes`, `world_checks`, and `checks`.
+pub fn runCase(config: anytype) RunError!RunReport {
+    return runCaseWithSeed(config, null);
+}
+
+/// Expect a struct-config case to pass. Prints the failure summary otherwise.
+pub fn expectPass(config: anytype) ExpectRunError!void {
+    var report = try runCase(config);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => {},
+        .failed => |failure| {
+            failure.print();
+            return error.ExpectedRunPass;
+        },
+    }
+}
+
+/// Expect a struct-config case to fail. Use `runCase` directly when the test
+/// needs to inspect the failure details.
+pub fn expectFailure(config: anytype) ExpectRunError!void {
+    var report = try runCase(config);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => {},
+    }
+}
+
+/// Run a struct-config case over many deterministic seeds.
+///
+/// Required extra field: `seeds`, the number of seeds to run. Optional `seed`
+/// acts as the base seed.
+pub fn expectFuzz(config: anytype) ExpectRunError!void {
+    if (!@hasField(@TypeOf(config), "seeds")) {
+        @compileError("expectFuzz config requires a `seeds` field");
+    }
+
+    for (0..config.seeds) |iteration| {
+        const seed = fuzzSeed(configSeed(config), iteration);
+        var report = try runCaseWithSeed(config, seed);
+        defer report.deinit();
+
+        switch (report) {
+            .passed => {},
+            .failed => |failure| {
+                std.debug.print("marionette fuzz failure: seed={} iteration={}\n", .{ seed, iteration });
+                failure.print();
+                return error.ExpectedRunPass;
+            },
+        }
+    }
+}
+
 const NoState = struct {
     world: *World,
 };
@@ -165,6 +234,82 @@ fn noopStateDeinit(comptime State: type) fn (*State) void {
     return struct {
         fn deinit(_: *State) void {}
     }.deinit;
+}
+
+fn runCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
+    const State = stateTypeFromInit(config.init);
+    const no_state_checks = [_]StateCheck(State){};
+    const state_checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_state_checks;
+
+    return runTwiceWithStateLifecycle(
+        config.allocator,
+        runOptionsFromConfig(config, seed_override),
+        State,
+        fallibleInit(State, config.init),
+        noopStateDeinit(State),
+        config.scenario,
+        state_checks,
+    );
+}
+
+fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
+    return .{
+        .seed = seed_override orelse configSeed(config),
+        .start_ns = fieldOrDefault(config, "start_ns", @as(u64, 0)),
+        .tick_ns = fieldOrDefault(config, "tick_ns", @import("clock.zig").default_tick_ns),
+        .profile_name = fieldOrDefault(config, "profile_name", @as(?[]const u8, null)),
+        .tags = fieldOrDefault(config, "tags", @as([]const []const u8, &.{})),
+        .attributes = fieldOrDefault(config, "attributes", @as([]const RunAttribute, &.{})),
+        .checks = fieldOrDefault(config, "world_checks", @as([]const Check, &.{})),
+    };
+}
+
+fn configSeed(config: anytype) u64 {
+    return fieldOrDefault(config, "seed", @as(u64, 0));
+}
+
+fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
+    return if (@hasField(@TypeOf(config), name)) @field(config, name) else default;
+}
+
+fn fuzzSeed(base_seed: u64, iteration: usize) u64 {
+    return base_seed ^ 0x9E37_79B9_7F4A_7C15 ^ @as(u64, @intCast(iteration));
+}
+
+fn stateTypeFromInit(comptime init_state: anytype) type {
+    const Return = initReturnType(init_state);
+    return switch (@typeInfo(Return)) {
+        .error_union => |error_union| error_union.payload,
+        else => Return,
+    };
+}
+
+fn initReturnType(comptime init_state: anytype) type {
+    const Init = @TypeOf(init_state);
+    const info = switch (@typeInfo(Init)) {
+        .@"fn" => |fn_info| fn_info,
+        else => @compileError("runCase config.init must be a function"),
+    };
+    if (info.params.len != 1 or info.params[0].type != *World) {
+        @compileError("runCase config.init must take `*mar.World`");
+    }
+    return info.return_type orelse @compileError("runCase config.init must return state");
+}
+
+fn fallibleInit(comptime State: type, comptime init_state: anytype) fn (*World) anyerror!State {
+    const Return = initReturnType(init_state);
+    return switch (@typeInfo(Return)) {
+        .error_union => struct {
+            fn init(world: *World) anyerror!State {
+                return try init_state(world);
+            }
+        }.init,
+        else => struct {
+            fn init(world: *World) anyerror!State {
+                return init_state(world);
+            }
+        }.init,
+    };
 }
 
 fn runTwiceWithStateLifecycle(
@@ -722,9 +867,67 @@ test "runWithState: checks inspect fresh scenario state" {
     }
 }
 
+test "runCase: infers state type from init" {
+    var report = try runCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .init = CounterState.init,
+        .scenario = counterScenario,
+        .checks = &[_]StateCheck(CounterState){
+            .{ .name = "counter is one", .check = counterCheck },
+        },
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| {
+            try std.testing.expectEqual(@as(u64, 3), passed.event_count);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.value value=1") != null);
+        },
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+test "expectPass and expectFuzz accept passing cases" {
+    const checks = [_]StateCheck(CounterState){
+        .{ .name = "counter is one", .check = counterCheck },
+    };
+
+    try expectPass(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .init = CounterState.init,
+        .scenario = counterScenario,
+        .checks = &checks,
+    });
+
+    try expectFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .seeds = 4,
+        .init = CounterState.init,
+        .scenario = counterScenario,
+        .checks = &checks,
+    });
+}
+
 fn failingCounterCheck(state: *const CounterState) !void {
     try state.env.record("state.check.fail value={}", .{state.value});
     return error.StateInvariantBroken;
+}
+
+test "expectFailure accepts failing cases" {
+    const checks = [_]StateCheck(CounterState){
+        .{ .name = "counter fails", .check = failingCounterCheck },
+    };
+
+    try expectFailure(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .init = CounterState.init,
+        .scenario = counterScenario,
+        .checks = &checks,
+    });
 }
 
 test "runWithState: check failures preserve partial trace and check name" {
