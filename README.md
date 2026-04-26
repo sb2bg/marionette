@@ -16,71 +16,145 @@
 
 Deterministic simulation testing for Zig.
 
-Marionette helps Zig services reproduce timing, randomness, and simulated
-failure from a seed.
+Write your code against `env`. In tests, drive `control` to inject faults. The same code runs on the simulator and on real hardware.
 
-Make rare bugs repeat themselves.
+```zig
+fn writeAndRecover(env: mar.Env) !KVStore {
+    var store = KVStore.init(env);
+    try store.put(1, 41, .sync);
+    try store.put(2, 99, .no_sync);
+    try store.recover(.strict);
+    return store;
+}
 
-## What It Finds
+// In simulation: deterministic, fault-injectable, replayable from a seed.
+const sim = try world.simulate(.{ .disk = .{ .sector_size = 16 } });
+var sim_store = try writeAndRecover(sim.env);
 
-The README example is a tiny retry queue. A worker leases a
-job, times out, and the job is leased again. The bug is accepting the late
-completion from the first worker after the second worker owns the lease.
-
-Marionette turns that unlucky ordering into a replayable failure:
-
-```text
-marionette failure: kind=check_failed seed=12648430 profile=retry-queue-late-ack-bug ... error=JobCompletedTwice check=job completed at most once
+// In production: real disk, same code path.
+var production = try mar.Production.init(.{ .root_dir = tmp.dir, .io = std.testing.io });
+var prod_store = try writeAndRecover(production.env());
 ```
 
-The trace excerpt shows the race directly:
-
-```text
-queue.lease job=7 worker=1 deadline_ns=5000000
-queue.timeout job=7 worker=1
-queue.lease job=7 worker=2
-queue.complete job=7 worker=1 accepted=true reason=stale_ack_bug completions=1
-queue.complete job=7 worker=2 accepted=true reason=current_lease completions=2
-queue.invariant_violation job=7 completions=2
-```
-
-The full example lives in
-[`examples/retry_queue.zig`](examples/retry_queue.zig).
-
-## Status
-
-Experimental. Time, seeded randomness, trace logging, replay checks, named
-scenario checks, trace summaries, and environment-based authority passing are
-implemented. Run tags and typed attributes are trace-visible so failing seeds
-can carry their expanded profile. A deterministic disk authority with
-read/write/corruption faults, crash/restart simulation, and an unstable
-network simulator exist, while the stable app-facing network API is still
-being designed. A real scheduler, shrinking, and time-travel debugging are
-planned, not implemented.
-
-The API is not stable. Do not use this in production yet.
-
-## Try It
-
-```sh
-zig build test
-zig build run-example -- kv-store --seed 12648430 --summary
-zig build run-example -- kv-store-bug --seed 12648430 --expect-failure
-zig build run-example -- replicated-register --seed 12648430 --summary
-zig build run-example -- retry-queue-bug --seed 12648430 --expect-failure
-```
+That parity is the whole point. You don't write a "simulator version" of your code. You write your code, and Marionette gives you a deterministic environment to run it in.
 
 ## Why
 
-Distributed systems bugs are hard because they depend on timing, ordering,
-and failure. Traditional tests often find them by accident, if at all.
+Distributed and storage systems fail in ways that are hard to reproduce: a torn write under crash, a network partition during quorum, a race between two timers. By the time you have a stack trace, the conditions that caused the bug are gone.
 
-Deterministic simulation testing changes the loop: run the system in a
-controlled world, save the seed and trace when it fails, replay the exact
-execution until the bug is fixed.
+Deterministic simulation testing turns those bugs into seeds. Every run is reproducible. Every failure is replayable. You compress weeks of fuzz-testing into seconds, and when something breaks in CI, the seed alone is enough to debug it.
 
-Marionette is the Zig-native version of that idea: explicit interfaces,
-explicit allocators, no runtime magic.
+Marionette brings that approach to Zig. It's inspired by the techniques behind FoundationDB, TigerBeetle, and Antithesis, but designed to be a drop-in library, not a framework you build your system around.
+
+## A complete example
+
+Here's a WAL recovery test that crashes the disk mid-write, corrupts a sector, and asserts that committed records survive while unsynced ones don't.
+
+```zig
+pub fn scenario(harness: *Harness) !void {
+    try harness.store.put(committed_key, committed_value, .sync);
+    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try harness.store.put(volatile_key, volatile_value, .no_sync);
+    try harness.control.disk.crash(.{});
+    try harness.control.disk.restart(.{});
+    try harness.control.disk.corruptSector(wal_path, record_size);
+    try harness.store.recover(.strict);
+}
+
+pub const checks = [_]mar.StateCheck(Harness){
+    .{ .name = "synced records recover, unsynced records are rejected", .check = recoveredStateIsSafe },
+};
+
+test "wal recovery" {
+    try mar.expectPass(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .init = Harness.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
+}
+
+test "wal recovery fuzz" {
+    try mar.expectFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .seeds = 16,
+        .init = Harness.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
+}
+```
+
+Three pieces, every test:
+
+- **`init`** sets up your harness: your code under test, plus the `control` handle for fault injection.
+- **`scenario`** drives the action. It calls into your code via `env`, and into the simulator via `control`.
+- **`checks`** assert invariants on the final state.
+
+`expectPass` runs once with a fixed seed. `expectFuzz` runs many seeds in parallel. `expectFailure` asserts that a deliberately-buggy scenario gets caught, useful for proving your checker actually works.
+
+## The two surfaces: `env` and `control`
+
+Every Marionette test has two halves.
+
+**`env`** is what your application code sees. It exposes `disk`, `network`, `clock`, and whatever else your system uses. The same `Env` type works in simulation and production, you write against it once.
+
+```zig
+try env.disk.write(.{ .path = "kv.wal", .offset = 0, .bytes = &bytes });
+try env.network.send(to, payload, .{});
+const now = env.clock.now();
+```
+
+**`control`** is what your test code uses to inject faults. It's only available in simulation. It mirrors `env`'s structure: every resource has a control surface.
+
+```zig
+try control.disk.crash(.{});
+try control.disk.corruptSector(path, offset);
+try control.network.partition(&side_a, &side_b);
+try control.network.heal();
+try control.clock.advance(duration);
+```
+
+This split is the whole API. Adding a new resource means adding it to both surfaces. You never have to learn a third concept.
+
+## Distributed simulation
+
+Network simulation works the same way. Here's a partition test against a toy replicated register:
+
+```zig
+fn partitionScenario(cluster: *Cluster) !void {
+    const isolated = [_]mar.NodeId{0};
+    const majority = [_]mar.NodeId{ 1, 2, client_node_id };
+
+    try cluster.control.network.partition(&isolated, &majority);
+    try cluster.write(.{ .version = 1, .value = 41 });
+
+    try cluster.control.network.heal();
+    try cluster.write(.{ .version = 1, .value = 41 });
+
+    try cluster.checkReplicaCommitted(0, 1, 41);
+}
+```
+
+Messages have configurable drop rates, latency distributions, and reordering. Delivery order is deterministic given a seed. Partitions are first-class, declare which sides are isolated, and the simulator handles routing.
+
+## Traces
+
+Every run produces a structured trace. When a check fails, you get the full sequence of events that led to the violation, plus the seed to reproduce it.
+
+```
+register.write.start version=1 value=41 retry_limit=8
+register.message kind=propose to=0 version=1 value=41
+replica.accept replica=0 version=1 value=41 accepted=true
+register.message kind=propose to=1 version=1 value=41
+replica.accept replica=1 version=1 value=41 accepted=true
+register.write.quorum version=1 value=41 acks=2
+register.invariant_violation kind=committed_divergence replica=1 ...
+```
+
+You write trace records with `env.record(...)` from anywhere. Application code, scenario code, checks. Failed runs print the trace automatically. Passing runs hand it back to you so you can persist it, diff it, or feed it to whatever observability you already have.
 
 ## Docs
 
@@ -100,25 +174,24 @@ explicit allocators, no runtime magic.
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
 - [Blog](docs/blog/index.md)
 
-Current examples include a retry queue with a duplicate-completion bug and a
-small replicated-register showcase that exercises seeded message drops,
-deterministic delivery, and state checks.
+## Status
 
-## Is This For Me?
+Marionette is early. The API shape is converging but not yet stable; expect breaking changes between minor versions until 0.1. The simulator currently models disk, network, and clock; allocator simulation is in progress.
 
-Eventually, yes, if you are building a database, queue, storage engine,
-consensus system, scheduler, replicated service, or anything where
-correctness under failure matters more than feature velocity.
+If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 
-Probably not, if you are building a CRUD app, GUI, ML training system, or a
-multi-threaded service you are not willing to structure around deterministic
-interfaces.
+## Install
 
-## Installation
+```
+zig fetch --save https://github.com/sb2bg/marionette/archive/<commit>.tar.gz
+```
 
-Not published yet. Marionette is source-only while the experimental API
-settles.
+Requires Zig 0.15.x.
+
+## Acknowledgments
+
+Marionette stands on the shoulders of [FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html), [TigerBeetle's VOPR](https://tigerbeetle.com/blog/2023-03-28-random-fuzzy-thoughts), and the broader DST tradition. The bugs they catch are bugs everyone has; this library tries to make catching them easy in Zig.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT
