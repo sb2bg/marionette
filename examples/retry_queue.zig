@@ -36,7 +36,7 @@ const checks = [_]mar.StateCheck(RetryQueue){
 
 /// Run the correct retry-queue scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithState(
+    var report = try mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -63,7 +63,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 
 /// Run the deliberately buggy late-ack scenario.
 pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runWithState(
+    return mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -101,8 +101,8 @@ fn runLateAckScenario(queue: *RetryQueue, mode: CompletionMode) !void {
 
     _ = try queue.lease(first_worker, lease_duration_ns);
 
-    const extra_delay_ticks = 1 + try queue.env.random().intLessThan(u8, 3);
-    try queue.env.runFor((profile.lease_ticks + extra_delay_ticks) * ns_per_ms);
+    const extra_delay_ticks = 1 + try queue.env.random.intLessThan(u8, 3);
+    try queue.control.runFor((profile.lease_ticks + extra_delay_ticks) * ns_per_ms);
     try queue.expireDue();
 
     _ = try queue.lease(second_worker, lease_duration_ns);
@@ -142,21 +142,25 @@ const JobState = enum {
 };
 
 const RetryQueue = struct {
-    env: mar.SimulationEnv,
+    env: mar.AppEnv,
+    control: mar.SimControl,
     job_id: u64 = 0,
     state: JobState = .empty,
     lease_owner: u8 = 0,
     lease_deadline_ns: mar.Timestamp = 0,
     completion_count: u8 = 0,
 
-    fn init(world: *mar.World) RetryQueue {
-        return .{ .env = mar.SimulationEnv.init(world, .{}) };
+    fn init(world: *mar.World) !RetryQueue {
+        const sim = try world.simulate(.{});
+        return .{ .env = sim.env, .control = sim.control };
     }
 
     fn makeReady(self: *RetryQueue, job_id: u64) !void {
         const env = self.env;
+        const control = self.control;
         self.* = .{
             .env = env,
+            .control = control,
             .job_id = job_id,
             .state = .ready,
         };
@@ -174,7 +178,7 @@ const RetryQueue = struct {
 
         self.state = .leased;
         self.lease_owner = worker;
-        self.lease_deadline_ns = self.env.clock().now() + duration_ns;
+        self.lease_deadline_ns = self.env.clock.now() + duration_ns;
         try self.env.record(
             "queue.lease job={} worker={} deadline_ns={}",
             .{ self.job_id, worker, self.lease_deadline_ns },
@@ -183,7 +187,7 @@ const RetryQueue = struct {
     }
 
     fn expireDue(self: *RetryQueue) !void {
-        if (self.state != .leased or self.env.clock().now() < self.lease_deadline_ns) return;
+        if (self.state != .leased or self.env.clock.now() < self.lease_deadline_ns) return;
 
         const previous_owner = self.lease_owner;
         self.state = .ready;
@@ -191,7 +195,7 @@ const RetryQueue = struct {
         self.lease_deadline_ns = 0;
         try self.env.record(
             "queue.timeout job={} worker={} now_ns={}",
-            .{ self.job_id, previous_owner, self.env.clock().now() },
+            .{ self.job_id, previous_owner, self.env.clock.now() },
         );
     }
 

@@ -13,17 +13,7 @@ pub const BuggifyError = error{
     InvalidRate,
 };
 
-pub const SimulationEnvError = error{
-    MissingDisk,
-};
-
-/// Environment selected at comptime.
-pub fn Env(comptime mode: clock_module.Mode) type {
-    return switch (mode) {
-        .production => ProductionEnv,
-        .simulation => SimulationEnv,
-    };
-}
+pub const AppEnvError = error{};
 
 /// Probability that a BUGGIFY hook fires in simulation.
 pub const BuggifyRate = struct {
@@ -58,94 +48,186 @@ pub const BuggifyRate = struct {
     }
 };
 
-/// Production random view backed by host entropy.
-pub const ProductionRandom = struct {
-    source: *std.Random.IoSource,
+pub const Clock = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        now: *const fn (*anyopaque) clock_module.Timestamp,
+        sleep: *const fn (*anyopaque, clock_module.Duration) anyerror!void,
+    };
+
+    pub fn now(self: Clock) clock_module.Timestamp {
+        return self.vtable.now(self.ptr);
+    }
+
+    pub fn sleep(self: Clock, duration_ns: clock_module.Duration) !void {
+        try self.vtable.sleep(self.ptr, duration_ns);
+    }
+
+    pub fn fromWorld(world: *World) Clock {
+        return .{ .ptr = world, .vtable = &world_clock_vtable };
+    }
+
+    pub fn fromProduction(clock: *clock_module.ProductionClock) Clock {
+        return .{ .ptr = clock, .vtable = &production_clock_vtable };
+    }
+
+    const world_clock_vtable: VTable = .{
+        .now = worldClockNow,
+        .sleep = worldClockSleep,
+    };
+
+    const production_clock_vtable: VTable = .{
+        .now = productionClockNow,
+        .sleep = productionClockSleep,
+    };
+
+    fn worldClock(ptr: *anyopaque) *World {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn productionClock(ptr: *anyopaque) *clock_module.ProductionClock {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn worldClockNow(ptr: *anyopaque) clock_module.Timestamp {
+        return worldClock(ptr).now();
+    }
+
+    fn worldClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) anyerror!void {
+        try worldClock(ptr).runFor(duration_ns);
+    }
+
+    fn productionClockNow(ptr: *anyopaque) clock_module.Timestamp {
+        return productionClock(ptr).now();
+    }
+
+    fn productionClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) anyerror!void {
+        productionClock(ptr).sleep(duration_ns);
+    }
+};
+
+pub const Random = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        random_u64: *const fn (*anyopaque) anyerror!u64,
+        boolean: *const fn (*anyopaque) anyerror!bool,
+        int_less_than_u32: *const fn (*anyopaque, u32) anyerror!u32,
+        int_less_than_u64: *const fn (*anyopaque, u64) anyerror!u64,
+    };
 
     /// Draw an untraced `u64` from host entropy.
-    pub fn randomU64(self: ProductionRandom) !u64 {
-        return self.source.interface().int(u64);
+    pub fn randomU64(self: Random) !u64 {
+        return self.vtable.random_u64(self.ptr);
     }
 
     /// Draw an untraced boolean from host entropy.
-    pub fn boolean(self: ProductionRandom) !bool {
-        return self.source.interface().boolean();
+    pub fn boolean(self: Random) !bool {
+        return self.vtable.boolean(self.ptr);
     }
 
     /// Draw an unbiased integer in the range `0 <= value < less_than`.
-    pub fn intLessThan(self: ProductionRandom, comptime T: type, less_than: T) !T {
-        return self.source.interface().intRangeLessThan(T, 0, less_than);
-    }
-};
-
-/// Production environment for the application composition root.
-pub const ProductionEnv = struct {
-    clock_authority: clock_module.ProductionClock,
-    random_source: std.Random.IoSource,
-
-    pub const Options = struct {};
-
-    /// Construct a production environment.
-    pub fn init(_: Options) ProductionEnv {
-        return .{
-            .clock_authority = .init(),
-            .random_source = .{ .io = std.Options.debug_io },
-        };
+    pub fn intLessThan(self: Random, comptime T: type, less_than: T) !T {
+        if (T == u32) {
+            return self.vtable.int_less_than_u32(self.ptr, less_than);
+        }
+        const value = try self.vtable.int_less_than_u64(self.ptr, @intCast(less_than));
+        return @intCast(value);
     }
 
-    /// Return the production clock authority.
-    pub fn clock(self: *ProductionEnv) *clock_module.ProductionClock {
-        return &self.clock_authority;
+    pub fn fromWorld(world: *World) Random {
+        return .{ .ptr = world, .vtable = &world_random_vtable };
     }
 
-    /// Return the production random view.
-    pub fn random(self: *ProductionEnv) ProductionRandom {
-        return .{ .source = &self.random_source };
+    pub fn fromProduction(source: *std.Random.IoSource) Random {
+        return .{ .ptr = source, .vtable = &production_random_vtable };
     }
 
-    /// Disabled production fault hook.
-    ///
-    /// The error union matches `SimulationEnv.buggify`, whose trace write can
-    /// fail, so generic call sites can use the same `try env.buggify(...)`
-    /// shape in both modes. This should still fold away in optimized builds.
-    pub fn buggify(_: *ProductionEnv, comptime hook: anytype, rate: BuggifyRate) !bool {
-        _ = hookName(hook);
-        _ = rate;
-        return comptime false;
-    }
-};
-
-/// Simulation environment backed by a `World`.
-pub const SimulationEnv = struct {
-    world: *World,
-    disk_authority: ?*disk_module.Disk = null,
-
-    pub const Options = struct {
-        disk: ?*disk_module.Disk = null,
+    const world_random_vtable: VTable = .{
+        .random_u64 = worldRandomU64,
+        .boolean = worldRandomBool,
+        .int_less_than_u32 = worldRandomIntLessThanU32,
+        .int_less_than_u64 = worldRandomIntLessThanU64,
     };
 
-    /// Construct a simulation environment from a world and optional authorities.
-    pub fn init(world: *World, options: Options) SimulationEnv {
-        return .{ .world = world, .disk_authority = options.disk };
+    const production_random_vtable: VTable = .{
+        .random_u64 = productionRandomU64,
+        .boolean = productionRandomBool,
+        .int_less_than_u32 = productionRandomIntLessThanU32,
+        .int_less_than_u64 = productionRandomIntLessThanU64,
+    };
+
+    fn worldRandom(ptr: *anyopaque) *World {
+        return @ptrCast(@alignCast(ptr));
     }
 
-    /// Return the world's simulated clock authority.
-    pub fn clock(self: *SimulationEnv) *clock_module.SimClock {
-        return self.world.clock();
+    fn productionRandom(ptr: *anyopaque) *std.Random.IoSource {
+        return @ptrCast(@alignCast(ptr));
     }
 
-    /// Return the world's traced random authority.
-    pub fn random(self: *SimulationEnv) World.TracedRandom {
-        return self.world.tracedRandom();
+    fn worldRandomU64(ptr: *anyopaque) anyerror!u64 {
+        return worldRandom(ptr).randomU64();
     }
 
-    /// Return the app-facing disk authority.
-    ///
-    /// Simulator-control operations such as `setFaults`, `crash`, `restart`,
-    /// and `corruptSector` stay on the owned `mar.Disk` handle, not on the
-    /// environment view passed to application code.
-    pub fn disk(self: *SimulationEnv) SimulationEnvError!SimulationDisk {
-        return .{ .authority = self.disk_authority orelse return error.MissingDisk };
+    fn worldRandomBool(ptr: *anyopaque) anyerror!bool {
+        return worldRandom(ptr).randomBool();
+    }
+
+    fn worldRandomIntLessThanU32(ptr: *anyopaque, less_than: u32) anyerror!u32 {
+        return worldRandom(ptr).randomIntLessThan(u32, less_than);
+    }
+
+    fn worldRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) anyerror!u64 {
+        return worldRandom(ptr).randomIntLessThan(u64, less_than);
+    }
+
+    fn productionRandomU64(ptr: *anyopaque) anyerror!u64 {
+        return productionRandom(ptr).interface().int(u64);
+    }
+
+    fn productionRandomBool(ptr: *anyopaque) anyerror!bool {
+        return productionRandom(ptr).interface().boolean();
+    }
+
+    fn productionRandomIntLessThanU32(ptr: *anyopaque, less_than: u32) anyerror!u32 {
+        return productionRandom(ptr).interface().intRangeLessThan(u32, 0, less_than);
+    }
+
+    fn productionRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) anyerror!u64 {
+        return productionRandom(ptr).interface().intRangeLessThan(u64, 0, less_than);
+    }
+};
+
+pub const Tracer = struct {
+    world: ?*World = null,
+
+    pub fn none() Tracer {
+        return .{};
+    }
+
+    pub fn fromWorld(world: *World) Tracer {
+        return .{ .world = world };
+    }
+
+    pub fn record(self: Tracer, comptime fmt: []const u8, args: anytype) !void {
+        if (self.world) |world| {
+            try world.record(fmt, args);
+        }
+    }
+};
+
+pub const Env = struct {
+    disk: disk_module.Disk,
+    clock: Clock,
+    random: Random,
+    tracer: Tracer,
+    buggify_enabled: bool = false,
+
+    pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void {
+        try self.tracer.record(fmt, args);
     }
 
     /// Draw and trace a simulation-only fault hook.
@@ -153,47 +235,35 @@ pub const SimulationEnv = struct {
     /// User code places these hooks at domain-specific fault points. The
     /// simulator owns the randomness and records the decision so failures are
     /// replayable. Production envs always return false.
-    pub fn buggify(self: *SimulationEnv, comptime hook: anytype, rate: BuggifyRate) !bool {
+    pub fn buggify(self: Env, comptime hook: anytype, rate: BuggifyRate) !bool {
+        if (!self.buggify_enabled) {
+            _ = hookName(hook);
+            return false;
+        }
         try rate.validate();
 
-        const roll = try self.world.randomIntLessThan(u32, rate.denominator);
+        const roll = try self.random.intLessThan(u32, rate.denominator);
         const fired = roll < rate.numerator;
-        try self.world.record(
+        try self.record(
             "buggify hook={s} rate={}/{} roll={} fired={}",
             .{ hookName(hook), rate.numerator, rate.denominator, roll, fired },
         );
         return fired;
     }
+};
 
-    /// Advance the backing world by one simulation tick.
-    pub fn tick(self: *SimulationEnv) !void {
+pub const AppEnv = Env;
+
+pub const SimControl = struct {
+    disk: disk_module.DiskControl,
+    world: *World,
+
+    pub fn tick(self: SimControl) !void {
         try self.world.tick();
     }
 
-    /// Advance the backing world by a duration measured in nanoseconds.
-    pub fn runFor(self: *SimulationEnv, duration_ns: clock_module.Duration) !void {
+    pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
         try self.world.runFor(duration_ns);
-    }
-
-    /// Record one trace event through the backing world.
-    pub fn record(self: *const SimulationEnv, comptime fmt: []const u8, args: anytype) !void {
-        try self.world.record(fmt, args);
-    }
-};
-
-pub const SimulationDisk = struct {
-    authority: *disk_module.Disk,
-
-    pub fn read(self: SimulationDisk, options: disk_module.Disk.Read) disk_module.DiskError!void {
-        try self.authority.read(options);
-    }
-
-    pub fn write(self: SimulationDisk, options: disk_module.Disk.Write) disk_module.DiskError!void {
-        try self.authority.write(options);
-    }
-
-    pub fn sync(self: SimulationDisk, options: disk_module.Disk.Sync) disk_module.DiskError!void {
-        try self.authority.sync(options);
     }
 };
 
@@ -205,66 +275,57 @@ fn hookName(comptime hook: anytype) []const u8 {
     };
 }
 
-test "env: comptime selector chooses implementation" {
-    try std.testing.expectEqual(ProductionEnv, Env(.production));
-    try std.testing.expectEqual(SimulationEnv, Env(.simulation));
-}
-
-test "env: simulation routes through world authorities" {
+test "env: simulation routes through world capabilities" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world, .{});
-    try env.tick();
-    _ = try env.random().intLessThan(u64, 100);
+    const sim = try world.simulate(.{});
+    try sim.control.tick();
+    _ = try sim.env.random.intLessThan(u64, 100);
 
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), env.clock().now());
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), sim.env.clock.now());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
 }
 
-test "env: simulation disk requires an attached authority" {
+test "env: simulation exposes app-facing disk operations" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world, .{});
-    try std.testing.expectError(error.MissingDisk, env.disk());
-}
-
-test "env: simulation exposes app-facing disk operations" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var disk_authority = try disk_module.Disk.init(&world, .{
+    const sim = try world.simulate(.{ .disk = .{
         .sector_size = 4,
-        .min_latency_ns = 10,
-    });
-    defer disk_authority.deinit();
-
-    var env = SimulationEnv.init(&world, .{ .disk = &disk_authority });
-    try (try env.disk()).write(.{
+        .min_latency_ns = 1,
+    } });
+    try sim.env.disk.write(.{
         .path = "wal.log",
         .offset = 0,
         .bytes = "abcd",
     });
 
     var buffer = [_]u8{0} ** 4;
-    try (try env.disk()).read(.{
+    try sim.env.disk.read(.{
         .path = "wal.log",
         .offset = 0,
         .buffer = &buffer,
     });
 
     try std.testing.expectEqualStrings("abcd", &buffer);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.write op=0 path=wal.log offset=0 len=4 status=ok latency_ns=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=ok latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.write op=0 path=wal.log offset=0 len=4 status=ok latency_ns=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=ok latency_ns=1") != null);
 }
 
 test "env: production exposes production authorities" {
-    var env = ProductionEnv.init(.{});
+    var clock: clock_module.ProductionClock = .init();
+    var source: std.Random.IoSource = .{ .io = std.Options.debug_io };
+    const env: Env = .{
+        .disk = undefined,
+        .clock = .fromProduction(&clock),
+        .random = .fromProduction(&source),
+        .tracer = .none(),
+    };
 
-    _ = env.clock().now();
-    _ = try env.random().intLessThan(u8, 10);
+    _ = env.clock.now();
+    _ = try env.random.intLessThan(u8, 10);
     try std.testing.expect(!try env.buggify(.drop_packet, .percent(50)));
 }
 
@@ -272,8 +333,8 @@ test "env: simulation buggify is traced" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world, .{});
-    _ = try env.buggify(.drop_packet, .percent(20));
+    const sim = try world.simulate(.{});
+    _ = try sim.env.buggify(.drop_packet, .percent(20));
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u32 less_than=100") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet rate=20/100 roll=") != null);
@@ -285,8 +346,8 @@ test "env: buggify accepts typed enum hooks" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world, .{});
-    _ = try env.buggify(Hook.drop_packet, .percent(20));
+    const sim = try world.simulate(.{});
+    _ = try sim.env.buggify(Hook.drop_packet, .percent(20));
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet") != null);
 }
@@ -295,25 +356,25 @@ test "env: buggify supports always and never rates" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world, .{});
+    const sim = try world.simulate(.{});
 
-    try std.testing.expect(try env.buggify(.always_fault, .always()));
-    try std.testing.expect(!try env.buggify(.never_fault, .never()));
+    try std.testing.expect(try sim.env.buggify(.always_fault, .always()));
+    try std.testing.expect(!try sim.env.buggify(.never_fault, .never()));
 }
 
 test "env: simulation buggify rejects invalid runtime rates" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var env = SimulationEnv.init(&world, .{});
+    const sim = try world.simulate(.{});
 
     try std.testing.expectError(
         error.InvalidRate,
-        env.buggify(.bad_rate, .{ .numerator = 1, .denominator = 0 }),
+        sim.env.buggify(.bad_rate, .{ .numerator = 1, .denominator = 0 }),
     );
     try std.testing.expectError(
         error.InvalidRate,
-        env.buggify(.bad_rate, .{ .numerator = 2, .denominator = 1 }),
+        sim.env.buggify(.bad_rate, .{ .numerator = 2, .denominator = 1 }),
     );
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") == null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=bad_rate") == null);

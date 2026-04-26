@@ -84,6 +84,29 @@ pub fn runWithState(
     );
 }
 
+/// Run a stateful scenario with fallible initialization and world-owned teardown.
+///
+/// Use this when state initialization can fail, but any simulator resources it
+/// creates are owned by `World` through `world.simulate`.
+pub fn runWithStateInit(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    comptime State: type,
+    comptime init_state: fn (*World) anyerror!State,
+    comptime scenario: fn (*State) anyerror!void,
+    comptime state_checks: []const StateCheck(State),
+) RunError!RunReport {
+    return runTwiceWithStateLifecycle(
+        allocator,
+        options,
+        State,
+        init_state,
+        noopStateDeinit(State),
+        scenario,
+        state_checks,
+    );
+}
+
 /// Run a stateful scenario with fallible initialization and explicit teardown.
 ///
 /// `init_state` and `deinit_state` are called once per replay attempt. Init,
@@ -655,11 +678,12 @@ test "run: check failures preserve partial trace and check name" {
 }
 
 const CounterState = struct {
-    env: @import("env.zig").SimulationEnv,
+    env: @import("env.zig").AppEnv,
     value: u8 = 0,
 
     fn init(world: *World) CounterState {
-        return .{ .env = .init(world, .{}) };
+        const sim = world.simulate(.{}) catch unreachable;
+        return .{ .env = sim.env };
     }
 };
 
@@ -733,11 +757,12 @@ test "runWithState: check failures preserve partial trace and check name" {
 var lifecycle_deinit_count: u8 = 0;
 
 const LifecycleState = struct {
-    env: @import("env.zig").SimulationEnv,
+    env: @import("env.zig").AppEnv,
     value: u8 = 0,
 
     fn init(world: *World) !LifecycleState {
-        return .{ .env = .init(world, .{}) };
+        const sim = try world.simulate(.{});
+        return .{ .env = sim.env };
     }
 
     fn deinit(_: *LifecycleState) void {

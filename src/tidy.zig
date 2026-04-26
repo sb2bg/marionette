@@ -44,7 +44,7 @@ pub const Allow = struct {
 // named bans, clear replacements, narrow allowlist entries, and tests for each
 // rule shape. Marionette should stay focused on deterministic-simulation hazards first.
 pub const default_patterns = [_]Pattern{
-    .{ .needle = "std.time", .reason = "use ProductionEnv, SimulationEnv, or World.clock()", .match = .prefix },
+    .{ .needle = "std.time", .reason = "use AppEnv.clock or World.clock()", .match = .prefix },
     .{ .needle = "std.Thread", .reason = "simulated components must be single-threaded", .match = .prefix },
     .{ .needle = "std.crypto.random", .reason = "use seeded Marionette randomness", .match = .prefix },
     .{ .needle = "std.fs.cwd", .reason = "route filesystem access through Marionette disk authority" },

@@ -93,7 +93,7 @@ const conflict_tags = [_][]const u8{
 
 /// Run the correct replicated-register scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithState(
+    var report = try mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -121,7 +121,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 /// Run a deliberately buggy scenario. Tests use this to prove the checker
 /// catches divergent committed state without making the normal suite fail.
 pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runWithState(
+    return mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -139,7 +139,7 @@ pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport 
 
 /// Run a scenario that writes through a partition and return an owned trace.
 pub fn runPartitionScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithState(
+    var report = try mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -166,7 +166,7 @@ pub fn runPartitionScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 
 /// Run a same-version conflict scenario and return an owned trace.
 pub fn runConflictScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithState(
+    var report = try mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -294,7 +294,8 @@ const Simulation = mar.UnstableNetworkSimulation(MessagePayload, network_options
 const Network = Simulation.PacketCore;
 
 const Cluster = struct {
-    env: mar.SimulationEnv,
+    env: mar.AppEnv,
+    control: mar.SimControl,
     replicas: [replica_count]Replica,
     sim: Simulation,
 
@@ -306,9 +307,11 @@ const Cluster = struct {
         retry_limit: u8 = 1,
     };
 
-    fn init(world: *mar.World) Cluster {
+    fn init(world: *mar.World) !Cluster {
+        const sim_env = try world.simulate(.{});
         return .{
-            .env = mar.SimulationEnv.init(world, .{}),
+            .env = sim_env.env,
+            .control = sim_env.control,
             .replicas = [_]Replica{.{}} ** replica_count,
             .sim = Simulation.init(world),
         };

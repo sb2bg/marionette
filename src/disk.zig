@@ -1,4 +1,4 @@
-//! Deterministic in-memory disk authority.
+//! Deterministic in-memory disk simulator and disk capabilities.
 //!
 //! Logical files, sector-aligned reads/writes, deterministic latency,
 //! operation ids, trace events, replayable faults, and crash/restart.
@@ -36,27 +36,93 @@ pub const DiskFaultOptions = struct {
 };
 
 pub const Disk = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const Read = DiskRead;
+    pub const Write = DiskWrite;
+    pub const Sync = DiskSync;
+
+    pub const VTable = struct {
+        read: *const fn (*anyopaque, Read) anyerror!void,
+        write: *const fn (*anyopaque, Write) anyerror!void,
+        sync: *const fn (*anyopaque, Sync) anyerror!void,
+    };
+
+    pub fn read(self: Disk, options: Read) !void {
+        try self.vtable.read(self.ptr, options);
+    }
+
+    pub fn write(self: Disk, options: Write) !void {
+        try self.vtable.write(self.ptr, options);
+    }
+
+    pub fn sync(self: Disk, options: Sync) !void {
+        try self.vtable.sync(self.ptr, options);
+    }
+};
+
+pub const DiskControl = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        set_faults: *const fn (*anyopaque, DiskFaultOptions) anyerror!void,
+        corrupt_sector: *const fn (*anyopaque, []const u8, u64) anyerror!void,
+        crash: *const fn (*anyopaque, DiskCrash) anyerror!void,
+        restart: *const fn (*anyopaque, DiskRestart) anyerror!void,
+        disk: *const fn (*anyopaque) Disk,
+    };
+
+    pub fn setFaults(self: DiskControl, faults: DiskFaultOptions) !void {
+        try self.vtable.set_faults(self.ptr, faults);
+    }
+
+    pub fn corruptSector(self: DiskControl, path: []const u8, offset: u64) !void {
+        try self.vtable.corrupt_sector(self.ptr, path, offset);
+    }
+
+    pub fn crash(self: DiskControl, options: DiskCrash) !void {
+        try self.vtable.crash(self.ptr, options);
+    }
+
+    pub fn restart(self: DiskControl, options: DiskRestart) !void {
+        try self.vtable.restart(self.ptr, options);
+    }
+
+    pub fn disk(self: DiskControl) Disk {
+        return self.vtable.disk(self.ptr);
+    }
+};
+
+pub const DiskRead = struct {
+    path: []const u8,
+    offset: u64,
+    buffer: []u8,
+};
+
+pub const DiskWrite = struct {
+    path: []const u8,
+    offset: u64,
+    bytes: []const u8,
+};
+
+pub const DiskSync = struct {
+    path: []const u8,
+};
+
+pub const DiskCrash = struct {};
+
+pub const DiskRestart = struct {};
+
+pub const SimDisk = struct {
     const Self = @This();
 
-    pub const Read = struct {
-        path: []const u8,
-        offset: u64,
-        buffer: []u8,
-    };
-
-    pub const Write = struct {
-        path: []const u8,
-        offset: u64,
-        bytes: []const u8,
-    };
-
-    pub const Sync = struct {
-        path: []const u8,
-    };
-
-    pub const Crash = struct {};
-
-    pub const Restart = struct {};
+    pub const Read = DiskRead;
+    pub const Write = DiskWrite;
+    pub const Sync = DiskSync;
+    pub const Crash = DiskCrash;
+    pub const Restart = DiskRestart;
 
     const File = struct {
         path: []u8,
@@ -110,6 +176,14 @@ pub const Disk = struct {
         };
     }
 
+    pub fn disk(self: *Self) Disk {
+        return .{ .ptr = self, .vtable = &disk_vtable };
+    }
+
+    pub fn control(self: *Self) DiskControl {
+        return .{ .ptr = self, .vtable = &control_vtable };
+    }
+
     pub fn deinit(self: *Self) void {
         for (self.files.items) |*file| file.deinit(self.world.allocator);
         self.files.deinit(self.world.allocator);
@@ -118,7 +192,7 @@ pub const Disk = struct {
         self.* = undefined;
     }
 
-    pub fn setFaults(self: *Self, faults: DiskFaultOptions) DiskError!void {
+    fn setFaults(self: *Self, faults: DiskFaultOptions) DiskError!void {
         try validateFaultRate(faults.read_error_rate);
         try validateFaultRate(faults.write_error_rate);
         try validateFaultRate(faults.corrupt_read_rate);
@@ -127,7 +201,7 @@ pub const Disk = struct {
         self.faults = faults;
     }
 
-    pub fn corruptSector(self: *Self, path: []const u8, offset: u64) DiskError!void {
+    fn corruptSector(self: *Self, path: []const u8, offset: u64) DiskError!void {
         try self.validatePath(path);
         try self.validateRange(offset, @intCast(self.options.sector_size));
 
@@ -142,7 +216,7 @@ pub const Disk = struct {
         });
     }
 
-    pub fn read(self: *Self, options: Read) DiskError!void {
+    fn read(self: *Self, options: Read) DiskError!void {
         try self.validatePath(options.path);
         try self.validateRange(options.offset, options.buffer.len);
         try self.ensureRunning();
@@ -188,7 +262,7 @@ pub const Disk = struct {
         );
     }
 
-    pub fn write(self: *Self, options: Write) DiskError!void {
+    fn write(self: *Self, options: Write) DiskError!void {
         try self.validatePath(options.path);
         try self.validateRange(options.offset, options.bytes.len);
         try self.ensureRunning();
@@ -221,7 +295,7 @@ pub const Disk = struct {
         );
     }
 
-    pub fn sync(self: *Self, options: Sync) DiskError!void {
+    fn sync(self: *Self, options: Sync) DiskError!void {
         try self.validatePath(options.path);
         try self.ensureRunning();
 
@@ -238,7 +312,7 @@ pub const Disk = struct {
         });
     }
 
-    pub fn crash(self: *Self, _: Crash) DiskError!void {
+    fn crash(self: *Self, _: Crash) DiskError!void {
         try self.ensureRunning();
 
         const pending_count = self.pending_writes.items.len;
@@ -285,7 +359,7 @@ pub const Disk = struct {
         });
     }
 
-    pub fn restart(self: *Self, _: Restart) DiskError!void {
+    fn restart(self: *Self, _: Restart) DiskError!void {
         self.crashed = false;
         try self.world.recordFields("disk.restart", &.{
             traceField("status", .{ .literal = "ok" }),
@@ -582,13 +656,63 @@ pub const Disk = struct {
             traceField("latency_ns", .{ .uint = latency_ns }),
         });
     }
+
+    const disk_vtable: Disk.VTable = .{
+        .read = diskRead,
+        .write = diskWrite,
+        .sync = diskSync,
+    };
+
+    const control_vtable: DiskControl.VTable = .{
+        .set_faults = controlSetFaults,
+        .corrupt_sector = controlCorruptSector,
+        .crash = controlCrash,
+        .restart = controlRestart,
+        .disk = controlDisk,
+    };
+
+    fn fromOpaque(ptr: *anyopaque) *Self {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn diskRead(ptr: *anyopaque, options: Disk.Read) anyerror!void {
+        try fromOpaque(ptr).read(options);
+    }
+
+    fn diskWrite(ptr: *anyopaque, options: Disk.Write) anyerror!void {
+        try fromOpaque(ptr).write(options);
+    }
+
+    fn diskSync(ptr: *anyopaque, options: Disk.Sync) anyerror!void {
+        try fromOpaque(ptr).sync(options);
+    }
+
+    fn controlSetFaults(ptr: *anyopaque, faults: DiskFaultOptions) anyerror!void {
+        try fromOpaque(ptr).setFaults(faults);
+    }
+
+    fn controlCorruptSector(ptr: *anyopaque, path: []const u8, offset: u64) anyerror!void {
+        try fromOpaque(ptr).corruptSector(path, offset);
+    }
+
+    fn controlCrash(ptr: *anyopaque, options: DiskCrash) anyerror!void {
+        try fromOpaque(ptr).crash(options);
+    }
+
+    fn controlRestart(ptr: *anyopaque, options: DiskRestart) anyerror!void {
+        try fromOpaque(ptr).restart(options);
+    }
+
+    fn controlDisk(ptr: *anyopaque) Disk {
+        return fromOpaque(ptr).disk();
+    }
 };
 
 test "disk: writes and reads sector-aligned logical files" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
@@ -617,7 +741,7 @@ test "disk: sync consumes operation ids and escapes logical paths" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{});
+    var disk = try SimDisk.init(&world, .{});
     defer disk.deinit();
 
     try disk.sync(.{ .path = "dir/wal 1.log" });
@@ -631,14 +755,14 @@ test "disk: rejects invalid paths, ranges, and latency options" {
 
     try std.testing.expectError(
         error.InvalidAlignment,
-        Disk.init(&world, .{ .sector_size = 0 }),
+        SimDisk.init(&world, .{ .sector_size = 0 }),
     );
     try std.testing.expectError(
         error.InvalidDuration,
-        Disk.init(&world, .{ .min_latency_ns = 11 }),
+        SimDisk.init(&world, .{ .min_latency_ns = 11 }),
     );
 
-    var disk = try Disk.init(&world, .{ .sector_size = 4, .min_latency_ns = 10 });
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4, .min_latency_ns = 10 });
     defer disk.deinit();
 
     var buffer = [_]u8{0} ** 4;
@@ -665,13 +789,13 @@ test "disk: latency jitter is deterministic and traced" {
     var b = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
     defer b.deinit();
 
-    var disk_a = try Disk.init(&a, .{
+    var disk_a = try SimDisk.init(&a, .{
         .sector_size = 4,
         .min_latency_ns = 10,
         .latency_jitter_ns = 20,
     });
     defer disk_a.deinit();
-    var disk_b = try Disk.init(&b, .{
+    var disk_b = try SimDisk.init(&b, .{
         .sector_size = 4,
         .min_latency_ns = 10,
         .latency_jitter_ns = 20,
@@ -690,20 +814,20 @@ test "disk: write errors do not mutate durable sectors" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
     defer disk.deinit();
 
-    try disk.setFaults(.{ .write_error_rate = .always() });
+    try disk.control().setFaults(.{ .write_error_rate = .always() });
     try std.testing.expectError(error.WriteError, disk.write(.{
         .path = "wal.log",
         .offset = 0,
         .bytes = "zzzz",
     }));
 
-    try disk.setFaults(.{});
+    try disk.control().setFaults(.{});
     var buffer = [_]u8{0xff} ** 4;
     try disk.read(.{
         .path = "wal.log",
@@ -721,14 +845,14 @@ test "disk: read errors return before filling buffer" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
     defer disk.deinit();
 
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
-    try disk.setFaults(.{ .read_error_rate = .always() });
+    try disk.control().setFaults(.{ .read_error_rate = .always() });
 
     var buffer = [_]u8{ 'x', 'x', 'x', 'x' };
     try std.testing.expectError(error.ReadError, disk.read(.{
@@ -746,14 +870,14 @@ test "disk: corrupt read faults do not mutate durable sectors" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
     defer disk.deinit();
 
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
-    try disk.setFaults(.{ .corrupt_read_rate = .always() });
+    try disk.control().setFaults(.{ .corrupt_read_rate = .always() });
 
     var corrupt_buffer = [_]u8{0} ** 4;
     try disk.read(.{
@@ -763,7 +887,7 @@ test "disk: corrupt read faults do not mutate durable sectors" {
     });
     try std.testing.expect(!std.mem.eql(u8, "abcd", &corrupt_buffer));
 
-    try disk.setFaults(.{});
+    try disk.control().setFaults(.{});
     var clean_buffer = [_]u8{0} ** 4;
     try disk.read(.{
         .path = "wal.log",
@@ -781,14 +905,14 @@ test "disk: scripted sector corruption persists across reads" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
     defer disk.deinit();
 
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
-    try disk.corruptSector("wal.log", 0);
+    try disk.control().corruptSector("wal.log", 0);
 
     var buffer = [_]u8{0} ** 4;
     try disk.read(.{
@@ -806,13 +930,14 @@ test "disk: rejects invalid fault rates" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{});
+    var disk = try SimDisk.init(&world, .{});
     defer disk.deinit();
+    const control = disk.control();
 
-    try std.testing.expectError(error.InvalidRate, disk.setFaults(.{
+    try std.testing.expectError(error.InvalidRate, control.setFaults(.{
         .read_error_rate = .{ .numerator = 1, .denominator = 0 },
     }));
-    try std.testing.expectError(error.InvalidRate, disk.setFaults(.{
+    try std.testing.expectError(error.InvalidRate, control.setFaults(.{
         .write_error_rate = .{ .numerator = 2, .denominator = 1 },
     }));
 }
@@ -823,13 +948,13 @@ test "disk: fault traces are deterministic for the same seed" {
     var b = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
     defer b.deinit();
 
-    var disk_a = try Disk.init(&a, .{
+    var disk_a = try SimDisk.init(&a, .{
         .sector_size = 4,
         .min_latency_ns = 10,
         .latency_jitter_ns = 20,
     });
     defer disk_a.deinit();
-    var disk_b = try Disk.init(&b, .{
+    var disk_b = try SimDisk.init(&b, .{
         .sector_size = 4,
         .min_latency_ns = 10,
         .latency_jitter_ns = 20,
@@ -841,8 +966,8 @@ test "disk: fault traces are deterministic for the same seed" {
         .write_error_rate = .oneIn(2),
         .corrupt_read_rate = .oneIn(2),
     };
-    try disk_a.setFaults(faults);
-    try disk_b.setFaults(faults);
+    try disk_a.control().setFaults(faults);
+    try disk_b.control().setFaults(faults);
 
     disk_a.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" }) catch |err| switch (err) {
         error.WriteError => {},
@@ -872,7 +997,7 @@ test "disk: sync makes pending writes survive crash" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
@@ -880,9 +1005,9 @@ test "disk: sync makes pending writes survive crash" {
 
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk.sync(.{ .path = "wal.log" });
-    try disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try disk.crash(.{});
-    try disk.restart(.{});
+    try disk.control().setFaults(.{ .crash_lost_write_rate = .always() });
+    try disk.control().crash(.{});
+    try disk.control().restart(.{});
 
     var buffer = [_]u8{0} ** 4;
     try disk.read(.{
@@ -900,16 +1025,16 @@ test "disk: crash can lose unflushed pending writes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
     defer disk.deinit();
 
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
-    try disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try disk.crash(.{});
-    try disk.restart(.{});
+    try disk.control().setFaults(.{ .crash_lost_write_rate = .always() });
+    try disk.control().crash(.{});
+    try disk.control().restart(.{});
 
     var buffer = [_]u8{0xff} ** 4;
     try disk.read(.{
@@ -928,7 +1053,7 @@ test "disk: crash can tear unflushed pending writes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
@@ -937,9 +1062,9 @@ test "disk: crash can tear unflushed pending writes" {
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "wxyz" });
     try disk.sync(.{ .path = "wal.log" });
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
-    try disk.setFaults(.{ .crash_torn_write_rate = .always() });
-    try disk.crash(.{});
-    try disk.restart(.{});
+    try disk.control().setFaults(.{ .crash_torn_write_rate = .always() });
+    try disk.control().crash(.{});
+    try disk.control().restart(.{});
 
     var buffer = [_]u8{0} ** 4;
     try disk.read(.{
@@ -958,13 +1083,13 @@ test "disk: crashed disk rejects operations until restart" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    var disk = try Disk.init(&world, .{
+    var disk = try SimDisk.init(&world, .{
         .sector_size = 4,
         .min_latency_ns = 10,
     });
     defer disk.deinit();
 
-    try disk.crash(.{});
+    try disk.control().crash(.{});
 
     var buffer = [_]u8{0} ** 4;
     try std.testing.expectError(error.DiskCrashed, disk.read(.{
@@ -979,7 +1104,7 @@ test "disk: crashed disk rejects operations until restart" {
     }));
     try std.testing.expectError(error.DiskCrashed, disk.sync(.{ .path = "wal.log" }));
 
-    try disk.restart(.{});
+    try disk.control().restart(.{});
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
 }
 
@@ -989,13 +1114,13 @@ test "disk: crash traces are deterministic for the same seed" {
     var b = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
     defer b.deinit();
 
-    var disk_a = try Disk.init(&a, .{
+    var disk_a = try SimDisk.init(&a, .{
         .sector_size = 4,
         .min_latency_ns = 10,
         .latency_jitter_ns = 20,
     });
     defer disk_a.deinit();
-    var disk_b = try Disk.init(&b, .{
+    var disk_b = try SimDisk.init(&b, .{
         .sector_size = 4,
         .min_latency_ns = 10,
         .latency_jitter_ns = 20,
@@ -1006,13 +1131,13 @@ test "disk: crash traces are deterministic for the same seed" {
         .crash_lost_write_rate = .oneIn(2),
         .crash_torn_write_rate = .oneIn(2),
     };
-    try disk_a.setFaults(faults);
-    try disk_b.setFaults(faults);
+    try disk_a.control().setFaults(faults);
+    try disk_b.control().setFaults(faults);
 
     try disk_a.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk_b.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
-    try disk_a.crash(.{});
-    try disk_b.crash(.{});
+    try disk_a.control().crash(.{});
+    try disk_b.control().crash(.{});
 
     try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
 }

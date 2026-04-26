@@ -2,7 +2,8 @@
 //!
 //! This is not a production KV store. It is a compact durability example for
 //! `mar.Disk`: fixed-size WAL records, sync as the durability boundary,
-//! crash/restart, corrupt reads, and a deliberately buggy recovery path.
+//! crash/restart through harness control, corrupt reads, and a deliberately
+//! buggy recovery path.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -42,13 +43,13 @@ const buggy_tags = [_][]const u8{
 
 const attributes = mar.runAttributesFrom(profile);
 
-const checks = [_]mar.StateCheck(Store){
+const checks = [_]mar.StateCheck(Harness){
     .{ .name = "synced records recover and unsynced records are rejected", .check = recoveredStateIsSafe },
 };
 
 /// Run the correct WAL recovery scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithStateLifecycle(
+    var report = try mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -57,9 +58,8 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
             .tags = &tags,
             .attributes = &attributes,
         },
-        Store,
-        Store.init,
-        Store.deinit,
+        Harness,
+        Harness.init,
         scenario,
         &checks,
     );
@@ -76,7 +76,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 
 /// Run a deliberately buggy recovery scenario.
 pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runWithStateLifecycle(
+    return mar.runWithStateInit(
         allocator,
         .{
             .seed = seed,
@@ -85,37 +85,37 @@ pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport 
             .tags = &buggy_tags,
             .attributes = &attributes,
         },
-        Store,
-        Store.init,
-        Store.deinit,
+        Harness,
+        Harness.init,
         buggyScenario,
         &checks,
     );
 }
 
-fn scenario(store: *Store) !void {
-    try store.put(profile.committed_key, profile.committed_value, .sync);
-    try store.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try store.put(profile.volatile_key, profile.volatile_value, .no_sync);
-    try store.disk.crash(.{});
-    try store.disk.restart(.{});
-    try store.disk.corruptSector(wal_path, record_size);
-    try store.recover(.strict);
+fn scenario(harness: *Harness) !void {
+    try harness.store.put(profile.committed_key, profile.committed_value, .sync);
+    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try harness.store.put(profile.volatile_key, profile.volatile_value, .no_sync);
+    try harness.control.disk.crash(.{});
+    try harness.control.disk.restart(.{});
+    try harness.control.disk.corruptSector(wal_path, record_size);
+    try harness.store.recover(.strict);
 }
 
-fn buggyScenario(store: *Store) !void {
-    try store.put(profile.committed_key, profile.committed_value, .sync);
-    try store.disk.setFaults(.{ .crash_torn_write_rate = .always() });
-    try store.put(profile.volatile_key, profile.volatile_value, .no_sync);
-    try store.disk.crash(.{});
-    try store.disk.restart(.{});
-    try store.recover(.buggy_accept_magic_only);
+fn buggyScenario(harness: *Harness) !void {
+    try harness.store.put(profile.committed_key, profile.committed_value, .sync);
+    try harness.control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
+    try harness.store.put(profile.volatile_key, profile.volatile_value, .no_sync);
+    try harness.control.disk.crash(.{});
+    try harness.control.disk.restart(.{});
+    try harness.store.recover(.buggy_accept_magic_only);
 }
 
-fn recoveredStateIsSafe(store: *const Store) !void {
+fn recoveredStateIsSafe(harness: *const Harness) !void {
     const committed_key: u32 = @intCast(profile.committed_key);
     const committed_value: u32 = @intCast(profile.committed_value);
     const volatile_key: u32 = @intCast(profile.volatile_key);
+    const store = &harness.store;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
         try store.env.record("kv.invariant_violation reason=committed_missing_or_wrong", .{});
@@ -148,37 +148,36 @@ const Entry = struct {
     value: u32,
 };
 
-const Store = struct {
-    env: mar.SimulationEnv,
-    disk: *mar.Disk,
-    allocator: std.mem.Allocator,
+const Harness = struct {
+    store: KVStore,
+    control: mar.SimControl,
+
+    fn init(world: *mar.World) !Harness {
+        const sim = try world.simulate(.{ .disk = .{
+            .sector_size = record_size,
+            .min_latency_ns = ns_per_ms,
+        } });
+
+        return .{
+            .store = KVStore.init(sim.env),
+            .control = sim.control,
+        };
+    }
+};
+
+const KVStore = struct {
+    env: mar.AppEnv,
     next_offset: u64 = 0,
     recovered: [max_records]Entry = undefined,
     recovered_count: u8 = 0,
 
-    fn init(world: *mar.World) !Store {
-        const disk = try world.allocator.create(mar.Disk);
-        errdefer world.allocator.destroy(disk);
-
-        disk.* = try mar.Disk.init(world, .{
-            .sector_size = record_size,
-            .min_latency_ns = ns_per_ms,
-        });
-        errdefer disk.deinit();
-
+    fn init(env: mar.AppEnv) KVStore {
         return .{
-            .env = mar.SimulationEnv.init(world, .{ .disk = disk }),
-            .disk = disk,
-            .allocator = world.allocator,
+            .env = env,
         };
     }
 
-    fn deinit(self: *Store) void {
-        self.disk.deinit();
-        self.allocator.destroy(self.disk);
-    }
-
-    fn put(self: *Store, key_value: u64, value_value: u64, sync_mode: SyncMode) !void {
+    fn put(self: *KVStore, key_value: u64, value_value: u64, sync_mode: SyncMode) !void {
         const key: u32 = @intCast(key_value);
         const value: u32 = @intCast(value_value);
 
@@ -186,8 +185,7 @@ const Store = struct {
         encodeRecord(&bytes, .{ .key = key, .value = value });
 
         const offset = self.next_offset;
-        const disk = try self.env.disk();
-        try disk.write(.{
+        try self.env.disk.write(.{
             .path = wal_path,
             .offset = offset,
             .bytes = &bytes,
@@ -195,7 +193,7 @@ const Store = struct {
         self.next_offset += record_size;
 
         if (sync_mode == .sync) {
-            try disk.sync(.{ .path = wal_path });
+            try self.env.disk.sync(.{ .path = wal_path });
         }
 
         try self.env.record(
@@ -204,15 +202,14 @@ const Store = struct {
         );
     }
 
-    fn recover(self: *Store, mode: RecoveryMode) !void {
+    fn recover(self: *KVStore, mode: RecoveryMode) !void {
         self.recovered_count = 0;
 
         var index: u64 = 0;
-        const disk = try self.env.disk();
         while (index < max_records) : (index += 1) {
             const offset = index * record_size;
             var bytes = [_]u8{0} ** record_size;
-            try disk.read(.{
+            try self.env.disk.read(.{
                 .path = wal_path,
                 .offset = offset,
                 .buffer = &bytes,
@@ -232,7 +229,7 @@ const Store = struct {
         }
     }
 
-    fn countKey(self: *const Store, key: u32) u8 {
+    fn countKey(self: *const KVStore, key: u32) u8 {
         var count: u8 = 0;
         for (self.recovered[0..self.recovered_count]) |entry| {
             if (entry.key == key) count += 1;
@@ -240,7 +237,7 @@ const Store = struct {
         return count;
     }
 
-    fn valueFor(self: *const Store, key: u32) ?u32 {
+    fn valueFor(self: *const KVStore, key: u32) ?u32 {
         for (self.recovered[0..self.recovered_count]) |entry| {
             if (entry.key == key) return entry.value;
         }

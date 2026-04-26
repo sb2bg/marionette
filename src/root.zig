@@ -36,20 +36,38 @@ pub const UnstableNetworkError = @import("network.zig").NetworkError;
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
 
-/// Deterministic in-memory disk authority.
+/// App-facing disk capability.
 pub const Disk = disk_module.Disk;
 
-/// Configuration for one deterministic disk authority.
+/// Simulator-control disk capability.
+pub const DiskControl = disk_module.DiskControl;
+
+/// Deterministic in-memory disk simulator.
+pub const SimDisk = disk_module.SimDisk;
+
+/// Configuration for one deterministic disk simulator.
 pub const DiskOptions = disk_module.DiskOptions;
 
-/// Fault rates and corruption controls for one deterministic disk authority.
+/// Fault rates and corruption controls for one deterministic disk simulator.
 pub const DiskFaultOptions = disk_module.DiskFaultOptions;
 
-/// Errors returned by the deterministic disk authority.
+/// Errors returned by deterministic disk operations.
 pub const DiskError = disk_module.DiskError;
 
-/// Return the environment implementation for a comptime mode.
+/// Concrete app-facing environment capability bundle.
 pub const Env = env_module.Env;
+
+/// App-facing clock capability.
+pub const EnvClock = env_module.Clock;
+
+/// App-facing random capability.
+pub const EnvRandom = env_module.Random;
+
+/// App-facing trace capability.
+pub const Tracer = env_module.Tracer;
+
+/// Simulator-control capability bundle.
+pub const SimControl = env_module.SimControl;
 
 /// Probability that a BUGGIFY hook fires in simulation.
 pub const BuggifyRate = env_module.BuggifyRate;
@@ -57,20 +75,11 @@ pub const BuggifyRate = env_module.BuggifyRate;
 /// Errors returned by BUGGIFY runtime validation.
 pub const BuggifyError = env_module.BuggifyError;
 
-/// Production composition-root environment.
-pub const ProductionEnv = env_module.ProductionEnv;
+/// Concrete app-facing environment capability bundle.
+pub const AppEnv = env_module.AppEnv;
 
-/// Simulation composition-root environment backed by a `World`.
-pub const SimulationEnv = env_module.SimulationEnv;
-
-/// App-facing simulation disk authority exposed by `SimulationEnv.disk()`.
-pub const SimulationDisk = env_module.SimulationDisk;
-
-/// Errors returned by optional simulation environment authorities.
-pub const SimulationEnvError = env_module.SimulationEnvError;
-
-/// Production random view backed by host entropy.
-pub const ProductionRandom = env_module.ProductionRandom;
+/// Errors returned by app-facing environment authorities.
+pub const AppEnvError = env_module.AppEnvError;
 
 /// Seeded deterministic random number generator.
 pub const Random = @import("random.zig").Random;
@@ -148,6 +157,9 @@ pub const run = run_module.run;
 
 /// Run a stateful scenario twice with fresh state and compare traces.
 pub const runWithState = run_module.runWithState;
+
+/// Run a stateful scenario with fallible initialization and world-owned teardown.
+pub const runWithStateInit = run_module.runWithStateInit;
 
 /// Run a stateful scenario with fallible initialization and explicit teardown.
 pub const runWithStateLifecycle = run_module.runWithStateLifecycle;

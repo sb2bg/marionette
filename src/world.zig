@@ -7,6 +7,8 @@
 const std = @import("std");
 
 const clock_module = @import("clock.zig");
+const disk_module = @import("disk.zig");
+const env_module = @import("env.zig");
 const random_module = @import("random.zig");
 
 /// Errors returned while writing deterministic trace records.
@@ -69,7 +71,7 @@ pub fn writeEscapedTraceText(writer: anytype, bytes: []const u8, allow_empty: bo
 /// Container for deterministic simulation engine state.
 ///
 /// `World` owns the fake clock, seeded random stream, and trace log used by
-/// simulation tests. Application code should usually receive `SimulationEnv`
+/// simulation tests. Application code should usually receive `AppEnv`
 /// rather than `World` directly; `World` is the harness-owned engine.
 pub const World = struct {
     /// Allocator used for the trace log.
@@ -82,6 +84,13 @@ pub const World = struct {
     trace_log: std.ArrayList(u8),
     /// Next event index to write into the trace.
     event_index: u64,
+    /// Simulator resources owned by the world and torn down in reverse order.
+    teardowns: std.ArrayList(Teardown),
+
+    const Teardown = struct {
+        ptr: *anyopaque,
+        deinit: *const fn (*anyopaque, std.mem.Allocator) void,
+    };
 
     /// Configuration for a simulation world.
     pub const Options = struct {
@@ -124,6 +133,7 @@ pub const World = struct {
             .rng = .init(options.seed),
             .trace_log = .empty,
             .event_index = 0,
+            .teardowns = .empty,
         };
         errdefer world.deinit();
 
@@ -141,13 +151,68 @@ pub const World = struct {
 
     /// Release memory owned by the world.
     pub fn deinit(self: *World) void {
+        var index = self.teardowns.items.len;
+        while (index > 0) {
+            index -= 1;
+            const teardown = self.teardowns.items[index];
+            teardown.deinit(teardown.ptr, self.allocator);
+        }
+        self.teardowns.deinit(self.allocator);
         self.trace_log.deinit(self.allocator);
         self.* = undefined;
     }
 
+    pub const SimulateOptions = struct {
+        disk: disk_module.DiskOptions = .{},
+    };
+
+    pub const Simulation = struct {
+        env: env_module.AppEnv,
+        control: env_module.SimControl,
+    };
+
+    /// Build app and harness views over world-owned simulator resources.
+    pub fn simulate(self: *World, options: SimulateOptions) disk_module.DiskError!Simulation {
+        var disk_options = options.disk;
+        if (disk_options.min_latency_ns == clock_module.default_tick_ns and self.sim_clock.tick_ns != clock_module.default_tick_ns) {
+            disk_options.min_latency_ns = self.sim_clock.tick_ns;
+        }
+
+        const sim_disk = try self.allocator.create(disk_module.SimDisk);
+        errdefer self.allocator.destroy(sim_disk);
+
+        sim_disk.* = try disk_module.SimDisk.init(self, disk_options);
+        errdefer sim_disk.deinit();
+
+        try self.teardowns.append(self.allocator, .{
+            .ptr = sim_disk,
+            .deinit = deinitSimDisk,
+        });
+
+        return .{
+            .env = .{
+                .disk = sim_disk.disk(),
+                .clock = env_module.Clock.fromWorld(self),
+                .random = env_module.Random.fromWorld(self),
+                .tracer = env_module.Tracer.fromWorld(self),
+                .buggify_enabled = true,
+            },
+            .control = .{
+                .disk = sim_disk.control(),
+                .world = self,
+            },
+        };
+    }
+
+    fn deinitSimDisk(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const sim_disk: *disk_module.SimDisk = @ptrCast(@alignCast(ptr));
+        sim_disk.deinit();
+        allocator.destroy(sim_disk);
+    }
+
     /// Return the world's simulated clock.
     ///
-    /// Prefer `SimulationEnv.clock()` in application code. This is a
+    /// Prefer `AppEnv.clock` in application code. This is a
     /// low-level world authority for harnesses and env implementations.
     pub fn clock(self: *World) *clock_module.SimClock {
         return &self.sim_clock;
@@ -165,7 +230,7 @@ pub const World = struct {
 
     /// Return the traced random authority.
     ///
-    /// Prefer `SimulationEnv.random()` in application code. This is a
+    /// Prefer `AppEnv.random` in application code. This is a
     /// low-level world authority for harnesses and env implementations.
     pub fn tracedRandom(self: *World) TracedRandom {
         return .{ .world = self };
