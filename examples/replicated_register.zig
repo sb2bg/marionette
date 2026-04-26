@@ -294,7 +294,7 @@ const Simulation = mar.UnstableNetworkSimulation(MessagePayload, network_options
 const Network = Simulation.PacketCore;
 
 const Cluster = struct {
-    env: mar.AppEnv,
+    env: mar.Env,
     control: mar.SimControl,
     replicas: [replica_count]Replica,
     sim: Simulation,

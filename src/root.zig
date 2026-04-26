@@ -87,12 +87,6 @@ pub const BuggifyRate = env_module.BuggifyRate;
 /// Errors returned by BUGGIFY runtime validation.
 pub const BuggifyError = env_module.BuggifyError;
 
-/// Concrete app-facing environment capability bundle.
-pub const AppEnv = env_module.AppEnv;
-
-/// Errors returned by app-facing environment authorities.
-pub const AppEnvError = env_module.AppEnvError;
-
 /// Seeded deterministic random number generator.
 pub const Random = @import("random.zig").Random;
 

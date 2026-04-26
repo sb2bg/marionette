@@ -27,7 +27,7 @@ Phase 0 has:
 - `World`, which owns one simulated clock, one seeded PRNG, and one trace log
   as harness-owned simulation engine state.
 - `Clock(.production)` and `Clock(.simulation)`.
-- `AppEnv` / `Env`, one concrete app-facing bundle of disk, clock, random,
+- `Env`, one concrete app-facing bundle of disk, clock, random,
   and tracer capabilities.
 - `SimControl`, the harness-facing counterpart for simulator-only controls.
 - A seeded `Random` wrapper.

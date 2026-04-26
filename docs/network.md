@@ -113,7 +113,7 @@ queue is empty. The callback may enqueue more packets.
 
 This is a low-level primitive for examples and early scheduler work. Harness
 code may still touch `packetCore()` directly for send and delivery, but fault
-orchestration should go through `sim.network()`. A future `AppEnv.network` or
+orchestration should go through `sim.network()`. A future `Env.network` or
 node-scoped authority may wrap the packet core for application code.
 
 ## Topology

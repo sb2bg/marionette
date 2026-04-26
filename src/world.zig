@@ -71,8 +71,8 @@ pub fn writeEscapedTraceText(writer: anytype, bytes: []const u8, allow_empty: bo
 /// Container for deterministic simulation engine state.
 ///
 /// `World` owns the fake clock, seeded random stream, and trace log used by
-/// simulation tests. Application code should usually receive `AppEnv`
-/// rather than `World` directly; `World` is the harness-owned engine.
+/// simulation tests. Application code should usually receive `Env` rather than
+/// `World` directly; `World` is the harness-owned engine.
 pub const World = struct {
     /// Allocator used for the trace log.
     allocator: std.mem.Allocator,
@@ -147,7 +147,7 @@ pub const World = struct {
     };
 
     pub const Simulation = struct {
-        env: env_module.AppEnv,
+        env: env_module.Env,
         control: env_module.SimControl,
     };
 
@@ -187,7 +187,7 @@ pub const World = struct {
 
     /// Return the world's simulated clock.
     ///
-    /// Prefer `AppEnv.clock` in application code. This is a
+    /// Prefer `Env.clock` in application code. This is a
     /// low-level world authority for harnesses and env implementations.
     pub fn clock(self: *World) *clock_module.SimClock {
         return &self.sim_clock;

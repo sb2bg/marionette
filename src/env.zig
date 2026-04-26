@@ -18,8 +18,6 @@ pub const BuggifyError = error{
     InvalidRate,
 };
 
-pub const AppEnvError = error{};
-
 /// Probability that a BUGGIFY hook fires in simulation.
 pub const BuggifyRate = struct {
     numerator: u32,
@@ -299,8 +297,6 @@ pub const Env = struct {
         return fired;
     }
 };
-
-pub const AppEnv = Env;
 
 pub const SimControl = struct {
     disk: disk_module.DiskControl,

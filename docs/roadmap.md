@@ -51,8 +51,8 @@ The current disk surface is:
 - `mar.DiskControl`: harness-facing fault, scripted corruption, crash, and
   restart authority over the same `SimDisk` backing state.
 - `World.simulate(...)`: constructs world-owned simulator resources and
-  returns `{ env: AppEnv, control: SimControl }`.
-- `AppEnv.disk`: app-facing simulation disk view exposing only `read`,
+  returns `{ env: Env, control: SimControl }`.
+- `Env.disk`: app-facing simulation disk view exposing only `read`,
   `write`, and `sync`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
@@ -81,7 +81,7 @@ checker, time-travel debugging.
   crash/restart simulation.
 - `mar.DiskControl`: simulator-control disk capability.
 - `World.simulate`: world-owned simulator construction.
-- `AppEnv.disk`: app-facing simulation disk capability.
+- `Env.disk`: app-facing simulation disk capability.
 - Trace format with per-line validation (`isValidTracePayload`).
 - Trace summary renderer (`mar.summarize`, `Summary.writeSummary`).
 - Seed parser for decimal seeds and 40-character Git hashes.

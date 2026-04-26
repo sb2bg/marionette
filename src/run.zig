@@ -823,7 +823,7 @@ test "run: check failures preserve partial trace and check name" {
 }
 
 const CounterState = struct {
-    env: @import("env.zig").AppEnv,
+    env: @import("env.zig").Env,
     value: u8 = 0,
 
     fn init(world: *World) CounterState {
@@ -960,7 +960,7 @@ test "runWithState: check failures preserve partial trace and check name" {
 var lifecycle_deinit_count: u8 = 0;
 
 const LifecycleState = struct {
-    env: @import("env.zig").AppEnv,
+    env: @import("env.zig").Env,
     value: u8 = 0,
 
     fn init(world: *World) !LifecycleState {

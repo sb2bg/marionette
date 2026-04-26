@@ -104,7 +104,7 @@ try sim.network().heal();
 
 That is acceptable for Phase 0 because examples are still close to the
 simulation kernel. The important constraint is that fault orchestration is now
-separate from the packet core's send/delivery path. A later `AppEnv` network
+separate from the packet core's send/delivery path. A later `Env` network
 capability should wrap this again so examples stop depending on the
 unstable network simulator type directly.
 
@@ -124,12 +124,12 @@ stable enough to build on. The current rule is:
 
 ## Simulation Path
 
-`AppEnv.network` is also not implemented yet.
+`Env.network` is also not implemented yet.
 
 The likely simulation path is:
 
 ```text
-AppEnv.network
+Env.network
   -> app-facing node or endpoint authority
   -> simulator-owned scheduler/network state
   -> UnstableNetwork-like packet core
