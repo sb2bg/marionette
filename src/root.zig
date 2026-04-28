@@ -33,6 +33,9 @@ pub const NodeId = @import("network.zig").NodeId;
 /// Errors returned by unstable network runtime validation.
 pub const UnstableNetworkError = @import("network.zig").NetworkError;
 
+/// Errors returned by deterministic network runtime validation.
+pub const NetworkError = @import("network.zig").NetworkError;
+
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
 
@@ -110,8 +113,14 @@ pub const UnstableNetwork = @import("network.zig").UnstableNetwork;
 /// Unstable simulator wrapper that owns one deterministic network packet core.
 pub const UnstableNetworkSimulation = @import("network.zig").NetworkSimulation;
 
+/// Simulator wrapper that owns one deterministic network packet core.
+pub const NetworkSimulation = @import("network.zig").NetworkSimulation;
+
 /// Fixed topology and per-path capacity for one unstable network instance.
 pub const UnstableNetworkOptions = @import("network.zig").NetworkOptions;
+
+/// Fixed topology and per-path capacity for one network simulation.
+pub const NetworkOptions = @import("network.zig").NetworkOptions;
 
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;

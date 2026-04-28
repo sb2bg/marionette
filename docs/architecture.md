@@ -49,8 +49,8 @@ Phase 0 has:
   per-link queues, seeded packet loss, tick-aligned latency, process up/down
   state, directed link filters, simple partitions, and stable
   `(deliver_at, packet_id)` delivery order.
-- `mar.UnstableNetworkSimulation`, a small owner wrapper that separates
-  harness packet-core send/delivery from simulator-control fault operations.
+- `mar.NetworkSimulation`, a small owner wrapper that separates app-shaped
+  sends from simulator-control fault operations.
 - `mar.Disk`, an app-facing disk capability for `read`, `write`, and `sync`.
 - `mar.SimDisk`, a deterministic disk simulator with logical paths,
   sector-aligned reads/writes, sparse in-memory sectors, deterministic

@@ -341,11 +341,10 @@ disk.restart status=ok
 
 ## Network
 
-`mar.UnstableNetworkSimulation(Payload, options)` is the first
-network/scheduler sketch. It is intentionally not the final public network
-API. It gives examples a shared deterministic primitive for fixed topologies,
-per-link queues, seeded packet loss, tick-aligned latency, simulator-control
-faults, and delivery order by `(deliver_at, packet_id)`.
+`mar.NetworkSimulation(Payload, options)` is the first network/scheduler
+sketch. It gives examples a shared deterministic primitive for fixed
+topologies, per-link queues, seeded packet loss, tick-aligned latency,
+simulator-control faults, and delivery order by `(deliver_at, packet_id)`.
 
 See [Network Model](network.md) for the design contract and current limits.
 See [Network API Direction](network-api.md) for the intended future split
@@ -354,14 +353,15 @@ simulator-control operations.
 
 ```zig
 const Payload = struct { value: u64 };
-const Sim = mar.UnstableNetworkSimulation(Payload, .{
+const Sim = mar.NetworkSimulation(Payload, .{
     .node_count = 3,
     .client_count = 1,
     .path_capacity = 64,
 });
 
-var sim = Sim.init(world);
-try sim.packetCore().send(0, 1, .{ .value = 42 }, .{
+const authorities = try world.simulate(.{});
+var sim = try Sim.init(authorities.control);
+try sim.network().send(0, 1, .{ .value = 42 }, .{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
@@ -395,22 +395,22 @@ This advances the backing world and then evolves network fault state.
 Nodes are up by default. Mark one down or up with:
 
 ```zig
-try sim.network().setNode(1, false);
-try sim.network().setNode(1, true);
+try sim.control().network.setNode(1, false);
+try sim.control().network.setNode(1, true);
 ```
 
 Directed links can be disabled and re-enabled:
 
 ```zig
-try sim.network().setLink(0, 1, false);
-try sim.network().setLink(0, 1, true);
+try sim.control().network.setLink(0, 1, false);
+try sim.control().network.setLink(0, 1, true);
 ```
 
 Directed paths can also be clogged for a simulated duration:
 
 ```zig
-try sim.network().clog(0, 1, 100 * ns_per_ms);
-try sim.network().unclog(0, 1);
+try sim.control().network.clog(0, 1, 100 * ns_per_ms);
+try sim.control().network.unclog(0, 1);
 ```
 
 Partitions disable every directed link crossing between two groups:
@@ -418,8 +418,8 @@ Partitions disable every directed link crossing between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try sim.network().partition(&left, &right);
-try sim.network().heal();
+try sim.control().network.partition(&left, &right);
+try sim.control().network.heal();
 ```
 
 ## Seeds

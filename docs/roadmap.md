@@ -32,9 +32,9 @@ The current network surface is:
 - `mar.UnstableNetwork(Payload, NetworkOptions)`: packet core with declared
   topology, per-link queues, send-time drops, latency with jitter, link/node
   state, and per-path clogging.
-- `mar.UnstableNetworkSimulation(Payload, NetworkOptions)`: thin simulator
-  wrapper exposing `packetCore()` (harness view) and `network()`
-  (simulator-control view).
+- `mar.NetworkSimulation(Payload, NetworkOptions)`: thin simulator wrapper
+  exposing `network()` (app-shaped send view), `control().network`
+  (simulator-control view), and `packetCore()` (delivery view).
 - `sim.tick()`: outer tick that advances `World` and evolves subsystem fault
   state. `sim.runFor(duration)` steps tick by tick rather than jumping time.
 - `sim.drainUntilIdle(...)`: the only public network drain helper, routing
@@ -89,7 +89,8 @@ checker, time-travel debugging.
 ### Shipped, marked unstable
 
 - `mar.UnstableEventQueue`: fixed-capacity priority queue primitive.
-- `mar.UnstableNetwork` / `mar.UnstableNetworkSimulation` / `mar.UnstableNetworkOptions`.
+- `mar.UnstableNetwork` plus stable `NetworkSimulation` / `NetworkOptions`
+  aliases for the current simulator wrapper.
 
 Unstable types will change without deprecation cycles until Phase 2 closes.
 
@@ -297,12 +298,12 @@ make the bypass dangerous.
 **Scope:**
 
 - Remove `UnstableNetwork.drainUntilIdle`.
-- Keep `UnstableNetworkSimulation.drainUntilIdle`.
+- Keep `NetworkSimulation.drainUntilIdle`.
 - Update the replicated-register example (already uses the sim version).
 
 **Acceptance criteria:**
 
-- The only public `drainUntilIdle` is on `UnstableNetworkSimulation`.
+- The only public `drainUntilIdle` is on `NetworkSimulation`.
 - All tests pass unchanged.
 
 **Files likely to change:**
@@ -413,7 +414,7 @@ Acceptance criteria:
 
 Extend `sim.tick()` to roll per-node crash and restart probabilities with
 stability floors. Crashed nodes are already expressible via
-`sim.network().setNode(n, false)`, but there is no tick-driven randomness
+`sim.control().network.setNode(n, false)`, but there is no tick-driven randomness
 and no separation between "paused" and "crashed." Work this after item 4
 so the probabilistic fault machinery is shared.
 

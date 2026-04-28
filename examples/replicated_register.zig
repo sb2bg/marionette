@@ -218,13 +218,13 @@ fn partitionScenario(cluster: *Cluster) !void {
     var majority_side: [replica_count]mar.NodeId = undefined;
     const majority_side_len = buildMajoritySide(partitioned_replica, &majority_side);
 
-    try cluster.sim.network().partition(&isolated, majority_side[0..majority_side_len]);
+    try cluster.control.network.partition(&isolated, majority_side[0..majority_side_len]);
     try cluster.write(.{
         .version = 1,
         .value = 41,
         .retry_limit = partition_profile.retry_limit,
     });
-    try cluster.sim.network().heal();
+    try cluster.control.network.heal();
     try cluster.write(.{
         .version = 1,
         .value = 41,
@@ -284,18 +284,18 @@ const MessagePayload = struct {
     value: u64,
 };
 
-const network_options: mar.UnstableNetworkOptions = .{
+const network_options: mar.NetworkOptions = .{
     .node_count = replica_count,
     .client_count = 1,
     .path_capacity = max_messages,
 };
 
-const Simulation = mar.UnstableNetworkSimulation(MessagePayload, network_options);
+const Simulation = mar.NetworkSimulation(MessagePayload, network_options);
 const Network = Simulation.PacketCore;
 
 const Cluster = struct {
     env: mar.Env,
-    control: mar.SimControl,
+    control: Simulation.Control,
     replicas: [replica_count]Replica,
     sim: Simulation,
 
@@ -309,11 +309,12 @@ const Cluster = struct {
 
     fn init(world: *mar.World) !Cluster {
         const sim_env = try world.simulate(.{});
+        var sim = try Simulation.init(sim_env.control);
         return .{
             .env = sim_env.env,
-            .control = sim_env.control,
+            .control = sim.control(),
             .replicas = [_]Replica{.{}} ** replica_count,
-            .sim = Simulation.init(world),
+            .sim = sim,
         };
     }
 
@@ -378,7 +379,7 @@ const Cluster = struct {
         value: u64,
         drop_percent: u8,
     ) !void {
-        try self.sim.packetCore().send(client_node_id, to, .{
+        try self.sim.network().send(client_node_id, to, .{
             .kind = kind,
             .version = version,
             .value = value,

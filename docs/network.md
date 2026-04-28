@@ -64,7 +64,7 @@ same discipline in a generic API, not the same product-specific surface.
 The current type is:
 
 ```zig
-const Sim = mar.UnstableNetworkSimulation(Payload, .{
+const Sim = mar.NetworkSimulation(Payload, .{
     .node_count = 3,
     .client_count = 1,
     .path_capacity = 64,
@@ -84,8 +84,9 @@ const Payload = struct {
     value: u64,
 };
 
-var sim = Sim.init(world);
-try sim.packetCore().send(0, 1, .{ .value = 42 }, .{
+const authorities = try world.simulate(.{});
+var sim = try Sim.init(authorities.control);
+try sim.network().send(0, 1, .{ .value = 42 }, .{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
@@ -111,10 +112,11 @@ The callback receives each delivered packet. The helper advances simulated time
 to the next queued packet through `sim.tick()` and keeps running until the
 queue is empty. The callback may enqueue more packets.
 
-This is a low-level primitive for examples and early scheduler work. Harness
-code may still touch `packetCore()` directly for send and delivery, but fault
-orchestration should go through `sim.network()`. A future `Env.network` or
-node-scoped authority may wrap the packet core for application code.
+This is a low-level primitive for examples and early scheduler work. App-like
+code sends through `sim.network()`, delivery still uses the packet core, and
+fault orchestration goes through `sim.control().network`. A future
+`Env.network` or node-scoped authority may wrap the packet core for
+application code.
 
 ## Topology
 
@@ -141,8 +143,8 @@ per-link model needed for clogging and path-local capacity.
 Nodes are up by default. Mark a simulated process down or up with:
 
 ```zig
-try sim.network().setNode(1, false);
-try sim.network().setNode(1, true);
+try sim.control().network.setNode(1, false);
+try sim.control().network.setNode(1, true);
 ```
 
 A down source cannot submit new packets. `send` still consumes a stable packet
@@ -169,7 +171,7 @@ yet.
 Links are directed. A disabled link drops ready packets at delivery time:
 
 ```zig
-try sim.network().setLink(0, 1, false);
+try sim.control().network.setLink(0, 1, false);
 ```
 
 If a packet from node `0` to node `1` is already queued when the link is
@@ -186,7 +188,7 @@ decide whether an in-flight packet makes it through.
 Re-enable a directed link with:
 
 ```zig
-try sim.network().setLink(0, 1, true);
+try sim.control().network.setLink(0, 1, true);
 ```
 
 ## Path Clogging
@@ -195,7 +197,7 @@ Clogs are directed path faults. A clogged path keeps its packets queued until
 simulated time reaches the clog deadline, while other paths keep delivering:
 
 ```zig
-try sim.network().clog(0, 1, 100 * ns_per_ms);
+try sim.control().network.clog(0, 1, 100 * ns_per_ms);
 ```
 
 If a packet for `0 -> 1` is ready at `t=10ms` but the path is clogged until
@@ -206,13 +208,13 @@ can actually make progress, accounting for active clogs.
 Clear one path clog explicitly with:
 
 ```zig
-try sim.network().unclog(0, 1);
+try sim.control().network.unclog(0, 1);
 ```
 
 Clear all active clogs with:
 
 ```zig
-try sim.network().unclogAll();
+try sim.control().network.unclogAll();
 ```
 
 Clogs also expire when simulated time reaches `until_ns`. `popReady` evolves
@@ -228,7 +230,7 @@ helper disables both directions between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try sim.network().partition(&left, &right);
+try sim.control().network.partition(&left, &right);
 ```
 
 This disables `0 -> 1`, `1 -> 0`, `0 -> 2`, and `2 -> 0`, while leaving
@@ -237,7 +239,7 @@ traffic inside the right side alone.
 Heal all disabled links with:
 
 ```zig
-try sim.network().heal();
+try sim.control().network.heal();
 ```
 
 `heal` restores default network state by re-enabling links and marking nodes
@@ -265,7 +267,7 @@ world's tick size. Phase 0 simulated time advances in whole ticks, so
 `UnstableNetwork` rejects `min_latency_ns` and `latency_jitter_ns` values that
 are not whole multiples of the world's tick.
 
-When using `UnstableNetworkSimulation`, prefer:
+When using `NetworkSimulation`, prefer:
 
 ```zig
 try sim.tick();

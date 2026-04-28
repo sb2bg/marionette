@@ -87,9 +87,11 @@ pub const World = struct {
     /// Simulator resources owned by the world and torn down in reverse order.
     teardowns: std.ArrayList(Teardown),
 
+    pub const TeardownFn = *const fn (*anyopaque, std.mem.Allocator) void;
+
     const Teardown = struct {
         ptr: *anyopaque,
-        deinit: *const fn (*anyopaque, std.mem.Allocator) void,
+        deinit: TeardownFn,
     };
 
     /// Configuration for a simulation world.
@@ -142,6 +144,21 @@ pub const World = struct {
         self.* = undefined;
     }
 
+    /// Register a world-owned resource to tear down when the world exits.
+    ///
+    /// Simulator capabilities use this for stable storage that can be safely
+    /// referenced by copied app/control bundles.
+    pub fn registerTeardown(
+        self: *World,
+        ptr: *anyopaque,
+        teardown_fn: TeardownFn,
+    ) std.mem.Allocator.Error!void {
+        try self.teardowns.append(self.allocator, .{
+            .ptr = ptr,
+            .deinit = teardown_fn,
+        });
+    }
+
     pub const SimulateOptions = struct {
         disk: disk_module.DiskOptions = .{},
     };
@@ -159,10 +176,7 @@ pub const World = struct {
         sim_disk.* = try disk_module.SimDisk.init(self, options.disk);
         errdefer sim_disk.deinit();
 
-        try self.teardowns.append(self.allocator, .{
-            .ptr = sim_disk,
-            .deinit = deinitSimDisk,
-        });
+        try self.registerTeardown(sim_disk, deinitSimDisk);
 
         return .{
             .env = .{
