@@ -104,18 +104,19 @@ writer.
 ## Metadata
 
 The seed is necessary but not sufficient once scenarios generate options from
-that seed. Use `profile_name`, `tags`, and `attributes` to make the expanded
-run shape visible:
+that seed. Use a run name, tags, and attributes to make the expanded run shape
+visible. `mar.runCase` accepts `.name`; the lower-level `mar.run` options still
+use `.profile_name` for compatibility:
 
 ```zig
 const SmokeRunProfile = struct {
     replicas: u64,
-    proposal_drop_percent: u8,
+    packet_loss_percent: u8,
 };
 
 const profile: SmokeRunProfile = .{
     .replicas = 3,
-    .proposal_drop_percent = 20,
+    .packet_loss_percent = 20,
 };
 
 const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
@@ -136,7 +137,7 @@ event=1 run.profile name=replicated-register-smoke
 event=2 run.tag value=example:replicated_register
 event=3 run.tag value=scenario:smoke
 event=4 run.attribute key=replicas value=uint:3
-event=5 run.attribute key=proposal_drop_percent value=uint:20
+event=5 run.attribute key=packet_loss_percent value=uint:20
 ```
 
 Tags should be stable scalar labels. Attribute keys should be stable scalar
@@ -203,6 +204,7 @@ const state_checks = [_]mar.StateCheck(Model){
 var report = try mar.runCase(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
+    .name = "model-smoke",
     .init = Model.init,
     .scenario = scenario,
     .checks = &state_checks,
@@ -220,7 +222,7 @@ Use `mar.expectPass` when the test only needs to fail loudly on a bad run:
 ```zig
 const Store = struct {
     env: mar.Env,
-    control: mar.SimControl,
+    control: mar.Control,
 
     fn init(world: *mar.World) !Store {
         const sim = try world.simulate(.{});
