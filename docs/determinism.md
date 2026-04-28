@@ -10,7 +10,7 @@ Marionette trace. If it does not, the library has failed.
 Simulated code must route non-deterministic behavior through Marionette
 interfaces:
 
-- Time through `Env.clock`, `SimControl`, or `World`.
+- Time through `Env.clock`, `Control`, or `World`.
 - Randomness through an environment, seeded `Random`, or `World`.
 - Disk through Marionette's `Disk` capability.
 - Network through the future Network interface.
@@ -43,7 +43,7 @@ Marionette enforces determinism in four layers.
 1. API design.
 
    The intended path should be the easiest path. Users should have no reason
-   to reach for host time when `Env.clock`, `SimControl`, or `World.clock()`
+   to reach for host time when `Env.clock`, `Control`, or `World.clock()`
    is already in hand.
 
 2. Build-integrated linter.
