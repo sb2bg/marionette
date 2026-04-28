@@ -86,37 +86,31 @@ const Payload = struct {
 
 const authorities = try world.simulate(.{});
 var sim = try Sim.init(authorities.control);
-try sim.network().send(0, 1, .{ .value = 42 }, .{
+
+try sim.control().network.setFaults(.{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
+try sim.network().send(0, 1, .{ .value = 42 });
 ```
 
-Ready packets are consumed explicitly:
+Deliverable packets are consumed explicitly:
 
 ```zig
-while (try sim.packetCore().popReady()) |packet| {
+while (try sim.network().nextDelivery()) |packet| {
     try apply(packet.payload);
 }
 ```
 
-For examples that just need to drive all pending network work, use
-`drainUntilIdle`:
-
-```zig
-try sim.drainUntilIdle(context, deliver);
-```
-
-The callback receives each delivered packet. The helper advances simulated time
-to the next queued packet through `sim.tick()` and keeps running until the
-queue is empty. The callback may enqueue more packets.
+`nextDelivery` advances simulated time when needed and returns `null` when the
+network has no pending work.
 
 This is a low-level primitive for examples and early scheduler work. App-like
-code sends through `sim.network()`, delivery still uses the packet core, and
-fault orchestration goes through `sim.control().network`. A future
-`Env.network` or node-scoped authority may wrap the packet core for
-application code.
+code sends and drains through `sim.network()`, while fault orchestration goes
+through `sim.control().network`. A future composition-root accessor may wrap
+the packet core so application code no longer depends on `NetworkSimulation`
+directly.
 
 ## Topology
 
@@ -298,7 +292,7 @@ records `network.drop` and does not enqueue the payload.
 The current drop model uses `BuggifyRate`:
 
 ```zig
-.drop_rate = .percent(20)
+try sim.control().network.setFaults(.{ .drop_rate = .percent(20) });
 ```
 
 This keeps the API consistent with BUGGIFY without making packet drops into
@@ -323,6 +317,7 @@ Current network trace events:
 - `network.partition left_count={} right_count={}`
 - `network.heal disabled_count={} down_count={} clogged_count={}`
 - `network.heal_links disabled_count={}`
+- `network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={}`
 
 The payload is not dumped into the core network trace. User code should record
 domain-specific payload facts separately when useful, as the replicated
@@ -375,7 +370,7 @@ perturb it during a run. Random rolls belong in `sim.tick()`, never
 - Broadcast.
 - Node spawning.
 - Probabilistic tick-evolved fault schedules.
-- Network-level default send options.
+- Multiple named buses or a non-generic `World.simulate(...).network(Payload)` accessor.
 - Command-aware or user-classified link filters.
 - Per-link drop predicates.
 - Exponential or profile-selected latency distributions.
