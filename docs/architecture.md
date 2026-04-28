@@ -29,13 +29,13 @@ Phase 0 has:
 - `Clock(.production)` and `Clock(.simulation)`.
 - `Env`, one concrete app-facing bundle of disk, clock, random,
   and tracer capabilities.
-- `SimControl`, the harness-facing counterpart for simulator-only controls.
+- `Control`, the harness-facing counterpart for simulator-only controls.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
 - `mar.run`, which executes a scenario twice and compares traces.
-- `RunOptions.profile_name`, tags, and `RunAttribute`, which make expanded
-  run facts replay-visible in traces and failure summaries without losing
-  scalar value types.
+- Run names, tags, and `RunAttribute`, which make expanded run facts
+  replay-visible in traces and failure summaries without losing scalar value
+  types.
 - `runAttributesFrom`, a small helper for deriving typed attributes from the
   same scalar run profile struct a scenario uses. Field names are exported
   attribute keys, and runtime behavior must not depend on derived attributes.
