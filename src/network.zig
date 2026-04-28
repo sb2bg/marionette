@@ -703,28 +703,6 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
             try self.control_bundle.runFor(duration_ns);
         }
 
-        /// Drive queued packets until the network has no pending work.
-        ///
-        /// Time movement routes through the outer simulation tick before
-        /// delivering ready packets, so future probabilistic network faults
-        /// evolve at the same boundary as the clock.
-        pub fn drainUntilIdle(
-            self: *Self,
-            context: anytype,
-            comptime deliver: fn (@TypeOf(context), *World, PacketCore.Packet) anyerror!void,
-        ) !void {
-            while (true) {
-                while (try self.packet_core.popReady()) |packet| {
-                    try deliver(context, self.packet_core.world, packet);
-                }
-
-                const deliver_at = self.packet_core.nextDeliveryAt() orelse break;
-                if (deliver_at > self.packet_core.world.now()) {
-                    try self.runFor(deliver_at - self.packet_core.world.now());
-                }
-            }
-        }
-
         fn deinitRuntime(ptr: *anyopaque, allocator: std.mem.Allocator) void {
             const runtime: *Runtime = @ptrCast(@alignCast(ptr));
             allocator.destroy(runtime);
@@ -1111,34 +1089,29 @@ test "network: restarted destination can receive queued packets" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
 }
 
-test "network simulation: drainUntilIdle advances time and delivers queued packets" {
+test "network simulation: nextDelivery drains queued packets" {
     const Sim = NetworkSimulation(TestPayload, test_options);
-
-    const DeliveryLog = struct {
-        values: [4]u64 = undefined,
-        count: usize = 0,
-
-        fn deliver(self: *@This(), _: *World, packet: Sim.PacketCore.Packet) !void {
-            self.values[self.count] = packet.payload.value;
-            self.count += 1;
-        }
-    };
 
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
     const authorities = try world.simulate(.{});
     var sim = try Sim.init(authorities.control);
-    var log: DeliveryLog = .{};
+    const network = sim.network();
+    var values: [4]u64 = undefined;
+    var count: usize = 0;
 
     try sim.control().network.setFaults(.{ .min_latency_ns = 10 });
-    try sim.network().send(0, 1, .{ .value = 1 });
-    try sim.network().send(0, 1, .{ .value = 2 });
-    try sim.drainUntilIdle(&log, DeliveryLog.deliver);
+    try network.send(0, 1, .{ .value = 1 });
+    try network.send(0, 1, .{ .value = 2 });
+    while (try network.nextDelivery()) |packet| {
+        values[count] = packet.payload.value;
+        count += 1;
+    }
 
-    try std.testing.expectEqual(@as(usize, 2), log.count);
-    try std.testing.expectEqual(@as(u64, 1), log.values[0]);
-    try std.testing.expectEqual(@as(u64, 2), log.values[1]);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(u64, 1), values[0]);
+    try std.testing.expectEqual(@as(u64, 2), values[1]);
     try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
     try std.testing.expectEqual(@as(usize, 0), sim.packetCore().pendingCount());
 }
