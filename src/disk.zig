@@ -94,8 +94,8 @@ pub const DiskControl = struct {
     pub const VTable = struct {
         set_faults: *const fn (*anyopaque, DiskFaultOptions) DiskError!void,
         corrupt_sector: *const fn (*anyopaque, []const u8, u64) DiskError!void,
-        crash: *const fn (*anyopaque, DiskCrash) DiskError!void,
-        restart: *const fn (*anyopaque, DiskRestart) DiskError!void,
+        crash: *const fn (*anyopaque) DiskError!void,
+        restart: *const fn (*anyopaque) DiskError!void,
         disk: *const fn (*anyopaque) Disk,
     };
 
@@ -107,12 +107,12 @@ pub const DiskControl = struct {
         try self.vtable.corrupt_sector(self.ptr, path, offset);
     }
 
-    pub fn crash(self: DiskControl, options: DiskCrash) DiskError!void {
-        try self.vtable.crash(self.ptr, options);
+    pub fn crash(self: DiskControl) DiskError!void {
+        try self.vtable.crash(self.ptr);
     }
 
-    pub fn restart(self: DiskControl, options: DiskRestart) DiskError!void {
-        try self.vtable.restart(self.ptr, options);
+    pub fn restart(self: DiskControl) DiskError!void {
+        try self.vtable.restart(self.ptr);
     }
 
     pub fn disk(self: DiskControl) Disk {
@@ -939,12 +939,12 @@ pub const SimDisk = struct {
         try fromOpaque(ptr).corruptSector(path, offset);
     }
 
-    fn controlCrash(ptr: *anyopaque, options: DiskCrash) DiskError!void {
-        try fromOpaque(ptr).crash(options);
+    fn controlCrash(ptr: *anyopaque) DiskError!void {
+        try fromOpaque(ptr).crash(.{});
     }
 
-    fn controlRestart(ptr: *anyopaque, options: DiskRestart) DiskError!void {
-        try fromOpaque(ptr).restart(options);
+    fn controlRestart(ptr: *anyopaque) DiskError!void {
+        try fromOpaque(ptr).restart(.{});
     }
 
     fn controlDisk(ptr: *anyopaque) Disk {
@@ -1305,8 +1305,8 @@ test "disk: sync makes pending writes survive crash" {
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk.sync(.{ .path = "wal.log" });
     try disk.control().setFaults(.{ .crash_lost_write_rate = .always() });
-    try disk.control().crash(.{});
-    try disk.control().restart(.{});
+    try disk.control().crash();
+    try disk.control().restart();
 
     var buffer = [_]u8{0} ** 4;
     try disk.read(.{
@@ -1332,8 +1332,8 @@ test "disk: crash can lose unflushed pending writes" {
 
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk.control().setFaults(.{ .crash_lost_write_rate = .always() });
-    try disk.control().crash(.{});
-    try disk.control().restart(.{});
+    try disk.control().crash();
+    try disk.control().restart();
 
     var buffer = [_]u8{0xff} ** 4;
     try disk.read(.{
@@ -1362,8 +1362,8 @@ test "disk: crash can tear unflushed pending writes" {
     try disk.sync(.{ .path = "wal.log" });
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk.control().setFaults(.{ .crash_torn_write_rate = .always() });
-    try disk.control().crash(.{});
-    try disk.control().restart(.{});
+    try disk.control().crash();
+    try disk.control().restart();
 
     var buffer = [_]u8{0} ** 4;
     try disk.read(.{
@@ -1388,7 +1388,7 @@ test "disk: crashed disk rejects operations until restart" {
     });
     defer disk.deinit();
 
-    try disk.control().crash(.{});
+    try disk.control().crash();
 
     var buffer = [_]u8{0} ** 4;
     try std.testing.expectError(error.DiskCrashed, disk.read(.{
@@ -1403,7 +1403,7 @@ test "disk: crashed disk rejects operations until restart" {
     }));
     try std.testing.expectError(error.DiskCrashed, disk.sync(.{ .path = "wal.log" }));
 
-    try disk.control().restart(.{});
+    try disk.control().restart();
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
 }
 
@@ -1435,8 +1435,8 @@ test "disk: crash traces are deterministic for the same seed" {
 
     try disk_a.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk_b.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
-    try disk_a.control().crash(.{});
-    try disk_b.control().crash(.{});
+    try disk_a.control().crash();
+    try disk_b.control().crash();
 
     try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
 }
