@@ -33,6 +33,7 @@ nav:
       - Architecture: architecture.md
       - Trace Format: trace-format.md
       - Run: run.md
+      - API Target Spec: api-target.md
       - BUGGIFY: buggify.md
       - Network Model: network.md
       - Network API Direction: network-api.md
