@@ -51,7 +51,7 @@ fn balancesAreSafe(harness: *const Harness) !void {
 
 pub const Harness = struct {
     service: PaymentService,
-    control: mar.SimControl,
+    control: mar.Control,
 
     pub fn init(world: *mar.World) !Harness {
         const sim = try world.simulate(.{});
