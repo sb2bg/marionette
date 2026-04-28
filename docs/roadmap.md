@@ -33,12 +33,13 @@ The current network surface is:
   topology, per-link queues, send-time drops, latency with jitter, link/node
   state, and per-path clogging.
 - `mar.NetworkSimulation(Payload, NetworkOptions)`: thin simulator wrapper
-  exposing `network()` (app-shaped send view), `control().network`
-  (simulator-control view), and `packetCore()` (delivery view).
+  exposing `network()` (app-shaped send and delivery view),
+  `control().network` (simulator-control view), and `packetCore()` (low-level
+  packet-core escape hatch).
 - `sim.tick()`: outer tick that advances `World` and evolves subsystem fault
   state. `sim.runFor(duration)` steps tick by tick rather than jumping time.
-- `sim.drainUntilIdle(...)`: the only public network drain helper, routing
-  time movement through `sim.tick()`.
+- `network.nextDelivery()`: the public delivery loop primitive, routing time
+  movement through the network simulation.
 
 The current disk surface is:
 
@@ -51,13 +52,14 @@ The current disk surface is:
 - `mar.DiskControl`: harness-facing fault, scripted corruption, crash, and
   restart authority over the same `SimDisk` backing state.
 - `World.simulate(...)`: constructs world-owned simulator resources and
-  returns `{ env: Env, control: SimControl }`.
+  returns `{ env: Env, control: Control }`.
 - `Env.disk`: app-facing simulation disk view exposing only `read`,
   `write`, and `sync`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 
-What is not built yet: app-facing `env.network`, probabilistic tick-evolved
+What is not built yet: a production network adapter, a non-generic
+`World.simulate(...).network(Payload)` accessor, probabilistic tick-evolved
 network faults, liveness mode, named simulation profiles, linearizability
 checker, time-travel debugging.
 
@@ -242,7 +244,7 @@ through `Env.disk`.
 - Tests and harnesses access simulator-control operations such as `setFaults`,
   `crash`, `restart`, and `corruptSector` through `mar.DiskControl`.
 - The KV example keeps app storage calls on `env.disk` and keeps simulator
-  control on `SimControl`.
+  control on `Control`.
 - Disk lifecycle is owned by `World`.
 - `mar.RealDisk`: production disk adapter backed by a real root directory.
 - `mar.Production`: production composition root that owns production
@@ -286,25 +288,26 @@ entry point changed instead of adding a compatibility wrapper.
 
 ---
 
-### Completed: Delete `PacketCore.drainUntilIdle`
+### Completed: Replace callback drain with `nextDelivery`
 
-**Status:** Done. `sim.drainUntilIdle` is the only public network drain helper.
+**Status:** Done. `network.nextDelivery()` is the public network delivery
+primitive.
 
-**Why it mattered:** `sim.drainUntilIdle` must be the only drain
-path, because the packet-core version bypasses `sim.tick()` and silently
-skips probabilistic fault evolution. Delete it before probabilistic faults
-make the bypass dangerous.
+**Why it mattered:** Callback-shaped delivery made example code harder to read
+and encouraged packet-core access. `nextDelivery()` keeps delivery top-to-bottom
+and advances simulated time through the simulation wrapper.
 
 **Scope:**
 
 - Remove `UnstableNetwork.drainUntilIdle`.
-- Keep `NetworkSimulation.drainUntilIdle`.
-- Update the replicated-register example (already uses the sim version).
+- Make `NetworkSimulation.drainUntilIdle` internal.
+- Update the replicated-register example to use `while (try net.nextDelivery())`.
 
 **Acceptance criteria:**
 
-- The only public `drainUntilIdle` is on `NetworkSimulation`.
-- All tests pass unchanged.
+- No public `drainUntilIdle` remains.
+- The replicated-register example has no `DeliveryContext`.
+- All tests pass.
 
 **Files likely to change:**
 
@@ -508,7 +511,7 @@ example motivates it.
 A small Viewstamped Replication or Raft-shaped example. Strictly after
 Phase 1 so the example has both disk durability and network faults.
 
-### 15. App-facing `env.network()`
+### 15. App-facing typed network composition
 
 Deferred until at least two independent examples have driven the shape, or
 until Zig's `std.Io` direction stabilizes enough to pick a production
@@ -594,13 +597,13 @@ calls into the simulator, which breaks determinism-by-simulated-time.
 
 ### Simulator-control is separate from the packet core
 
-`UnstableNetwork.Control` exposes only operations that make sense for a
-test harness: `setNode`, `setLink`, `partition`, `heal`, `healLinks`,
-`clog`, `unclog`, `unclogAll`. Application-shaped operations (`send`,
-`popReady`) live on the packet core. No test-only operation will ever leak
-into app-facing APIs.
+`NetworkSimulation.Control.network` exposes only operations that make sense for
+a test harness: `setFaults`, `setNode`, `setLink`, `partition`, `heal`,
+`healLinks`, `clog`, `unclog`, `unclogAll`. Application-shaped operations
+(`send`, `nextDelivery`) live on the typed network handle. No test-only
+operation will ever leak into app-facing APIs.
 
-### App-facing `env.network()` is deferred
+### App-facing typed network composition is deferred
 
 `std.Io` is in flux; the design space (addressing, payload ownership, sync
 vs callback, listener lifecycle) is large; one example isn't enough signal.
