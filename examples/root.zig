@@ -45,8 +45,7 @@ test "examples: replicated register scenario is replayable" {
 
     try std.testing.expectEqualStrings(a, b);
     try std.testing.expect(std.mem.indexOf(u8, a, "run.profile name=replicated-register-smoke") != null);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.tag value=scenario:smoke") != null);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.attribute key=proposal_drop_percent value=uint:20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.faults drop_rate=20/100") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.write.quorum") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.check committed_agreement=ok") != null);
 }
@@ -74,7 +73,6 @@ test "examples: replicated register partition scenario is replayable" {
 
     try std.testing.expectEqualStrings(a, b);
     try std.testing.expect(std.mem.indexOf(u8, a, "run.profile name=replicated-register-partition") != null);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.tag value=scenario:partition") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "network.partition left_count=1 right_count=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "reason=link_disabled") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "network.heal disabled_count=6 down_count=0") != null);

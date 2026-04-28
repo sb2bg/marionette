@@ -122,6 +122,9 @@ pub const UnstableNetworkOptions = @import("network.zig").NetworkOptions;
 /// Fixed topology and per-path capacity for one network simulation.
 pub const NetworkOptions = @import("network.zig").NetworkOptions;
 
+/// Runtime fault configuration for app-facing network sends.
+pub const NetworkFaultOptions = @import("network.zig").NetworkFaultOptions;
+
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 

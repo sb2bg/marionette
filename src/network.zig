@@ -42,6 +42,13 @@ pub const NetworkOptions = struct {
     path_capacity: usize,
 };
 
+/// Runtime fault configuration for app-facing network sends.
+pub const NetworkFaultOptions = struct {
+    drop_rate: env_module.BuggifyRate = .never(),
+    min_latency_ns: clock_module.Duration = 0,
+    latency_jitter_ns: clock_module.Duration = 0,
+};
+
 /// Build a fixed-topology deterministic network for one payload type.
 pub fn UnstableNetwork(comptime Payload: type, comptime network_options: NetworkOptions) type {
     const configured_process_count = network_options.node_count + network_options.client_count;
@@ -520,8 +527,7 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
         pub const PacketCore = UnstableNetwork(Payload, network_options);
         pub const Network = struct {
             packet_core: *PacketCore,
-
-            pub const SendOptions = PacketCore.SendOptions;
+            faults: *NetworkFaultOptions,
 
             /// Submit one packet through the simulated network.
             pub fn send(
@@ -529,21 +535,98 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
                 from: NodeId,
                 to: NodeId,
                 payload: Payload,
-                options: SendOptions,
             ) !void {
-                try self.packet_core.send(from, to, payload, options);
+                try self.packet_core.send(from, to, payload, .{
+                    .drop_rate = self.faults.drop_rate,
+                    .min_latency_ns = self.faults.min_latency_ns,
+                    .latency_jitter_ns = self.faults.latency_jitter_ns,
+                });
+            }
+
+            /// Return the next deliverable packet, advancing simulated time when needed.
+            pub fn nextDelivery(self: Network) !?PacketCore.Packet {
+                while (true) {
+                    if (try self.packet_core.popReady()) |packet| return packet;
+
+                    const deliver_at = self.packet_core.nextDeliveryAt() orelse return null;
+                    const now_ns = self.packet_core.world.now();
+                    if (deliver_at <= now_ns) return null;
+
+                    try runNetworkFor(self.packet_core, deliver_at - now_ns);
+                }
+            }
+        };
+
+        pub const NetworkControl = struct {
+            packet_core: *PacketCore,
+            faults: *NetworkFaultOptions,
+
+            /// Configure runtime send faults for subsequent app-facing sends.
+            pub fn setFaults(self: NetworkControl, faults: NetworkFaultOptions) !void {
+                try validateRate(faults.drop_rate);
+                try validateFaultLatency(self.packet_core, faults);
+                self.faults.* = faults;
+                try self.packet_core.world.record(
+                    "network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={}",
+                    .{
+                        faults.drop_rate.numerator,
+                        faults.drop_rate.denominator,
+                        faults.min_latency_ns,
+                        faults.latency_jitter_ns,
+                    },
+                );
+            }
+
+            /// Mark one simulated node/process up or down.
+            pub fn setNode(self: NetworkControl, node: NodeId, up: bool) !void {
+                try self.packet_core.control().setNode(node, up);
+            }
+
+            /// Enable or disable one directed link.
+            pub fn setLink(self: NetworkControl, from: NodeId, to: NodeId, enabled: bool) !void {
+                try self.packet_core.control().setLink(from, to, enabled);
+            }
+
+            /// Clog one directed path until simulated time advances by `duration_ns`.
+            pub fn clog(self: NetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
+                try self.packet_core.control().clog(from, to, duration_ns);
+            }
+
+            /// Clear one directed path clog.
+            pub fn unclog(self: NetworkControl, from: NodeId, to: NodeId) !void {
+                try self.packet_core.control().unclog(from, to);
+            }
+
+            /// Clear every directed path clog.
+            pub fn unclogAll(self: NetworkControl) !void {
+                try self.packet_core.control().unclogAll();
+            }
+
+            /// Disable all directed links crossing between two groups.
+            pub fn partition(self: NetworkControl, left: []const NodeId, right: []const NodeId) !void {
+                try self.packet_core.control().partition(left, right);
+            }
+
+            /// Re-enable every disabled link and mark every node/process up.
+            pub fn heal(self: NetworkControl) !void {
+                try self.packet_core.control().heal();
+            }
+
+            /// Re-enable every disabled link without changing node state.
+            pub fn healLinks(self: NetworkControl) !void {
+                try self.packet_core.control().healLinks();
             }
         };
 
         pub const Control = struct {
             disk: disk_module.DiskControl,
-            network: PacketCore.Control,
+            network: NetworkControl,
             world: *World,
 
             /// Advance simulated time by one tick and evolve network fault state.
             pub fn tick(self: Control) !void {
                 try self.world.tick();
-                try self.network.network.evolveFaults();
+                try self.network.packet_core.evolveFaults();
             }
 
             /// Advance simulated time by whole ticks and evolve network faults.
@@ -558,22 +641,38 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
             }
         };
 
+        const Runtime = struct {
+            packet_core: PacketCore,
+            faults: NetworkFaultOptions,
+        };
+
         packet_core: *PacketCore,
+        faults: *NetworkFaultOptions,
         control_bundle: Control,
 
         /// Construct a simulation wrapper around a world-owned authority set.
         pub fn init(sim_control: env_module.SimControl) std.mem.Allocator.Error!Self {
-            const packet_core = try sim_control.world.allocator.create(PacketCore);
-            errdefer sim_control.world.allocator.destroy(packet_core);
+            const runtime = try sim_control.world.allocator.create(Runtime);
+            errdefer sim_control.world.allocator.destroy(runtime);
 
-            packet_core.* = .init(sim_control.world);
-            try sim_control.world.registerTeardown(packet_core, deinitPacketCore);
+            runtime.* = .{
+                .packet_core = .init(sim_control.world),
+                .faults = .{ .min_latency_ns = sim_control.world.clock().tick_ns },
+            };
+            try sim_control.world.registerTeardown(runtime, deinitRuntime);
+
+            const packet_core = &runtime.packet_core;
+            const faults = &runtime.faults;
 
             return .{
                 .packet_core = packet_core,
+                .faults = faults,
                 .control_bundle = .{
                     .disk = sim_control.disk,
-                    .network = packet_core.control(),
+                    .network = .{
+                        .packet_core = packet_core,
+                        .faults = faults,
+                    },
                     .world = sim_control.world,
                 },
             };
@@ -586,7 +685,7 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
 
         /// Return the app-facing network view for packet sends.
         pub fn network(self: *Self) Network {
-            return .{ .packet_core = self.packet_core };
+            return .{ .packet_core = self.packet_core, .faults = self.faults };
         }
 
         /// Return the simulator-control view for fault orchestration.
@@ -626,9 +725,26 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
             }
         }
 
-        fn deinitPacketCore(ptr: *anyopaque, allocator: std.mem.Allocator) void {
-            const packet_core: *PacketCore = @ptrCast(@alignCast(ptr));
-            allocator.destroy(packet_core);
+        fn deinitRuntime(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+            const runtime: *Runtime = @ptrCast(@alignCast(ptr));
+            allocator.destroy(runtime);
+        }
+
+        fn runNetworkFor(packet_core: *PacketCore, duration_ns: clock_module.Duration) !void {
+            const tick_ns = packet_core.world.clock().tick_ns;
+            if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+
+            var remaining = duration_ns;
+            while (remaining > 0) : (remaining -= tick_ns) {
+                try packet_core.world.tick();
+                try packet_core.evolveFaults();
+            }
+        }
+
+        fn validateFaultLatency(packet_core: *PacketCore, faults: NetworkFaultOptions) NetworkError!void {
+            const tick_ns = packet_core.world.clock().tick_ns;
+            if (faults.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
+            if (faults.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
         }
     };
 }
@@ -1015,13 +1131,33 @@ test "network simulation: drainUntilIdle advances time and delivers queued packe
     var sim = try Sim.init(authorities.control);
     var log: DeliveryLog = .{};
 
-    try sim.network().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 20 });
-    try sim.network().send(0, 1, .{ .value = 2 }, .{ .min_latency_ns = 10 });
+    try sim.control().network.setFaults(.{ .min_latency_ns = 10 });
+    try sim.network().send(0, 1, .{ .value = 1 });
+    try sim.network().send(0, 1, .{ .value = 2 });
     try sim.drainUntilIdle(&log, DeliveryLog.deliver);
 
     try std.testing.expectEqual(@as(usize, 2), log.count);
-    try std.testing.expectEqual(@as(u64, 2), log.values[0]);
-    try std.testing.expectEqual(@as(u64, 1), log.values[1]);
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
+    try std.testing.expectEqual(@as(u64, 1), log.values[0]);
+    try std.testing.expectEqual(@as(u64, 2), log.values[1]);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
     try std.testing.expectEqual(@as(usize, 0), sim.packetCore().pendingCount());
+}
+
+test "network simulation: nextDelivery advances time and returns packets" {
+    const Sim = NetworkSimulation(TestPayload, test_options);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const authorities = try world.simulate(.{});
+    var sim = try Sim.init(authorities.control);
+    const network = sim.network();
+
+    try sim.control().network.setFaults(.{ .min_latency_ns = 20 });
+    try network.send(0, 1, .{ .value = 1 });
+
+    const packet = (try network.nextDelivery()).?;
+    try std.testing.expectEqual(@as(u64, 1), packet.payload.value);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
+    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try network.nextDelivery());
 }
