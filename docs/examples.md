@@ -52,7 +52,7 @@ Source: [`examples/kv_store.zig`](https://github.com/sb2bg/marionette/blob/main/
 The KV store is the first disk-backed example. It is intentionally tiny: a
 fixed-size append-only WAL where each sector is one record with a magic value,
 key, value, and checksum. It exists to exercise `mar.Disk` plus the
-`Env`/`SimControl` harness split, not to be a real database.
+`Env`/`Control` harness split, not to be a real database.
 
 The correct scenario:
 
@@ -136,10 +136,10 @@ portable shapes Marionette needs:
 - `mar.NetworkSimulation` routing packets through a fixed topology and
   per-link queues ordered by `(deliver_at, packet_id)`.
 - A partition scenario that drops queued packets through directed link filters.
-- `RunOptions.profile_name`, tags, and `RunAttribute` for replay-visible
-  knobs.
+- Runtime network fault configuration through `control.network.setFaults(...)`.
+- `runCase` / `expectPass` / `expectFuzz` / `expectFailure` for scenario runs.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
-- A named `mar.StateCheck` that inspects structured cluster state.
+- A named `mar.StateCheck` that inspects structured harness state.
 - Rejection of conflicting same-version proposals.
 
 The normal scenario writes one value to a quorum, commits it, and checks that
@@ -150,13 +150,9 @@ const trace = try replicated_register.runScenario(allocator, 0xC0FFEE);
 defer allocator.free(trace);
 ```
 
-The trace starts with the profile and expanded knobs, including replica count,
-quorum, queue capacity, proposal drop percent, and retry limit. Those
-attributes are derived from typed run profile structs with
-`mar.runAttributesFrom` so the trace-visible facts stay tied to the config the
-scenario executes. Field names are intentionally exported as attribute keys.
-That keeps the showcase aligned with the VOPR lesson that a seed alone is not
-enough context for a failure.
+The trace starts with the run name and records network fault configuration as
+explicit control events, so the seed is not the only context available when a
+failure is replayed.
 
 The example also includes a deliberately buggy scenario used by tests to prove
 the checker path catches divergent committed state:
@@ -166,9 +162,9 @@ var report = try replicated_register.runBuggyScenario(allocator, 0xC0FFEE);
 defer report.deinit();
 ```
 
-The partition scenario derives its groups from the run profile, isolates one
-replica from the client and majority, then heals the network and replays the
-same value so the previously isolated replica commits too:
+The partition scenario isolates one replica from the client and majority, then
+heals the network and replays the same value so the previously isolated replica
+commits too:
 
 ```zig
 const trace = try replicated_register.runPartitionScenario(allocator, 0xC0FFEE);
