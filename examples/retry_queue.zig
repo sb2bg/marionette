@@ -143,7 +143,7 @@ const JobState = enum {
 
 const RetryQueue = struct {
     env: mar.Env,
-    control: mar.SimControl,
+    control: mar.Control,
     job_id: u64 = 0,
     state: JobState = .empty,
     lease_owner: u8 = 0,
