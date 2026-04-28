@@ -1,37 +1,48 @@
 # Network API Direction
 
-This document describes the intended production/simulation network API shape.
-Some simulator pieces exist today; production networking and `Env.network` are
-still future work.
+This document describes the current network API direction. The simulator pieces
+exist today; production networking and a non-generic
+`World.simulate(...).network(Payload)` accessor are still future work.
 
-Marionette should eventually let application code use the same network
-authority in production and simulation. The composition root chooses the
-environment; the service code should not care whether packets are real sockets
-or deterministic simulator events.
+Marionette should eventually let application code use the same network handle
+in production and simulation. The composition root chooses the backing
+environment; service code should not care whether packets are real sockets or
+deterministic simulator events.
 
 ## Current Status
 
-Today, production networking does not exist in Marionette.
-
-The current network simulator wrapper is:
+Today, production networking does not exist in Marionette. The current network
+surface is a typed simulator handle built by `NetworkSimulation`:
 
 ```zig
+const Payload = struct { value: u64 };
 const Sim = mar.NetworkSimulation(Payload, .{
     .node_count = 3,
     .client_count = 1,
     .path_capacity = 64,
 });
+
+const authorities = try world.simulate(.{});
+var sim = try Sim.init(authorities.control);
+
+const net = sim.network();
+try sim.control().network.setFaults(.{ .drop_rate = .percent(20) });
+try net.send(3, 0, .{ .value = 42 });
+
+while (try net.nextDelivery()) |packet| {
+    try apply(packet.payload);
+}
 ```
 
 `NetworkSimulation` owns one packet core and exposes two views over it:
-`sim.network()` for app-shaped sends, and `sim.control().network` for
-test-only fault orchestration. The packet core owns a fixed topology, per-link
-packet queues, packet ids, seeded drops, latency, and deterministic delivery
-order.
+`sim.network()` for app-shaped sends and deterministic delivery, and
+`sim.control().network` for test-only fault orchestration. The packet core owns
+a fixed topology, per-link packet queues, packet ids, seeded drops, latency,
+and deterministic delivery order.
 
 ## Two Surfaces
 
-The final network shape should have two separate surfaces:
+The network API has two separate surfaces:
 
 - App-facing network authority.
 - Simulator-control authority.
@@ -39,72 +50,61 @@ The final network shape should have two separate surfaces:
 Application code should use the app-facing authority. Test scenarios and
 simulation harnesses should use the simulator-control authority.
 
-This split keeps production code portable without giving production code
-test-only powers such as partitioning the network or stopping nodes.
+This split keeps production-shaped code portable without giving it test-only
+powers such as partitioning the network, stopping nodes, or changing drop
+rates.
 
 ## App-Facing Authority
 
-The app-facing authority is what user services receive through `Env`:
+The current app-facing authority is a typed sibling handle passed alongside
+`Env`:
 
 ```zig
-fn service(env: anytype) !void {
-    const network = env.network();
-
-    try network.send(.{
-        .to = .{ .node = 1 },
-        .payload = "ping",
-    });
-
-    const message = try network.recv();
-    _ = message;
+fn write(env: mar.Env, net: Network, payload: Payload) !void {
+    try env.record("write.start", .{});
+    try net.send(client_node_id, 1, payload);
 }
 ```
 
-In simulation:
+This is deliberately not a field on `Env`. `Env` is one non-generic type, while
+`Network(Payload)` is payload-specialized. A future generic accessor or named
+bus registry may hide this behind a composition root, but the current API keeps
+the typing constraint explicit.
+
+Simulation setup wires both handles into production-shaped code:
 
 ```zig
-fn scenario(world: *mar.World) !void {
-    const sim = try world.simulate(.{});
-    try service(sim.env);
+fn init(world: *mar.World) !Harness {
+    const authorities = try world.simulate(.{});
+    var sim = try Sim.init(authorities.control);
+    return .{
+        .replicas = Replicas.init(authorities.env, sim.network()),
+        .control = sim.control(),
+        .sim = sim,
+    };
 }
 ```
 
-The service shape should stay the same. Production routing should use real IO.
-Simulation routing should use deterministic packet scheduling, seeded faults,
-and trace records.
-
-Exact names such as `send`, `recv`, `listen`, `connect`, addresses, and
-payload ownership are not committed yet. The important contract is that user
-services talk to an environment-provided network authority, not directly to
-`std.net` or to `UnstableNetwork`.
+The application-shaped code depends on `Env` plus the typed network handle, not
+on `control`, `World`, `std.net`, or `UnstableNetwork`.
 
 ## Simulator-Control Authority
 
-The simulator-control authority is for tests, scenarios, and future
-schedulers:
+The simulator-control authority is for tests, scenarios, and future schedulers:
 
 ```zig
+try sim.control().network.setFaults(.{ .drop_rate = .percent(20) });
 try sim.control().network.setNode(1, false);
 try sim.control().network.clog(0, 1, 100 * ns_per_ms);
 try sim.control().network.partition(&left, &right);
 try sim.control().network.heal();
 ```
 
-These calls are not app behavior. They are fault orchestration. They should
-not be required or available in ordinary production service code.
-
-Today, these operations live on `NetworkSimulation.control().network`:
-
-```zig
-try sim.control().network.setNode(1, false);
-try sim.control().network.clog(0, 1, 100 * ns_per_ms);
-try sim.control().network.partition(&left, &right);
-try sim.control().network.heal();
-```
+These calls are not app behavior. They are fault orchestration. They should not
+be required or available in ordinary production service code.
 
 The important constraint is that fault orchestration is separate from the
-app-shaped send path. A later `Env` network capability should wrap this again
-so application code stops depending on the network simulator type directly.
+app-shaped send path. `send` takes only `from`, `to`, and `payload`.
 
 ## Production Path
 
@@ -122,34 +122,31 @@ stable enough to build on. The current rule is:
 
 ## Simulation Path
 
-`Env.network` is also not implemented yet.
-
-The likely simulation path is:
+A non-generic `World.simulate(...).network(Payload)` accessor is not implemented
+yet. The likely simulation path is:
 
 ```text
-Env.network
-  -> app-facing node or endpoint authority
+World.simulate(...).network(Payload)
+  -> app-facing typed network handle
   -> simulator-owned scheduler/network state
   -> UnstableNetwork-like packet core
   -> World clock, World PRNG, World trace
 ```
 
 The current `UnstableNetwork` is the packet core in this chain. It proves the
-deterministic pieces before Marionette commits to the final user API.
+deterministic pieces before Marionette commits to the final composition-root
+API.
 
-The packet core already has a declared topology and per-link queues. The env
-layer still needs to provide the process-facing authority for application
-code; the current simulator-control view is the first half of that split.
-`NetworkSimulation.tick()` is the current outer tick for this slice: it
-advances the world clock and then evolves network fault state. Future
-tick-evolved subsystems should attach to an outer simulation tick rather than
-asking users to remember separate subsystem ticks.
+The packet core already has a declared topology and per-link queues. The
+composition layer still needs to provide the final process-facing authority for
+application code without forcing `Env` itself to become generic.
 
 ## Non-Goals For Now
 
 Marionette is not trying to support all of production networking in the first
 network API. These are intentionally unresolved:
 
+- Generic `World.simulate(...).network(Payload)` or named bus registry.
 - TCP versus UDP shape.
 - Stream versus datagram ownership.
 - Listener and connection lifetime.
@@ -172,7 +169,8 @@ Code that uses:
 mar.NetworkSimulation(Payload, options)
 ```
 
-is using a simulator primitive. Code that reaches for
-`sim.packetCore().send(...)` is writing harness code, not production service
-code. Production-ready Marionette code should eventually depend on
-`env.network()` instead.
+is using a simulator primitive. Code that reaches for `sim.packetCore()` is
+writing harness or low-level simulator code, not production-shaped service
+code. Production-ready Marionette code should eventually depend on `Env` plus a
+production-backed typed network handle with the same call shape as
+`NetworkSimulation.network()`.
