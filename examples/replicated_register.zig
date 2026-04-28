@@ -44,7 +44,7 @@ pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport 
         .allocator = allocator,
         .seed = seed,
         .tick_ns = tick_ns,
-        .profile_name = "replicated-register-bug",
+        .name = "replicated-register-bug",
         .init = Harness.init,
         .scenario = buggyScenario,
         .checks = &checks,
@@ -64,14 +64,14 @@ pub fn runConflictScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 fn runTrace(
     allocator: std.mem.Allocator,
     seed: u64,
-    profile_name: []const u8,
+    name: []const u8,
     comptime scenario_fn: fn (*Harness) anyerror!void,
 ) ![]u8 {
     var report = try mar.runCase(.{
         .allocator = allocator,
         .seed = seed,
         .tick_ns = tick_ns,
-        .profile_name = profile_name,
+        .name = name,
         .init = Harness.init,
         .scenario = scenario_fn,
         .checks = &checks,
