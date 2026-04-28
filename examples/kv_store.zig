@@ -26,8 +26,8 @@ pub fn scenario(harness: *Harness) !void {
     try harness.store.put(committed_key, committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try harness.store.put(volatile_key, volatile_value, .no_sync);
-    try harness.control.disk.crash(.{});
-    try harness.control.disk.restart(.{});
+    try harness.control.disk.crash();
+    try harness.control.disk.restart();
     try harness.control.disk.corruptSector(wal_path, record_size);
     try harness.store.recover(.strict);
 }
@@ -36,8 +36,8 @@ pub fn buggyScenario(harness: *Harness) !void {
     try harness.store.put(committed_key, committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
     try harness.store.put(volatile_key, volatile_value, .no_sync);
-    try harness.control.disk.crash(.{});
-    try harness.control.disk.restart(.{});
+    try harness.control.disk.crash();
+    try harness.control.disk.restart();
     try harness.store.recover(.buggy_accept_magic_only);
 }
 
@@ -93,7 +93,7 @@ const Entry = struct {
 
 pub const Harness = struct {
     store: KVStore,
-    control: mar.SimControl,
+    control: mar.Control,
 
     pub fn init(world: *mar.World) !Harness {
         const sim = try world.simulate(.{ .disk = .{
