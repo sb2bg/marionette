@@ -324,8 +324,8 @@ committed and are not lost by crash.
 
 ```zig
 try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
-try control.crash(.{});
-try control.restart(.{});
+try control.crash();
+try control.restart();
 ```
 
 While crashed, `read`, `write`, and `sync` return `error.DiskCrashed`.
@@ -361,26 +361,25 @@ const Sim = mar.NetworkSimulation(Payload, .{
 
 const authorities = try world.simulate(.{});
 var sim = try Sim.init(authorities.control);
-try sim.network().send(0, 1, .{ .value = 42 }, .{
+
+try sim.control().network.setFaults(.{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
+try sim.network().send(0, 1, .{ .value = 42 });
 
-while (try sim.packetCore().popReady()) |packet| {
+while (try sim.network().nextDelivery()) |packet| {
     _ = packet.payload;
 }
 ```
 
-For examples that should run queued packets until no network work remains:
+`send` records `network.send` or `network.drop`. `nextDelivery` records
+`network.deliver`, advances world time when the next queued packet is in the
+future, and returns `null` when the network has no pending work.
 
-```zig
-try sim.drainUntilIdle(context, deliver);
-```
-
-`send` records `network.send` or `network.drop`. `popReady` records
-`network.deliver`. Latency values must align with the world's tick size because
-Phase 0 simulated time advances in whole ticks.
+Latency values must align with the world's tick size because Phase 0 simulated
+time advances in whole ticks.
 
 When a network simulation owns time-evolved faults, advance time through the
 simulation wrapper:
@@ -524,8 +523,8 @@ defer report.deinit();
 ```
 
 Stateful scenarios should usually use the struct-config runner. It infers the
-state type from the initializer, and run metadata such as `profile_name`,
-`tags`, and `attributes` is optional:
+state type from the initializer, and run metadata such as `name`, `tags`, and
+`attributes` is optional:
 
 ```zig
 const Model = struct {
@@ -554,6 +553,7 @@ const state_checks = [_]mar.StateCheck(Model){
 var report = try mar.runCase(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
+    .name = "model-smoke",
     .init = Model.init,
     .scenario = scenario,
     .checks = &state_checks,
