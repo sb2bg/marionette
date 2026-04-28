@@ -55,8 +55,8 @@ pub fn scenario(harness: *Harness) !void {
     try harness.store.put(committed_key, committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try harness.store.put(volatile_key, volatile_value, .no_sync);
-    try harness.control.disk.crash(.{});
-    try harness.control.disk.restart(.{});
+    try harness.control.disk.crash();
+    try harness.control.disk.restart();
     try harness.control.disk.corruptSector(wal_path, record_size);
     try harness.store.recover(.strict);
 }
@@ -99,22 +99,21 @@ Three pieces, every test:
 
 Every Marionette test has two halves.
 
-**`env`** is what your application code sees. It exposes `disk`, `network`, `clock`, and whatever else your system uses. The same `Env` type works in simulation and production, you write against it once.
+**`env`** is what your application code sees. It exposes non-generic resources such as `disk`, `clock`, randomness, and tracing. Typed resources such as `Network(Payload)` are passed alongside `env`, so `Env` stays one concrete type.
 
 ```zig
 try env.disk.write(.{ .path = "kv.wal", .offset = 0, .bytes = &bytes });
-try env.network.send(to, payload, .{});
 const now = env.clock.now();
 ```
 
 **`control`** is what your test code uses to inject faults. It's only available in simulation. It mirrors `env`'s structure: every resource has a control surface.
 
 ```zig
-try control.disk.crash(.{});
+try control.disk.crash();
 try control.disk.corruptSector(path, offset);
 try control.network.partition(&side_a, &side_b);
+try control.network.setFaults(.{ .drop_rate = .percent(20) });
 try control.network.heal();
-try control.clock.advance(duration);
 ```
 
 This split is the whole API. Adding a new resource means adding it to both surfaces. You never have to learn a third concept.
@@ -124,21 +123,21 @@ This split is the whole API. Adding a new resource means adding it to both surfa
 Network simulation works the same way. Here's a partition test against a toy replicated register:
 
 ```zig
-fn partitionScenario(cluster: *Cluster) !void {
+fn partitionScenario(harness: *Harness) !void {
     const isolated = [_]mar.NodeId{0};
     const majority = [_]mar.NodeId{ 1, 2, client_node_id };
 
-    try cluster.control.network.partition(&isolated, &majority);
-    try cluster.write(.{ .version = 1, .value = 41 });
+    try harness.control.network.partition(&isolated, &majority);
+    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
 
-    try cluster.control.network.heal();
-    try cluster.write(.{ .version = 1, .value = 41 });
+    try harness.control.network.heal();
+    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 1 });
 
-    try cluster.checkReplicaCommitted(0, 1, 41);
+    try checkReplicaCommitted(&harness.replicas, 0, 1, 41);
 }
 ```
 
-Messages have configurable drop rates, latency distributions, and reordering. Delivery order is deterministic given a seed. Partitions are first-class, declare which sides are isolated, and the simulator handles routing.
+Messages have configurable drop rates, latency distributions, and reordering through `control.network.setFaults(...)`. Application code sends with `net.send(from, to, payload)` and can drain deterministic deliveries with `while (try net.nextDelivery()) |packet|`.
 
 ## Traces
 
@@ -162,6 +161,7 @@ You write trace records with `env.record(...)` from anywhere. Application code, 
 - [Architecture](docs/architecture.md)
 - [Trace Format](docs/trace-format.md)
 - [Run](docs/run.md)
+- [API Target Spec](docs/api-target.md)
 - [BUGGIFY](docs/buggify.md)
 - [Network Model](docs/network.md)
 - [Network API Direction](docs/network-api.md)
