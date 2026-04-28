@@ -145,7 +145,7 @@ pub fn runWithStateLifecycle(
 /// - `scenario: fn (*State) !void`
 ///
 /// Optional fields mirror `RunOptions`: `seed`, `start_ns`, `tick_ns`,
-/// `profile_name`, `tags`, `attributes`, `world_checks`, and `checks`.
+/// `name`, `profile_name`, `tags`, `attributes`, `world_checks`, and `checks`.
 pub fn runCase(config: anytype) RunError!RunReport {
     return runCaseWithSeed(config, null);
 }
@@ -257,7 +257,7 @@ fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
         .seed = seed_override orelse configSeed(config),
         .start_ns = fieldOrDefault(config, "start_ns", @as(u64, 0)),
         .tick_ns = fieldOrDefault(config, "tick_ns", @import("clock.zig").default_tick_ns),
-        .profile_name = fieldOrDefault(config, "profile_name", @as(?[]const u8, null)),
+        .profile_name = configName(config),
         .tags = fieldOrDefault(config, "tags", @as([]const []const u8, &.{})),
         .attributes = fieldOrDefault(config, "attributes", @as([]const RunAttribute, &.{})),
         .checks = fieldOrDefault(config, "world_checks", @as([]const Check, &.{})),
@@ -266,6 +266,11 @@ fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
 
 fn configSeed(config: anytype) u64 {
     return fieldOrDefault(config, "seed", @as(u64, 0));
+}
+
+fn configName(config: anytype) ?[]const u8 {
+    if (@hasField(@TypeOf(config), "name")) return config.name;
+    return fieldOrDefault(config, "profile_name", @as(?[]const u8, null));
 }
 
 fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
@@ -871,6 +876,7 @@ test "runCase: infers state type from init" {
     var report = try runCase(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
+        .name = "counter",
         .init = CounterState.init,
         .scenario = counterScenario,
         .checks = &[_]StateCheck(CounterState){
@@ -881,7 +887,8 @@ test "runCase: infers state type from init" {
 
     switch (report) {
         .passed => |passed| {
-            try std.testing.expectEqual(@as(u64, 3), passed.event_count);
+            try std.testing.expectEqual(@as(u64, 4), passed.event_count);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.profile name=counter") != null);
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.value value=1") != null);
         },
         .failed => return error.UnexpectedRunFailure,
