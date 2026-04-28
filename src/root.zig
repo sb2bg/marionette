@@ -87,6 +87,12 @@ pub const TracerError = env_module.TracerError;
 /// Simulator-control capability bundle.
 pub const SimControl = env_module.SimControl;
 
+/// Preferred name for the simulator-control capability bundle.
+pub const Control = env_module.SimControl;
+
+/// App and control views returned by `World.simulate`.
+pub const Sim = @import("world.zig").World.Simulation;
+
 /// Probability that a BUGGIFY hook fires in simulation.
 pub const BuggifyRate = env_module.BuggifyRate;
 
