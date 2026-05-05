@@ -33,9 +33,8 @@ while (try net.nextDelivery()) |packet| {
 
 The simulator network owns a fixed topology, per-link packet queues, packet
 ids, seeded drops, latency, node and link state, and deterministic delivery
-order. `mar.NetworkSimulation(Payload, options)` remains available as a
-lower-level compatibility wrapper around the same packet-core ideas, but new
-examples should use the composition-root API.
+order. The older `NetworkSimulation(Payload, options)` wrapper remains internal
+to network tests; public examples should use the composition-root API.
 
 ## Two Surfaces
 
@@ -104,8 +103,8 @@ app-shaped send path. `send` takes only `from`, `to`, and `payload`.
 
 `Production.network(Payload)` exists today and returns the same typed handle
 shape as simulation. Its current backing is local and in-process, useful for
-parity tests and for proving that production-shaped code does not depend on
-simulator control.
+same-process parity tests and for proving that production-shaped code does not
+depend on simulator control. It is not a cross-process transport.
 
 A real production socket adapter is still future work. The current rule is:
 
@@ -129,7 +128,10 @@ World.simulate(...).network(Payload)
 
 The composition-root control plane owns the shared topology and fault state.
 Typed handles are created lazily for each payload type and share that control
-state.
+state. A simulation may create at most one handle for a given payload type;
+requesting the same `Network(Payload)` twice returns
+`error.NetworkHandleAlreadyExists` so pending packets cannot be split across
+parallel queues accidentally.
 
 ## Non-Goals For Now
 
@@ -151,19 +153,13 @@ service, then grow from real examples.
 
 ## Migration Rule
 
-Prefer:
+Use:
 
 ```zig
 const sim = try world.simulate(.{ .network = .{ .nodes = 4 } });
 const net = try sim.network(Payload);
 ```
 
-over new example code that constructs:
-
-```zig
-mar.NetworkSimulation(Payload, options)
-```
-
-`NetworkSimulation` and `UnstableNetwork` remain simulator primitives. Code
+The old `NetworkSimulation` wrapper is not exported from the root API. Code
 that reaches for packet-core APIs is writing harness or low-level simulator
 code, not production-shaped service code.

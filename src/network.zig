@@ -20,6 +20,8 @@ pub const NodeId = u16;
 pub const NetworkError = error{
     /// The simulation was not configured with a network.
     NetworkUnavailable,
+    /// A typed network handle for this payload already exists in the simulation.
+    NetworkHandleAlreadyExists,
     /// A node/process id is outside the configured topology.
     InvalidNode,
     /// A duration is zero where progress requires a positive interval, not
@@ -159,6 +161,7 @@ const SharedRuntime = struct {
     faults: NetworkFaultOptions,
     links: []Link,
     down_nodes: []bool,
+    typed_handles: std.ArrayList([]const u8) = .empty,
 
     const Link = struct {
         enabled: bool = true,
@@ -193,6 +196,7 @@ const SharedRuntime = struct {
     }
 
     fn deinit(self: *SharedRuntime, allocator: std.mem.Allocator) void {
+        self.typed_handles.deinit(allocator);
         allocator.free(self.links);
         allocator.free(self.down_nodes);
         self.* = undefined;
@@ -200,6 +204,24 @@ const SharedRuntime = struct {
 
     fn control(self: *SharedRuntime) AnyNetworkControl {
         return .{ .ptr = self, .vtable = &shared_control_vtable };
+    }
+
+    fn claimTypedHandle(self: *SharedRuntime, comptime Payload: type) !void {
+        const payload_name = @typeName(Payload);
+        for (self.typed_handles.items) |existing| {
+            if (std.mem.eql(u8, existing, payload_name)) return error.NetworkHandleAlreadyExists;
+        }
+        try self.typed_handles.append(self.world.allocator, payload_name);
+    }
+
+    fn releaseTypedHandle(self: *SharedRuntime, comptime Payload: type) void {
+        const payload_name = @typeName(Payload);
+        for (self.typed_handles.items, 0..) |existing, index| {
+            if (std.mem.eql(u8, existing, payload_name)) {
+                _ = self.typed_handles.swapRemove(index);
+                return;
+            }
+        }
     }
 
     fn pathIndex(self: *const SharedRuntime, from: NodeId, to: NodeId) NetworkError!usize {
@@ -517,6 +539,9 @@ fn TypedRuntime(comptime Payload: type) type {
         next_packet_id: u64 = 0,
 
         fn init(shared: *SharedRuntime) !Handle {
+            try shared.claimTypedHandle(Payload);
+            errdefer shared.releaseTypedHandle(Payload);
+
             const allocator = shared.world.allocator;
             const runtime = try allocator.create(Self);
             errdefer allocator.destroy(runtime);
@@ -676,6 +701,7 @@ fn TypedRuntime(comptime Payload: type) type {
             const runtime: *Self = @ptrCast(@alignCast(ptr));
             for (runtime.queues) |*queue| queue.deinit(allocator);
             allocator.free(runtime.queues);
+            runtime.shared.releaseTypedHandle(Payload);
             allocator.destroy(runtime);
         }
 
@@ -1448,6 +1474,10 @@ const TestPayload = struct {
     value: u64,
 };
 
+const OtherTestPayload = struct {
+    value: u64,
+};
+
 const test_options: NetworkOptions = .{
     .node_count = 3,
     .client_count = 1,
@@ -1850,4 +1880,15 @@ test "network simulation: nextDelivery advances time and returns packets" {
     try std.testing.expectEqual(@as(u64, 1), packet.payload.value);
     try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
     try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try network.nextDelivery());
+}
+
+test "composition network: duplicate payload handles are rejected" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    _ = try sim.network(TestPayload);
+
+    try std.testing.expectError(error.NetworkHandleAlreadyExists, sim.network(TestPayload));
+    _ = try sim.network(OtherTestPayload);
 }

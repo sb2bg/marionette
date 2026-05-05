@@ -35,12 +35,11 @@ The current network surface is:
   construction with `sim.control.network` for fault orchestration and
   `sim.network(Payload)` for typed app handles.
 - `Production.network(Payload)`: production-shaped local in-process handle for
-  parity tests; real socket backing is still future work.
+  same-process parity tests; it is not a cross-process transport, and real
+  socket backing is still future work.
 - `mar.UnstableNetwork(Payload, NetworkOptions)`: packet core with declared
   topology, per-link queues, send-time drops, latency with jitter, link/node
   state, and per-path clogging.
-- `mar.NetworkSimulation(Payload, NetworkOptions)`: lower-level compatibility
-  wrapper exposing `network()`, `control().network`, and `packetCore()`.
 - `sim.control.tick()`: outer tick that advances `World` and evolves subsystem
   fault state. `sim.control.runFor(duration)` steps tick by tick rather than
   jumping time.
@@ -98,8 +97,7 @@ profiles, named network buses, linearizability checker, time-travel debugging.
 ### Shipped, marked unstable
 
 - `mar.UnstableEventQueue`: fixed-capacity priority queue primitive.
-- `mar.UnstableNetwork` plus `NetworkSimulation` / `NetworkOptions`
-  compatibility aliases for packet-core work.
+- `mar.UnstableNetwork` plus `NetworkOptions` for packet-core work.
 
 Unstable types will change without deprecation cycles until Phase 2 closes.
 
@@ -614,8 +612,9 @@ app-facing APIs.
 The app-facing typed handle now exists for simulation and production-shaped
 local parity tests. Real sockets are still deferred: `std.Io` is in flux, the
 design space (addressing, payload ownership, sync vs callback, listener
-lifecycle) is large, and one example is not enough signal. Do not commit to a
-socket shape before the second independent example forces it.
+lifecycle) is large, and one example is not enough signal. The current
+production handle is a same-process FIFO adapter for shape parity only; do not
+use it as evidence of cross-process transport support.
 
 ### Trace format is strict ASCII, line-oriented, validated at write time
 
@@ -632,8 +631,7 @@ simple without banning useful runtime labels.
 `SimNetworkOptions.nodes` declares the process universe for composition-root
 simulation. Every `NodeId` is bounds-checked against the declared topology. No
 dynamic node spawning in the current surface. When dynamic topology is needed,
-it is a separate primitive. `NetworkOptions` remains for the lower-level
-`NetworkSimulation` compatibility wrapper.
+it is a separate primitive.
 
 ---
 

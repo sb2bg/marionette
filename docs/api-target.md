@@ -74,8 +74,8 @@ var replicas = Replicas.init(sim.env, try sim.network(MessagePayload));
 
 The design keeps `Env` non-generic and passes `Network(Payload)` as a sibling
 handle. `Production.network(Payload)` currently provides a local in-process
-production-shaped handle for parity tests; a real socket adapter is still
-future work.
+production-shaped handle for same-process parity tests; it is not a
+cross-process transport. A real socket adapter is still future work.
 
 ## Example Shape
 

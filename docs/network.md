@@ -105,9 +105,8 @@ while (try net.nextDelivery()) |packet| {
 network has no pending work.
 
 Application-shaped code sends and drains through the typed handle, while fault
-orchestration goes through `sim.control.network`. `mar.NetworkSimulation` and
-`mar.UnstableNetwork` remain lower-level simulator primitives for compatibility
-and packet-core work.
+orchestration goes through `sim.control.network`. `mar.UnstableNetwork` remains
+the lower-level packet-core primitive for focused simulator work.
 
 ## Topology
 

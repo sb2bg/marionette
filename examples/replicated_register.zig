@@ -83,7 +83,6 @@ fn runTrace(
 pub const Harness = struct {
     replicas: Replicas,
     control: mar.Control,
-    sim: mar.Sim,
 
     pub fn init(world: *mar.World) !Harness {
         const sim = try world.simulate(.{ .network = .{
@@ -95,7 +94,6 @@ pub const Harness = struct {
         return .{
             .replicas = Replicas.init(sim.env, net),
             .control = sim.control,
-            .sim = sim,
         };
     }
 };

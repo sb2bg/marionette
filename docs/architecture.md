@@ -49,8 +49,7 @@ Phase 0 has:
   state, directed link filters, simple partitions, and stable
   `(deliver_at, packet_id)` delivery order.
 - `mar.Network(Payload)`, an app-facing typed network handle returned by
-  simulation and production setup, plus lower-level `mar.NetworkSimulation`
-  compatibility for packet-core work.
+  simulation and production setup.
 - `mar.Disk`, an app-facing disk capability for `read`, `write`, and `sync`.
 - `mar.SimDisk`, a deterministic disk simulator with logical paths,
   sector-aligned reads/writes, sparse in-memory sectors, deterministic
