@@ -23,33 +23,21 @@ const profile: Profile = .{
     .second_worker = 2,
 };
 
-const tags = [_][]const u8{
-    "example:retry_queue",
-    "scenario:late_ack",
-};
-
-const attributes = mar.runAttributesFrom(profile);
-
 const checks = [_]mar.StateCheck(RetryQueue){
     .{ .name = "job completed at most once", .check = jobCompletedAtMostOnce },
 };
 
 /// Run the correct retry-queue scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runWithStateInit(
-        allocator,
-        .{
-            .seed = seed,
-            .tick_ns = ns_per_ms,
-            .profile_name = "retry-queue-late-ack",
-            .tags = &tags,
-            .attributes = &attributes,
-        },
-        RetryQueue,
-        RetryQueue.init,
-        scenario,
-        &checks,
-    );
+    var report = try mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = ns_per_ms,
+        .name = "retry-queue-late-ack",
+        .init = RetryQueue.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
     defer report.deinit();
 
     switch (report) {
@@ -63,20 +51,15 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 
 /// Run the deliberately buggy late-ack scenario.
 pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runWithStateInit(
-        allocator,
-        .{
-            .seed = seed,
-            .tick_ns = ns_per_ms,
-            .profile_name = "retry-queue-late-ack-bug",
-            .tags = &tags,
-            .attributes = &attributes,
-        },
-        RetryQueue,
-        RetryQueue.init,
-        buggyScenario,
-        &checks,
-    );
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = ns_per_ms,
+        .name = "retry-queue-late-ack-bug",
+        .init = RetryQueue.init,
+        .scenario = buggyScenario,
+        .checks = &checks,
+    });
 }
 
 fn scenario(queue: *RetryQueue) !void {
