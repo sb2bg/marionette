@@ -18,15 +18,8 @@ const MessagePayload = struct {
     value: u64,
 };
 
-const network_options: mar.NetworkOptions = .{
-    .node_count = replica_count,
-    .client_count = 1,
-    .path_capacity = max_messages,
-};
-
-const Simulation = mar.NetworkSimulation(MessagePayload, network_options);
-const Network = Simulation.Network;
-const Packet = Simulation.PacketCore.Packet;
+const Network = mar.Network(MessagePayload);
+const Packet = Network.Packet;
 
 pub const checks = [_]mar.StateCheck(Harness){
     .{ .name = "committed register is safe", .check = committedRegisterIsSafe },
@@ -89,16 +82,19 @@ fn runTrace(
 
 pub const Harness = struct {
     replicas: Replicas,
-    control: Simulation.Control,
-    sim: Simulation,
+    control: mar.Control,
+    sim: mar.Sim,
 
     pub fn init(world: *mar.World) !Harness {
-        const sim_env = try world.simulate(.{});
-        var sim = try Simulation.init(sim_env.control);
+        const sim = try world.simulate(.{ .network = .{
+            .nodes = replica_count + 1,
+            .path_capacity = max_messages,
+        } });
+        const net = try sim.network(MessagePayload);
 
         return .{
-            .replicas = Replicas.init(sim_env.env, sim.network()),
-            .control = sim.control(),
+            .replicas = Replicas.init(sim.env, net),
+            .control = sim.control,
             .sim = sim,
         };
     }
@@ -433,4 +429,31 @@ test "register: conflict" {
         .scenario = conflictScenario,
         .checks = &checks,
     });
+}
+
+test "register: same code on simulated and production network handles" {
+    var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xC0FFEE, .tick_ns = tick_ns });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{
+        .nodes = replica_count + 1,
+        .path_capacity = max_messages,
+    } });
+    var sim_replicas = Replicas.init(sim.env, try sim.network(MessagePayload));
+    try sim_replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
+    try checkCommittedAgreement(&sim_replicas);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var production = try mar.Production.init(.{
+        .root_dir = tmp.dir,
+        .io = std.testing.io,
+        .disk = .{ .sector_size = 16 },
+    });
+    defer production.deinit();
+
+    var prod_replicas = Replicas.init(production.env(), try production.network(MessagePayload));
+    try prod_replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
+    try checkCommittedAgreement(&prod_replicas);
 }
