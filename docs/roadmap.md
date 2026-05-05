@@ -673,16 +673,29 @@ length-prefixed framing with checksums, refcounted preallocated message
 pool, lazy connect with seeded jittered backoff, async close, bounded
 per-peer queues, silent-drop send.
 
-Two settled choices, recorded so they don't get rediscussed:
+Settled choices, recorded so they don't get rediscussed:
 
-- **One seam, the existing vtable.** Marionette will not parametrize
-  `Network(Payload)` on an IO backend the way TigerBeetle parametrizes
-  `MessageBusType(IO)`. The vtable already gives the swap; adding a
-  generic IO type would push library internals into every user call site.
+- **The user-visible seam is the existing vtable.** Marionette will not
+  parametrize `Network(Payload)` on an IO backend at the public API.
+  The vtable already gives the sim/prod swap; adding a generic IO type
+  would push library internals into every user call site.
 - **Sim and prod converge on silent-drop send semantics.** Today's sim
   `error.EventQueueFull` becomes a trace-visible `network.drop
   reason=queue_full` event. Production drops the same way. The application
   retries.
+
+Deferred, not foreclosed:
+
+- **Internal IO parameterization for fuzzing the production bus.**
+  TigerBeetle's `MessageBusType(IO)` exists primarily so `message_bus_fuzz`
+  can exercise the *real* production bus code (framing, recv-buffer
+  reassembly, connection state) against a deterministic test IO that
+  simulates partial reads, EOF mid-frame, and similar IO-edge behaviors.
+  The vtable seam does not deliver that coverage. Sub-tasks 15d-15g
+  should structure their syscalls behind a small internal IO abstraction
+  so a deterministic impl is cheap to add later. The decision to ship
+  one is deferred until 15d lands. See `docs/network-production.md`
+  "Marionette's seam choice" for the reasoning.
 
 The current production handle is a same-process FIFO adapter for shape
 parity only; do not use it as evidence of cross-process transport support

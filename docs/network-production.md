@@ -56,20 +56,47 @@ The closest fully-realized example in the Zig ecosystem. Studied in detail in
 
 ## Marionette's seam choice
 
-Marionette will keep its current vtable seam. The same `Network(Payload)`
-type is satisfied by two implementations: a simulation impl backed by the
-deterministic packet bus, and a production impl backed by sockets.
+There are actually two seams hiding in this question, and they have different
+answers.
 
-We will *not* parametrize `Network(Payload)` on an IO backend. The vtable
-already gives the swap; adding `Network(Payload, IO)` would push the IO
-choice into every call site of every function that takes a network handle.
-TigerBeetle accepts that cost because they ship a single product whose IO
-backend is part of the build configuration. Marionette is a library; the
-public surface stays uniform.
+**Public-API seam (settled).** The user-visible `Network(Payload)` type
+will not be parametric on an IO backend. The vtable already gives the
+sim/prod swap; adding `Network(Payload, IO)` would push the IO choice into
+every function signature that takes a network handle and leak library
+internals into application code. The same `Network(Payload)` type is
+satisfied by two impls: a simulation impl backed by the deterministic
+packet bus, and a production impl backed by sockets. Production transport
+work goes behind the existing `TypedNetwork(Payload)` vtable in
+`src/network.zig`. No type signatures change in user-facing code.
 
-Concretely, this means production transport work goes behind the existing
-`TypedNetwork(Payload)` vtable in `src/network.zig`. No type signatures
-change in user-facing code.
+**Implementer-internal seam (deferred, not foreclosed).** Whether the
+production-side bus implementation is itself parametric on an internal IO
+type is a separate question. TigerBeetle's `MessageBusType(IO)` is not
+primarily for swapping sim and prod (VOPR uses a different MessageBus
+entirely); it is for `message_bus_fuzz`, which exercises the *real*
+production MessageBus code against a deterministic test IO that simulates
+partial reads, EOF mid-frame, `EAGAIN`, and similar IO-edge behaviors.
+That coverage is not optional in a correctness-focused project: framing,
+recv-buffer reassembly, and connection state-machine code only ever runs
+against real sockets without it.
+
+The vtable seam does not deliver this coverage. Once code is on the prod
+side of `TypedNetwork(Payload)`'s vtable, syscalls are wired in directly.
+The pragmatic plan is to leave room for an internal IO seam without
+committing to one yet:
+
+- Sub-tasks 15a (framing) and 15b (buffer pool) are already independent of
+  IO and are fuzzable directly.
+- Sub-tasks 15d-15g (sockets, connection management, queues) should
+  structure their IO calls behind a small internal abstraction, even if
+  the only impl is the real one. That keeps a future deterministic IO
+  impl cheap to add.
+- A decision on whether to actually ship a deterministic IO + bus-impl
+  fuzzer is deferred until 15d lands and we know what the IO surface
+  looks like in practice. At that point we either commit to internal
+  parameterization or drop the option.
+
+The user-visible API is unaffected by this question either way.
 
 ## Target architecture
 
@@ -233,6 +260,15 @@ The internal IO type is not part of the public API. Users see only
 exposes the primitives the production impl needs (async accept, recv, send,
 close); until then, the internal abstraction is whatever works.
 
+The internal IO surface should be small and well-defined for a second
+reason beyond `std.Io` migration: structured this way, the production bus
+implementation can later be made parametric on the internal IO type so a
+deterministic IO impl can drive bus-implementation fuzz tests
+(TigerBeetle's `message_bus_fuzz` pattern). This is not committed work for
+v1, but the cost of structuring the IO calls cleanly now is small and
+preserves the option. See "Marionette's seam choice" above for the full
+reasoning.
+
 ## Implementation order
 
 Each item ships on its own. Cross-process parity is the done-signal.
@@ -292,9 +328,14 @@ and not use `Network(Payload)` for that workload.
 
 For posterity, where this design diverges from TigerBeetle and why:
 
-- **One seam, not two.** Marionette's vtable substitutes for TigerBeetle's
-  parametric IO type plus separate VOPR bus. Justification: keeps the public
-  type uniform across sim and prod.
+- **One *user-visible* seam, not two.** Marionette's vtable substitutes
+  for the TigerBeetle equivalent of "different MessageBus per use case"
+  (separate VOPR bus vs production bus). Justification: keeps the public
+  type uniform across sim and prod. Note this is narrower than "one seam
+  total": TigerBeetle's parametric `MessageBusType(IO)` exists primarily
+  to let `message_bus_fuzz` exercise the production bus against a
+  deterministic IO. Marionette has not adopted that internal seam yet but
+  has not foreclosed on it; see "Marionette's seam choice" above.
 - **No bus-level replica/client distinction.** Single `NodeId` namespace.
   Justification: Marionette is generic, not VSR-specific.
 - **Pull-shaped receive (`nextDelivery`).** TigerBeetle is callback-shaped.
