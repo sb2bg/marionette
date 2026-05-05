@@ -61,6 +61,10 @@ pub const Production = struct {
 };
 ```
 
+`runCase` accepts optional `.deinit = State.deinit` for state that owns
+non-world resources. The older positional `runWithState*` helpers are internal
+implementation details, not part of the public teaching surface.
+
 The current network handle is obtained from the composition root:
 
 ```zig

@@ -73,9 +73,8 @@ profiles, named network buses, linearizability checker, time-travel debugging.
 - `World`: clock, seeded PRNG, trace log, event indexes.
 - `Clock`: production (host IO clock) and simulation (fake tick-based).
 - `Random`: seeded PRNG wrapper.
-- `mar.run`, `mar.runCase`, `mar.expectPass`, `mar.expectFailure`,
-  `mar.expectFuzz`, `mar.runWithState`, and `mar.runWithStateLifecycle`:
-  twice-and-compare deterministic runner.
+- `mar.run`, `mar.runCase`, `mar.expectPass`, `mar.expectFailure`, and
+  `mar.expectFuzz`: twice-and-compare deterministic runner.
   Stateful initializers receive the replay attempt's `World`; stateful
   scenarios and checks receive only state.
 - `RunOptions`, `RunFailure`, `RunReport`, `StateCheck`, named `Check`.
@@ -262,15 +261,13 @@ through `Env.disk`.
 
 ### Completed: Fix `Cluster.sim = undefined` / `bindWorld` pattern
 
-**Status:** Done. `runWithState` now passes `*World` into state
-initialization, stateful scenarios/checks receive only state, and the
-replicated-register example constructs `Cluster.sim` inside
-`Cluster.init(world)`.
+**Status:** Done. `runCase` now passes `*World` into state initialization,
+stateful scenarios/checks receive only state, and the replicated-register
+example constructs its harness inside `Harness.init(world)`.
 
 **Scope:**
 
-- Change `runWithState`'s `init_state` signature to
-  `fn(*World) State`.
+- Change the state initializer signature to `fn(*World) State`.
 - Migrate the replicated-register example to construct `Cluster` fully in
   `init`, removing `bindWorld` entirely.
 
@@ -287,7 +284,7 @@ replicated-register example constructs `Cluster.sim` inside
 
 - `src/run.zig` (signature change).
 - `examples/replicated_register.zig` (remove `bindWorld`).
-- Tests that call `runWithState` directly (there are a few).
+- Tests that call the stateful runner directly.
 
 **Size:** ~100 lines.
 

@@ -40,9 +40,8 @@ Phase 0 has:
   same scalar run profile struct a scenario uses. Field names are exported
   attribute keys, and runtime behavior must not depend on derived attributes.
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
-- `mar.runWithState`, `mar.runWithStateLifecycle`, and `mar.StateCheck`, which
-  let checks inspect structured scenario state initialized fresh for each
-  replay attempt.
+- `mar.runCase` and `mar.StateCheck`, which let checks inspect structured
+  scenario state initialized fresh for each replay attempt.
 - `mar.UnstableEventQueue`, a fixed-capacity deterministic event queue sketch for
   stable `(ready_at, event_id)`-style ordering.
 - `mar.UnstableNetwork`, a fixed-topology deterministic network sketch with
@@ -275,10 +274,10 @@ Planned API direction:
 - Include invariant name and event index in failure reports.
 
 Current Phase 0 support is deliberately smaller: `RunOptions.checks` accepts
-named `mar.Check` functions that run after the scenario body, and
-`mar.runWithState` accepts named `mar.StateCheck(State)` functions that inspect
-structured scenario state. This proves the failure-report shape, but it is not
-enough for serious multi-event DST yet.
+named `mar.Check` functions that run after the scenario body, and `mar.runCase`
+accepts named `mar.StateCheck(State)` functions that inspect structured
+scenario state. This proves the failure-report shape, but it is not enough for
+serious multi-event DST yet.
 
 Liveness is harder. Marionette should eventually detect stuck systems, unmet
 deadlines, and lack of progress under fair scheduling assumptions. This is not

@@ -70,7 +70,7 @@ pub fn run(
 /// `init_state` is called once per replay attempt. Stateful scenarios receive
 /// only `*State`; store any environment authorities needed by the scenario in
 /// the state initializer.
-pub fn runWithState(
+fn runWithState(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
@@ -93,7 +93,7 @@ pub fn runWithState(
 ///
 /// Use this when state initialization can fail, but any simulator resources it
 /// creates are owned by `World` through `world.simulate`.
-pub fn runWithStateInit(
+fn runWithStateInit(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
@@ -117,7 +117,7 @@ pub fn runWithStateInit(
 /// `init_state` and `deinit_state` are called once per replay attempt. Init,
 /// scenario, and check errors are returned as `RunReport.failed` with the
 /// partial trace preserved. Teardown must be infallible.
-pub fn runWithStateLifecycle(
+fn runWithStateLifecycle(
     allocator: std.mem.Allocator,
     options: RunOptions,
     comptime State: type,
@@ -145,7 +145,8 @@ pub fn runWithStateLifecycle(
 /// - `scenario: fn (*State) !void`
 ///
 /// Optional fields mirror `RunOptions`: `seed`, `start_ns`, `tick_ns`,
-/// `name`, `profile_name`, `tags`, `attributes`, `world_checks`, and `checks`.
+/// `name`, `profile_name`, `tags`, `attributes`, `world_checks`, `checks`,
+/// and `deinit: fn (*State) void`.
 pub fn runCase(config: anytype) RunError!RunReport {
     return runCaseWithSeed(config, null);
 }
@@ -241,6 +242,19 @@ fn runCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
     const no_state_checks = [_]StateCheck(State){};
     const state_checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_state_checks;
 
+    if (@hasField(@TypeOf(config), "deinit")) {
+        validateDeinit(State, config.deinit);
+        return runTwiceWithStateLifecycle(
+            config.allocator,
+            runOptionsFromConfig(config, seed_override),
+            State,
+            fallibleInit(State, config.init),
+            config.deinit,
+            config.scenario,
+            state_checks,
+        );
+    }
+
     return runTwiceWithStateLifecycle(
         config.allocator,
         runOptionsFromConfig(config, seed_override),
@@ -299,6 +313,20 @@ fn initReturnType(comptime init_state: anytype) type {
         @compileError("runCase config.init must take `*mar.World`");
     }
     return info.return_type orelse @compileError("runCase config.init must return state");
+}
+
+fn validateDeinit(comptime State: type, comptime deinit_state: anytype) void {
+    const info = switch (@typeInfo(@TypeOf(deinit_state))) {
+        .@"fn" => |fn_info| fn_info,
+        else => @compileError("runCase config.deinit must be a function"),
+    };
+    if (info.params.len != 1 or info.params[0].type != *State) {
+        @compileError("runCase config.deinit must take `*State`");
+    }
+    const Return = info.return_type orelse @compileError("runCase config.deinit must return void");
+    if (Return != void) {
+        @compileError("runCase config.deinit must return void");
+    }
 }
 
 fn fallibleInit(comptime State: type, comptime init_state: anytype) fn (*World) anyerror!State {
@@ -847,19 +875,18 @@ fn counterCheck(state: *const CounterState) !void {
     try state.env.record("state.check value={}", .{state.value});
 }
 
-test "runWithState: checks inspect fresh scenario state" {
+test "runCase: checks inspect fresh scenario state" {
     const state_checks = [_]StateCheck(CounterState){
         .{ .name = "counter is one", .check = counterCheck },
     };
 
-    var report = try runWithState(
-        std.testing.allocator,
-        .{ .seed = 1234 },
-        CounterState,
-        CounterState.init,
-        counterScenario,
-        &state_checks,
-    );
+    var report = try runCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .init = CounterState.init,
+        .scenario = counterScenario,
+        .checks = &state_checks,
+    });
     defer report.deinit();
 
     switch (report) {
@@ -937,19 +964,18 @@ test "expectFailure accepts failing cases" {
     });
 }
 
-test "runWithState: check failures preserve partial trace and check name" {
+test "runCase: check failures preserve partial trace and check name" {
     const state_checks = [_]StateCheck(CounterState){
         .{ .name = "counter fails", .check = failingCounterCheck },
     };
 
-    var report = try runWithState(
-        std.testing.allocator,
-        .{ .seed = 1234 },
-        CounterState,
-        CounterState.init,
-        counterScenario,
-        &state_checks,
-    );
+    var report = try runCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .init = CounterState.init,
+        .scenario = counterScenario,
+        .checks = &state_checks,
+    });
     defer report.deinit();
 
     switch (report) {
@@ -990,21 +1016,20 @@ fn lifecycleCheck(state: *const LifecycleState) !void {
     try state.env.record("lifecycle.check value={}", .{state.value});
 }
 
-test "runWithStateLifecycle: deinitializes each replay attempt" {
+test "runCase: deinitializes each replay attempt" {
     lifecycle_deinit_count = 0;
     const state_checks = [_]StateCheck(LifecycleState){
         .{ .name = "lifecycle is one", .check = lifecycleCheck },
     };
 
-    var report = try runWithStateLifecycle(
-        std.testing.allocator,
-        .{ .seed = 1234 },
-        LifecycleState,
-        LifecycleState.init,
-        LifecycleState.deinit,
-        lifecycleScenario,
-        &state_checks,
-    );
+    var report = try runCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .init = LifecycleState.init,
+        .deinit = LifecycleState.deinit,
+        .scenario = lifecycleScenario,
+        .checks = &state_checks,
+    });
     defer report.deinit();
 
     switch (report) {
@@ -1031,19 +1056,18 @@ fn unreachableLifecycleScenario(_: *FallibleInitState) !void {
     return error.UnreachableScenario;
 }
 
-test "runWithStateLifecycle: init errors become scenario failures" {
+test "runCase: init errors become scenario failures" {
     lifecycle_deinit_count = 0;
     const state_checks = [_]StateCheck(FallibleInitState){};
 
-    var report = try runWithStateLifecycle(
-        std.testing.allocator,
-        .{ .seed = 1234 },
-        FallibleInitState,
-        FallibleInitState.init,
-        FallibleInitState.deinit,
-        unreachableLifecycleScenario,
-        &state_checks,
-    );
+    var report = try runCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .init = FallibleInitState.init,
+        .deinit = FallibleInitState.deinit,
+        .scenario = unreachableLifecycleScenario,
+        .checks = &state_checks,
+    });
     defer report.deinit();
 
     switch (report) {

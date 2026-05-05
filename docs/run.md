@@ -258,8 +258,18 @@ try mar.expectFuzz(.{
 ```
 
 Use `mar.expectFailure` when proving a checker catches a known-buggy scenario.
-Use `mar.runWithStateLifecycle` only when state owns non-world resources that
-need an explicit infallible deinitializer.
+If state owns non-world resources, pass an explicit infallible deinitializer:
+
+```zig
+var report = try mar.runCase(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .init = Model.init,
+    .deinit = Model.deinit,
+    .scenario = scenario,
+    .checks = &state_checks,
+});
+```
 
 This is intentionally small. Future scheduler work can check invariants after
 every event or on quiescence, but the current API already gives failures a

@@ -191,15 +191,6 @@ pub const traceField = @import("world.zig").traceField;
 /// Run a scenario twice with the same seed and compare traces.
 pub const run = run_module.run;
 
-/// Run a stateful scenario twice with fresh state and compare traces.
-pub const runWithState = run_module.runWithState;
-
-/// Run a stateful scenario with fallible initialization and world-owned teardown.
-pub const runWithStateInit = run_module.runWithStateInit;
-
-/// Run a stateful scenario with fallible initialization and explicit teardown.
-pub const runWithStateLifecycle = run_module.runWithStateLifecycle;
-
 /// Run a scenario through the struct-config runner.
 pub const runCase = run_module.runCase;
 

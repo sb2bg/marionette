@@ -561,7 +561,9 @@ defer report.deinit();
 attempt's `World` into the initializer. Initializers may construct world-bound
 simulator authorities, but should not record trace events. Stateful scenarios
 and state checks receive only state; put environment authorities on the state
-when they need to record or advance time.
+when they need to record or advance time. If state owns non-world resources,
+provide `.deinit = State.deinit`; the deinitializer runs once per replay
+attempt after scenario execution and checks.
 
 Tests that only need pass/fail behavior can skip report handling:
 
