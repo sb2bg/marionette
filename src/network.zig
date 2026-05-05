@@ -18,6 +18,8 @@ pub const NodeId = u16;
 
 /// Errors returned by unstable network runtime validation.
 pub const NetworkError = error{
+    /// The simulation was not configured with a network.
+    NetworkUnavailable,
     /// A node/process id is outside the configured topology.
     InvalidNode,
     /// A duration is zero where progress requires a positive interval, not
@@ -25,6 +27,8 @@ pub const NetworkError = error{
     InvalidDuration,
     /// A send drop rate has an invalid numerator/denominator pair.
     InvalidRate,
+    /// A directed path queue is at capacity.
+    EventQueueFull,
 };
 
 fn validateRate(rate: env_module.BuggifyRate) NetworkError!void {
@@ -48,6 +52,719 @@ pub const NetworkFaultOptions = struct {
     min_latency_ns: clock_module.Duration = 0,
     latency_jitter_ns: clock_module.Duration = 0,
 };
+
+/// Runtime topology for a composition-root network simulation.
+pub const SimNetworkOptions = struct {
+    /// Total simulated processes/nodes.
+    nodes: usize,
+    /// Maximum packets queued on one directed path.
+    path_capacity: usize = 64,
+};
+
+/// Type-erased simulator-control view for network fault orchestration.
+pub const AnyNetworkControl = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        set_faults: *const fn (*anyopaque, NetworkFaultOptions) anyerror!void,
+        set_node: *const fn (*anyopaque, NodeId, bool) anyerror!void,
+        set_link: *const fn (*anyopaque, NodeId, NodeId, bool) anyerror!void,
+        clog: *const fn (*anyopaque, NodeId, NodeId, clock_module.Duration) anyerror!void,
+        unclog: *const fn (*anyopaque, NodeId, NodeId) anyerror!void,
+        unclog_all: *const fn (*anyopaque) anyerror!void,
+        partition: *const fn (*anyopaque, []const NodeId, []const NodeId) anyerror!void,
+        heal: *const fn (*anyopaque) anyerror!void,
+        heal_links: *const fn (*anyopaque) anyerror!void,
+        world: *const fn (*anyopaque) ?*World,
+        shared: *const fn (*anyopaque) ?*SharedRuntime,
+    };
+
+    pub fn unavailable() AnyNetworkControl {
+        return .{ .ptr = &unavailable_network_control_ctx, .vtable = &unavailable_network_control_vtable };
+    }
+
+    pub fn setFaults(self: AnyNetworkControl, faults: NetworkFaultOptions) !void {
+        try self.vtable.set_faults(self.ptr, faults);
+    }
+
+    pub fn setNode(self: AnyNetworkControl, node: NodeId, up: bool) !void {
+        try self.vtable.set_node(self.ptr, node, up);
+    }
+
+    pub fn setLink(self: AnyNetworkControl, from: NodeId, to: NodeId, enabled: bool) !void {
+        try self.vtable.set_link(self.ptr, from, to, enabled);
+    }
+
+    pub fn clog(self: AnyNetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
+        try self.vtable.clog(self.ptr, from, to, duration_ns);
+    }
+
+    pub fn unclog(self: AnyNetworkControl, from: NodeId, to: NodeId) !void {
+        try self.vtable.unclog(self.ptr, from, to);
+    }
+
+    pub fn unclogAll(self: AnyNetworkControl) !void {
+        try self.vtable.unclog_all(self.ptr);
+    }
+
+    pub fn partition(self: AnyNetworkControl, left: []const NodeId, right: []const NodeId) !void {
+        try self.vtable.partition(self.ptr, left, right);
+    }
+
+    pub fn heal(self: AnyNetworkControl) !void {
+        try self.vtable.heal(self.ptr);
+    }
+
+    pub fn healLinks(self: AnyNetworkControl) !void {
+        try self.vtable.heal_links(self.ptr);
+    }
+};
+
+/// Typed app-facing network handle.
+pub fn TypedNetwork(comptime Payload: type) type {
+    return struct {
+        const Self = @This();
+
+        ptr: *anyopaque,
+        vtable: *const VTable,
+
+        pub const Packet = struct {
+            id: u64,
+            from: NodeId,
+            to: NodeId,
+            deliver_at: clock_module.Timestamp,
+            payload: Payload,
+        };
+
+        pub const VTable = struct {
+            send: *const fn (*anyopaque, NodeId, NodeId, Payload) anyerror!void,
+            next_delivery: *const fn (*anyopaque) anyerror!?Packet,
+        };
+
+        pub fn send(self: Self, from: NodeId, to: NodeId, payload: Payload) !void {
+            try self.vtable.send(self.ptr, from, to, payload);
+        }
+
+        pub fn nextDelivery(self: Self) !?Packet {
+            return try self.vtable.next_delivery(self.ptr);
+        }
+    };
+}
+
+const SharedRuntime = struct {
+    world: *World,
+    process_count: usize,
+    path_capacity: usize,
+    faults: NetworkFaultOptions,
+    links: []Link,
+    down_nodes: []bool,
+
+    const Link = struct {
+        enabled: bool = true,
+        clogged_until: clock_module.Timestamp = 0,
+    };
+
+    fn init(world: *World, options: SimNetworkOptions) !*SharedRuntime {
+        try validateTopology(options.nodes, options.path_capacity);
+
+        const runtime = try world.allocator.create(SharedRuntime);
+        errdefer world.allocator.destroy(runtime);
+
+        const path_count = options.nodes * options.nodes;
+        const links = try world.allocator.alloc(Link, path_count);
+        errdefer world.allocator.free(links);
+        const down_nodes = try world.allocator.alloc(bool, options.nodes);
+        errdefer world.allocator.free(down_nodes);
+
+        @memset(links, .{});
+        @memset(down_nodes, false);
+
+        runtime.* = .{
+            .world = world,
+            .process_count = options.nodes,
+            .path_capacity = options.path_capacity,
+            .faults = .{ .min_latency_ns = world.clock().tick_ns },
+            .links = links,
+            .down_nodes = down_nodes,
+        };
+        try world.registerTeardown(runtime, deinitSharedRuntime);
+        return runtime;
+    }
+
+    fn deinit(self: *SharedRuntime, allocator: std.mem.Allocator) void {
+        allocator.free(self.links);
+        allocator.free(self.down_nodes);
+        self.* = undefined;
+    }
+
+    fn control(self: *SharedRuntime) AnyNetworkControl {
+        return .{ .ptr = self, .vtable = &shared_control_vtable };
+    }
+
+    fn pathIndex(self: *const SharedRuntime, from: NodeId, to: NodeId) NetworkError!usize {
+        try self.validateNode(from);
+        try self.validateNode(to);
+        return @as(usize, from) * self.process_count + @as(usize, to);
+    }
+
+    fn validateNode(self: *const SharedRuntime, node: NodeId) NetworkError!void {
+        if (@as(usize, node) >= self.process_count) return error.InvalidNode;
+    }
+
+    fn validateNodes(self: *const SharedRuntime, nodes: []const NodeId) NetworkError!void {
+        for (nodes) |node| try self.validateNode(node);
+    }
+
+    fn validatePositiveTickDuration(self: *const SharedRuntime, duration_ns: clock_module.Duration) NetworkError!void {
+        if (duration_ns == 0) return error.InvalidDuration;
+        if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
+    }
+
+    fn validateFaultLatency(self: *const SharedRuntime, faults: NetworkFaultOptions) NetworkError!void {
+        const tick_ns = self.world.clock().tick_ns;
+        if (faults.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
+        if (faults.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
+    }
+
+    fn setFaults(self: *SharedRuntime, faults: NetworkFaultOptions) !void {
+        try validateRate(faults.drop_rate);
+        try self.validateFaultLatency(faults);
+        self.faults = faults;
+        try self.world.record(
+            "network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={}",
+            .{ faults.drop_rate.numerator, faults.drop_rate.denominator, faults.min_latency_ns, faults.latency_jitter_ns },
+        );
+    }
+
+    fn setNode(self: *SharedRuntime, node: NodeId, up: bool) !void {
+        try self.validateNode(node);
+        self.down_nodes[@intCast(node)] = !up;
+        try self.world.record("network.node node={} up={}", .{ node, up });
+    }
+
+    fn setLink(self: *SharedRuntime, from: NodeId, to: NodeId, enabled: bool) !void {
+        self.links[try self.pathIndex(from, to)].enabled = enabled;
+        try self.world.record("network.link from={} to={} enabled={}", .{ from, to, enabled });
+    }
+
+    fn clog(self: *SharedRuntime, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
+        try self.validatePositiveTickDuration(duration_ns);
+        if (std.math.maxInt(clock_module.Timestamp) - self.world.now() < duration_ns) {
+            return error.InvalidDuration;
+        }
+
+        const until = self.world.now() + duration_ns;
+        const link = &self.links[try self.pathIndex(from, to)];
+        link.clogged_until = @max(link.clogged_until, until);
+        try self.world.record(
+            "network.clog from={} to={} duration_ns={} until_ns={}",
+            .{ from, to, duration_ns, link.clogged_until },
+        );
+    }
+
+    fn unclog(self: *SharedRuntime, from: NodeId, to: NodeId) !void {
+        const link = &self.links[try self.pathIndex(from, to)];
+        const active = link.clogged_until > self.world.now();
+        link.clogged_until = 0;
+        try self.world.record("network.unclog from={} to={} active={}", .{ from, to, active });
+    }
+
+    fn unclogAll(self: *SharedRuntime) !void {
+        const clogged_count = self.cloggedLinkCount();
+        for (self.links) |*link| link.clogged_until = 0;
+        try self.world.record("network.unclog_all clogged_count={}", .{clogged_count});
+    }
+
+    fn partition(self: *SharedRuntime, left: []const NodeId, right: []const NodeId) !void {
+        try self.validateNodes(left);
+        try self.validateNodes(right);
+        try self.world.record("network.partition left_count={} right_count={}", .{ left.len, right.len });
+        for (left) |from| {
+            for (right) |to| {
+                self.links[try self.pathIndex(from, to)].enabled = false;
+                self.links[try self.pathIndex(to, from)].enabled = false;
+            }
+        }
+    }
+
+    fn heal(self: *SharedRuntime) !void {
+        const disabled_count = self.disabledLinkCount();
+        const down_count = self.downNodeCount();
+        const clogged_count = self.cloggedLinkCount();
+        for (self.links) |*link| {
+            link.enabled = true;
+            link.clogged_until = 0;
+        }
+        @memset(self.down_nodes, false);
+        try self.world.record(
+            "network.heal disabled_count={} down_count={} clogged_count={}",
+            .{ disabled_count, down_count, clogged_count },
+        );
+    }
+
+    fn healLinks(self: *SharedRuntime) !void {
+        const disabled_count = self.disabledLinkCount();
+        for (self.links) |*link| link.enabled = true;
+        try self.world.record("network.heal_links disabled_count={}", .{disabled_count});
+    }
+
+    fn evolveFaults(self: *SharedRuntime) !void {
+        const now_ns = self.world.now();
+        for (self.links, 0..) |*link, index| {
+            if (link.clogged_until == 0 or link.clogged_until > now_ns) continue;
+            const from: NodeId = @intCast(index / self.process_count);
+            const to: NodeId = @intCast(index % self.process_count);
+            link.clogged_until = 0;
+            try self.world.record("network.unclog from={} to={} active=false", .{ from, to });
+        }
+    }
+
+    fn disabledLinkCount(self: *const SharedRuntime) usize {
+        var count: usize = 0;
+        for (self.links) |link| {
+            if (!link.enabled) count += 1;
+        }
+        return count;
+    }
+
+    fn downNodeCount(self: *const SharedRuntime) usize {
+        var count: usize = 0;
+        for (self.down_nodes) |down| {
+            if (down) count += 1;
+        }
+        return count;
+    }
+
+    fn cloggedLinkCount(self: *const SharedRuntime) usize {
+        var count: usize = 0;
+        const now_ns = self.world.now();
+        for (self.links) |link| {
+            if (link.clogged_until > now_ns) count += 1;
+        }
+        return count;
+    }
+};
+
+fn validateTopology(nodes: usize, path_capacity: usize) NetworkError!void {
+    if (nodes == 0 or nodes > @as(usize, std.math.maxInt(NodeId)) + 1) return error.InvalidNode;
+    if (path_capacity == 0) return error.EventQueueFull;
+}
+
+fn deinitSharedRuntime(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const runtime: *SharedRuntime = @ptrCast(@alignCast(ptr));
+    runtime.deinit(allocator);
+    allocator.destroy(runtime);
+}
+
+fn sharedControl(ptr: *anyopaque) *SharedRuntime {
+    return @ptrCast(@alignCast(ptr));
+}
+
+const shared_control_vtable: AnyNetworkControl.VTable = .{
+    .set_faults = sharedControlSetFaults,
+    .set_node = sharedControlSetNode,
+    .set_link = sharedControlSetLink,
+    .clog = sharedControlClog,
+    .unclog = sharedControlUnclog,
+    .unclog_all = sharedControlUnclogAll,
+    .partition = sharedControlPartition,
+    .heal = sharedControlHeal,
+    .heal_links = sharedControlHealLinks,
+    .world = sharedControlWorld,
+    .shared = sharedControlShared,
+};
+
+fn sharedControlSetFaults(ptr: *anyopaque, faults: NetworkFaultOptions) anyerror!void {
+    try sharedControl(ptr).setFaults(faults);
+}
+
+fn sharedControlSetNode(ptr: *anyopaque, node: NodeId, up: bool) anyerror!void {
+    try sharedControl(ptr).setNode(node, up);
+}
+
+fn sharedControlSetLink(ptr: *anyopaque, from: NodeId, to: NodeId, enabled: bool) anyerror!void {
+    try sharedControl(ptr).setLink(from, to, enabled);
+}
+
+fn sharedControlClog(ptr: *anyopaque, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) anyerror!void {
+    try sharedControl(ptr).clog(from, to, duration_ns);
+}
+
+fn sharedControlUnclog(ptr: *anyopaque, from: NodeId, to: NodeId) anyerror!void {
+    try sharedControl(ptr).unclog(from, to);
+}
+
+fn sharedControlUnclogAll(ptr: *anyopaque) anyerror!void {
+    try sharedControl(ptr).unclogAll();
+}
+
+fn sharedControlPartition(ptr: *anyopaque, left: []const NodeId, right: []const NodeId) anyerror!void {
+    try sharedControl(ptr).partition(left, right);
+}
+
+fn sharedControlHeal(ptr: *anyopaque) anyerror!void {
+    try sharedControl(ptr).heal();
+}
+
+fn sharedControlHealLinks(ptr: *anyopaque) anyerror!void {
+    try sharedControl(ptr).healLinks();
+}
+
+fn sharedControlWorld(ptr: *anyopaque) ?*World {
+    return sharedControl(ptr).world;
+}
+
+fn sharedControlShared(ptr: *anyopaque) ?*SharedRuntime {
+    return sharedControl(ptr);
+}
+
+var unavailable_network_control_ctx: u8 = 0;
+
+const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
+    .set_faults = unavailableControlSetFaults,
+    .set_node = unavailableControlSetNode,
+    .set_link = unavailableControlSetLink,
+    .clog = unavailableControlClog,
+    .unclog = unavailableControlUnclog,
+    .unclog_all = unavailableControlUnclogAll,
+    .partition = unavailableControlPartition,
+    .heal = unavailableControlHeal,
+    .heal_links = unavailableControlHealLinks,
+    .world = unavailableControlWorld,
+    .shared = unavailableControlShared,
+};
+
+fn unavailableControlSetFaults(_: *anyopaque, _: NetworkFaultOptions) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlSetNode(_: *anyopaque, _: NodeId, _: bool) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlSetLink(_: *anyopaque, _: NodeId, _: NodeId, _: bool) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlClog(_: *anyopaque, _: NodeId, _: NodeId, _: clock_module.Duration) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlUnclog(_: *anyopaque, _: NodeId, _: NodeId) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlUnclogAll(_: *anyopaque) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlPartition(_: *anyopaque, _: []const NodeId, _: []const NodeId) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlHeal(_: *anyopaque) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlHealLinks(_: *anyopaque) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlWorld(_: *anyopaque) ?*World {
+    return null;
+}
+
+fn unavailableControlShared(_: *anyopaque) ?*SharedRuntime {
+    return null;
+}
+
+pub fn initSimControl(world: *World, options: SimNetworkOptions) !AnyNetworkControl {
+    const shared = try SharedRuntime.init(world, options);
+    return shared.control();
+}
+
+pub fn networkFromControl(comptime Payload: type, control: AnyNetworkControl) !TypedNetwork(Payload) {
+    const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
+    return try TypedRuntime(Payload).init(shared);
+}
+
+pub const ProductionNetworkTeardown = struct {
+    ptr: *anyopaque,
+    deinit: *const fn (*anyopaque, std.mem.Allocator) void,
+};
+
+pub fn ProductionNetworkInit(comptime Payload: type) type {
+    return struct {
+        network: TypedNetwork(Payload),
+        teardown: ProductionNetworkTeardown,
+    };
+}
+
+pub fn initProductionNetwork(comptime Payload: type, allocator: std.mem.Allocator) std.mem.Allocator.Error!ProductionNetworkInit(Payload) {
+    return try ProductionRuntime(Payload).init(allocator);
+}
+
+fn TypedRuntime(comptime Payload: type) type {
+    const Handle = TypedNetwork(Payload);
+    const Packet = Handle.Packet;
+
+    return struct {
+        const Self = @This();
+
+        shared: *SharedRuntime,
+        queues: []std.ArrayList(Packet),
+        next_packet_id: u64 = 0,
+
+        fn init(shared: *SharedRuntime) !Handle {
+            const allocator = shared.world.allocator;
+            const runtime = try allocator.create(Self);
+            errdefer allocator.destroy(runtime);
+
+            const path_count = shared.process_count * shared.process_count;
+            const queues = try allocator.alloc(std.ArrayList(Packet), path_count);
+            errdefer allocator.free(queues);
+            @memset(queues, .empty);
+
+            runtime.* = .{
+                .shared = shared,
+                .queues = queues,
+            };
+            try shared.world.registerTeardown(runtime, deinit);
+
+            return .{ .ptr = runtime, .vtable = &vtable };
+        }
+
+        fn send(self: *Self, from: NodeId, to: NodeId, payload: Payload) !void {
+            const shared = self.shared;
+            try shared.validateNode(from);
+            try shared.validateNode(to);
+            try validateRate(shared.faults.drop_rate);
+            try shared.validateFaultLatency(shared.faults);
+
+            const packet_id = self.next_packet_id;
+            self.next_packet_id += 1;
+
+            if (shared.down_nodes[@intCast(from)]) {
+                try shared.world.record("network.drop id={} from={} to={} reason=source_down", .{ packet_id, from, to });
+                return;
+            }
+
+            const drop_roll = try shared.world.randomIntLessThan(u32, shared.faults.drop_rate.denominator);
+            if (drop_roll < shared.faults.drop_rate.numerator) {
+                try shared.world.record(
+                    "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
+                    .{ packet_id, from, to, shared.faults.drop_rate.numerator, shared.faults.drop_rate.denominator, drop_roll },
+                );
+                return;
+            }
+
+            const latency_ns = try self.latency();
+            if (std.math.maxInt(clock_module.Timestamp) - shared.world.now() < latency_ns) {
+                return error.InvalidDuration;
+            }
+
+            const packet: Packet = .{
+                .id = packet_id,
+                .from = from,
+                .to = to,
+                .deliver_at = shared.world.now() + latency_ns,
+                .payload = payload,
+            };
+
+            const queue = &self.queues[try shared.pathIndex(from, to)];
+            if (queue.items.len >= shared.path_capacity) return error.EventQueueFull;
+            try queue.append(shared.world.allocator, packet);
+            var index = queue.items.len - 1;
+            while (index > 0 and packetLessThan(queue.items[index], queue.items[index - 1])) : (index -= 1) {
+                std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
+            }
+
+            try shared.world.record(
+                "network.send id={} from={} to={} deliver_at={} latency_ns={}",
+                .{ packet.id, packet.from, packet.to, packet.deliver_at, latency_ns },
+            );
+        }
+
+        fn nextDelivery(self: *Self) !?Packet {
+            while (true) {
+                try self.shared.evolveFaults();
+                if (try self.popReady()) |packet| return packet;
+
+                const deliver_at = self.nextDeliveryAt() orelse return null;
+                const now_ns = self.shared.world.now();
+                if (deliver_at <= now_ns) return null;
+                try self.runFor(deliver_at - now_ns);
+            }
+        }
+
+        fn popReady(self: *Self) !?Packet {
+            while (true) {
+                const link_index = self.nextReadyLinkIndex() orelse return null;
+                const ready = self.queues[link_index].orderedRemove(0);
+
+                if (self.shared.down_nodes[@intCast(ready.to)]) {
+                    try self.shared.world.record("network.drop id={} from={} to={} reason=destination_down", .{ ready.id, ready.from, ready.to });
+                    continue;
+                }
+
+                const link = self.shared.links[try self.shared.pathIndex(ready.from, ready.to)];
+                if (!link.enabled) {
+                    try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
+                    continue;
+                }
+
+                try self.shared.world.record("network.deliver id={} from={} to={} now_ns={}", .{ ready.id, ready.from, ready.to, self.shared.world.now() });
+                return ready;
+            }
+        }
+
+        fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
+            var best: ?clock_module.Timestamp = null;
+            for (self.queues, 0..) |queue, index| {
+                const packet = if (queue.items.len == 0) continue else queue.items[0];
+                const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
+                if (best == null or ready_at < best.?) best = ready_at;
+            }
+            return best;
+        }
+
+        fn nextReadyLinkIndex(self: *const Self) ?usize {
+            var best_index: ?usize = null;
+            var best_packet: Packet = undefined;
+            for (self.queues, 0..) |queue, index| {
+                if (queue.items.len == 0) continue;
+                const packet = queue.items[0];
+                if (packet.deliver_at > self.shared.world.now()) continue;
+                if (self.shared.links[index].clogged_until > self.shared.world.now()) continue;
+                if (best_index == null or packetLessThan(packet, best_packet)) {
+                    best_index = index;
+                    best_packet = packet;
+                }
+            }
+            return best_index;
+        }
+
+        fn latency(self: *Self) !clock_module.Duration {
+            const faults = self.shared.faults;
+            const tick_ns = self.shared.world.clock().tick_ns;
+            if (faults.latency_jitter_ns == 0) return faults.min_latency_ns;
+
+            const jitter_ticks = try self.shared.world.randomIntLessThan(
+                clock_module.Duration,
+                faults.latency_jitter_ns / tick_ns + 1,
+            );
+            return faults.min_latency_ns + jitter_ticks * tick_ns;
+        }
+
+        fn runFor(self: *Self, duration_ns: clock_module.Duration) !void {
+            const tick_ns = self.shared.world.clock().tick_ns;
+            if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+            var remaining = duration_ns;
+            while (remaining > 0) : (remaining -= tick_ns) {
+                try self.shared.world.tick();
+                try self.shared.evolveFaults();
+            }
+        }
+
+        fn packetLessThan(a: Packet, b: Packet) bool {
+            return a.deliver_at < b.deliver_at or
+                (a.deliver_at == b.deliver_at and a.id < b.id);
+        }
+
+        fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+            const runtime: *Self = @ptrCast(@alignCast(ptr));
+            for (runtime.queues) |*queue| queue.deinit(allocator);
+            allocator.free(runtime.queues);
+            allocator.destroy(runtime);
+        }
+
+        fn fromOpaque(ptr: *anyopaque) *Self {
+            return @ptrCast(@alignCast(ptr));
+        }
+
+        fn vtableSend(ptr: *anyopaque, from: NodeId, to: NodeId, payload: Payload) anyerror!void {
+            try fromOpaque(ptr).send(from, to, payload);
+        }
+
+        fn vtableNextDelivery(ptr: *anyopaque) anyerror!?Packet {
+            return try fromOpaque(ptr).nextDelivery();
+        }
+
+        const vtable: Handle.VTable = .{
+            .send = vtableSend,
+            .next_delivery = vtableNextDelivery,
+        };
+    };
+}
+
+fn ProductionRuntime(comptime Payload: type) type {
+    const Handle = TypedNetwork(Payload);
+    const Packet = Handle.Packet;
+
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+        queue: std.ArrayList(Packet) = .empty,
+        next_packet_id: u64 = 0,
+
+        fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!ProductionNetworkInit(Payload) {
+            const runtime = try allocator.create(Self);
+            runtime.* = .{ .allocator = allocator };
+
+            return .{
+                .network = .{ .ptr = runtime, .vtable = &vtable },
+                .teardown = .{ .ptr = runtime, .deinit = deinitOpaque },
+            };
+        }
+
+        fn send(self: *Self, from: NodeId, to: NodeId, payload: Payload) !void {
+            const packet: Packet = .{
+                .id = self.next_packet_id,
+                .from = from,
+                .to = to,
+                .deliver_at = 0,
+                .payload = payload,
+            };
+            self.next_packet_id += 1;
+            try self.queue.append(self.allocator, packet);
+        }
+
+        fn nextDelivery(self: *Self) !?Packet {
+            if (self.queue.items.len == 0) return null;
+            return self.queue.orderedRemove(0);
+        }
+
+        fn deinit(self: *Self) void {
+            self.queue.deinit(self.allocator);
+            const allocator = self.allocator;
+            self.* = undefined;
+            allocator.destroy(self);
+        }
+
+        fn deinitOpaque(ptr: *anyopaque, _: std.mem.Allocator) void {
+            fromOpaque(ptr).deinit();
+        }
+
+        fn fromOpaque(ptr: *anyopaque) *Self {
+            return @ptrCast(@alignCast(ptr));
+        }
+
+        fn vtableSend(ptr: *anyopaque, from: NodeId, to: NodeId, payload: Payload) anyerror!void {
+            try fromOpaque(ptr).send(from, to, payload);
+        }
+
+        fn vtableNextDelivery(ptr: *anyopaque) anyerror!?Packet {
+            return try fromOpaque(ptr).nextDelivery();
+        }
+
+        const vtable: Handle.VTable = .{
+            .send = vtableSend,
+            .next_delivery = vtableNextDelivery,
+        };
+    };
+}
 
 /// Build a fixed-topology deterministic network for one payload type.
 pub fn UnstableNetwork(comptime Payload: type, comptime network_options: NetworkOptions) type {
@@ -557,12 +1274,12 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
             }
         };
 
-        pub const NetworkControl = struct {
+        pub const SimulationNetworkControl = struct {
             packet_core: *PacketCore,
             faults: *NetworkFaultOptions,
 
             /// Configure runtime send faults for subsequent app-facing sends.
-            pub fn setFaults(self: NetworkControl, faults: NetworkFaultOptions) !void {
+            pub fn setFaults(self: SimulationNetworkControl, faults: NetworkFaultOptions) !void {
                 try validateRate(faults.drop_rate);
                 try validateFaultLatency(self.packet_core, faults);
                 self.faults.* = faults;
@@ -578,49 +1295,49 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
             }
 
             /// Mark one simulated node/process up or down.
-            pub fn setNode(self: NetworkControl, node: NodeId, up: bool) !void {
+            pub fn setNode(self: SimulationNetworkControl, node: NodeId, up: bool) !void {
                 try self.packet_core.control().setNode(node, up);
             }
 
             /// Enable or disable one directed link.
-            pub fn setLink(self: NetworkControl, from: NodeId, to: NodeId, enabled: bool) !void {
+            pub fn setLink(self: SimulationNetworkControl, from: NodeId, to: NodeId, enabled: bool) !void {
                 try self.packet_core.control().setLink(from, to, enabled);
             }
 
             /// Clog one directed path until simulated time advances by `duration_ns`.
-            pub fn clog(self: NetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
+            pub fn clog(self: SimulationNetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
                 try self.packet_core.control().clog(from, to, duration_ns);
             }
 
             /// Clear one directed path clog.
-            pub fn unclog(self: NetworkControl, from: NodeId, to: NodeId) !void {
+            pub fn unclog(self: SimulationNetworkControl, from: NodeId, to: NodeId) !void {
                 try self.packet_core.control().unclog(from, to);
             }
 
             /// Clear every directed path clog.
-            pub fn unclogAll(self: NetworkControl) !void {
+            pub fn unclogAll(self: SimulationNetworkControl) !void {
                 try self.packet_core.control().unclogAll();
             }
 
             /// Disable all directed links crossing between two groups.
-            pub fn partition(self: NetworkControl, left: []const NodeId, right: []const NodeId) !void {
+            pub fn partition(self: SimulationNetworkControl, left: []const NodeId, right: []const NodeId) !void {
                 try self.packet_core.control().partition(left, right);
             }
 
             /// Re-enable every disabled link and mark every node/process up.
-            pub fn heal(self: NetworkControl) !void {
+            pub fn heal(self: SimulationNetworkControl) !void {
                 try self.packet_core.control().heal();
             }
 
             /// Re-enable every disabled link without changing node state.
-            pub fn healLinks(self: NetworkControl) !void {
+            pub fn healLinks(self: SimulationNetworkControl) !void {
                 try self.packet_core.control().healLinks();
             }
         };
 
         pub const Control = struct {
             disk: disk_module.DiskControl,
-            network: NetworkControl,
+            network: SimulationNetworkControl,
             world: *World,
 
             /// Advance simulated time by one tick and evolve network fault state.
