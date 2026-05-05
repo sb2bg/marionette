@@ -7,6 +7,7 @@ const std = @import("std");
 
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
+const network_module = @import("network.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
@@ -299,12 +300,15 @@ pub const Env = struct {
 };
 
 pub const Production = struct {
+    allocator: std.mem.Allocator,
     disk: disk_module.RealDisk,
     clock: clock_module.ProductionClock,
     random_source: std.Random.IoSource,
     tracer: Tracer,
+    network_teardowns: std.ArrayList(network_module.ProductionNetworkTeardown) = .empty,
 
     pub const Options = struct {
+        allocator: std.mem.Allocator = std.heap.smp_allocator,
         /// Root directory that production disk paths are resolved beneath.
         /// The caller owns this directory and must keep it alive.
         root_dir: std.Io.Dir,
@@ -316,11 +320,19 @@ pub const Production = struct {
 
     pub fn init(options: Options) disk_module.DiskError!Production {
         return .{
+            .allocator = options.allocator,
             .disk = try disk_module.RealDisk.init(options.root_dir, options.io, options.disk),
             .clock = .init(),
             .random_source = .{ .io = options.io },
             .tracer = options.tracer orelse .none(),
         };
+    }
+
+    pub fn network(self: *Production, comptime Payload: type) std.mem.Allocator.Error!network_module.TypedNetwork(Payload) {
+        const created = try network_module.initProductionNetwork(Payload, self.allocator);
+        errdefer created.teardown.deinit(created.teardown.ptr, self.allocator);
+        try self.network_teardowns.append(self.allocator, created.teardown);
+        return created.network;
     }
 
     pub fn env(self: *Production) Env {
@@ -333,6 +345,13 @@ pub const Production = struct {
     }
 
     pub fn deinit(self: *Production) void {
+        var index = self.network_teardowns.items.len;
+        while (index > 0) {
+            index -= 1;
+            const teardown = self.network_teardowns.items[index];
+            teardown.deinit(teardown.ptr, self.allocator);
+        }
+        self.network_teardowns.deinit(self.allocator);
         self.disk.deinit();
         self.* = undefined;
     }
@@ -340,6 +359,7 @@ pub const Production = struct {
 
 pub const SimControl = struct {
     disk: disk_module.DiskControl,
+    network: network_module.AnyNetworkControl,
     world: *World,
 
     pub fn tick(self: SimControl) !void {

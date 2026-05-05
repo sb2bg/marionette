@@ -131,6 +131,15 @@ pub const NetworkOptions = @import("network.zig").NetworkOptions;
 /// Runtime fault configuration for app-facing network sends.
 pub const NetworkFaultOptions = @import("network.zig").NetworkFaultOptions;
 
+/// Runtime topology for a composition-root network simulation.
+pub const SimNetworkOptions = @import("network.zig").SimNetworkOptions;
+
+/// Typed app-facing network handle.
+pub const Network = @import("network.zig").TypedNetwork;
+
+/// Simulator-control network capability.
+pub const NetworkControl = @import("network.zig").AnyNetworkControl;
+
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 

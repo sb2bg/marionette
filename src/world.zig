@@ -9,6 +9,7 @@ const std = @import("std");
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
+const network_module = @import("network.zig");
 const random_module = @import("random.zig");
 
 /// Errors returned while writing deterministic trace records.
@@ -161,15 +162,20 @@ pub const World = struct {
 
     pub const SimulateOptions = struct {
         disk: disk_module.DiskOptions = .{},
+        network: ?network_module.SimNetworkOptions = null,
     };
 
     pub const Simulation = struct {
         env: env_module.Env,
         control: env_module.SimControl,
+
+        pub fn network(self: Simulation, comptime Payload: type) !network_module.TypedNetwork(Payload) {
+            return try network_module.networkFromControl(Payload, self.control.network);
+        }
     };
 
     /// Build app and harness views over world-owned simulator resources.
-    pub fn simulate(self: *World, options: SimulateOptions) disk_module.DiskError!Simulation {
+    pub fn simulate(self: *World, options: SimulateOptions) !Simulation {
         const sim_disk = try self.allocator.create(disk_module.SimDisk);
         errdefer self.allocator.destroy(sim_disk);
 
@@ -177,6 +183,11 @@ pub const World = struct {
         errdefer sim_disk.deinit();
 
         try self.registerTeardown(sim_disk, deinitSimDisk);
+
+        const network_control = if (options.network) |network_options|
+            try network_module.initSimControl(self, network_options)
+        else
+            network_module.AnyNetworkControl.unavailable();
 
         return .{
             .env = .{
@@ -188,6 +199,7 @@ pub const World = struct {
             },
             .control = .{
                 .disk = sim_disk.control(),
+                .network = network_control,
                 .world = self,
             },
         };
