@@ -53,14 +53,14 @@ pub fn runAttribute(key: []const u8, value: anytype) RunAttribute {
     return .{ .key = key, .value = runAttributeValue(value) };
 }
 
-/// Build run attributes from a scalar-only run profile struct.
+/// Build run attributes from a scalar-only run config struct.
 ///
 /// Contract:
 /// - Only deterministic scalar fields are supported: ints, floats, bools, and
 ///   UTF-8 string slices/literals.
 /// - Fields are emitted in declaration order.
 /// - Field names become exported attribute keys.
-/// - Runtime behavior must depend on the original profile, not on the derived
+/// - Runtime behavior must depend on the original config, not on the derived
 ///   attributes.
 ///
 /// Use `runAttribute` when a stable exported key should differ from an
@@ -155,11 +155,11 @@ pub const RunOptions = struct {
     start_ns: clock_module.Timestamp = 0,
     /// Nanoseconds advanced by one world tick.
     tick_ns: clock_module.Duration = clock_module.default_tick_ns,
-    /// Optional named profile, such as "smoke", "swarm", or "replay".
-    profile_name: ?[]const u8 = null,
+    /// Optional stable run name, such as "smoke", "swarm", or "replay".
+    name: ?[]const u8 = null,
     /// Loose searchable labels.
     tags: []const []const u8 = &.{},
-    /// Expanded typed run/profile facts needed to reproduce the scenario.
+    /// Expanded typed run facts needed to reproduce the scenario.
     attributes: []const RunAttribute = &.{},
     /// Checks run after a successful scenario body.
     checks: []const Check = &.{},
@@ -181,8 +181,8 @@ pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.me
     };
     errdefer deinitRunOptions(allocator, &cloned);
 
-    if (options.profile_name) |profile_name| {
-        cloned.profile_name = try allocator.dupe(u8, profile_name);
+    if (options.name) |name| {
+        cloned.name = try allocator.dupe(u8, name);
     }
 
     if (options.tags.len > 0) {
@@ -224,7 +224,7 @@ pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.me
 }
 
 pub fn deinitRunOptions(allocator: std.mem.Allocator, options: *RunOptions) void {
-    if (options.profile_name) |profile_name| allocator.free(profile_name);
+    if (options.name) |name| allocator.free(name);
     for (options.tags) |tag| allocator.free(tag);
     allocator.free(options.tags);
     for (options.attributes) |attribute| {
@@ -322,9 +322,9 @@ pub const RunFailure = struct {
             "marionette failure: kind={s} seed={}",
             .{ @tagName(self.kind), self.options.seed },
         );
-        if (self.options.profile_name) |profile_name| {
-            try writer.print(" profile=", .{});
-            try world_module.writeEscapedTraceText(writer, profile_name, false);
+        if (self.options.name) |name| {
+            try writer.print(" name=", .{});
+            try world_module.writeEscapedTraceText(writer, name, false);
         }
         try writer.print(
             " start_ns={} tick_ns={} first_events={} second_events={}",

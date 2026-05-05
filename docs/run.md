@@ -26,7 +26,7 @@ test "scenario is deterministic" {
 
     var report = try mar.run(std.testing.allocator, .{
         .seed = 0x1234,
-        .profile_name = "smoke",
+        .name = "smoke",
         .tags = &tags,
         .attributes = &attributes,
         .checks = &.{.{ .name = "trace exists", .check = traceExists }},
@@ -105,8 +105,7 @@ writer.
 
 The seed is necessary but not sufficient once scenarios generate options from
 that seed. Use a run name, tags, and attributes to make the expanded run shape
-visible. `mar.runCase` accepts `.name`; the lower-level `mar.run` options still
-use `.profile_name` for compatibility:
+visible. Both `mar.runCase` and the lower-level `mar.run` options use `.name`:
 
 ```zig
 const SmokeRunProfile = struct {
@@ -124,7 +123,7 @@ const attributes = mar.runAttributesFrom(profile);
 
 var report = try mar.run(std.testing.allocator, .{
     .seed = 0x1234,
-    .profile_name = "replicated-register-smoke",
+    .name = "replicated-register-smoke",
     .tags = &tags,
     .attributes = &attributes,
 }, scenario);
@@ -133,7 +132,7 @@ var report = try mar.run(std.testing.allocator, .{
 The runner records these entries before scenario code:
 
 ```text
-event=1 run.profile name=replicated-register-smoke
+event=1 run.name value=replicated-register-smoke
 event=2 run.tag value=example:replicated_register
 event=3 run.tag value=scenario:smoke
 event=4 run.attribute key=replicas value=uint:3
@@ -142,11 +141,11 @@ event=5 run.attribute key=packet_loss_percent value=uint:20
 
 Tags should be stable scalar labels. Attribute keys should be stable scalar
 text, and values should use the narrow typed union Marionette exposes.
-`mar.runAttributesFrom` derives attributes from a scalar-only run profile
+`mar.runAttributesFrom` derives attributes from a scalar-only run config
 struct using field names as keys and declaration order as output order. That
 makes field names part of the exported trace contract. Use `mar.runAttribute`
 directly when a stable exported key should differ from an internal field name.
-Runtime behavior should read from the profile, not from derived attributes. Do
+Runtime behavior should read from the config, not from derived attributes. Do
 not put pointers, addresses, unordered dumps, or machine-local paths in run
 metadata.
 

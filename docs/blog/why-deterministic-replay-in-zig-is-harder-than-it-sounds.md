@@ -121,7 +121,7 @@ probabilities. Marionette records that context before scenario code even
 starts:
 
 ```text
-event=1 run.profile name=replicated-register-smoke
+event=1 run.name value=replicated-register-smoke
 event=2 run.tag value=scenario:smoke
 event=3 run.attribute key=replicas value=uint:3
 event=4 run.attribute key=proposal_drop_percent value=uint:20

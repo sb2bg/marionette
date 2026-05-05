@@ -24,7 +24,7 @@ Example:
 ```text
 marionette.trace format=text version=0
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1000000
-event=1 run.profile name=smoke
+event=1 run.name value=smoke
 event=2 run.tag value=scenario:smoke
 event=3 run.attribute key=packet_loss_percent value=uint:20
 event=4 world.tick now_ns=1000000

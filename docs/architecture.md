@@ -37,7 +37,7 @@ Phase 0 has:
   replay-visible in traces and failure summaries without losing scalar value
   types.
 - `runAttributesFrom`, a small helper for deriving typed attributes from the
-  same scalar run profile struct a scenario uses. Field names are exported
+  same scalar run config struct a scenario uses. Field names are exported
   attribute keys, and runtime behavior must not depend on derived attributes.
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
 - `mar.runCase` and `mar.StateCheck`, which let checks inspect structured
@@ -203,8 +203,8 @@ error-returning checks for simulated failures; a future custom panic hook can
 improve crash traces.
 
 Current `RunFailure` captures seed, options, failure kind, event counts, owned
-traces, profile name, tags, typed attributes, error name when available, and
-check name when a named check failed. `RunFailure.writeSummary` is testable and backs
+traces, run name, tags, typed attributes, error name when available, and check
+name when a named check failed. `RunFailure.writeSummary` is testable and backs
 `RunFailure.print`. A future CLI wrapper should add an exact reproduction
 command once the command-line surface exists.
 
@@ -217,7 +217,7 @@ replay contract, not good enough to claim deep distributed-systems coverage.
 Planned strategy layers:
 
 - Uniform random choices first.
-- Replay-visible profile tags and typed attributes before adding many knobs.
+- Replay-visible run names, tags, and typed attributes before adding many knobs.
 - Weighted fault profiles after examples reveal real needs.
 - Coverage or state feedback only after there is a stable trace/event model.
 - Shrinking only after failures are represented as replayable event streams.

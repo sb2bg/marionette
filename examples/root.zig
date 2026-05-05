@@ -15,7 +15,7 @@ test "examples: retry queue scenario is replayable" {
     defer std.testing.allocator.free(b);
 
     try std.testing.expectEqualStrings(a, b);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.profile name=retry-queue-late-ack") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=retry-queue-late-ack") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "queue.complete job=7 worker=1 accepted=false reason=stale_ack") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "queue.check completed_at_most_once=ok job=7 completions=1") != null);
 }
@@ -44,7 +44,7 @@ test "examples: replicated register scenario is replayable" {
     defer std.testing.allocator.free(b);
 
     try std.testing.expectEqualStrings(a, b);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.profile name=replicated-register-smoke") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=replicated-register-smoke") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "network.faults drop_rate=20/100") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.write.quorum") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.check committed_agreement=ok") != null);
@@ -72,7 +72,7 @@ test "examples: replicated register partition scenario is replayable" {
     defer std.testing.allocator.free(b);
 
     try std.testing.expectEqualStrings(a, b);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.profile name=replicated-register-partition") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=replicated-register-partition") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "network.partition left_count=1 right_count=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "reason=link_disabled") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "network.heal disabled_count=6 down_count=0") != null);

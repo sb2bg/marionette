@@ -15,7 +15,7 @@ pub fn expectReplicatedRegisterSummary(allocator: std.mem.Allocator) !void {
 
     try std.testing.expectEqualStrings(
         \\trace.events total=36
-        \\trace.run profile=replicated-register-smoke
+        \\trace.run name=replicated-register-smoke
         \\trace.subsystem name=network count=12
         \\trace.subsystem name=register count=11
         \\trace.subsystem name=replica count=5
@@ -34,7 +34,7 @@ pub fn expectReplicatedRegisterSummary(allocator: std.mem.Allocator) !void {
         \\trace.singleton name=register.write.attempt
         \\trace.singleton name=register.write.quorum
         \\trace.singleton name=register.write.start
-        \\trace.singleton name=run.profile
+        \\trace.singleton name=run.name
         \\trace.singleton name=world.init
         \\trace.network sends=5 deliveries=5 drops=1
         \\trace.network.drop_reason name=send_drop count=1

@@ -78,7 +78,7 @@ profiles, named network buses, linearizability checker, time-travel debugging.
   Stateful initializers receive the replay attempt's `World`; stateful
   scenarios and checks receive only state.
 - `RunOptions`, `RunFailure`, `RunReport`, `StateCheck`, named `Check`.
-- Replay-visible run profile, tags, and typed attributes.
+- Replay-visible run names, tags, and typed attributes.
 - `mar.tidy` linter for banned direct calls.
 - `BuggifyRate` + `env.buggify(hook, rate)` with enum-hook checks and
   runtime rate validation in simulation.
@@ -134,7 +134,7 @@ after.
   `network.*`, `register.*`, etc.), the top 8 most voluminous event names,
   a "singletons" list of event names that
   fired exactly once (long-tail surfacing).
-- Replay context is echoed at the top of the summary: `run.profile`,
+- Replay context is echoed at the top of the summary: `run.name`,
   `run.tag`, `run.attribute` pulled from the trace.
 - A dedicated network-aware breakdown: sends, drops by reason, deliveries,
   per-link send/deliver/drop counts.

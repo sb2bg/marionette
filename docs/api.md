@@ -480,17 +480,17 @@ const attributes = mar.runAttributesFrom(profile);
 
 var report = try mar.run(std.testing.allocator, .{
     .seed = 0x1234,
-    .profile_name = "smoke",
+    .name = "smoke",
     .tags = &tags,
     .attributes = &attributes,
 }, scenario);
 ```
 
-`profile_name`, `tags`, and `attributes` are recorded into the trace before
+`name`, `tags`, and `attributes` are recorded into the trace before
 scenario code runs and are included in failure summaries. Tags are loose
 searchable labels. Attributes are stable scalar facts needed to reproduce the
 run without forcing tools to parse presentation strings.
-`mar.runAttributesFrom` derives those facts from a scalar-only run profile
+`mar.runAttributesFrom` derives those facts from a scalar-only run config
 struct so the trace-visible values stay tied to the scenario config.
 
 The helper intentionally treats field names as exported attribute keys and

@@ -67,7 +67,7 @@ does a different job. Lite is mostly looking for crashes. Swarm is trying to
 exercise broad fault combinations. Performance uses a different shape entirely
 and can simulate missing replicas.
 
-Marionette already has `RunOptions.profile_name`, tags, and `RunAttribute`,
+Marionette already has `RunOptions.name`, tags, and `RunAttribute`,
 but there are no named profiles yet. Before multi-node work gets heavy, I want
 at least:
 

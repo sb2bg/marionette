@@ -45,7 +45,7 @@ pub const Summary = struct {
     allocator: std.mem.Allocator,
     total_events: u64 = 0,
     final_timestamp: ?u64 = null,
-    profile_name: ?[]u8 = null,
+    name: ?[]u8 = null,
     tags: std.ArrayList([]u8) = .empty,
     attributes: std.ArrayList(RunAttribute) = .empty,
     subsystem_counts: std.ArrayList(Counter) = .empty,
@@ -58,7 +58,7 @@ pub const Summary = struct {
 
     /// Release summary-owned memory.
     pub fn deinit(self: *Summary) void {
-        if (self.profile_name) |profile_name| self.allocator.free(profile_name);
+        if (self.name) |name| self.allocator.free(name);
         for (self.tags.items) |tag| self.allocator.free(tag);
         self.tags.deinit(self.allocator);
         for (self.attributes.items) |attribute| {
@@ -81,8 +81,8 @@ pub const Summary = struct {
         }
         try writer.writeByte('\n');
 
-        if (self.profile_name) |profile_name| {
-            try writer.print("trace.run profile={s}\n", .{profile_name});
+        if (self.name) |name| {
+            try writer.print("trace.run name={s}\n", .{name});
         }
         for (self.tags.items) |tag| {
             try writer.print("trace.run tag={s}\n", .{tag});
@@ -262,10 +262,14 @@ fn linkFor(summary: *Summary, from: u16, to: u16) !*LinkCounter {
 }
 
 fn recordRunContext(summary: *Summary, event: ParsedEvent) !void {
-    if (std.mem.eql(u8, event.name, "run.profile")) {
-        const name = event.field("name") orelse return error.InvalidTraceEvent;
-        if (summary.profile_name) |profile_name| summary.allocator.free(profile_name);
-        summary.profile_name = try summary.allocator.dupe(u8, name);
+    if (std.mem.eql(u8, event.name, "run.name")) {
+        const value = event.field("value") orelse return error.InvalidTraceEvent;
+        if (summary.name) |name| summary.allocator.free(name);
+        summary.name = try summary.allocator.dupe(u8, value);
+    } else if (std.mem.eql(u8, event.name, "run.profile")) {
+        const value = event.field("name") orelse return error.InvalidTraceEvent;
+        if (summary.name) |name| summary.allocator.free(name);
+        summary.name = try summary.allocator.dupe(u8, value);
     } else if (std.mem.eql(u8, event.name, "run.tag")) {
         const value = event.field("value") orelse return error.InvalidTraceEvent;
         try summary.tags.append(summary.allocator, try summary.allocator.dupe(u8, value));
@@ -320,7 +324,7 @@ test "trace summary: summarizes run context and network events" {
     const trace =
         "marionette.trace format=text version=0\n" ++
         "event=0 world.init seed=1 start_ns=0 tick_ns=10\n" ++
-        "event=1 run.profile name=smoke\n" ++
+        "event=1 run.name value=smoke\n" ++
         "event=2 run.tag value=example:replicated_register\n" ++
         "event=3 run.attribute key=replicas value=uint:3\n" ++
         "event=4 network.send id=0 from=3 to=0 deliver_at=10 latency_ns=10\n" ++
@@ -339,7 +343,7 @@ test "trace summary: summarizes run context and network events" {
 
     try std.testing.expectEqualStrings(
         \\trace.events total=9 final_time_ns=10
-        \\trace.run profile=smoke
+        \\trace.run name=smoke
         \\trace.run tag=example:replicated_register
         \\trace.run attribute.replicas=uint:3
         \\trace.subsystem name=network count=3
@@ -351,7 +355,7 @@ test "trace summary: summarizes run context and network events" {
         \\trace.event_top rank=3 name=network.send count=1
         \\trace.event_top rank=4 name=register.check count=1
         \\trace.event_top rank=5 name=run.attribute count=1
-        \\trace.event_top rank=6 name=run.profile count=1
+        \\trace.event_top rank=6 name=run.name count=1
         \\trace.event_top rank=7 name=run.tag count=1
         \\trace.event_top rank=8 name=world.init count=1
         \\trace.singleton name=network.deliver
@@ -359,7 +363,7 @@ test "trace summary: summarizes run context and network events" {
         \\trace.singleton name=network.send
         \\trace.singleton name=register.check
         \\trace.singleton name=run.attribute
-        \\trace.singleton name=run.profile
+        \\trace.singleton name=run.name
         \\trace.singleton name=run.tag
         \\trace.singleton name=world.init
         \\trace.singleton name=world.tick

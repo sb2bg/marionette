@@ -145,7 +145,7 @@ fn runWithStateLifecycle(
 /// - `scenario: fn (*State) !void`
 ///
 /// Optional fields mirror `RunOptions`: `seed`, `start_ns`, `tick_ns`,
-/// `name`, `profile_name`, `tags`, `attributes`, `world_checks`, `checks`,
+/// `name`, `name`, `tags`, `attributes`, `world_checks`, `checks`,
 /// and `deinit: fn (*State) void`.
 pub fn runCase(config: anytype) RunError!RunReport {
     return runCaseWithSeed(config, null);
@@ -271,7 +271,7 @@ fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
         .seed = seed_override orelse configSeed(config),
         .start_ns = fieldOrDefault(config, "start_ns", @as(u64, 0)),
         .tick_ns = fieldOrDefault(config, "tick_ns", @import("clock.zig").default_tick_ns),
-        .profile_name = configName(config),
+        .name = configRunName(config),
         .tags = fieldOrDefault(config, "tags", @as([]const []const u8, &.{})),
         .attributes = fieldOrDefault(config, "attributes", @as([]const RunAttribute, &.{})),
         .checks = fieldOrDefault(config, "world_checks", @as([]const Check, &.{})),
@@ -282,9 +282,8 @@ fn configSeed(config: anytype) u64 {
     return fieldOrDefault(config, "seed", @as(u64, 0));
 }
 
-fn configName(config: anytype) ?[]const u8 {
-    if (@hasField(@TypeOf(config), "name")) return config.name;
-    return fieldOrDefault(config, "profile_name", @as(?[]const u8, null));
+fn configRunName(config: anytype) ?[]const u8 {
+    return fieldOrDefault(config, "name", @as(?[]const u8, null));
 }
 
 fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
@@ -481,9 +480,9 @@ fn runOnceWithStateLifecycle(
 }
 
 fn recordRunContext(world: *World, options: RunOptions) RunError!void {
-    if (options.profile_name) |profile_name| {
-        try world.recordFields("run.profile", &.{
-            traceField("name", .{ .text = profile_name }),
+    if (options.name) |name| {
+        try world.recordFields("run.name", &.{
+            traceField("value", .{ .text = name }),
         });
     }
     for (options.tags) |tag| {
@@ -636,7 +635,7 @@ test "run: attributes and tags are traced before scenario code" {
 
     var report = try run(std.testing.allocator, .{
         .seed = 1234,
-        .profile_name = "smoke",
+        .name = "smoke",
         .tags = &tags,
         .attributes = &attributes,
     }, deterministicScenario);
@@ -645,7 +644,7 @@ test "run: attributes and tags are traced before scenario code" {
     switch (report) {
         .passed => |passed| {
             try std.testing.expectEqual(@as(u64, 10), passed.event_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.profile name=smoke") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.name value=smoke") != null);
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.tag value=example:replicated_register") != null);
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=replicas value=uint:3") != null);
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=proposal_drop_percent value=uint:20") != null);
@@ -700,7 +699,7 @@ test "RunFailure: writeSummary includes replay attributes and tags" {
 
     var report = try run(std.testing.allocator, .{
         .seed = 1234,
-        .profile_name = "smoke",
+        .name = "smoke",
         .tags = &tags,
         .attributes = &attributes,
     }, failingScenario);
@@ -715,17 +714,17 @@ test "RunFailure: writeSummary includes replay attributes and tags" {
             const summary = writer.buffered();
 
             try std.testing.expectEqualStrings(
-                "marionette failure: kind=scenario_error seed=1234 profile=smoke start_ns=0 tick_ns=1 first_events=7 second_events=0 tag=example:replicated_register tag=scenario:smoke replicas=uint:3 proposal_drop_percent=uint:20 error=Boom\n",
+                "marionette failure: kind=scenario_error seed=1234 name=smoke start_ns=0 tick_ns=1 first_events=7 second_events=0 tag=example:replicated_register tag=scenario:smoke replicas=uint:3 proposal_drop_percent=uint:20 error=Boom\n",
                 summary,
             );
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "run.profile name=smoke") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "run.name value=smoke") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.before_error") != null);
         },
     }
 }
 
 test "RunFailure: owns replay metadata used by summaries" {
-    var profile_buf = [_]u8{ 's', 'm', 'o', 'k', 'e' };
+    var name_buf = [_]u8{ 's', 'm', 'o', 'k', 'e' };
     var tag_buf = [_]u8{ 't', 'a', 'g', '_', 'a' };
     var key_buf = [_]u8{ 'm', 'o', 'd', 'e' };
     var value_buf = [_]u8{ 'f', 'a', 's', 't' };
@@ -742,14 +741,14 @@ test "RunFailure: owns replay metadata used by summaries" {
 
     var report = try run(std.testing.allocator, .{
         .seed = 1234,
-        .profile_name = profile_buf[0..],
+        .name = name_buf[0..],
         .tags = &tags,
         .attributes = &attributes,
         .checks = &checks,
     }, deterministicScenario);
     defer report.deinit();
 
-    @memcpy(profile_buf[0..], "other");
+    @memcpy(name_buf[0..], "other");
     @memcpy(tag_buf[0..], "tag_b");
     @memcpy(key_buf[0..], "xxxx");
     @memcpy(value_buf[0..], "slow");
@@ -763,7 +762,7 @@ test "RunFailure: owns replay metadata used by summaries" {
             try failure.writeSummary(&writer);
             const summary = writer.buffered();
 
-            try std.testing.expect(std.mem.indexOf(u8, summary, "profile=smoke") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "name=smoke") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "tag=tag_a") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "mode=string:fast") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "check=fails") != null);
@@ -780,7 +779,7 @@ test "RunFailure: summary escapes replay metadata text" {
 
     var report = try run(std.testing.allocator, .{
         .seed = 1234,
-        .profile_name = "smoke test",
+        .name = "smoke test",
         .tags = &tags,
         .attributes = &attributes,
         .checks = &checks,
@@ -795,7 +794,7 @@ test "RunFailure: summary escapes replay metadata text" {
             try failure.writeSummary(&writer);
             const summary = writer.buffered();
 
-            try std.testing.expect(std.mem.indexOf(u8, summary, "profile=smoke%20test") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "name=smoke%20test") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "tag=tag%20with%20space") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "mode%20name=string:fast%20mode") != null);
             try std.testing.expect(std.mem.indexOf(u8, summary, "check=check%20name") != null);
@@ -915,7 +914,7 @@ test "runCase: infers state type from init" {
     switch (report) {
         .passed => |passed| {
             try std.testing.expectEqual(@as(u64, 4), passed.event_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.profile name=counter") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.name value=counter") != null);
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.value value=1") != null);
         },
         .failed => return error.UnexpectedRunFailure,
