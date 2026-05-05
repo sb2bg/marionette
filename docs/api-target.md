@@ -1,15 +1,14 @@
 # API Target Spec
 
-This is the current refactor target for Marionette examples and public API
-shape. It is intentionally narrower than the long-term production networking
-goal; see [Network API Direction](network-api.md) for the remaining network
-composition work.
+This is the current target shape for Marionette examples and public API. It is
+intentionally narrower than a full production networking stack; see
+[Network API Direction](network-api.md) for the remaining socket-adapter work.
 
 ## Core Principles
 
-Application code receives `Env` and any typed handles it needs, such as the
-current `NetworkSimulation(Payload, options).Network`. Test harnesses receive
-`Control` and use it to inject faults.
+Application code receives `Env` and any typed handles it needs, such as
+`Network(Payload)`. Test harnesses receive `Control` and use it to inject
+faults.
 
 Harnesses own simulator control. Production-shaped code does not import or hold
 `Control`, `World`, or packet-core types.
@@ -43,33 +42,36 @@ pub const Env = struct {
 
 pub const Control = SimControl;
 
-pub fn NetworkSimulation(comptime Payload: type, comptime options: NetworkOptions) type;
+pub fn Network(comptime Payload: type) type;
+
+pub const SimNetworkOptions = struct {
+    nodes: usize,
+    path_capacity: usize = 64,
+};
+
+pub const Sim = struct {
+    env: Env,
+    control: Control,
+    pub fn network(self: Sim, comptime Payload: type) !Network(Payload);
+};
+
+pub const Production = struct {
+    pub fn env(self: *Production) Env;
+    pub fn network(self: *Production, comptime Payload: type) !Network(Payload);
+};
 ```
 
-The current network handle is obtained from a typed simulation owner:
+The current network handle is obtained from the composition root:
 
 ```zig
-const Sim = mar.NetworkSimulation(MessagePayload, .{
-    .node_count = 3,
-    .client_count = 1,
-    .path_capacity = 64,
-});
-
-const authorities = try world.simulate(.{});
-var sim = try Sim.init(authorities.control);
-var replicas = Replicas.init(authorities.env, sim.network());
+const sim = try world.simulate(.{ .network = .{ .nodes = 4, .path_capacity = 64 } });
+var replicas = Replicas.init(sim.env, try sim.network(MessagePayload));
 ```
 
-The target future composition-root shape is:
-
-```zig
-const sim = try world.simulate(.{ .network = .{ .nodes = 4 } });
-var replicas = Replicas.init(sim.env, sim.network(MessagePayload));
-```
-
-That future accessor is not implemented yet because the current packet queues
-are payload-specialized. The design keeps `Env` non-generic and passes
-`Network(Payload)` as a sibling handle.
+The design keeps `Env` non-generic and passes `Network(Payload)` as a sibling
+handle. `Production.network(Payload)` currently provides a local in-process
+production-shaped handle for parity tests; a real socket adapter is still
+future work.
 
 ## Example Shape
 

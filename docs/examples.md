@@ -133,14 +133,17 @@ portable shapes Marionette needs:
 
 - A small cluster model with three replicas.
 - Seeded message drops and delivery latency.
-- `mar.NetworkSimulation` routing packets through a fixed topology and
-  per-link queues ordered by `(deliver_at, packet_id)`.
+- `world.simulate(.{ .network = ... })` producing a typed
+  `mar.Network(MessagePayload)` handle backed by fixed-topology per-link
+  queues ordered by `(deliver_at, packet_id)`.
 - A partition scenario that drops queued packets through directed link filters.
 - Runtime network fault configuration through `control.network.setFaults(...)`.
 - `runCase` / `expectPass` / `expectFuzz` / `expectFailure` for scenario runs.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
 - A named `mar.StateCheck` that inspects structured harness state.
 - Rejection of conflicting same-version proposals.
+- A parity test that initializes the same `Replicas` type with simulated and
+  production-shaped network handles.
 
 The normal scenario writes one value to a quorum, commits it, and checks that
 committed replicas agree and that committed values were accepted by a quorum:

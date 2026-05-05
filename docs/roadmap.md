@@ -29,17 +29,23 @@ probabilistic network faults remain valuable but are not a disk blocker.
 
 The current network surface is:
 
+- `mar.Network(Payload)`: app-facing typed handle with `send` and
+  `nextDelivery`, returned by both simulation and production setup.
+- `World.simulate(.{ .network = ... })`: world-owned simulator network
+  construction with `sim.control.network` for fault orchestration and
+  `sim.network(Payload)` for typed app handles.
+- `Production.network(Payload)`: production-shaped local in-process handle for
+  parity tests; real socket backing is still future work.
 - `mar.UnstableNetwork(Payload, NetworkOptions)`: packet core with declared
   topology, per-link queues, send-time drops, latency with jitter, link/node
   state, and per-path clogging.
-- `mar.NetworkSimulation(Payload, NetworkOptions)`: thin simulator wrapper
-  exposing `network()` (app-shaped send and delivery view),
-  `control().network` (simulator-control view), and `packetCore()` (low-level
-  packet-core escape hatch).
-- `sim.tick()`: outer tick that advances `World` and evolves subsystem fault
-  state. `sim.runFor(duration)` steps tick by tick rather than jumping time.
+- `mar.NetworkSimulation(Payload, NetworkOptions)`: lower-level compatibility
+  wrapper exposing `network()`, `control().network`, and `packetCore()`.
+- `sim.control.tick()`: outer tick that advances `World` and evolves subsystem
+  fault state. `sim.control.runFor(duration)` steps tick by tick rather than
+  jumping time.
 - `network.nextDelivery()`: the public delivery loop primitive, routing time
-  movement through the network simulation.
+  movement through the simulated network handle.
 
 The current disk surface is:
 
@@ -58,10 +64,9 @@ The current disk surface is:
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 
-What is not built yet: a production network adapter, a non-generic
-`World.simulate(...).network(Payload)` accessor, probabilistic tick-evolved
-network faults, liveness mode, named simulation profiles, linearizability
-checker, time-travel debugging.
+What is not built yet: a real socket-backed production network adapter,
+probabilistic tick-evolved network faults, liveness mode, named simulation
+profiles, named network buses, linearizability checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -84,6 +89,9 @@ checker, time-travel debugging.
 - `mar.DiskControl`: simulator-control disk capability.
 - `World.simulate`: world-owned simulator construction.
 - `Env.disk`: app-facing simulation disk capability.
+- `mar.Network(Payload)`, `mar.NetworkControl`, `SimNetworkOptions`, and
+  composition-root network accessors for simulation and production-shaped
+  setup.
 - Trace format with per-line validation (`isValidTracePayload`).
 - Trace summary renderer (`mar.summarize`, `Summary.writeSummary`).
 - Seed parser for decimal seeds and 40-character Git hashes.
@@ -91,8 +99,8 @@ checker, time-travel debugging.
 ### Shipped, marked unstable
 
 - `mar.UnstableEventQueue`: fixed-capacity priority queue primitive.
-- `mar.UnstableNetwork` plus stable `NetworkSimulation` / `NetworkOptions`
-  aliases for the current simulator wrapper.
+- `mar.UnstableNetwork` plus `NetworkSimulation` / `NetworkOptions`
+  compatibility aliases for packet-core work.
 
 Unstable types will change without deprecation cycles until Phase 2 closes.
 
@@ -324,14 +332,14 @@ design context. Pick from the top unless coordinating otherwise.
 
 ### 1. Probabilistic tick-evolved network faults with stability floors
 
-**Why now:** The outer `sim.tick()` is built and the packet-core drain bypass
+**Why now:** The outer `sim.control.tick()` is built and the packet-core drain bypass
 is gone. This is the next piece that makes VOPR-style swarm testing possible,
 and the first disk-backed recovery example is now in place.
 
 **Scope:**
 
 - Add a runtime `NetworkFaultOptions`/profile object separate from static
-  `NetworkOptions` topology and capacity.
+  `SimNetworkOptions` topology and capacity.
 - Per-path clog probability per tick, with minimum clog duration.
 - The first automatic partition strategy is narrow: isolate one random
   service node from all other service nodes and clients, hold it for at
@@ -339,7 +347,7 @@ and the first disk-backed recovery example is now in place.
   roll passes once the stability floor has elapsed.
 - Partition probability per tick with `partition_stability_min_ns` floor.
 - Unpartition probability per tick with `unpartition_stability_min_ns` floor.
-- All rolls happen only inside `sim.tick()`, never inside `popReady` or
+- All rolls happen only inside `sim.control.tick()`, never inside `popReady` or
   `send`. Lazy expiry remains only for deadline-based deterministic clogs.
 - All random draws are trace-visible through `world.randomIntLessThan`;
   network domain events record state changes.
@@ -415,9 +423,9 @@ Acceptance criteria:
 
 ### 5. Crash / restart simulation
 
-Extend `sim.tick()` to roll per-node crash and restart probabilities with
+Extend `sim.control.tick()` to roll per-node crash and restart probabilities with
 stability floors. Crashed nodes are already expressible via
-`sim.control().network.setNode(n, false)`, but there is no tick-driven randomness
+`sim.control.network.setNode(n, false)`, but there is no tick-driven randomness
 and no separation between "paused" and "crashed." Work this after item 4
 so the probabilistic fault machinery is shared.
 
@@ -432,7 +440,7 @@ and item 5.
 ### 7. Named simulation profiles
 
 Ship `smoke`, `swarm`, `replay`, `performance` as first-class named
-profiles that expand into `RunOptions`, `NetworkOptions`, and runtime
+profiles that expand into `RunOptions`, `SimNetworkOptions`, and runtime
 `NetworkFaultOptions`. The replicated register example already manually
 constructs these; lift them into the library. Depends on item 4.
 
@@ -565,8 +573,9 @@ parallel part behind an interface Marionette can simulate sequentially.
 
 ### Outer `Simulation.tick()` fans out; subsystem ticks are internal
 
-Users call `sim.tick()` (or `sim.runFor(duration)`). Each subsystem exposes
-an internal fault-evolution hook called by `sim.tick()`. No public
+Users call `sim.control.tick()` (or `sim.control.runFor(duration)`). Each
+subsystem exposes an internal fault-evolution hook called by that outer
+simulation tick. No public
 `sim.network().tick()`, no public `sim.disk().tick()`. This avoids the
 footgun where users forget to tick one subsystem.
 
@@ -591,23 +600,25 @@ outside the simulator's model.
 
 Time-based deterministic expiry (like clog deadlines) may be evaluated
 lazily inside `popReady` as a safety net. Probabilistic rolls (partition
-probability, crash probability) MUST live only inside `sim.tick()`. Running
+probability, crash probability) MUST live only inside `sim.control.tick()`. Running
 them inside observation paths makes behavior depend on how often user code
 calls into the simulator, which breaks determinism-by-simulated-time.
 
 ### Simulator-control is separate from the packet core
 
-`NetworkSimulation.Control.network` exposes only operations that make sense for
-a test harness: `setFaults`, `setNode`, `setLink`, `partition`, `heal`,
-`healLinks`, `clog`, `unclog`, `unclogAll`. Application-shaped operations
-(`send`, `nextDelivery`) live on the typed network handle. No test-only
-operation will ever leak into app-facing APIs.
+`Control.network` exposes only operations that make sense for a test harness:
+`setFaults`, `setNode`, `setLink`, `partition`, `heal`, `healLinks`, `clog`,
+`unclog`, `unclogAll`. Application-shaped operations (`send`, `nextDelivery`)
+live on the typed network handle. No test-only operation will ever leak into
+app-facing APIs.
 
-### App-facing typed network composition is deferred
+### Real production network adapters are deferred
 
-`std.Io` is in flux; the design space (addressing, payload ownership, sync
-vs callback, listener lifecycle) is large; one example isn't enough signal.
-Do not commit to a shape before the second independent example forces it.
+The app-facing typed handle now exists for simulation and production-shaped
+local parity tests. Real sockets are still deferred: `std.Io` is in flux, the
+design space (addressing, payload ownership, sync vs callback, listener
+lifecycle) is large, and one example is not enough signal. Do not commit to a
+socket shape before the second independent example forces it.
 
 ### Trace format is strict ASCII, line-oriented, validated at write time
 
@@ -619,12 +630,13 @@ it percent-escapes ambiguous bytes while preserving readable stable ASCII
 where possible. This keeps replay comparison byte-accurate and parsers
 simple without banning useful runtime labels.
 
-### Topology is declared at comptime
+### Topology is declared at simulation construction
 
-`NetworkOptions.node_count` and `NetworkOptions.client_count` are comptime
-values. Every NodeId is bounds-checked against the declared topology. No
-dynamic node spawning in the current unstable surface. When dynamic
-topology is needed, it is a separate primitive.
+`SimNetworkOptions.nodes` declares the process universe for composition-root
+simulation. Every `NodeId` is bounds-checked against the declared topology. No
+dynamic node spawning in the current surface. When dynamic topology is needed,
+it is a separate primitive. `NetworkOptions` remains for the lower-level
+`NetworkSimulation` compatibility wrapper.
 
 ---
 

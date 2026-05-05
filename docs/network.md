@@ -61,20 +61,21 @@ same discipline in a generic API, not the same product-specific surface.
 
 ## Current API
 
-The current type is:
+The current app-facing type is `mar.Network(Payload)`. Simulation setup
+creates the backing topology and returns typed handles from the composition
+root:
 
 ```zig
-const Sim = mar.NetworkSimulation(Payload, .{
-    .node_count = 3,
-    .client_count = 1,
+const sim = try world.simulate(.{ .network = .{
+    .nodes = 4,
     .path_capacity = 64,
-});
+} });
+const net = try sim.network(Payload);
 ```
 
-`node_count` declares simulated service/replica nodes. `client_count` declares
-extra client processes whose ids follow node ids. With the example above,
-valid process ids are `0`, `1`, `2`, and `3`; id `3` is the first client.
-`path_capacity` is per directed link, not global.
+`nodes` declares the total simulated process ids. With the example above,
+valid process ids are `0`, `1`, `2`, and `3`. `path_capacity` is per directed
+link, not global.
 
 `Payload` is user-owned data. Marionette only schedules and traces the packet
 metadata:
@@ -84,21 +85,18 @@ const Payload = struct {
     value: u64,
 };
 
-const authorities = try world.simulate(.{});
-var sim = try Sim.init(authorities.control);
-
-try sim.control().network.setFaults(.{
+try sim.control.network.setFaults(.{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
-try sim.network().send(0, 1, .{ .value = 42 });
+try net.send(0, 1, .{ .value = 42 });
 ```
 
 Deliverable packets are consumed explicitly:
 
 ```zig
-while (try sim.network().nextDelivery()) |packet| {
+while (try net.nextDelivery()) |packet| {
     try apply(packet.payload);
 }
 ```
@@ -106,22 +104,20 @@ while (try sim.network().nextDelivery()) |packet| {
 `nextDelivery` advances simulated time when needed and returns `null` when the
 network has no pending work.
 
-This is a low-level primitive for examples and early scheduler work. App-like
-code sends and drains through `sim.network()`, while fault orchestration goes
-through `sim.control().network`. A future composition-root accessor may wrap
-the packet core so application code no longer depends on `NetworkSimulation`
-directly.
+Application-shaped code sends and drains through the typed handle, while fault
+orchestration goes through `sim.control.network`. `mar.NetworkSimulation` and
+`mar.UnstableNetwork` remain lower-level simulator primitives for compatibility
+and packet-core work.
 
 ## Topology
 
-The topology is fixed when the network type is instantiated:
+The topology is fixed when simulation is created:
 
 ```zig
-.node_count = 3,
-.client_count = 1,
+.nodes = 4,
 ```
 
-All node-shaped APIs reject ids outside `0..node_count + client_count`.
+All node-shaped APIs reject ids outside `0..nodes`.
 That gives the simulator a known universe for partitions, per-link queues,
 node state, and future liveness cores. It also makes invalid topology use
 return `InvalidNode` instead of silently creating new processes by accident.
@@ -137,8 +133,8 @@ per-link model needed for clogging and path-local capacity.
 Nodes are up by default. Mark a simulated process down or up with:
 
 ```zig
-try sim.control().network.setNode(1, false);
-try sim.control().network.setNode(1, true);
+try sim.control.network.setNode(1, false);
+try sim.control.network.setNode(1, true);
 ```
 
 A down source cannot submit new packets. `send` still consumes a stable packet
@@ -165,7 +161,7 @@ yet.
 Links are directed. A disabled link drops ready packets at delivery time:
 
 ```zig
-try sim.control().network.setLink(0, 1, false);
+try sim.control.network.setLink(0, 1, false);
 ```
 
 If a packet from node `0` to node `1` is already queued when the link is
@@ -182,7 +178,7 @@ decide whether an in-flight packet makes it through.
 Re-enable a directed link with:
 
 ```zig
-try sim.control().network.setLink(0, 1, true);
+try sim.control.network.setLink(0, 1, true);
 ```
 
 ## Path Clogging
@@ -191,7 +187,7 @@ Clogs are directed path faults. A clogged path keeps its packets queued until
 simulated time reaches the clog deadline, while other paths keep delivering:
 
 ```zig
-try sim.control().network.clog(0, 1, 100 * ns_per_ms);
+try sim.control.network.clog(0, 1, 100 * ns_per_ms);
 ```
 
 If a packet for `0 -> 1` is ready at `t=10ms` but the path is clogged until
@@ -202,19 +198,19 @@ can actually make progress, accounting for active clogs.
 Clear one path clog explicitly with:
 
 ```zig
-try sim.control().network.unclog(0, 1);
+try sim.control.network.unclog(0, 1);
 ```
 
 Clear all active clogs with:
 
 ```zig
-try sim.control().network.unclogAll();
+try sim.control.network.unclogAll();
 ```
 
 Clogs also expire when simulated time reaches `until_ns`. `popReady` evolves
 that deterministic state before selecting a packet as a backstop. Scenario and
-scheduler code should move simulated time through `sim.tick()` or
-`sim.runFor(...)` so network faults evolve at the same boundary as the clock.
+scheduler code should move simulated time through `sim.control.tick()` or
+`sim.control.runFor(...)` so network faults evolve at the same boundary as the clock.
 
 ## Partitions
 
@@ -224,7 +220,7 @@ helper disables both directions between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try sim.control().network.partition(&left, &right);
+try sim.control.network.partition(&left, &right);
 ```
 
 This disables `0 -> 1`, `1 -> 0`, `0 -> 2`, and `2 -> 0`, while leaving
@@ -233,7 +229,7 @@ traffic inside the right side alone.
 Heal all disabled links with:
 
 ```zig
-try sim.control().network.heal();
+try sim.control.network.heal();
 ```
 
 `heal` restores default network state by re-enabling links and marking nodes
@@ -261,17 +257,17 @@ world's tick size. Phase 0 simulated time advances in whole ticks, so
 `UnstableNetwork` rejects `min_latency_ns` and `latency_jitter_ns` values that
 are not whole multiples of the world's tick.
 
-When using `NetworkSimulation`, prefer:
+When using composition-root simulation, prefer:
 
 ```zig
-try sim.tick();
-try sim.runFor(10 * ns_per_ms);
+try sim.control.tick();
+try sim.control.runFor(10 * ns_per_ms);
 ```
 
-over calling `world.tick()` or `world.runFor(...)` directly. The simulation
-wrapper advances the world and then evolves network fault state. This mirrors
-VOPR's outer simulator tick and keeps future disk/network/crash subsystems
-from each needing separate caller-managed ticks.
+over calling `world.tick()` or `world.runFor(...)` directly. Simulation control
+advances the world and then evolves network fault state. This mirrors VOPR's
+outer simulator tick and keeps future disk/network/crash subsystems from each
+needing separate caller-managed ticks.
 
 The current latency model is uniform integer jitter over whole ticks:
 
@@ -292,7 +288,7 @@ records `network.drop` and does not enqueue the payload.
 The current drop model uses `BuggifyRate`:
 
 ```zig
-try sim.control().network.setFaults(.{ .drop_rate = .percent(20) });
+try sim.control.network.setFaults(.{ .drop_rate = .percent(20) });
 ```
 
 This keeps the API consistent with BUGGIFY without making packet drops into
@@ -356,9 +352,9 @@ const faults = mar.NetworkFaultOptions{
 };
 ```
 
-Exact names are not committed. The important split is that `NetworkOptions`
+Exact names are not committed. The important split is that `SimNetworkOptions`
 describes what exists, while the fault profile describes how the simulator may
-perturb it during a run. Random rolls belong in `sim.tick()`, never
+perturb it during a run. Random rolls belong in `sim.control.tick()`, never
 `popReady`, `pendingCount`, `nextDeliveryAt`, or other observation methods.
 
 ## Current Limits
@@ -370,7 +366,7 @@ perturb it during a run. Random rolls belong in `sim.tick()`, never
 - Broadcast.
 - Node spawning.
 - Probabilistic tick-evolved fault schedules.
-- Multiple named buses or a non-generic `World.simulate(...).network(Payload)` accessor.
+- Multiple named buses or bus registry.
 - Command-aware or user-classified link filters.
 - Per-link drop predicates.
 - Exponential or profile-selected latency distributions.
@@ -386,9 +382,9 @@ smallest useful packet core before growing.
 The next high-value addition before disk is a runtime network fault profile on
 top of the existing per-link queues:
 
-1. Add `NetworkFaultOptions` separate from static `NetworkOptions`.
-2. Move packet loss defaults from every send call into that profile while still
-   allowing per-send overrides for focused examples.
+1. Add `NetworkFaultOptions` separate from static `SimNetworkOptions`.
+2. Grow `control.network.setFaults(...)` from simple drop/latency settings
+   into that profile.
 3. Add tick-evolved automatic partitions with stability floors.
 4. Add tick-evolved per-path clogs with profile-selected duration.
 

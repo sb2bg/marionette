@@ -341,35 +341,31 @@ disk.restart status=ok
 
 ## Network
 
-`mar.NetworkSimulation(Payload, options)` is the first network/scheduler
-sketch. It gives examples a shared deterministic primitive for fixed
-topologies, per-link queues, seeded packet loss, tick-aligned latency,
-simulator-control faults, and delivery order by `(deliver_at, packet_id)`.
+`mar.Network(Payload)` is the app-facing network handle. Simulation and
+production setup both return this typed handle shape, while simulator-control
+faults remain on `control.network`.
 
 See [Network Model](network.md) for the design contract and current limits.
-See [Network API Direction](network-api.md) for the intended future split
-between production/simulation app-facing network authority and test-only
-simulator-control operations.
+See [Network API Direction](network-api.md) for the split between app-facing
+network authority and test-only simulator-control operations.
 
 ```zig
 const Payload = struct { value: u64 };
-const Sim = mar.NetworkSimulation(Payload, .{
-    .node_count = 3,
-    .client_count = 1,
+
+const sim = try world.simulate(.{ .network = .{
+    .nodes = 4,
     .path_capacity = 64,
-});
+} });
+const net = try sim.network(Payload);
 
-const authorities = try world.simulate(.{});
-var sim = try Sim.init(authorities.control);
-
-try sim.control().network.setFaults(.{
+try sim.control.network.setFaults(.{
     .drop_rate = .percent(20),
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
-try sim.network().send(0, 1, .{ .value = 42 });
+try net.send(0, 1, .{ .value = 42 });
 
-while (try sim.network().nextDelivery()) |packet| {
+while (try net.nextDelivery()) |packet| {
     _ = packet.payload;
 }
 ```
@@ -381,12 +377,12 @@ future, and returns `null` when the network has no pending work.
 Latency values must align with the world's tick size because Phase 0 simulated
 time advances in whole ticks.
 
-When a network simulation owns time-evolved faults, advance time through the
-simulation wrapper:
+When a simulation owns time-evolved faults, advance time through simulation
+control:
 
 ```zig
-try sim.tick();
-try sim.runFor(10 * ns_per_ms);
+try sim.control.tick();
+try sim.control.runFor(10 * ns_per_ms);
 ```
 
 This advances the backing world and then evolves network fault state.
@@ -394,22 +390,22 @@ This advances the backing world and then evolves network fault state.
 Nodes are up by default. Mark one down or up with:
 
 ```zig
-try sim.control().network.setNode(1, false);
-try sim.control().network.setNode(1, true);
+try sim.control.network.setNode(1, false);
+try sim.control.network.setNode(1, true);
 ```
 
 Directed links can be disabled and re-enabled:
 
 ```zig
-try sim.control().network.setLink(0, 1, false);
-try sim.control().network.setLink(0, 1, true);
+try sim.control.network.setLink(0, 1, false);
+try sim.control.network.setLink(0, 1, true);
 ```
 
 Directed paths can also be clogged for a simulated duration:
 
 ```zig
-try sim.control().network.clog(0, 1, 100 * ns_per_ms);
-try sim.control().network.unclog(0, 1);
+try sim.control.network.clog(0, 1, 100 * ns_per_ms);
+try sim.control.network.unclog(0, 1);
 ```
 
 Partitions disable every directed link crossing between two groups:
@@ -417,8 +413,8 @@ Partitions disable every directed link crossing between two groups:
 ```zig
 const left = [_]mar.NodeId{0};
 const right = [_]mar.NodeId{ 1, 2 };
-try sim.control().network.partition(&left, &right);
-try sim.control().network.heal();
+try sim.control.network.partition(&left, &right);
+try sim.control.network.heal();
 ```
 
 ## Seeds
