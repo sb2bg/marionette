@@ -106,7 +106,14 @@ shape as simulation. Its current backing is local and in-process, useful for
 same-process parity tests and for proving that production-shaped code does not
 depend on simulator control. It is not a cross-process transport.
 
-A real production socket adapter is still future work. The current rule is:
+A real socket-backed production transport is scoped under roadmap item 15.
+The target architecture lives in `docs/network-production.md`: TigerBeetle
+MessageBus shape behind the existing `Network(Payload)` vtable, with
+length-prefixed framing, refcounted message pool, lazy connect with seeded
+jittered backoff, async close, bounded per-peer queues, and silent-drop
+send semantics. Read that doc before picking up any 15a-15h sub-task.
+
+The standing rules until 15h ships:
 
 - Do not invent a large permanent socket ecosystem yet.
 - Keep app-facing network requirements narrow.

@@ -63,9 +63,11 @@ The current disk surface is:
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 
-What is not built yet: a real socket-backed production network adapter,
-probabilistic tick-evolved network faults, liveness mode, named simulation
-profiles, named network buses, linearizability checker, time-travel debugging.
+What is not built yet: a real socket-backed production network adapter
+(scoped under roadmap item 15, with `docs/network-production.md` as the
+target architecture), probabilistic tick-evolved network faults, liveness
+mode, named simulation profiles, named network buses, linearizability
+checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -514,18 +516,71 @@ example motivates it.
 A small Viewstamped Replication or Raft-shaped example. Strictly after
 Phase 1 so the example has both disk durability and network faults.
 
-### 15. App-facing typed network composition
+### 15. Real production network transport
 
-Deferred until at least two independent examples have driven the shape, or
-until Zig's `std.Io` direction stabilizes enough to pick a production
-adapter. Likely shape is documented in `docs/network-api.md`.
+Marionette's parity claim ("the same code runs in production and under the
+simulator") is true only inside one OS process today. `Production.network`
+is a same-process FIFO. Closing the gap is a real engineering project, not
+a thin wrapper over `std.net`.
 
-### 16. Multi-replica fault atlas
+The full target is in `docs/network-production.md`. Read it before picking
+up any sub-task. The headline shape is "TigerBeetle MessageBus, behind
+Marionette's existing `Network(Payload)` vtable": length-prefixed framing
+with checksums, refcounted preallocated message pool, lazy outbound connect
+with seeded jittered backoff, async close discipline, bounded per-peer
+queues, silent-drop send on full queue and unreachable peer.
+
+Implementation order. Each sub-task ships independently. Cross-process
+parity is the done-signal.
+
+**15a. Wire format and framing primitive.** Encode and decode helpers,
+header and body checksums, roundtrip tests. No sockets. Lives in
+`src/network_frame.zig`.
+
+**15b. Buffer pool primitive.** Refcounted preallocated message pool. Pool
+exhaustion returns a hard error. Used by both sim and prod once integrated.
+Lives in `src/message_pool.zig`.
+
+**15c. Topology config and `Production.network(Payload, opts)`.**
+Production handle accepts peers and self id. Initially returns the same
+in-process FIFO behavior; the API change is the gate.
+
+**15d. Single-peer end-to-end socket transport.** Two processes, one peer
+each, real send and receive over the new framing. Loopback only.
+
+**15e. Multi-peer with internal connection management.** Lazy outbound
+connect, inbound listener, peer-type resolution from the first valid frame.
+
+**15f. Reconnect with seeded jittered backoff.** Connection drop and
+recovery tested end to end. Jitter seed comes from the local `NodeId` so
+multiple peers reconnecting to a flapping node naturally desynchronize.
+
+**15g. Bounded send and recv queues with silent-drop semantics.** Sim
+reconciles to the same drop semantics as part of this step:
+`error.EventQueueFull` becomes a trace-visible `network.drop reason=queue_full`
+event in both impls, and `send` no longer surfaces transient errors.
+
+**15h. Cross-process parity test.** The replicated-register example runs
+on N OS processes, same source, same scenario, real sockets. This closes
+item 15.
+
+Steps 15a and 15b are independent and can land in parallel. 15c through
+15h are sequential.
+
+### 16. Named-bus composition
+
+Deferred until at least two independent examples have driven the shape.
+Currently a single `Network(Payload)` per simulation is sufficient; the
+moment a second example needs both an RPC channel and a gossip channel
+in the same process, this becomes blocking. Likely shape is sketched in
+`docs/network-api.md`.
+
+### 17. Multi-replica fault atlas
 
 Add a VOPR-style cluster atlas that preserves recoverability invariants
 across replicas. This belongs after the disk-backed replicated example exists.
 
-### 17. Cooperative simulation scheduler
+### 18. Cooperative simulation scheduler
 
 Spawn deterministic simulated tasks/nodes, route sleeps and simulated IO
 through one scheduler, and trace every runnable-task decision. Production
@@ -607,14 +662,31 @@ calls into the simulator, which breaks determinism-by-simulated-time.
 live on the typed network handle. No test-only operation will ever leak into
 app-facing APIs.
 
-### Real production network adapters are deferred
+### Real production network adapters are deferred, with a target
 
-The app-facing typed handle now exists for simulation and production-shaped
-local parity tests. Real sockets are still deferred: `std.Io` is in flux, the
-design space (addressing, payload ownership, sync vs callback, listener
-lifecycle) is large, and one example is not enough signal. The current
-production handle is a same-process FIFO adapter for shape parity only; do not
-use it as evidence of cross-process transport support.
+The app-facing typed handle exists for simulation and for same-process
+parity tests. Real sockets are deferred but no longer open-ended.
+`docs/network-production.md` records the target architecture and the
+sub-task ordering (roadmap item 15). The headline shape is "TigerBeetle
+MessageBus, behind Marionette's existing `Network(Payload)` vtable":
+length-prefixed framing with checksums, refcounted preallocated message
+pool, lazy connect with seeded jittered backoff, async close, bounded
+per-peer queues, silent-drop send.
+
+Two settled choices, recorded so they don't get rediscussed:
+
+- **One seam, the existing vtable.** Marionette will not parametrize
+  `Network(Payload)` on an IO backend the way TigerBeetle parametrizes
+  `MessageBusType(IO)`. The vtable already gives the swap; adding a
+  generic IO type would push library internals into every user call site.
+- **Sim and prod converge on silent-drop send semantics.** Today's sim
+  `error.EventQueueFull` becomes a trace-visible `network.drop
+  reason=queue_full` event. Production drops the same way. The application
+  retries.
+
+The current production handle is a same-process FIFO adapter for shape
+parity only; do not use it as evidence of cross-process transport support
+until item 15h ships.
 
 ### Trace format is strict ASCII, line-oriented, validated at write time
 
@@ -648,9 +720,13 @@ so they don't get rediscussed.
   but it will not introduce a new language or require users to rewrite services
   in a Marionette-specific actor DSL.
 - **Cross-process simulation.** In-process only.
-- **TLS, real DNS, `std.net` compatibility.** The app-facing network will
-  be narrower than `std.net`. If you need real sockets, you're not
-  Marionette's user yet.
+- **TLS, real DNS, arbitrary `std.net` compatibility.** The app-facing
+  network is narrower than `std.net`: it carries typed `Network(Payload)`
+  traffic and nothing else. The production transport (roadmap item 15)
+  uses real sockets internally, but it is not a general socket library
+  and will not expose stream or datagram primitives outside the
+  `Network(Payload)` shape. Users who want raw sockets should reach for
+  `std.net` directly.
 - **Unconstrained "chaos" disk faults.** All disk faults pass through a
   recoverability-aware fault model.
 - **External dependencies.** Marionette depends only on Zig's standard
@@ -699,6 +775,9 @@ become confusing.
 
 ---
 
-Last meaningful update: after commit `86539ad Add simulation tick`. Update
-this roadmap in the same PR as any substantive code change. Contributors
-should expect the roadmap to reflect the true state of the code.
+Last meaningful update: TigerBeetle MessageBus study; roadmap item 15
+restructured into production-transport sub-tasks (15a-15h) and named-bus
+composition split into a separate item 16. See `docs/network-production.md`
+for the target architecture. Update this roadmap in the same PR as any
+substantive code change. Contributors should expect the roadmap to reflect
+the true state of the code.
