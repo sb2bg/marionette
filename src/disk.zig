@@ -968,7 +968,7 @@ test "disk: writes and reads sector-aligned logical files" {
         .bytes = "abcd",
     });
 
-    var buffer = [_]u8{0} ** 8;
+    var buffer: [8]u8 = @splat(0);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
@@ -996,7 +996,7 @@ test "disk: real disk writes, reads, zero-fills, syncs, and creates parent direc
     });
     try app_disk.sync(.{ .path = "accounts/wal.log" });
 
-    var buffer = [_]u8{0xff} ** 8;
+    var buffer: [8]u8 = @splat(0xff);
     try app_disk.read(.{
         .path = "accounts/wal.log",
         .offset = 0,
@@ -1014,7 +1014,7 @@ test "disk: real disk rejects invalid paths and unaligned ranges" {
     defer disk.deinit();
     const app_disk = disk.disk();
 
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try std.testing.expectError(error.InvalidPath, app_disk.read(.{
         .path = "../wal.log",
         .offset = 0,
@@ -1064,7 +1064,7 @@ test "disk: rejects invalid paths, ranges, and latency options" {
     var disk = try SimDisk.init(&world, .{ .sector_size = 4, .min_latency_ns = 10 });
     defer disk.deinit();
 
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try std.testing.expectError(error.InvalidPath, disk.read(.{
         .path = "",
         .offset = 0,
@@ -1127,14 +1127,14 @@ test "disk: write errors do not mutate durable sectors" {
     }));
 
     try disk.control().setFaults(.{});
-    var buffer = [_]u8{0xff} ** 4;
+    var buffer: [4]u8 = @splat(0xff);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
         .buffer = &buffer,
     });
 
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 4, &buffer);
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0)), &buffer);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=0 path=wal.log kind=write_error rate=1/1 roll=0 fired=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.write op=0 path=wal.log offset=0 len=4 status=io_error latency_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=ok latency_ns=10") != null);
@@ -1178,7 +1178,7 @@ test "disk: corrupt read faults do not mutate durable sectors" {
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk.control().setFaults(.{ .corrupt_read_rate = .always() });
 
-    var corrupt_buffer = [_]u8{0} ** 4;
+    var corrupt_buffer: [4]u8 = @splat(0);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
@@ -1187,7 +1187,7 @@ test "disk: corrupt read faults do not mutate durable sectors" {
     try std.testing.expect(!std.mem.eql(u8, "abcd", &corrupt_buffer));
 
     try disk.control().setFaults(.{});
-    var clean_buffer = [_]u8{0} ** 4;
+    var clean_buffer: [4]u8 = @splat(0);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
@@ -1213,7 +1213,7 @@ test "disk: scripted sector corruption persists across reads" {
     try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
     try disk.control().corruptSector("wal.log", 0);
 
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
@@ -1277,13 +1277,13 @@ test "disk: fault traces are deterministic for the same seed" {
         else => return err,
     };
 
-    var buffer_a = [_]u8{0} ** 4;
+    var buffer_a: [4]u8 = @splat(0);
     disk_a.read(.{ .path = "wal.log", .offset = 0, .buffer = &buffer_a }) catch |err| switch (err) {
         error.ReadError => {},
         else => return err,
     };
 
-    var buffer_b = [_]u8{0} ** 4;
+    var buffer_b: [4]u8 = @splat(0);
     disk_b.read(.{ .path = "wal.log", .offset = 0, .buffer = &buffer_b }) catch |err| switch (err) {
         error.ReadError => {},
         else => return err,
@@ -1308,7 +1308,7 @@ test "disk: sync makes pending writes survive crash" {
     try disk.control().crash();
     try disk.control().restart();
 
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
@@ -1335,14 +1335,14 @@ test "disk: crash can lose unflushed pending writes" {
     try disk.control().crash();
     try disk.control().restart();
 
-    var buffer = [_]u8{0xff} ** 4;
+    var buffer: [4]u8 = @splat(0xff);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
         .buffer = &buffer,
     });
 
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 4, &buffer);
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0)), &buffer);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=0 path=wal.log kind=crash_lost_write rate=1/1 roll=0 fired=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=0 path=wal.log offset=0 len=4 result=lost") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=1 landed=0 lost=1 torn=0") != null);
@@ -1365,7 +1365,7 @@ test "disk: crash can tear unflushed pending writes" {
     try disk.control().crash();
     try disk.control().restart();
 
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try disk.read(.{
         .path = "wal.log",
         .offset = 0,
@@ -1390,7 +1390,7 @@ test "disk: crashed disk rejects operations until restart" {
 
     try disk.control().crash();
 
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try std.testing.expectError(error.DiskCrashed, disk.read(.{
         .path = "wal.log",
         .offset = 0,

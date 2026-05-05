@@ -863,7 +863,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
         world: *World,
         links: [path_count]Link = defaultLinks(),
-        down_nodes: [process_count]bool = [_]bool{false} ** process_count,
+        down_nodes: [process_count]bool = @splat(false),
         next_packet_id: u64 = 0,
 
         /// Construct an empty network.
@@ -1231,7 +1231,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         }
 
         fn defaultLinks() [path_count]Link {
-            return [_]Link{.{}} ** path_count;
+            return @splat(.{});
         }
     };
 }

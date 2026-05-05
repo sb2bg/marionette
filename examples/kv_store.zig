@@ -123,7 +123,7 @@ const KVStore = struct {
     fn put(self: *KVStore, key: u32, value: u32, sync_mode: SyncMode) !void {
         std.debug.assert(self.next_offset / record_size < scenario_write_count);
 
-        var bytes = [_]u8{0} ** record_size;
+        var bytes: [record_size]u8 = @splat(0);
         encodeRecord(&bytes, .{ .key = key, .value = value });
 
         const offset = self.next_offset;
@@ -150,7 +150,7 @@ const KVStore = struct {
         var index: u64 = 0;
         while (index < scenario_write_count) : (index += 1) {
             const offset = index * record_size;
-            var bytes = [_]u8{0} ** record_size;
+            var bytes: [record_size]u8 = @splat(0);
             try self.env.disk.read(.{
                 .path = wal_path,
                 .offset = offset,

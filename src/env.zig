@@ -406,7 +406,7 @@ test "env: simulation exposes app-facing disk operations" {
         .bytes = "abcd",
     });
 
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try sim.env.disk.read(.{
         .path = "wal.log",
         .offset = 0,
@@ -435,7 +435,7 @@ test "env: production exposes production authorities" {
     _ = try env.random.intLessThan(u8, 10);
     try env.disk.write(.{ .path = "prod/wal.log", .offset = 0, .bytes = "abcd" });
     try env.disk.sync(.{ .path = "prod/wal.log" });
-    var buffer = [_]u8{0} ** 4;
+    var buffer: [4]u8 = @splat(0);
     try env.disk.read(.{ .path = "prod/wal.log", .offset = 0, .buffer = &buffer });
     try std.testing.expectEqualStrings("abcd", &buffer);
     try std.testing.expect(!try env.buggify(.drop_packet, .percent(50)));

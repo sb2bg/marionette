@@ -169,7 +169,7 @@ const Replicas = struct {
         return .{
             .env = env,
             .net = net,
-            .state = [_]Replica{.{}} ** replica_count,
+            .state = @splat(.{}),
         };
     }
 
@@ -182,7 +182,7 @@ const Replicas = struct {
     fn write(self: *Replicas, options: WriteOptions) !void {
         std.debug.assert(options.retry_limit > 0);
 
-        var acked = [_]bool{false} ** replica_count;
+        var acked: [replica_count]bool = @splat(false);
         try self.env.record(
             "register.write.start version={} value={} retry_limit={}",
             .{ options.version, options.value, options.retry_limit },
