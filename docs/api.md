@@ -339,29 +339,6 @@ disk.crash pending_writes=1 landed=0 lost=0 torn=1
 disk.restart status=ok
 ```
 
-## WAL Record Helper
-
-`mar.wal.FixedRecord(body_size)` is a small fixed-size record framing helper
-for tests and examples. It frames one record as
-`magic:u32 | body | checksum:u32` and exposes little-endian integer helpers for
-packing service-specific body fields.
-
-```zig
-const Record = mar.wal.FixedRecord(8);
-const magic: u32 = 0x4d4b5631; // MKV1
-
-var body: [Record.body_size]u8 = undefined;
-mar.wal.putU32(body[0..4], key);
-mar.wal.putU32(body[4..8], value);
-
-var bytes: [Record.record_size]u8 = undefined;
-Record.encode(&bytes, magic, &body);
-```
-
-Use `Record.decode` in real recovery paths. `Record.decodeMagicOnly` exists
-for bug demos that intentionally accept torn or corrupt records based only on
-magic.
-
 ## Network
 
 `mar.Network(Payload)` is the app-facing network handle. Simulation and

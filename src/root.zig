@@ -8,7 +8,6 @@ const env_module = @import("env.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
 const trace_summary_module = @import("trace_summary.zig");
-const wal_record_module = @import("wal_record.zig");
 
 /// Return the clock implementation for a comptime mode.
 pub const Clock = clock_module.Clock;
@@ -60,9 +59,6 @@ pub const DiskFaultOptions = disk_module.DiskFaultOptions;
 
 /// Errors returned by deterministic disk operations.
 pub const DiskError = disk_module.DiskError;
-
-/// Small fixed-size WAL record framing helpers.
-pub const wal = wal_record_module;
 
 /// Concrete app-facing environment capability bundle.
 pub const Env = env_module.Env;

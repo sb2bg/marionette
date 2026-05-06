@@ -8,9 +8,8 @@ const mar = @import("marionette");
 
 pub const tick_ns: mar.Duration = 1_000_000;
 const log_path = "durable_broadcast.wal";
-const RecordFrame = mar.wal.FixedRecord(16);
-const record_size = RecordFrame.record_size;
-const magic: u32 = 0x4d444231; // MDB1
+const record_size = 24;
+const magic: u32 = 0x4d444231;
 const replica_count = 3;
 const quorum = 2;
 const client_node_id: mar.NodeId = replica_count;
@@ -366,21 +365,60 @@ fn sameOp(maybe_op: ?Op, expected: Op) bool {
 }
 
 fn encodeRecord(bytes: *[record_size]u8, op: Op) void {
-    var body: [RecordFrame.body_size]u8 = undefined;
-    mar.wal.putU64(body[0..8], op.id);
-    mar.wal.putU64(body[8..16], op.value);
-    RecordFrame.encode(bytes, magic, &body);
+    putU32(bytes[0..4], magic);
+    putU64(bytes[4..12], op.id);
+    putU64(bytes[12..20], op.value);
+    putU32(bytes[20..24], checksum(op));
 }
 
 fn decodeRecord(bytes: *const [record_size]u8) ?Op {
-    const decoded = RecordFrame.decode(bytes, magic) orelse return null;
+    if (readU32(bytes[0..4]) != magic) return null;
 
     const op: Op = .{
-        .id = mar.wal.readU64(decoded.body[0..8]),
-        .value = mar.wal.readU64(decoded.body[8..16]),
+        .id = readU64(bytes[4..12]),
+        .value = readU64(bytes[12..20]),
     };
     if (op.id == 0) return null;
+    if (readU32(bytes[20..24]) != checksum(op)) return null;
     return op;
+}
+
+fn checksum(op: Op) u32 {
+    const folded_id: u32 = @truncate(op.id ^ (op.id >> 32));
+    const folded_value: u32 = @truncate(op.value ^ (op.value >> 32));
+    return magic ^ std.math.rotl(u32, folded_id, 7) ^ std.math.rotl(u32, folded_value, 17) ^ 0x5a5a_a5a5;
+}
+
+fn putU32(bytes: []u8, value: u32) void {
+    std.debug.assert(bytes.len == 4);
+    bytes[0] = @as(u8, @truncate(value));
+    bytes[1] = @as(u8, @truncate(value >> 8));
+    bytes[2] = @as(u8, @truncate(value >> 16));
+    bytes[3] = @as(u8, @truncate(value >> 24));
+}
+
+fn readU32(bytes: []const u8) u32 {
+    std.debug.assert(bytes.len == 4);
+    return @as(u32, bytes[0]) |
+        (@as(u32, bytes[1]) << 8) |
+        (@as(u32, bytes[2]) << 16) |
+        (@as(u32, bytes[3]) << 24);
+}
+
+fn putU64(bytes: []u8, value: u64) void {
+    std.debug.assert(bytes.len == 8);
+    for (0..8) |index| {
+        bytes[index] = @as(u8, @truncate(value >> @intCast(index * 8)));
+    }
+}
+
+fn readU64(bytes: []const u8) u64 {
+    std.debug.assert(bytes.len == 8);
+    var value: u64 = 0;
+    for (0..8) |index| {
+        value |= @as(u64, bytes[index]) << @intCast(index * 8);
+    }
+    return value;
 }
 
 fn countTrue(values: *const [replica_count]bool) u8 {

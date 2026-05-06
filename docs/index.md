@@ -157,7 +157,6 @@ Passing runs return traces for persistence, diffing, or external tooling.
 - [Network Model](network.md)
 - [Network API Direction](network-api.md)
 - [Disk Fault Model](disk-fault-model.md)
-- [WAL Records](wal-records.md)
 - [API](api.md)
 - [Determinism](determinism.md)
 - [Examples](examples.md)

@@ -51,8 +51,7 @@ Source: [`examples/kv_store.zig`](https://github.com/sb2bg/marionette/blob/main/
 
 The KV store is the first disk-backed example. It is intentionally tiny: a
 fixed-size append-only WAL where each sector is one record with a magic value,
-key, value, and checksum. The record framing uses the small
-[`mar.wal`](wal-records.md) helper. It exists to exercise `mar.Disk` plus the
+key, value, and checksum. It exists to exercise `mar.Disk` plus the
 `Env`/`Control` harness split, not to be a real database.
 
 The correct scenario:
@@ -191,9 +190,9 @@ harness. It models a service that writes one operation to a local WAL, syncs it,
 then broadcasts the operation to three replicas and waits for a quorum of
 acknowledgements.
 
-The example is deliberately narrow: one fixed-size WAL record framed with
-[`mar.wal`](wal-records.md), one operation, and scripted crash/restart. The
-roadmap tracks follow-ups for adding a probabilistic buggy fuzz/search variant,
+The example is deliberately narrow: one fixed-size WAL record, one operation,
+and scripted crash/restart. The roadmap tracks follow-ups for extracting the
+duplicated WAL framing helper, adding a probabilistic buggy fuzz/search variant,
 splitting happy-path and crash-recovery scenarios, and growing this into a
 multi-record recovery case.
 
