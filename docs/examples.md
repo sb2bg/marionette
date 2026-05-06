@@ -181,6 +181,50 @@ This is intentionally tiny. Its job is to make the future scheduler, network,
 and invariant APIs concrete enough to critique before they become core library
 surface.
 
+## Durable Broadcast
+
+Source: [`examples/durable_broadcast.zig`](https://github.com/sb2bg/marionette/blob/main/examples/durable_broadcast.zig)
+
+Durable broadcast is the first example that combines disk and network in one
+harness. It models a service that writes one operation to a local WAL, syncs it,
+then broadcasts the operation to three replicas and waits for a quorum of
+acknowledgements.
+
+The example is deliberately narrow: one fixed-size WAL record, one operation,
+and scripted crash/restart. The roadmap tracks follow-ups for extracting the
+duplicated WAL framing helper, adding a probabilistic buggy fuzz/search variant,
+splitting happy-path and crash-recovery scenarios, and growing this into a
+multi-record recovery case.
+
+The checker asserts the cross-subsystem invariant:
+
+- if a quorum acknowledged an operation, that operation must be recoverable from
+  local durable storage after crash/restart;
+- if any replica accepted an operation, it must match the recovered durable
+  operation.
+
+Run the correct scenario:
+
+```sh
+zig build run-example -- durable-broadcast --seed 12648430 --summary
+```
+
+The deliberately buggy scenario broadcasts before syncing. The replicas can
+acknowledge the operation, then a crash loses the pending WAL write. The checker
+catches that the network-visible operation was not durable:
+
+```sh
+zig build run-example -- durable-broadcast-bug --seed 12648430 --expect-failure
+```
+
+Useful trace events include:
+
+```text
+durable.broadcast.quorum op=1 value=99 acks=3
+disk.crash_write op=0 path=durable_broadcast.wal offset=0 len=24 result=lost
+durable.invariant_violation reason=quorum_without_durable
+```
+
 ## Example Rules
 
 - Keep examples focused and readable.

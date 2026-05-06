@@ -62,12 +62,14 @@ The current disk surface is:
   `write`, and `sync`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
+- `examples/durable_broadcast.zig`: first disk + network cross-product
+  example. It checks that quorum-acknowledged operations are recoverable from
+  durable storage after crash/restart.
 
 What is not built yet: a real socket-backed production network adapter
 (scoped under roadmap item 15, with `docs/network-production.md` as the
-target architecture), probabilistic tick-evolved network faults, liveness
-mode, named simulation profiles, named network buses, linearizability
-checker, time-travel debugging.
+target architecture), liveness mode, named simulation profiles, named network
+buses, linearizability checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -410,20 +412,64 @@ Acceptance criteria:
 - Define how destructive disk fault budgets interact with synced vs unsynced
   writes.
 
-### 3. WAL record framing guidance
+### 3. WAL record framing helper
 
-The KV example hand-rolls fixed-size records and checksums. Do not promote a
-library helper yet, but document the pattern so users do not accidentally test
-storage without record identity validation.
+The KV and durable-broadcast examples both hand-roll fixed-size records,
+checksums, and little-endian field helpers. That repetition has crossed the
+threshold where guidance alone is not enough; extract a tiny helper rather than
+letting a third example copy the same framing again.
 
 Acceptance criteria:
 
-- Add a short guide showing magic, key/sequence, payload, and checksum fields.
+- Add a small helper for fixed-size WAL records with magic, sequence/op id,
+  payload bytes, and checksum.
+- Migrate `examples/kv_store.zig` and `examples/durable_broadcast.zig` to use
+  it, reducing duplicated encode/decode code in both examples.
+- Document the helper with the same worked pattern: magic, key/sequence,
+  payload, and checksum fields.
 - Explain why corrupt/torn reads should be detected by user code, not inferred
   by Marionette.
-- Link the guide from the KV example docs.
+- Link the guide from the KV and durable-broadcast example docs.
 
-### 5. Crash / restart simulation
+Design notes:
+
+- Keep the helper small and explicit. It should not become a generic WAL or
+  recovery framework.
+- Establish a simple magic naming convention or registry comment while touching
+  the framing code; `kv_store` uses `MKV1`, durable broadcast uses `MDB1`.
+
+### 4. Bug-detection fuzz coverage
+
+Most deliberately buggy examples are single-seed demonstrations. Add a small
+fuzz/search layer where the bug is probabilistic, so the suite proves failures
+are discoverable under realistic profiles rather than only under scripted
+`.always()` faults.
+
+Acceptance criteria:
+
+- Add a durable-broadcast buggy fuzz/search variant where crash loss is
+  probabilistic instead of `.always()`.
+- Keep the existing deterministic buggy smoke test for stable failure traces.
+- Decide whether replicated-register and KV should also get bug-search tests,
+  or document why single-seed demonstration is enough for those cases.
+
+### 5. Durable-broadcast scenario split and multi-record variant
+
+The first durable-broadcast example intentionally compresses fault setup,
+submit, crash/restart, recovery, heal, and rebroadcast into one scenario. Split
+the coverage once the helper code is extracted so swarm runs can target one
+behavior at a time.
+
+Acceptance criteria:
+
+- Add a short happy-path scenario that only submits under network faults and
+  checks durable quorum acknowledgement.
+- Keep a separate crash-recovery scenario for the scripted crash/recover/heal
+  path.
+- Add or sketch a multi-record variant so recovery bugs after record zero are
+  reachable.
+
+### 6. Crash / restart simulation
 
 Extend `sim.control.tick()` to roll per-node crash and restart probabilities with
 stability floors. Crashed nodes are already expressible via
@@ -516,10 +562,16 @@ enum. Options include a `Payload.command(self) enum` trait or a
 user-provided `classify_fn`. Do not start this until a second network
 example motivates it.
 
-### 14. Replicated example beyond the register
+### Completed: Disk + network replicated example beyond the register
 
-A small Viewstamped Replication or Raft-shaped example. Strictly after
-Phase 1 so the example has both disk durability and network faults.
+**Status:** Done as a narrow first cut. `examples/durable_broadcast.zig`
+combines the disk and network surfaces in one harness and includes a
+deliberately buggy broadcast-before-sync scenario.
+
+This is not a full Viewstamped Replication or Raft implementation. It is the
+smaller cross-product example needed before those heavier protocols: a local
+WAL write, quorum replication, crash/restart recovery, network faults, and a
+checker that fails when a network-visible operation was not durable.
 
 ### 15. Real production network transport
 

@@ -5,6 +5,7 @@ const mar = @import("marionette");
 
 pub const retry_queue = @import("retry_queue.zig");
 pub const replicated_register = @import("replicated_register.zig");
+pub const durable_broadcast = @import("durable_broadcast.zig");
 pub const kv_store = @import("kv_store.zig");
 pub const idempotency_bug = @import("idempotency_bug.zig");
 
@@ -88,6 +89,37 @@ test "examples: replicated register rejects same-version conflicts" {
     try std.testing.expect(std.mem.indexOf(u8, trace, "value=42 accepted=false") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "register.write.no_quorum version=1 acks=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "register.check committed_agreement=ok") != null);
+}
+
+test "examples: durable broadcast scenario is replayable" {
+    const a = try durable_broadcast.runScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(a);
+    const b = try durable_broadcast.runScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(b);
+
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=durable-broadcast-smoke") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "disk.sync") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.faults drop_rate=10/100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "durable.broadcast.quorum op=1 value=41") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "durable.check quorum_durable=ok") != null);
+}
+
+test "examples: durable broadcast checker catches broadcast before sync" {
+    var report = try durable_broadcast.runBuggyScenario(std.testing.allocator, 0xC0FFEE);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
+            try std.testing.expectEqualStrings("quorum acknowledgements are durable", failure.check_name.?);
+            try std.testing.expectEqualStrings("QuorumWithoutDurableRecord", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "durable.broadcast.quorum op=1 value=99") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "disk.crash_write op=0 path=durable_broadcast.wal offset=0 len=24 result=lost") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "durable.invariant_violation reason=quorum_without_durable") != null);
+        },
+    }
 }
 
 test "examples: kv store recovery scenario is replayable" {

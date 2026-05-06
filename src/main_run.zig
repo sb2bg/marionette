@@ -78,6 +78,13 @@ fn runScenario(
         defer allocator.free(trace);
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
+    } else if (std.mem.eql(u8, scenario, "durable-broadcast")) {
+        const trace = try examples.durable_broadcast.runScenario(allocator, seed);
+        defer allocator.free(trace);
+        if (expect_failure) return expectedFailureDidNotHappen();
+        try printTraceOrSummary(allocator, trace, mode);
+    } else if (std.mem.eql(u8, scenario, "durable-broadcast-bug")) {
+        try printReport(try examples.durable_broadcast.runBuggyScenario(allocator, seed), expect_failure);
     } else if (std.mem.eql(u8, scenario, "kv-store")) {
         const trace = try runKvStoreTrace(allocator, seed, examples.kv_store.scenario);
         defer allocator.free(trace);
@@ -225,6 +232,8 @@ fn usage(exe_name: []const u8) noreturn {
         \\  replicated-register-bug
         \\  replicated-register-partition
         \\  replicated-register-conflict
+        \\  durable-broadcast
+        \\  durable-broadcast-bug
         \\  kv-store
         \\  kv-store-bug
         \\  idempotency-bug
