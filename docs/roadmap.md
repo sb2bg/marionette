@@ -412,31 +412,26 @@ Acceptance criteria:
 - Define how destructive disk fault budgets interact with synced vs unsynced
   writes.
 
-### 3. WAL record framing helper
+### Completed: WAL record framing helper
 
-The KV and durable-broadcast examples both hand-roll fixed-size records,
-checksums, and little-endian field helpers. That repetition has crossed the
-threshold where guidance alone is not enough; extract a tiny helper rather than
-letting a third example copy the same framing again.
+**Status:** Done. `mar.wal.FixedRecord(body_size)` centralizes the fixed-size
+magic/body/checksum framing used by the KV and durable-broadcast examples.
 
-Acceptance criteria:
+Shipped scope:
 
-- Add a small helper for fixed-size WAL records with magic, sequence/op id,
-  payload bytes, and checksum.
-- Migrate `examples/kv_store.zig` and `examples/durable_broadcast.zig` to use
-  it, reducing duplicated encode/decode code in both examples.
-- Document the helper with the same worked pattern: magic, key/sequence,
-  payload, and checksum fields.
-- Explain why corrupt/torn reads should be detected by user code, not inferred
-  by Marionette.
-- Link the guide from the KV and durable-broadcast example docs.
+- `src/wal_record.zig` exposes `FixedRecord`, checksum validation, magic-only
+  decoding for bug demos, and little-endian integer helpers.
+- `examples/kv_store.zig` and `examples/durable_broadcast.zig` use the helper
+  without changing their record sizes.
+- `docs/wal-records.md` documents the pattern and keeps record validity in
+  user recovery code rather than in `mar.Disk`.
 
 Design notes:
 
 - Keep the helper small and explicit. It should not become a generic WAL or
   recovery framework.
-- Establish a simple magic naming convention or registry comment while touching
-  the framing code; `kv_store` uses `MKV1`, durable broadcast uses `MDB1`.
+- Magic values should use a short comment-style convention next to the u32;
+  `kv_store` uses `MKV1`, durable broadcast uses `MDB1`.
 
 ### 4. Bug-detection fuzz coverage
 
