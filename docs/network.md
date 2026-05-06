@@ -41,8 +41,8 @@ node up/down state, and delivery order by `(deliver_at, packet_id)`.
 
 The main differences are deliberate:
 
-- VOPR has tick-evolved automatic partitions and unclogs with stability
-  windows; Marionette only has explicit scenario actions plus clog expiration.
+- VOPR has broader tick-evolved automatic fault scheduling; Marionette now has
+  a narrow version for per-path clogs and node-isolating partitions.
 - VOPR can replay packets and record selected command classes for later
   replay; Marionette has whole-run seed replay but no packet-sequence replay.
 - VOPR has command-aware link filters and optional per-link drop predicates;
@@ -68,6 +68,7 @@ root:
 ```zig
 const sim = try world.simulate(.{ .network = .{
     .nodes = 4,
+    .service_nodes = 3,
     .path_capacity = 64,
 } });
 const net = try sim.network(Payload);
@@ -75,7 +76,9 @@ const net = try sim.network(Payload);
 
 `nodes` declares the total simulated process ids. With the example above,
 valid process ids are `0`, `1`, `2`, and `3`. `path_capacity` is per directed
-link, not global.
+link, not global. `service_nodes` declares the prefix of process ids eligible
+for automatic node-isolating partitions; when omitted or zero, all processes
+are eligible.
 
 `Payload` is user-owned data. Marionette only schedules and traces the packet
 metadata:
@@ -307,12 +310,15 @@ Current network trace events:
 - `network.node node={} up={}`
 - `network.link from={} to={} enabled={}`
 - `network.clog from={} to={} duration_ns={} until_ns={}`
+- `network.clog from={} to={} duration_ns={} until_ns={} automatic=true`
 - `network.unclog from={} to={} active={}`
 - `network.unclog_all clogged_count={}`
 - `network.partition left_count={} right_count={}`
+- `network.auto_partition node={} isolated_count=1 connected_count={}`
+- `network.auto_heal node={}`
 - `network.heal disabled_count={} down_count={} clogged_count={}`
 - `network.heal_links disabled_count={}`
-- `network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={}`
+- `network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={} path_clog_rate={}/{} path_clog_duration_ns={} partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}`
 
 The payload is not dumped into the core network trace. User code should record
 domain-specific payload facts separately when useful, as the replicated
@@ -320,41 +326,35 @@ register example does with `register.message`.
 
 ## Fault Evolution
 
-Current packet loss is still a send-time decision, and partitions/node state
-are explicit scenario actions. Path clogs are time-based: the control plane
-sets a clog deadline, and the network evolves that state as simulated time
-advances. That is useful, but it is not the final VOPR-style fault scheduler.
+Packet loss is still a send-time decision. Probabilistic path clogs and
+automatic partitions are tick-evolved decisions: random rolls happen only when
+simulation control advances time with `sim.control.tick()` or
+`sim.control.runFor(...)`. Lazy `popReady` expiration remains only for
+deterministic clog deadlines; random partition or clog probabilities do not
+fire from observation methods.
 
-Future probabilistic fault evolution must be tick-only. Lazy `popReady`
-expiration is acceptable for deterministic clog deadlines because no random
-roll is involved; random partition or clog probabilities must not fire from
-observation methods, or the random stream would depend on how often user code
-polls the network.
-
-The next structural layer should be tick-evolved network state: partitions
-start and heal on simulator ticks, clog probabilities fire per path with a
-stability floor, and liveness mode can change network defaults for the rest of
-a run. The per-link queue topology exists so those faults can be added without
-rewriting the packet core again.
-
-The first fault profile should be separate from static topology:
+The runtime fault profile is separate from static topology:
 
 ```zig
 const faults = mar.NetworkFaultOptions{
-    .packet_loss_rate = .percent(1),
+    .drop_rate = .percent(1),
+    .min_latency_ns = 1 * ns_per_ms,
+    .latency_jitter_ns = 2 * ns_per_ms,
+    .path_clog_rate = .percent(1),
+    .path_clog_duration_ns = 50 * ns_per_ms,
     .partition_rate = .percent(1),
     .unpartition_rate = .percent(5),
-    .partition_min_ticks = 20,
-    .unpartition_min_ticks = 20,
-    .path_clog_rate = .percent(1),
-    .path_clog_duration_mean_ns = 50 * ns_per_ms,
+    .partition_stability_min_ns = 20 * ns_per_ms,
+    .unpartition_stability_min_ns = 20 * ns_per_ms,
 };
 ```
 
-Exact names are not committed. The important split is that `SimNetworkOptions`
-describes what exists, while the fault profile describes how the simulator may
-perturb it during a run. Random rolls belong in `sim.control.tick()`, never
-`popReady`, `pendingCount`, `nextDeliveryAt`, or other observation methods.
+`SimNetworkOptions` describes what exists; `NetworkFaultOptions` describes how
+the simulator may perturb it during a run. Automatic partitioning currently
+isolates one random service node from every other configured process and heals
+only after the unpartition stability floor has elapsed and the unpartition
+roll fires. Explicit `partition`, `heal`, `setLink`, and `clog` calls remain
+immediate scenario actions.
 
 ## Current Limits
 
@@ -364,7 +364,6 @@ perturb it during a run. Random rolls belong in `sim.control.tick()`, never
 - Packet duplication.
 - Broadcast.
 - Node spawning.
-- Probabilistic tick-evolved fault schedules.
 - Multiple named buses or bus registry.
 - Command-aware or user-classified link filters.
 - Per-link drop predicates.
@@ -378,16 +377,8 @@ smallest useful packet core before growing.
 
 ## Next Step
 
-The next high-value addition before disk is a runtime network fault profile on
-top of the existing per-link queues:
-
-1. Add `NetworkFaultOptions` separate from static `SimNetworkOptions`.
-2. Grow `control.network.setFaults(...)` from simple drop/latency settings
-   into that profile.
-3. Add tick-evolved automatic partitions with stability floors.
-4. Add tick-evolved per-path clogs with profile-selected duration.
-
-The app-facing/control split in `network-api.md` still matters, but the packet
-core is already close enough to host fault profiles. `UnstableNetwork` remains
-a simulator primitive; examples should not teach it as the final production
-network surface.
+The app-facing/control split in `network-api.md` still matters. The remaining
+network work is liveness-oriented: replay recording, duplicate/broadcast
+semantics, richer latency distributions, and named bus composition.
+`UnstableNetwork` remains a simulator primitive; examples should not teach it
+as the final production network surface.

@@ -53,12 +53,21 @@ pub const NetworkFaultOptions = struct {
     drop_rate: env_module.BuggifyRate = .never(),
     min_latency_ns: clock_module.Duration = 0,
     latency_jitter_ns: clock_module.Duration = 0,
+    path_clog_rate: env_module.BuggifyRate = .never(),
+    path_clog_duration_ns: clock_module.Duration = 0,
+    partition_rate: env_module.BuggifyRate = .never(),
+    unpartition_rate: env_module.BuggifyRate = .never(),
+    partition_stability_min_ns: clock_module.Duration = 0,
+    unpartition_stability_min_ns: clock_module.Duration = 0,
 };
 
 /// Runtime topology for a composition-root network simulation.
 pub const SimNetworkOptions = struct {
     /// Total simulated processes/nodes.
     nodes: usize,
+    /// Processes eligible for automatic node-isolating partitions. Defaults to
+    /// all configured processes when zero.
+    service_nodes: usize = 0,
     /// Maximum packets queued on one directed path.
     path_capacity: usize = 64,
 };
@@ -78,6 +87,7 @@ pub const AnyNetworkControl = struct {
         partition: *const fn (*anyopaque, []const NodeId, []const NodeId) anyerror!void,
         heal: *const fn (*anyopaque) anyerror!void,
         heal_links: *const fn (*anyopaque) anyerror!void,
+        evolve_tick_faults: *const fn (*anyopaque) anyerror!void,
         world: *const fn (*anyopaque) ?*World,
         shared: *const fn (*anyopaque) ?*SharedRuntime,
     };
@@ -121,6 +131,10 @@ pub const AnyNetworkControl = struct {
     pub fn healLinks(self: AnyNetworkControl) !void {
         try self.vtable.heal_links(self.ptr);
     }
+
+    pub fn evolveTickFaults(self: AnyNetworkControl) !void {
+        try self.vtable.evolve_tick_faults(self.ptr);
+    }
 };
 
 /// Typed app-facing network handle.
@@ -157,19 +171,27 @@ pub fn TypedNetwork(comptime Payload: type) type {
 const SharedRuntime = struct {
     world: *World,
     process_count: usize,
+    service_node_count: usize,
     path_capacity: usize,
     faults: NetworkFaultOptions,
     links: []Link,
     down_nodes: []bool,
     typed_handles: std.ArrayList([]const u8) = .empty,
+    auto_partitioned_node: ?NodeId = null,
+    auto_partition_changed_at_ns: clock_module.Timestamp = 0,
 
     const Link = struct {
-        enabled: bool = true,
+        manual_enabled: bool = true,
+        auto_enabled: bool = true,
         clogged_until: clock_module.Timestamp = 0,
+
+        fn enabled(self: Link) bool {
+            return self.manual_enabled and self.auto_enabled;
+        }
     };
 
     fn init(world: *World, options: SimNetworkOptions) !*SharedRuntime {
-        try validateTopology(options.nodes, options.path_capacity);
+        const service_node_count = try validateTopology(options.nodes, options.service_nodes, options.path_capacity);
 
         const runtime = try world.allocator.create(SharedRuntime);
         errdefer world.allocator.destroy(runtime);
@@ -186,10 +208,12 @@ const SharedRuntime = struct {
         runtime.* = .{
             .world = world,
             .process_count = options.nodes,
+            .service_node_count = service_node_count,
             .path_capacity = options.path_capacity,
             .faults = .{ .min_latency_ns = world.clock().tick_ns },
             .links = links,
             .down_nodes = down_nodes,
+            .auto_partition_changed_at_ns = world.now(),
         };
         try world.registerTeardown(runtime, deinitSharedRuntime);
         return runtime;
@@ -249,13 +273,45 @@ const SharedRuntime = struct {
         if (faults.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
     }
 
-    fn setFaults(self: *SharedRuntime, faults: NetworkFaultOptions) !void {
+    fn validateFaultProfile(self: *const SharedRuntime, faults: NetworkFaultOptions) !void {
         try validateRate(faults.drop_rate);
+        try validateRate(faults.path_clog_rate);
+        try validateRate(faults.partition_rate);
+        try validateRate(faults.unpartition_rate);
         try self.validateFaultLatency(faults);
+        if (faults.path_clog_rate.numerator > 0) {
+            try self.validatePositiveTickDuration(faults.path_clog_duration_ns);
+        } else if (faults.path_clog_duration_ns != 0 and faults.path_clog_duration_ns % self.world.clock().tick_ns != 0) {
+            return error.InvalidDuration;
+        }
+        try self.validateTickAlignedDuration(faults.partition_stability_min_ns);
+        try self.validateTickAlignedDuration(faults.unpartition_stability_min_ns);
+    }
+
+    fn validateTickAlignedDuration(self: *const SharedRuntime, duration_ns: clock_module.Duration) NetworkError!void {
+        if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
+    }
+
+    fn setFaults(self: *SharedRuntime, faults: NetworkFaultOptions) !void {
+        try self.validateFaultProfile(faults);
         self.faults = faults;
         try self.world.record(
-            "network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={}",
-            .{ faults.drop_rate.numerator, faults.drop_rate.denominator, faults.min_latency_ns, faults.latency_jitter_ns },
+            "network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={} path_clog_rate={}/{} path_clog_duration_ns={} partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}",
+            .{
+                faults.drop_rate.numerator,
+                faults.drop_rate.denominator,
+                faults.min_latency_ns,
+                faults.latency_jitter_ns,
+                faults.path_clog_rate.numerator,
+                faults.path_clog_rate.denominator,
+                faults.path_clog_duration_ns,
+                faults.partition_rate.numerator,
+                faults.partition_rate.denominator,
+                faults.unpartition_rate.numerator,
+                faults.unpartition_rate.denominator,
+                faults.partition_stability_min_ns,
+                faults.unpartition_stability_min_ns,
+            },
         );
     }
 
@@ -266,7 +322,7 @@ const SharedRuntime = struct {
     }
 
     fn setLink(self: *SharedRuntime, from: NodeId, to: NodeId, enabled: bool) !void {
-        self.links[try self.pathIndex(from, to)].enabled = enabled;
+        self.links[try self.pathIndex(from, to)].manual_enabled = enabled;
         try self.world.record("network.link from={} to={} enabled={}", .{ from, to, enabled });
     }
 
@@ -304,8 +360,8 @@ const SharedRuntime = struct {
         try self.world.record("network.partition left_count={} right_count={}", .{ left.len, right.len });
         for (left) |from| {
             for (right) |to| {
-                self.links[try self.pathIndex(from, to)].enabled = false;
-                self.links[try self.pathIndex(to, from)].enabled = false;
+                self.links[try self.pathIndex(from, to)].manual_enabled = false;
+                self.links[try self.pathIndex(to, from)].manual_enabled = false;
             }
         }
     }
@@ -315,10 +371,13 @@ const SharedRuntime = struct {
         const down_count = self.downNodeCount();
         const clogged_count = self.cloggedLinkCount();
         for (self.links) |*link| {
-            link.enabled = true;
+            link.manual_enabled = true;
+            link.auto_enabled = true;
             link.clogged_until = 0;
         }
         @memset(self.down_nodes, false);
+        self.auto_partitioned_node = null;
+        self.auto_partition_changed_at_ns = self.world.now();
         try self.world.record(
             "network.heal disabled_count={} down_count={} clogged_count={}",
             .{ disabled_count, down_count, clogged_count },
@@ -327,11 +386,16 @@ const SharedRuntime = struct {
 
     fn healLinks(self: *SharedRuntime) !void {
         const disabled_count = self.disabledLinkCount();
-        for (self.links) |*link| link.enabled = true;
+        for (self.links) |*link| {
+            link.manual_enabled = true;
+            link.auto_enabled = true;
+        }
+        self.auto_partitioned_node = null;
+        self.auto_partition_changed_at_ns = self.world.now();
         try self.world.record("network.heal_links disabled_count={}", .{disabled_count});
     }
 
-    fn evolveFaults(self: *SharedRuntime) !void {
+    fn expireDeterministicFaults(self: *SharedRuntime) !void {
         const now_ns = self.world.now();
         for (self.links, 0..) |*link, index| {
             if (link.clogged_until == 0 or link.clogged_until > now_ns) continue;
@@ -342,10 +406,87 @@ const SharedRuntime = struct {
         }
     }
 
+    fn evolveTickFaults(self: *SharedRuntime) !void {
+        try self.expireDeterministicFaults();
+        try self.evolveAutoPartition();
+        try self.evolveAutoClogs();
+    }
+
+    fn evolveAutoClogs(self: *SharedRuntime) !void {
+        const faults = self.faults;
+        if (faults.path_clog_rate.numerator == 0) return;
+
+        const now_ns = self.world.now();
+        for (self.links, 0..) |*link, index| {
+            if (link.clogged_until > now_ns) continue;
+            if (!try self.roll(faults.path_clog_rate)) continue;
+            if (std.math.maxInt(clock_module.Timestamp) - now_ns < faults.path_clog_duration_ns) {
+                return error.InvalidDuration;
+            }
+
+            const from: NodeId = @intCast(index / self.process_count);
+            const to: NodeId = @intCast(index % self.process_count);
+            link.clogged_until = now_ns + faults.path_clog_duration_ns;
+            try self.world.record(
+                "network.clog from={} to={} duration_ns={} until_ns={} automatic=true",
+                .{ from, to, faults.path_clog_duration_ns, link.clogged_until },
+            );
+        }
+    }
+
+    fn evolveAutoPartition(self: *SharedRuntime) !void {
+        const faults = self.faults;
+        if (self.auto_partitioned_node) |node| {
+            if (!self.durationSinceAutoPartitionChangeAtLeast(faults.unpartition_stability_min_ns)) return;
+            if (faults.unpartition_rate.numerator == 0 or !try self.roll(faults.unpartition_rate)) return;
+            self.clearAutoPartitionLinks();
+            self.auto_partitioned_node = null;
+            self.auto_partition_changed_at_ns = self.world.now();
+            try self.world.record("network.auto_heal node={}", .{node});
+            return;
+        }
+
+        if (!self.durationSinceAutoPartitionChangeAtLeast(faults.partition_stability_min_ns)) return;
+        if (faults.partition_rate.numerator == 0 or !try self.roll(faults.partition_rate)) return;
+
+        const isolated_index = try self.world.randomIntLessThan(usize, self.service_node_count);
+        const isolated: NodeId = @intCast(isolated_index);
+        self.applyAutoPartition(isolated);
+        self.auto_partitioned_node = isolated;
+        self.auto_partition_changed_at_ns = self.world.now();
+        try self.world.record(
+            "network.auto_partition node={} isolated_count=1 connected_count={}",
+            .{ isolated, self.process_count - 1 },
+        );
+    }
+
+    fn durationSinceAutoPartitionChangeAtLeast(self: *SharedRuntime, duration_ns: clock_module.Duration) bool {
+        return self.world.now() - self.auto_partition_changed_at_ns >= duration_ns;
+    }
+
+    fn roll(self: *SharedRuntime, rate: env_module.BuggifyRate) !bool {
+        const roll_value = try self.world.randomIntLessThan(u32, rate.denominator);
+        return roll_value < rate.numerator;
+    }
+
+    fn clearAutoPartitionLinks(self: *SharedRuntime) void {
+        for (self.links) |*link| link.auto_enabled = true;
+    }
+
+    fn applyAutoPartition(self: *SharedRuntime, isolated: NodeId) void {
+        self.clearAutoPartitionLinks();
+        for (0..self.process_count) |other_index| {
+            if (other_index == isolated) continue;
+            const other: NodeId = @intCast(other_index);
+            self.links[self.pathIndex(isolated, other) catch unreachable].auto_enabled = false;
+            self.links[self.pathIndex(other, isolated) catch unreachable].auto_enabled = false;
+        }
+    }
+
     fn disabledLinkCount(self: *const SharedRuntime) usize {
         var count: usize = 0;
         for (self.links) |link| {
-            if (!link.enabled) count += 1;
+            if (!link.enabled()) count += 1;
         }
         return count;
     }
@@ -368,9 +509,11 @@ const SharedRuntime = struct {
     }
 };
 
-fn validateTopology(nodes: usize, path_capacity: usize) NetworkError!void {
+fn validateTopology(nodes: usize, service_nodes: usize, path_capacity: usize) NetworkError!usize {
     if (nodes == 0 or nodes > @as(usize, std.math.maxInt(NodeId)) + 1) return error.InvalidNode;
+    if (service_nodes > nodes) return error.InvalidNode;
     if (path_capacity == 0) return error.EventQueueFull;
+    return if (service_nodes == 0) nodes else service_nodes;
 }
 
 fn deinitSharedRuntime(ptr: *anyopaque, allocator: std.mem.Allocator) void {
@@ -393,6 +536,7 @@ const shared_control_vtable: AnyNetworkControl.VTable = .{
     .partition = sharedControlPartition,
     .heal = sharedControlHeal,
     .heal_links = sharedControlHealLinks,
+    .evolve_tick_faults = sharedControlEvolveTickFaults,
     .world = sharedControlWorld,
     .shared = sharedControlShared,
 };
@@ -433,6 +577,10 @@ fn sharedControlHealLinks(ptr: *anyopaque) anyerror!void {
     try sharedControl(ptr).healLinks();
 }
 
+fn sharedControlEvolveTickFaults(ptr: *anyopaque) anyerror!void {
+    try sharedControl(ptr).evolveTickFaults();
+}
+
 fn sharedControlWorld(ptr: *anyopaque) ?*World {
     return sharedControl(ptr).world;
 }
@@ -453,6 +601,7 @@ const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
     .partition = unavailableControlPartition,
     .heal = unavailableControlHeal,
     .heal_links = unavailableControlHealLinks,
+    .evolve_tick_faults = unavailableControlEvolveTickFaults,
     .world = unavailableControlWorld,
     .shared = unavailableControlShared,
 };
@@ -492,6 +641,8 @@ fn unavailableControlHeal(_: *anyopaque) anyerror!void {
 fn unavailableControlHealLinks(_: *anyopaque) anyerror!void {
     return error.NetworkUnavailable;
 }
+
+fn unavailableControlEvolveTickFaults(_: *anyopaque) anyerror!void {}
 
 fn unavailableControlWorld(_: *anyopaque) ?*World {
     return null;
@@ -613,13 +764,13 @@ fn TypedRuntime(comptime Payload: type) type {
 
         fn nextDelivery(self: *Self) !?Packet {
             while (true) {
-                try self.shared.evolveFaults();
+                try self.shared.expireDeterministicFaults();
                 if (try self.popReady()) |packet| return packet;
 
                 const deliver_at = self.nextDeliveryAt() orelse return null;
                 const now_ns = self.shared.world.now();
                 if (deliver_at <= now_ns) return null;
-                try self.runFor(deliver_at - now_ns);
+                try self.runForDeterministicFaults(deliver_at - now_ns);
             }
         }
 
@@ -634,7 +785,7 @@ fn TypedRuntime(comptime Payload: type) type {
                 }
 
                 const link = self.shared.links[try self.shared.pathIndex(ready.from, ready.to)];
-                if (!link.enabled) {
+                if (!link.enabled()) {
                     try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
                     continue;
                 }
@@ -682,13 +833,13 @@ fn TypedRuntime(comptime Payload: type) type {
             return faults.min_latency_ns + jitter_ticks * tick_ns;
         }
 
-        fn runFor(self: *Self, duration_ns: clock_module.Duration) !void {
+        fn runForDeterministicFaults(self: *Self, duration_ns: clock_module.Duration) !void {
             const tick_ns = self.shared.world.clock().tick_ns;
             if (duration_ns % tick_ns != 0) return error.InvalidDuration;
             var remaining = duration_ns;
             while (remaining > 0) : (remaining -= tick_ns) {
                 try self.shared.world.tick();
-                try self.shared.evolveFaults();
+                try self.shared.expireDeterministicFaults();
             }
         }
 
@@ -1891,4 +2042,115 @@ test "composition network: duplicate payload handles are rejected" {
 
     try std.testing.expectError(error.NetworkHandleAlreadyExists, sim.network(TestPayload));
     _ = try sim.network(OtherTestPayload);
+}
+
+fn runCompositionClogTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    var world = try World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    _ = try sim.network(TestPayload);
+    try sim.control.network.setFaults(.{
+        .path_clog_rate = .percent(10),
+        .path_clog_duration_ns = 20,
+    });
+    try sim.control.runFor(50);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "composition network: probabilistic clogs are tick evolved and deterministic" {
+    const a = try runCompositionClogTrace(std.testing.allocator, 1234);
+    defer std.testing.allocator.free(a);
+    const b = try runCompositionClogTrace(std.testing.allocator, 1234);
+    defer std.testing.allocator.free(b);
+
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expect(std.mem.indexOf(u8, a, "world.random_int_less_than") != null);
+}
+
+test "composition network: automatic partition honors unpartition stability" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
+    _ = try sim.network(TestPayload);
+    try sim.control.network.setFaults(.{
+        .partition_rate = .always(),
+        .unpartition_rate = .always(),
+        .unpartition_stability_min_ns = 30,
+    });
+
+    try sim.control.tick();
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") != null);
+
+    try sim.control.tick();
+    try sim.control.tick();
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_heal") == null);
+
+    try sim.control.tick();
+    const tick_40 = std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=40").?;
+    const heal = std.mem.indexOf(u8, world.traceBytes(), "network.auto_heal").?;
+    try std.testing.expect(heal > tick_40);
+}
+
+test "composition network: nextDelivery wait does not evolve probabilistic faults" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
+    const net = try sim.network(TestPayload);
+    try sim.control.network.setFaults(.{ .partition_rate = .always() });
+
+    try net.send(0, 1, .{ .value = 1 });
+    const random_events_before = std.mem.count(u8, world.traceBytes(), "world.random_int_less_than");
+    const packet = (try net.nextDelivery()).?;
+    try std.testing.expectEqual(@as(NodeId, 0), packet.from);
+    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") == null);
+    try std.testing.expectEqual(random_events_before, std.mem.count(u8, world.traceBytes(), "world.random_int_less_than"));
+}
+
+test "composition network: automatic partition honors partition stability" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
+    _ = try sim.network(TestPayload);
+    try sim.control.network.setFaults(.{
+        .partition_rate = .always(),
+        .partition_stability_min_ns = 30,
+    });
+
+    try sim.control.tick();
+    try sim.control.tick();
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") == null);
+
+    try sim.control.tick();
+    const tick_30 = std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=30").?;
+    const partition = std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition").?;
+    try std.testing.expect(partition > tick_30);
+}
+
+test "composition network: manual and automatic partitions compose" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
+    const net = try sim.network(TestPayload);
+    const isolated = [_]NodeId{1};
+    const other = [_]NodeId{2};
+
+    // service_nodes = 1 pins automatic partition selection to node 0, making
+    // the auto/manual overlap deterministic without depending on RNG output.
+    try sim.control.network.setFaults(.{ .partition_rate = .always() });
+    try sim.control.network.partition(&isolated, &other);
+    try sim.control.tick();
+    try sim.control.network.setFaults(.{ .unpartition_rate = .always() });
+    try sim.control.tick();
+
+    try net.send(1, 2, .{ .value = 1 });
+    try std.testing.expectEqual(@as(?TypedNetwork(TestPayload).Packet, null), try net.nextDelivery());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_heal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=link_disabled") != null);
 }

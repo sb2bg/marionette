@@ -19,6 +19,7 @@ const Payload = struct { value: u64 };
 
 const sim = try world.simulate(.{ .network = .{
     .nodes = 4,
+    .service_nodes = 3,
     .path_capacity = 64,
 } });
 

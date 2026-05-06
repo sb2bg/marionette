@@ -87,6 +87,7 @@ pub const Harness = struct {
     pub fn init(world: *mar.World) !Harness {
         const sim = try world.simulate(.{ .network = .{
             .nodes = replica_count + 1,
+            .service_nodes = replica_count,
             .path_capacity = max_messages,
         } });
         const net = try sim.network(MessagePayload);
@@ -129,6 +130,25 @@ pub fn partitionScenario(harness: *Harness) !void {
 pub fn conflictScenario(harness: *Harness) !void {
     try harness.replicas.write(.{ .version = 1, .value = 41 });
     try harness.replicas.write(.{ .version = 1, .value = 42 });
+}
+
+pub fn swarmScenario(harness: *Harness) !void {
+    try harness.control.network.setFaults(.{
+        .drop_rate = .percent(10),
+        .min_latency_ns = tick_ns,
+        .latency_jitter_ns = 2 * tick_ns,
+        .path_clog_rate = .percent(10),
+        .path_clog_duration_ns = 2 * tick_ns,
+        .partition_rate = .percent(5),
+        .unpartition_rate = .percent(20),
+        .partition_stability_min_ns = 3 * tick_ns,
+        .unpartition_stability_min_ns = 3 * tick_ns,
+    });
+
+    try harness.control.tick();
+    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 12 });
+    try harness.control.network.heal();
+    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
 }
 
 const Replica = struct {
@@ -429,12 +449,25 @@ test "register: conflict" {
     });
 }
 
+test "register: swarm fuzz" {
+    try mar.expectFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .seeds = 100,
+        .tick_ns = tick_ns,
+        .init = Harness.init,
+        .scenario = swarmScenario,
+        .checks = &checks,
+    });
+}
+
 test "register: same code on simulated and production network handles" {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xC0FFEE, .tick_ns = tick_ns });
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{
         .nodes = replica_count + 1,
+        .service_nodes = replica_count,
         .path_capacity = max_messages,
     } });
     var sim_replicas = Replicas.init(sim.env, try sim.network(MessagePayload));

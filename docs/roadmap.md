@@ -327,7 +327,12 @@ and advances simulated time through the simulation wrapper.
 Ordered by priority. Each entry has acceptance criteria, a rough size, and the
 design context. Pick from the top unless coordinating otherwise.
 
-### 1. Probabilistic tick-evolved network faults with stability floors
+### Completed: Probabilistic tick-evolved network faults with stability floors
+
+**Status:** Done. `NetworkFaultOptions` now includes tick-evolved per-path
+clogs and automatic node-isolating partitions with stability floors. The
+replicated-register example has a swarm fuzz scenario that exercises the
+profile.
 
 **Why now:** The outer `sim.control.tick()` is built and the packet-core drain bypass
 is gone. This is the next piece that makes VOPR-style swarm testing possible,

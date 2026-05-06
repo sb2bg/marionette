@@ -364,10 +364,16 @@ pub const SimControl = struct {
 
     pub fn tick(self: SimControl) !void {
         try self.world.tick();
+        try self.network.evolveTickFaults();
     }
 
     pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
-        try self.world.runFor(duration_ns);
+        const tick_ns = self.world.clock().tick_ns;
+        if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+        var remaining = duration_ns;
+        while (remaining > 0) : (remaining -= tick_ns) {
+            try self.tick();
+        }
     }
 };
 

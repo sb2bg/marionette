@@ -46,6 +46,7 @@ pub fn Network(comptime Payload: type) type;
 
 pub const SimNetworkOptions = struct {
     nodes: usize,
+    service_nodes: usize = 0,
     path_capacity: usize = 64,
 };
 
