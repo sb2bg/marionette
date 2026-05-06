@@ -186,7 +186,7 @@ If you're building something where determinism matters and you want to try it, t
 zig fetch --save https://github.com/sb2bg/marionette/archive/<commit>.tar.gz
 ```
 
-Requires Zig 0.15.x.
+Requires Zig 0.16.x.
 
 ## Acknowledgments
 

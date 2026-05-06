@@ -179,7 +179,7 @@ The [`examples/`](../examples/) directory is the best place to start.
 zig fetch --save https://github.com/sb2bg/marionette/archive/<commit>.tar.gz
 ```
 
-Requires Zig 0.15.x.
+Requires Zig 0.16.x.
 
 ## Acknowledgments
 
