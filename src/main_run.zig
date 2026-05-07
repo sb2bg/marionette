@@ -60,14 +60,14 @@ fn runScenario(
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "retry-queue-bug")) {
-        try printReport(try examples.retry_queue.runBuggyScenario(allocator, seed), expect_failure);
+        try printReport(try examples.retry_queue.runBuggyScenarioReport(allocator, seed), expect_failure);
     } else if (std.mem.eql(u8, scenario, "replicated-register")) {
         const trace = try examples.replicated_register.runScenario(allocator, seed);
         defer allocator.free(trace);
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "replicated-register-bug")) {
-        try printReport(try examples.replicated_register.runBuggyScenario(allocator, seed), expect_failure);
+        try printReport(try examples.replicated_register.runBuggyScenarioReport(allocator, seed), expect_failure);
     } else if (std.mem.eql(u8, scenario, "replicated-register-partition")) {
         const trace = try examples.replicated_register.runPartitionScenario(allocator, seed);
         defer allocator.free(trace);
@@ -84,7 +84,7 @@ fn runScenario(
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "durable-broadcast-bug")) {
-        try printReport(try examples.durable_broadcast.runBuggyScenario(allocator, seed), expect_failure);
+        try printReport(try examples.durable_broadcast.runBuggyScenarioReport(allocator, seed), expect_failure);
     } else if (std.mem.eql(u8, scenario, "kv-store")) {
         const trace = try runKvStoreTrace(allocator, seed, examples.kv_store.scenario);
         defer allocator.free(trace);

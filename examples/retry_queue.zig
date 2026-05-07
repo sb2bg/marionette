@@ -29,15 +29,7 @@ const checks = [_]mar.StateCheck(RetryQueue){
 
 /// Run the correct retry-queue scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = ns_per_ms,
-        .name = "retry-queue-late-ack",
-        .init = RetryQueue.init,
-        .scenario = scenario,
-        .checks = &checks,
-    });
+    var report = try runScenarioReport(allocator, seed);
     defer report.deinit();
 
     switch (report) {
@@ -49,8 +41,20 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     }
 }
 
+pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = ns_per_ms,
+        .name = "retry-queue-late-ack",
+        .init = RetryQueue.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
+}
+
 /// Run the deliberately buggy late-ack scenario.
-pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
     return mar.runCase(.{
         .allocator = allocator,
         .seed = seed,

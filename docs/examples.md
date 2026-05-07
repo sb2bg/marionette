@@ -25,7 +25,7 @@ completion. The deliberately buggy scenario accepts both completions, and a
 named `mar.StateCheck` catches the duplicate completion:
 
 ```zig
-var report = try retry_queue.runBuggyScenario(allocator, 0xC0FFEE);
+var report = try retry_queue.runBuggyScenarioReport(allocator, 0xC0FFEE);
 defer report.deinit();
 ```
 
@@ -161,7 +161,7 @@ The example also includes a deliberately buggy scenario used by tests to prove
 the checker path catches divergent committed state:
 
 ```zig
-var report = try replicated_register.runBuggyScenario(allocator, 0xC0FFEE);
+var report = try replicated_register.runBuggyScenarioReport(allocator, 0xC0FFEE);
 defer report.deinit();
 ```
 
