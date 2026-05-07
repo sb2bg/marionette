@@ -169,8 +169,21 @@ pub const World = struct {
         env: env_module.Env,
         control: env_module.SimControl,
 
-        pub fn network(self: Simulation, comptime Payload: type) !network_module.TypedNetwork(Payload) {
-            return try network_module.networkFromControl(Payload, self.control.network);
+        pub fn endpoint(self: Simulation, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
+            return try network_module.endpointFromControl(Payload, self.control.network, node);
+        }
+
+        pub fn endpointRange(
+            self: Simulation,
+            comptime Payload: type,
+            comptime count: usize,
+            first_node: network_module.NodeId,
+        ) ![count]network_module.Endpoint(Payload) {
+            var endpoints: [count]network_module.Endpoint(Payload) = undefined;
+            for (&endpoints, 0..) |*endpoint_handle, index| {
+                endpoint_handle.* = try self.endpoint(Payload, first_node + @as(network_module.NodeId, @intCast(index)));
+            }
+            return endpoints;
         }
     };
 

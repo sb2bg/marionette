@@ -7,7 +7,7 @@ intentionally narrower than a full production networking stack; see
 ## Core Principles
 
 Application code receives `Env` and any typed handles it needs, such as
-`Network(Payload)`. Test harnesses receive `Control` and use it to inject
+`Endpoint(Message)`. Test harnesses receive `Control` and use it to inject
 faults.
 
 Harnesses own simulator control. Production-shaped code does not import or hold
@@ -42,7 +42,8 @@ pub const Env = struct {
 
 pub const Control = SimControl;
 
-pub fn Network(comptime Payload: type) type;
+pub fn Endpoint(comptime Message: type) type;
+pub const Network = Endpoint; // compatibility alias
 
 pub const SimNetworkOptions = struct {
     nodes: usize,
@@ -53,12 +54,14 @@ pub const SimNetworkOptions = struct {
 pub const Sim = struct {
     env: Env,
     control: Control,
-    pub fn network(self: Sim, comptime Payload: type) !Network(Payload);
+    pub fn endpoint(self: Sim, comptime Message: type, node: NodeId) !Endpoint(Message);
+    pub fn endpointRange(self: Sim, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
 };
 
 pub const Production = struct {
     pub fn env(self: *Production) Env;
-    pub fn network(self: *Production, comptime Payload: type) !Network(Payload);
+    pub fn endpoint(self: *Production, comptime Message: type, node: NodeId) !Endpoint(Message);
+    pub fn endpointRange(self: *Production, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
 };
 ```
 
@@ -66,23 +69,23 @@ pub const Production = struct {
 non-world resources. The older positional `runWithState*` helpers are internal
 implementation details, not part of the public teaching surface.
 
-The current network handle is obtained from the composition root:
+The current network endpoint is obtained from the composition root:
 
 ```zig
 const sim = try world.simulate(.{ .network = .{ .nodes = 4, .path_capacity = 64 } });
-var replicas = Replicas.init(sim.env, try sim.network(MessagePayload));
+var replica_0 = Replica.init(sim.env, try sim.endpoint(Message, 0));
 ```
 
-The design keeps `Env` non-generic and passes `Network(Payload)` as a sibling
-handle. `Production.network(Payload)` currently provides a local in-process
-production-shaped handle for same-process parity tests; it is not a
+The design keeps `Env` non-generic and passes `Endpoint(Message)` as a sibling
+handle. `Production.endpoint(Message, node)` currently provides a local in-process
+production-shaped endpoint for same-process parity tests; it is not a
 cross-process transport. A real socket adapter is still future work.
 
 ## Example Shape
 
 Network-shaped examples should split into:
 
-- A production-shaped type that holds `env`, a typed network handle, and app
+- A production-shaped type that holds `env`, typed node endpoints, and app
   state.
 - A test-only `Harness` that owns the production-shaped type, `control`, and
   any simulation owner needed for handle lifetime.
@@ -92,9 +95,9 @@ Network-shaped examples should split into:
 Application sends look like:
 
 ```zig
-try net.send(from, to, payload);
-while (try net.nextDelivery()) |packet| {
-    try apply(packet);
+try endpoint.send(to, message);
+while (try endpoint.receive()) |envelope| {
+    try apply(envelope.from, envelope.message);
 }
 ```
 

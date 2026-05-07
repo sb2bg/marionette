@@ -18,8 +18,7 @@ const MessagePayload = struct {
     value: u64,
 };
 
-const Network = mar.Network(MessagePayload);
-const Packet = Network.Packet;
+const Endpoint = mar.Endpoint(MessagePayload);
 
 pub const checks = [_]mar.StateCheck(Harness){
     .{ .name = "committed register is safe", .check = committedRegisterIsSafe },
@@ -95,10 +94,12 @@ pub const Harness = struct {
             .service_nodes = replica_count,
             .path_capacity = max_messages,
         } });
-        const net = try sim.network(MessagePayload);
-
         return .{
-            .replicas = Replicas.init(sim.env, net),
+            .replicas = Replicas.init(
+                sim.env,
+                try sim.endpoint(MessagePayload, client_node_id),
+                try sim.endpointRange(MessagePayload, replica_count, 0),
+            ),
             .control = sim.control,
         };
     }
@@ -188,13 +189,15 @@ const Replica = struct {
 
 const Replicas = struct {
     env: mar.Env,
-    net: Network,
+    client: Endpoint,
+    replicas: [replica_count]Endpoint,
     state: [replica_count]Replica,
 
-    fn init(env: mar.Env, net: Network) Replicas {
+    fn init(env: mar.Env, client: Endpoint, replicas: [replica_count]Endpoint) Replicas {
         return .{
             .env = env,
-            .net = net,
+            .client = client,
+            .replicas = replicas,
             .state = @splat(.{}),
         };
     }
@@ -253,7 +256,7 @@ const Replicas = struct {
     }
 
     fn send(self: *Replicas, to: mar.NodeId, payload: MessagePayload) !void {
-        try self.net.send(client_node_id, to, payload);
+        try self.client.send(to, payload);
         try self.env.record(
             "register.message kind={s} to={} version={} value={}",
             .{ @tagName(payload.kind), to, payload.version, payload.value },
@@ -261,33 +264,41 @@ const Replicas = struct {
     }
 
     fn drainAndAck(self: *Replicas, acked: ?*[replica_count]bool) !void {
-        while (try self.net.nextDelivery()) |packet| {
-            const accepted = try self.apply(packet);
-            if (accepted) {
-                if (acked) |acks| {
-                    const replica_index: usize = @intCast(packet.to);
-                    acks[replica_index] = true;
+        while (true) {
+            var progressed = false;
+
+            for (self.replicas, 0..) |endpoint, replica_index| {
+                while (try endpoint.receive()) |envelope| {
+                    progressed = true;
+                    const accepted = try self.apply(replica_index, envelope);
+                    if (accepted) {
+                        if (acked) |acks| {
+                            acks[replica_index] = true;
+                        }
+                    }
                 }
             }
+
+            if (!progressed) break;
         }
     }
 
-    fn apply(self: *Replicas, packet: Packet) !bool {
-        const replica_index: usize = @intCast(packet.to);
-        switch (packet.payload.kind) {
+    fn apply(self: *Replicas, replica_index: usize, envelope: Endpoint.Envelope) !bool {
+        const replica_node: mar.NodeId = @intCast(replica_index);
+        switch (envelope.message.kind) {
             .propose => {
-                const accepted = self.state[replica_index].accept(packet.payload.version, packet.payload.value);
+                const accepted = self.state[replica_index].accept(envelope.message.version, envelope.message.value);
                 try self.env.record(
                     "replica.accept replica={} version={} value={} accepted={}",
-                    .{ packet.to, packet.payload.version, packet.payload.value, accepted },
+                    .{ replica_node, envelope.message.version, envelope.message.value, accepted },
                 );
                 return accepted;
             },
             .commit => {
-                const committed = self.state[replica_index].commit(packet.payload.version, packet.payload.value);
+                const committed = self.state[replica_index].commit(envelope.message.version, envelope.message.value);
                 try self.env.record(
                     "replica.commit replica={} version={} value={} committed={}",
-                    .{ packet.to, packet.payload.version, packet.payload.value, committed },
+                    .{ replica_node, envelope.message.version, envelope.message.value, committed },
                 );
                 return false;
             },
@@ -478,7 +489,11 @@ test "register: same code on simulated and production network handles" {
         .service_nodes = replica_count,
         .path_capacity = max_messages,
     } });
-    var sim_replicas = Replicas.init(sim.env, try sim.network(MessagePayload));
+    var sim_replicas = Replicas.init(
+        sim.env,
+        try sim.endpoint(MessagePayload, client_node_id),
+        try sim.endpointRange(MessagePayload, replica_count, 0),
+    );
     try sim_replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
     try checkCommittedAgreement(&sim_replicas);
 
@@ -492,7 +507,11 @@ test "register: same code on simulated and production network handles" {
     });
     defer production.deinit();
 
-    var prod_replicas = Replicas.init(production.env(), try production.network(MessagePayload));
+    var prod_replicas = Replicas.init(
+        production.env(),
+        try production.endpoint(MessagePayload, client_node_id),
+        try production.endpointRange(MessagePayload, replica_count, 0),
+    );
     try prod_replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
     try checkCommittedAgreement(&prod_replicas);
 }

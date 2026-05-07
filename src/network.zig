@@ -20,7 +20,8 @@ pub const NodeId = u16;
 pub const NetworkError = error{
     /// The simulation was not configured with a network.
     NetworkUnavailable,
-    /// A typed network handle for this payload already exists in the simulation.
+    /// Reserved for older duplicate-handle validation. Endpoint views for the
+    /// same message type now intentionally share one unnamed bus runtime.
     NetworkHandleAlreadyExists,
     /// A node/process id is outside the configured topology.
     InvalidNode,
@@ -180,36 +181,41 @@ pub const AnyNetworkControl = struct {
     }
 };
 
-/// Typed app-facing network handle.
-pub fn TypedNetwork(comptime Payload: type) type {
+/// Typed app-facing process endpoint.
+pub fn Endpoint(comptime Message: type) type {
     return struct {
         const Self = @This();
 
         ptr: *anyopaque,
+        self_node: NodeId,
         vtable: *const VTable,
 
-        pub const Packet = struct {
-            id: u64,
+        pub const Envelope = struct {
             from: NodeId,
-            to: NodeId,
-            deliver_at: clock_module.Timestamp,
-            payload: Payload,
+            message: Message,
         };
 
         pub const VTable = struct {
-            send: *const fn (*anyopaque, NodeId, NodeId, Payload) anyerror!void,
-            next_delivery: *const fn (*anyopaque) anyerror!?Packet,
+            send: *const fn (*anyopaque, NodeId, NodeId, Message) anyerror!void,
+            receive: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
         };
 
-        pub fn send(self: Self, from: NodeId, to: NodeId, payload: Payload) !void {
-            try self.vtable.send(self.ptr, from, to, payload);
+        pub fn node(self: Self) NodeId {
+            return self.self_node;
         }
 
-        pub fn nextDelivery(self: Self) !?Packet {
-            return try self.vtable.next_delivery(self.ptr);
+        pub fn send(self: Self, to: NodeId, message: Message) !void {
+            try self.vtable.send(self.ptr, self.self_node, to, message);
+        }
+
+        pub fn receive(self: Self) !?Envelope {
+            return try self.vtable.receive(self.ptr, self.self_node);
         }
     };
 }
+
+/// Backwards-compatible type name for the app-facing endpoint.
+pub const TypedNetwork = Endpoint;
 
 const SharedRuntime = struct {
     world: *World,
@@ -219,7 +225,7 @@ const SharedRuntime = struct {
     faults: NetworkFaultOptions,
     links: []Link,
     down_nodes: []bool,
-    typed_handles: std.ArrayList([]const u8) = .empty,
+    typed_runtimes: std.ArrayList(TypedRuntimeEntry) = .empty,
     auto_partitioned_node: ?NodeId = null,
     auto_partition_changed_at_ns: clock_module.Timestamp = 0,
 
@@ -262,8 +268,13 @@ const SharedRuntime = struct {
         return runtime;
     }
 
+    const TypedRuntimeEntry = struct {
+        payload_name: []const u8,
+        ptr: *anyopaque,
+    };
+
     fn deinit(self: *SharedRuntime, allocator: std.mem.Allocator) void {
-        self.typed_handles.deinit(allocator);
+        self.typed_runtimes.deinit(allocator);
         allocator.free(self.links);
         allocator.free(self.down_nodes);
         self.* = undefined;
@@ -273,19 +284,29 @@ const SharedRuntime = struct {
         return .{ .ptr = self, .vtable = &shared_control_vtable };
     }
 
-    fn claimTypedHandle(self: *SharedRuntime, comptime Payload: type) !void {
+    fn typedRuntime(self: *SharedRuntime, comptime Payload: type) ?*TypedRuntime(Payload) {
         const payload_name = @typeName(Payload);
-        for (self.typed_handles.items) |existing| {
-            if (std.mem.eql(u8, existing, payload_name)) return error.NetworkHandleAlreadyExists;
+        for (self.typed_runtimes.items) |entry| {
+            if (std.mem.eql(u8, entry.payload_name, payload_name)) {
+                return @ptrCast(@alignCast(entry.ptr));
+            }
         }
-        try self.typed_handles.append(self.world.allocator, payload_name);
+        return null;
     }
 
-    fn releaseTypedHandle(self: *SharedRuntime, comptime Payload: type) void {
+    fn registerTypedRuntime(self: *SharedRuntime, comptime Payload: type, ptr: *TypedRuntime(Payload)) !void {
+        std.debug.assert(self.typedRuntime(Payload) == null);
+        try self.typed_runtimes.append(self.world.allocator, .{
+            .payload_name = @typeName(Payload),
+            .ptr = ptr,
+        });
+    }
+
+    fn unregisterTypedRuntime(self: *SharedRuntime, comptime Payload: type) void {
         const payload_name = @typeName(Payload);
-        for (self.typed_handles.items, 0..) |existing, index| {
-            if (std.mem.eql(u8, existing, payload_name)) {
-                _ = self.typed_handles.swapRemove(index);
+        for (self.typed_runtimes.items, 0..) |entry, index| {
+            if (std.mem.eql(u8, entry.payload_name, payload_name)) {
+                _ = self.typed_runtimes.swapRemove(index);
                 return;
             }
         }
@@ -807,9 +828,10 @@ pub fn initSimControl(world: *World, options: SimNetworkOptions) !AnyNetworkCont
     return shared.control();
 }
 
-pub fn networkFromControl(comptime Payload: type, control: AnyNetworkControl) !TypedNetwork(Payload) {
+pub fn endpointFromControl(comptime Payload: type, control: AnyNetworkControl, node: NodeId) !Endpoint(Payload) {
     const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
-    return try TypedRuntime(Payload).init(shared);
+    try shared.validateNode(node);
+    return try TypedRuntime(Payload).endpoint(shared, node);
 }
 
 pub const ProductionNetworkTeardown = struct {
@@ -817,20 +839,49 @@ pub const ProductionNetworkTeardown = struct {
     deinit: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 
-pub fn ProductionNetworkInit(comptime Payload: type) type {
-    return struct {
-        network: TypedNetwork(Payload),
-        teardown: ProductionNetworkTeardown,
-    };
-}
+pub const ProductionNetworkEntry = struct {
+    payload_name: []const u8,
+    ptr: *anyopaque,
+    teardown: ProductionNetworkTeardown,
+};
 
-pub fn initProductionNetwork(comptime Payload: type, allocator: std.mem.Allocator) std.mem.Allocator.Error!ProductionNetworkInit(Payload) {
-    return try ProductionRuntime(Payload).init(allocator);
+pub fn productionEndpoint(
+    comptime Payload: type,
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(ProductionNetworkEntry),
+    node: NodeId,
+) std.mem.Allocator.Error!Endpoint(Payload) {
+    const payload_name = @typeName(Payload);
+    for (entries.items) |entry| {
+        if (std.mem.eql(u8, entry.payload_name, payload_name)) {
+            const runtime: *ProductionRuntime(Payload) = @ptrCast(@alignCast(entry.ptr));
+            return runtime.handle(node);
+        }
+    }
+
+    const runtime = try ProductionRuntime(Payload).init(allocator);
+    errdefer runtime.deinit();
+
+    try entries.append(allocator, .{
+        .payload_name = payload_name,
+        .ptr = runtime,
+        .teardown = .{ .ptr = runtime, .deinit = ProductionRuntime(Payload).deinitOpaque },
+    });
+
+    return runtime.handle(node);
 }
 
 fn TypedRuntime(comptime Payload: type) type {
-    const Handle = TypedNetwork(Payload);
-    const Packet = Handle.Packet;
+    const Handle = Endpoint(Payload);
+    const Envelope = Handle.Envelope;
+
+    const Packet = struct {
+        id: u64,
+        from: NodeId,
+        to: NodeId,
+        deliver_at: clock_module.Timestamp,
+        payload: Payload,
+    };
 
     return struct {
         const Self = @This();
@@ -839,9 +890,13 @@ fn TypedRuntime(comptime Payload: type) type {
         queues: []std.ArrayList(Packet),
         next_packet_id: u64 = 0,
 
-        fn init(shared: *SharedRuntime) !Handle {
-            try shared.claimTypedHandle(Payload);
-            errdefer shared.releaseTypedHandle(Payload);
+        fn endpoint(shared: *SharedRuntime, node: NodeId) !Handle {
+            const runtime = try getOrInit(shared);
+            return runtime.handle(node);
+        }
+
+        fn getOrInit(shared: *SharedRuntime) !*Self {
+            if (shared.typedRuntime(Payload)) |existing| return existing;
 
             const allocator = shared.world.allocator;
             const runtime = try allocator.create(Self);
@@ -856,9 +911,17 @@ fn TypedRuntime(comptime Payload: type) type {
                 .shared = shared,
                 .queues = queues,
             };
-            try shared.world.registerTeardown(runtime, deinit);
+            errdefer runtime.free(allocator);
 
-            return .{ .ptr = runtime, .vtable = &vtable };
+            try shared.registerTypedRuntime(Payload, runtime);
+            errdefer shared.unregisterTypedRuntime(Payload);
+
+            try shared.world.registerTeardown(runtime, deinit);
+            return runtime;
+        }
+
+        fn handle(self: *Self, node: NodeId) Handle {
+            return .{ .ptr = self, .self_node = node, .vtable = &vtable };
         }
 
         fn send(self: *Self, from: NodeId, to: NodeId, payload: Payload) !void {
@@ -912,21 +975,28 @@ fn TypedRuntime(comptime Payload: type) type {
             );
         }
 
-        fn nextDelivery(self: *Self) !?Packet {
+        fn receive(self: *Self, node: NodeId) !?Envelope {
+            try self.shared.validateNode(node);
+
             while (true) {
                 try self.shared.expireDeterministicFaults();
-                if (try self.popReady()) |packet| return packet;
+                if (try self.popReadyFor(node)) |packet| {
+                    return .{
+                        .from = packet.from,
+                        .message = packet.payload,
+                    };
+                }
 
-                const deliver_at = self.nextDeliveryAt() orelse return null;
+                const deliver_at = self.nextDeliveryAtFor(node) orelse return null;
                 const now_ns = self.shared.world.now();
                 if (deliver_at <= now_ns) return null;
                 try self.runForDeterministicFaults(deliver_at - now_ns);
             }
         }
 
-        fn popReady(self: *Self) !?Packet {
+        fn popReadyFor(self: *Self, node: NodeId) !?Packet {
             while (true) {
-                const link_index = self.nextReadyLinkIndex() orelse return null;
+                const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
                 const ready = self.queues[link_index].orderedRemove(0);
 
                 if (self.shared.down_nodes[@intCast(ready.to)]) {
@@ -945,22 +1015,24 @@ fn TypedRuntime(comptime Payload: type) type {
             }
         }
 
-        fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
+        fn nextDeliveryAtFor(self: *const Self, node: NodeId) ?clock_module.Timestamp {
             var best: ?clock_module.Timestamp = null;
             for (self.queues, 0..) |queue, index| {
                 const packet = if (queue.items.len == 0) continue else queue.items[0];
+                if (packet.to != node) continue;
                 const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
                 if (best == null or ready_at < best.?) best = ready_at;
             }
             return best;
         }
 
-        fn nextReadyLinkIndex(self: *const Self) ?usize {
+        fn nextReadyLinkIndexFor(self: *const Self, node: NodeId) ?usize {
             var best_index: ?usize = null;
             var best_packet: Packet = undefined;
             for (self.queues, 0..) |queue, index| {
                 if (queue.items.len == 0) continue;
                 const packet = queue.items[0];
+                if (packet.to != node) continue;
                 if (packet.deliver_at > self.shared.world.now()) continue;
                 if (self.shared.links[index].clogged_until > self.shared.world.now()) continue;
                 if (best_index == null or packetLessThan(packet, best_packet)) {
@@ -1000,9 +1072,12 @@ fn TypedRuntime(comptime Payload: type) type {
 
         fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
             const runtime: *Self = @ptrCast(@alignCast(ptr));
+            runtime.free(allocator);
+        }
+
+        fn free(runtime: *Self, allocator: std.mem.Allocator) void {
             for (runtime.queues) |*queue| queue.deinit(allocator);
             allocator.free(runtime.queues);
-            runtime.shared.releaseTypedHandle(Payload);
             allocator.destroy(runtime);
         }
 
@@ -1014,20 +1089,28 @@ fn TypedRuntime(comptime Payload: type) type {
             try fromOpaque(ptr).send(from, to, payload);
         }
 
-        fn vtableNextDelivery(ptr: *anyopaque) anyerror!?Packet {
-            return try fromOpaque(ptr).nextDelivery();
+        fn vtableReceive(ptr: *anyopaque, node: NodeId) anyerror!?Envelope {
+            return try fromOpaque(ptr).receive(node);
         }
 
         const vtable: Handle.VTable = .{
             .send = vtableSend,
-            .next_delivery = vtableNextDelivery,
+            .receive = vtableReceive,
         };
     };
 }
 
 fn ProductionRuntime(comptime Payload: type) type {
-    const Handle = TypedNetwork(Payload);
-    const Packet = Handle.Packet;
+    const Handle = Endpoint(Payload);
+    const Envelope = Handle.Envelope;
+
+    const Packet = struct {
+        id: u64,
+        from: NodeId,
+        to: NodeId,
+        deliver_at: clock_module.Timestamp,
+        payload: Payload,
+    };
 
     return struct {
         const Self = @This();
@@ -1036,14 +1119,14 @@ fn ProductionRuntime(comptime Payload: type) type {
         queue: std.ArrayList(Packet) = .empty,
         next_packet_id: u64 = 0,
 
-        fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!ProductionNetworkInit(Payload) {
+        fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
             const runtime = try allocator.create(Self);
             runtime.* = .{ .allocator = allocator };
+            return runtime;
+        }
 
-            return .{
-                .network = .{ .ptr = runtime, .vtable = &vtable },
-                .teardown = .{ .ptr = runtime, .deinit = deinitOpaque },
-            };
+        fn handle(self: *Self, node: NodeId) Handle {
+            return .{ .ptr = self, .self_node = node, .vtable = &vtable };
         }
 
         fn send(self: *Self, from: NodeId, to: NodeId, payload: Payload) !void {
@@ -1058,19 +1141,26 @@ fn ProductionRuntime(comptime Payload: type) type {
             try self.queue.append(self.allocator, packet);
         }
 
-        fn nextDelivery(self: *Self) !?Packet {
-            if (self.queue.items.len == 0) return null;
-            return self.queue.orderedRemove(0);
+        fn receive(self: *Self, node: NodeId) !?Envelope {
+            for (self.queue.items, 0..) |packet, index| {
+                if (packet.to != node) continue;
+                const ready = self.queue.orderedRemove(index);
+                return .{
+                    .from = ready.from,
+                    .message = ready.payload,
+                };
+            }
+            return null;
         }
 
-        fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self) void {
             self.queue.deinit(self.allocator);
             const allocator = self.allocator;
             self.* = undefined;
             allocator.destroy(self);
         }
 
-        fn deinitOpaque(ptr: *anyopaque, _: std.mem.Allocator) void {
+        pub fn deinitOpaque(ptr: *anyopaque, _: std.mem.Allocator) void {
             fromOpaque(ptr).deinit();
         }
 
@@ -1082,13 +1172,13 @@ fn ProductionRuntime(comptime Payload: type) type {
             try fromOpaque(ptr).send(from, to, payload);
         }
 
-        fn vtableNextDelivery(ptr: *anyopaque) anyerror!?Packet {
-            return try fromOpaque(ptr).nextDelivery();
+        fn vtableReceive(ptr: *anyopaque, node: NodeId) anyerror!?Envelope {
+            return try fromOpaque(ptr).receive(node);
         }
 
         const vtable: Handle.VTable = .{
             .send = vtableSend,
-            .next_delivery = vtableNextDelivery,
+            .receive = vtableReceive,
         };
     };
 }
@@ -2183,15 +2273,19 @@ test "network simulation: nextDelivery advances time and returns packets" {
     try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try network.nextDelivery());
 }
 
-test "composition network: duplicate payload handles are rejected" {
+test "composition network: endpoints for the same payload share one runtime" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    _ = try sim.network(TestPayload);
+    const node_0 = try sim.endpoint(TestPayload, 0);
+    const node_1 = try sim.endpoint(TestPayload, 1);
+    _ = try sim.endpoint(OtherTestPayload, 1);
 
-    try std.testing.expectError(error.NetworkHandleAlreadyExists, sim.network(TestPayload));
-    _ = try sim.network(OtherTestPayload);
+    try node_0.send(1, .{ .value = 42 });
+    const envelope = (try node_1.receive()).?;
+    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
+    try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
 }
 
 fn runCompositionClogTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
@@ -2199,7 +2293,7 @@ fn runCompositionClogTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    _ = try sim.network(TestPayload);
+    _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setFaults(.{
         .path_clog_rate = .percent(10),
         .path_clog_duration_ns = 20,
@@ -2224,7 +2318,7 @@ test "composition network: automatic partition honors unpartition stability" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
-    _ = try sim.network(TestPayload);
+    _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setFaults(.{
         .partition_rate = .always(),
         .unpartition_rate = .always(),
@@ -2249,14 +2343,14 @@ test "composition network: nextDelivery wait does not evolve probabilistic fault
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
-    const net = try sim.network(TestPayload);
+    const node_0 = try sim.endpoint(TestPayload, 0);
+    const node_1 = try sim.endpoint(TestPayload, 1);
     try sim.control.network.setFaults(.{ .partition_rate = .always() });
 
-    try net.send(0, 1, .{ .value = 1 });
+    try node_0.send(1, .{ .value = 1 });
     const random_events_before = std.mem.count(u8, world.traceBytes(), "world.random_int_less_than");
-    const packet = (try net.nextDelivery()).?;
-    try std.testing.expectEqual(@as(NodeId, 0), packet.from);
-    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
+    const envelope = (try node_1.receive()).?;
+    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") == null);
     try std.testing.expectEqual(random_events_before, std.mem.count(u8, world.traceBytes(), "world.random_int_less_than"));
 }
@@ -2266,7 +2360,7 @@ test "composition network: automatic partition honors partition stability" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
-    _ = try sim.network(TestPayload);
+    _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setFaults(.{
         .partition_rate = .always(),
         .partition_stability_min_ns = 30,
@@ -2287,7 +2381,8 @@ test "composition network: manual and automatic partitions compose" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
-    const net = try sim.network(TestPayload);
+    const node_1 = try sim.endpoint(TestPayload, 1);
+    const node_2 = try sim.endpoint(TestPayload, 2);
     const isolated = [_]NodeId{1};
     const other = [_]NodeId{2};
 
@@ -2299,8 +2394,8 @@ test "composition network: manual and automatic partitions compose" {
     try sim.control.network.setFaults(.{ .unpartition_rate = .always() });
     try sim.control.tick();
 
-    try net.send(1, 2, .{ .value = 1 });
-    try std.testing.expectEqual(@as(?TypedNetwork(TestPayload).Packet, null), try net.nextDelivery());
+    try node_1.send(2, .{ .value = 1 });
+    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try node_2.receive());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_heal") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=link_disabled") != null);
 }

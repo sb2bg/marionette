@@ -140,8 +140,11 @@ pub const NetworkPartitionDynamicsOptions = @import("network.zig").NetworkPartit
 /// Runtime topology for a composition-root network simulation.
 pub const SimNetworkOptions = @import("network.zig").SimNetworkOptions;
 
-/// Typed app-facing network handle.
-pub const Network = @import("network.zig").TypedNetwork;
+/// Typed app-facing process endpoint.
+pub const Endpoint = @import("network.zig").Endpoint;
+
+/// Backwards-compatible type name for the app-facing endpoint.
+pub const Network = @import("network.zig").Endpoint;
 
 /// Simulator-control network capability.
 pub const NetworkControl = @import("network.zig").AnyNetworkControl;

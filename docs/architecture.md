@@ -48,7 +48,7 @@ Phase 0 has:
   per-link queues, seeded packet loss, tick-aligned latency, process up/down
   state, directed link filters, simple partitions, and stable
   `(deliver_at, packet_id)` delivery order.
-- `mar.Network(Payload)`, an app-facing typed network handle returned by
+- `mar.Endpoint(Message)`, an app-facing typed process endpoint returned by
   simulation and production setup.
 - `mar.Disk`, an app-facing disk capability for `read`, `write`, and `sync`.
 - `mar.SimDisk`, a deterministic disk simulator with logical paths,

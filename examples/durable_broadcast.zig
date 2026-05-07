@@ -26,8 +26,7 @@ const MessagePayload = struct {
     value: u64,
 };
 
-const Network = mar.Network(MessagePayload);
-const Packet = Network.Packet;
+const Endpoint = mar.Endpoint(MessagePayload);
 
 pub const checks = [_]mar.StateCheck(Harness){
     .{ .name = "quorum acknowledgements are durable", .check = quorumAcknowledgementsAreDurable },
@@ -98,7 +97,11 @@ pub const Harness = struct {
         });
 
         return .{
-            .service = DurableBroadcast.init(sim.env, try sim.network(MessagePayload)),
+            .service = DurableBroadcast.init(
+                sim.env,
+                try sim.endpoint(MessagePayload, client_node_id),
+                try sim.endpointRange(MessagePayload, replica_count, 0),
+            ),
             .control = sim.control,
         };
     }
@@ -174,15 +177,17 @@ const Replica = struct {
 
 const DurableBroadcast = struct {
     env: mar.Env,
-    net: Network,
+    client: Endpoint,
+    replica_endpoints: [replica_count]Endpoint,
     replicas: [replica_count]Replica,
     durable_op: ?Op = null,
     last_quorum_op: ?Op = null,
 
-    fn init(env: mar.Env, net: Network) DurableBroadcast {
+    fn init(env: mar.Env, client: Endpoint, replica_endpoints: [replica_count]Endpoint) DurableBroadcast {
         return .{
             .env = env,
-            .net = net,
+            .client = client,
+            .replica_endpoints = replica_endpoints,
             .replicas = @splat(.{}),
         };
     }
@@ -280,7 +285,12 @@ const DurableBroadcast = struct {
     }
 
     fn send(self: *DurableBroadcast, from: mar.NodeId, to: mar.NodeId, payload: MessagePayload) !void {
-        try self.net.send(from, to, payload);
+        if (from == client_node_id) {
+            try self.client.send(to, payload);
+        } else {
+            const replica_index: usize = @intCast(from);
+            try self.replica_endpoints[replica_index].send(to, payload);
+        }
         try self.env.record(
             "durable.message kind={s} from={} to={} op={} value={}",
             .{ @tagName(payload.kind), from, to, payload.op_id, payload.value },
@@ -288,41 +298,55 @@ const DurableBroadcast = struct {
     }
 
     fn drainAndAck(self: *DurableBroadcast, acked: *[replica_count]bool) !void {
-        while (try self.net.nextDelivery()) |packet| {
-            try self.apply(packet, acked);
+        while (true) {
+            var progressed = false;
+
+            for (self.replica_endpoints, 0..) |endpoint, replica_index| {
+                while (try endpoint.receive()) |envelope| {
+                    progressed = true;
+                    try self.apply(@intCast(replica_index), envelope, acked);
+                }
+            }
+
+            while (try self.client.receive()) |envelope| {
+                progressed = true;
+                try self.apply(client_node_id, envelope, acked);
+            }
+
+            if (!progressed) break;
         }
     }
 
-    fn apply(self: *DurableBroadcast, packet: Packet, acked: *[replica_count]bool) !void {
-        switch (packet.payload.kind) {
+    fn apply(self: *DurableBroadcast, to: mar.NodeId, envelope: Endpoint.Envelope, acked: *[replica_count]bool) !void {
+        switch (envelope.message.kind) {
             .replicate => {
-                if (packet.to >= replica_count) return;
+                if (to >= replica_count) return;
 
-                const replica_index: usize = @intCast(packet.to);
+                const replica_index: usize = @intCast(to);
                 const accepted = self.replicas[replica_index].accept(.{
-                    .id = packet.payload.op_id,
-                    .value = packet.payload.value,
+                    .id = envelope.message.op_id,
+                    .value = envelope.message.value,
                 });
                 try self.env.record(
                     "durable.replica_accept replica={} op={} value={} accepted={}",
-                    .{ packet.to, packet.payload.op_id, packet.payload.value, accepted },
+                    .{ to, envelope.message.op_id, envelope.message.value, accepted },
                 );
 
                 if (accepted) {
-                    try self.send(packet.to, client_node_id, .{
+                    try self.send(to, client_node_id, .{
                         .kind = .ack,
-                        .op_id = packet.payload.op_id,
-                        .value = packet.payload.value,
+                        .op_id = envelope.message.op_id,
+                        .value = envelope.message.value,
                     });
                 }
             },
             .ack => {
-                if (packet.to != client_node_id or packet.from >= replica_count) return;
-                const replica_index: usize = @intCast(packet.from);
+                if (to != client_node_id or envelope.from >= replica_count) return;
+                const replica_index: usize = @intCast(envelope.from);
                 acked[replica_index] = true;
                 try self.env.record(
                     "durable.ack replica={} op={} value={}",
-                    .{ packet.from, packet.payload.op_id, packet.payload.value },
+                    .{ envelope.from, envelope.message.op_id, envelope.message.value },
                 );
             },
         }
@@ -434,8 +458,12 @@ fn countTrue(values: *const [replica_count]bool) u8 {
     return count;
 }
 
-fn writeBroadcastRecover(env: mar.Env, net: Network) !DurableBroadcast {
-    var service = DurableBroadcast.init(env, net);
+fn writeBroadcastRecover(
+    env: mar.Env,
+    client: Endpoint,
+    replica_endpoints: [replica_count]Endpoint,
+) !DurableBroadcast {
+    var service = DurableBroadcast.init(env, client, replica_endpoints);
     try service.submit(.{
         .op = .{ .id = 1, .value = 41 },
         .retry_limit = 2,
@@ -491,7 +519,11 @@ test "durable broadcast: same app code on simulated and production handles" {
             .path_capacity = max_messages,
         },
     });
-    var sim_service = try writeBroadcastRecover(sim.env, try sim.network(MessagePayload));
+    var sim_service = try writeBroadcastRecover(
+        sim.env,
+        try sim.endpoint(MessagePayload, client_node_id),
+        try sim.endpointRange(MessagePayload, replica_count, 0),
+    );
     try durableServiceIsSafe(&sim_service);
 
     var tmp = std.testing.tmpDir(.{});
@@ -504,6 +536,10 @@ test "durable broadcast: same app code on simulated and production handles" {
     });
     defer production.deinit();
 
-    var prod_service = try writeBroadcastRecover(production.env(), try production.network(MessagePayload));
+    var prod_service = try writeBroadcastRecover(
+        production.env(),
+        try production.endpoint(MessagePayload, client_node_id),
+        try production.endpointRange(MessagePayload, replica_count, 0),
+    );
     try durableServiceIsSafe(&prod_service);
 }

@@ -220,10 +220,10 @@ deliberately: the parametric form keeps message_bus_fuzz exercising the real
 bus code, and the separate VOPR form avoids paying the cost of simulating TCP
 in software for full-cluster runs.
 
-Marionette already has one seam at the right level: the `Network(Payload)`
+Marionette already has one seam at the right level: the `Endpoint(Message)`
 vtable. The current production impl is a same-process FIFO; the simulation
 impl is the deterministic packet bus. Both satisfy the same vtable. Reading
-TigerBeetle, I considered switching to a parametric `Network(Payload, IO)`
+TigerBeetle, I considered switching to a parametric `Endpoint(Message, IO)`
 shape and decided against it. The vtable already gives us the swappability;
 adding a generic IO type would force every user to choose an IO backend at
 the call site, which leaks library internals into user code.

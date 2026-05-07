@@ -99,7 +99,7 @@ Three pieces, every test:
 
 Every Marionette test has two halves.
 
-**`env`** is what your application code sees. It exposes non-generic resources such as `disk`, `clock`, randomness, and tracing. Typed resources such as `Network(Payload)` are passed alongside `env`, so `Env` stays one concrete type.
+**`env`** is what your application code sees. It exposes non-generic resources such as `disk`, `clock`, randomness, and tracing. Typed resources such as `Endpoint(Message)` are passed alongside `env`, so `Env` stays one concrete type.
 
 ```zig
 try env.disk.write(.{ .path = "kv.wal", .offset = 0, .bytes = &bytes });
@@ -137,7 +137,7 @@ fn partitionScenario(harness: *Harness) !void {
 }
 ```
 
-Messages have configurable drop rates, latency distributions, and reordering through `control.network.setFaults(...)`. Application code sends with `net.send(from, to, payload)` and can drain deterministic deliveries with `while (try net.nextDelivery()) |packet|`.
+Messages have configurable drop rates, latency distributions, and reordering through `control.network.setFaults(...)`. Application code sends through a node-scoped endpoint with `endpoint.send(to, message)` and receives with `while (try endpoint.receive()) |envelope|`.
 
 ## Traces
 

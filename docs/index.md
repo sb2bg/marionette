@@ -83,7 +83,7 @@ Every Marionette test has two surfaces.
 
 **`env`** is what application code sees. It exposes non-generic capabilities
 such as `disk`, `clock`, randomness, and tracing. Typed capabilities such as
-`Network(Payload)` are passed alongside `env`, so `Env` stays one concrete
+`Endpoint(Message)` are passed alongside `env`, so `Env` stays one concrete
 type.
 
 ```zig
@@ -124,9 +124,9 @@ fn partitionScenario(harness: *Harness) !void {
 ```
 
 Messages have configurable drop rates, latency distributions, and reordering
-through `control.network.setFaults(...)`. Application code sends through the
-typed network handle and drains deterministic deliveries with
-`while (try net.nextDelivery()) |packet|`.
+through `control.network.setFaults(...)`. Application code sends through a
+node-scoped endpoint with `endpoint.send(to, message)` and receives with
+`while (try endpoint.receive()) |envelope|`.
 
 ## Traces
 

@@ -2,7 +2,7 @@
 
 This document is a forward-looking plan, not a current specification. It
 describes the target shape for Marionette's production-side
-`Network(Payload)` once it grows from a same-process FIFO into a real
+`Endpoint(Message)` once it grows from a same-process FIFO into a real
 cross-process transport. It is the source of truth for roadmap item 15
 ("App-facing typed network composition: production transport").
 
@@ -23,7 +23,7 @@ Closing that gap requires a production transport that:
 - frames messages on the wire so torn reads cannot cross a message boundary,
 - pools and bounds the memory used for in-flight messages,
 - manages outbound connections with reconnect and backoff,
-- exposes the same `Network(Payload)` vtable that simulation already exposes,
+- exposes the same `Endpoint(Message)` vtable that simulation already exposes,
 - preserves the application code path so production-shaped code never branches
   on whether the network is real.
 
@@ -59,14 +59,14 @@ The closest fully-realized example in the Zig ecosystem. Studied in detail in
 There are actually two seams hiding in this question, and they have different
 answers.
 
-**Public-API seam (settled).** The user-visible `Network(Payload)` type
+**Public-API seam (settled).** The user-visible `Endpoint(Message)` type
 will not be parametric on an IO backend. The vtable already gives the
-sim/prod swap; adding `Network(Payload, IO)` would push the IO choice into
-every function signature that takes a network handle and leak library
-internals into application code. The same `Network(Payload)` type is
+sim/prod swap; adding `Endpoint(Message, IO)` would push the IO choice into
+every function signature that takes an endpoint and leak library internals
+into application code. The same `Endpoint(Message)` type is
 satisfied by two impls: a simulation impl backed by the deterministic
 packet bus, and a production impl backed by sockets. Production transport
-work goes behind the existing `TypedNetwork(Payload)` vtable in
+work goes behind the existing endpoint vtable in
 `src/network.zig`. No type signatures change in user-facing code.
 
 **Implementer-internal seam (deferred, not foreclosed).** Whether the
@@ -81,7 +81,7 @@ recv-buffer reassembly, and connection state-machine code only ever runs
 against real sockets without it.
 
 The vtable seam does not deliver this coverage. Once code is on the prod
-side of `TypedNetwork(Payload)`'s vtable, syscalls are wired in directly.
+side of `Endpoint(Message)`'s vtable, syscalls are wired in directly.
 The pragmatic plan is to leave room for an internal IO seam without
 committing to one yet:
 
@@ -134,7 +134,7 @@ demands it.
 Production setup requires a topology config absent in simulation:
 
 ```zig
-const net = try production.network(MessagePayload, .{
+const endpoint = try production.endpoint(Message, .{
     .self = 1,
     .peers = &.{
         .{ .id = 0, .address = "127.0.0.1:4240" },
@@ -148,10 +148,12 @@ const net = try production.network(MessagePayload, .{
 Simulation does not need this; `World.simulate(.{ .network = .{ .nodes = N }
 })` declares topology implicitly.
 
-This is a deliberate divergence: `Production.network` and `Sim.network`
-accept different option types. The returned handle is the same. Application
-code that holds a `Network(Payload)` is unaware of how its peers were
-declared.
+This will be a deliberate divergence between production and simulation setup:
+production declares peer addresses and listener state, while simulation
+declares a node count. The returned endpoint shape is the same. Application
+code that holds an `Endpoint(Message)` is unaware of how its peers were
+declared. The current in-process production stub still accepts just a `NodeId`;
+the topology options are the item-15 target.
 
 ### Identity model
 
@@ -173,7 +175,7 @@ exhaustion returns `error.PoolExhausted` from `send`; this is one of the few
 conditions that propagates as a hard error rather than dropping silently,
 because it represents a configuration bug, not a transient condition.
 
-User-facing API for v1 is copy semantics: `net.send(from, to, payload)` copies
+User-facing API for v1 is copy semantics: `endpoint.send(to, message)` copies
 the payload into a pooled buffer. Zero-copy primitives such as `acquire`/
 `commitSend` are deferred until a workload justifies them.
 
@@ -185,7 +187,9 @@ delay on failure. The jitter seed comes from the local `NodeId` so that
 multiple replicas reconnecting to a flapping peer naturally desynchronize.
 
 Inbound: a single listener bound to `options.listen` accepts connections.
-Peer identity is inferred from the first valid frame's `from` field.
+Peer identity is inferred from the first valid frame's source field. The
+application cannot choose that source per send; it is fixed by the endpoint's
+configured `self` identity.
 
 Async close: when a connection terminates, pending recv and send completions
 must drain before the socket file descriptor is released. This prevents
@@ -199,8 +203,8 @@ does not receive an error. This matches TigerBeetle. The application owns
 retries.
 
 Receive side: bounded per-connection recv buffer. When the buffer is full,
-the kernel read on that connection is paused until `nextDelivery` consumes a
-message. The pull-shaped `nextDelivery` API gives application backpressure for
+the kernel read on that connection is paused until `receive` consumes a
+message. The pull-shaped `receive` API gives application backpressure for
 free.
 
 Marionette will *not* implement TigerBeetle's per-message `suspend_message`
@@ -211,7 +215,7 @@ deferral, we add it then.
 ### Send semantics
 
 ```zig
-try net.send(from, to, payload);
+try endpoint.send(to, message);
 ```
 
 Returns `!void`. Possible errors:
@@ -235,18 +239,19 @@ network code.
 ### Receive semantics
 
 ```zig
-while (try net.nextDelivery()) |packet| { ... }
+while (try endpoint.receive()) |envelope| { ... }
 ```
 
-Returns `!?Packet`. Same shape as today. The production impl fills pooled
-recv buffers from sockets and hands the next available packet to the caller.
-When no packet is currently deliverable, the production impl yields control
+Returns `!?Envelope(Message)`. The production impl fills pooled recv buffers
+from sockets and hands the next available message for this endpoint's node to
+the caller.
+When no message is currently deliverable, the production impl yields control
 to the IO backend (i.e. blocks on a poll) until one arrives or until a
 configured deadline expires; the deadline is exposed via a future
-`nextDeliveryWithin(duration)` variant if needed.
+`receiveWithin(duration)` variant if needed.
 
-For v1, `nextDelivery` blocks indefinitely until a packet is available or the
-network handle is closed. Callers that need a non-blocking poll use the
+For v1, `receive` blocks indefinitely until a message is available or the
+endpoint is closed. Callers that need a non-blocking poll use the
 trySend / tryRecv pattern, deferred until a real example asks for it.
 
 ### IO backend
@@ -256,7 +261,7 @@ internal abstraction with one impl per platform: io_uring on Linux, kqueue on
 Darwin, IOCP on Windows.
 
 The internal IO type is not part of the public API. Users see only
-`Network(Payload)`. The decision to migrate to `std.Io` happens when `std.Io`
+`Endpoint(Message)`. The decision to migrate to `std.Io` happens when `std.Io`
 exposes the primitives the production impl needs (async accept, recv, send,
 close); until then, the internal abstraction is whatever works.
 
@@ -278,9 +283,9 @@ Each item ships on its own. Cross-process parity is the done-signal.
 2. **Buffer pool primitive.** Refcounted, preallocated pool. Pool exhaustion
    returns hard error. Lives in `src/message_pool.zig`. Used by both sim and
    prod once integrated.
-3. **Topology config and `Production.network(Payload, opts)`.** Production
-   handle accepts peers and self id. Initially returns the same in-process
-   FIFO behavior as today; the API change is the gate.
+3. **Topology config and `Production.endpoint(Message, opts)`.** Production
+   endpoint accepts peers and self id. Initially returns the same in-process
+   FIFO behavior as today; the topology API change is the gate.
 4. **Single-peer end-to-end socket transport.** Two processes, one peer each,
    real send and receive with the new framing. Loopback only.
 5. **Multi-peer with internal connection management.** Lazy outbound connect,
@@ -317,12 +322,12 @@ they do not get rediscussed.
 - General-purpose RPC: no request/response correlation, no service discovery,
   no client libraries.
 - TLS, real DNS, arbitrary `std.net` compatibility.
-- Stream or datagram primitives outside the `Network(Payload)` shape.
+- Stream or datagram primitives outside the `Endpoint(Message)` shape.
 - A drop-in replacement for Tokio, libuv, or any general-purpose async
   runtime.
 
 If a user needs any of the above, they should reach for `std.net` directly
-and not use `Network(Payload)` for that workload.
+and not use `Endpoint(Message)` for that workload.
 
 ## Deviations from TigerBeetle
 
@@ -338,7 +343,7 @@ For posterity, where this design diverges from TigerBeetle and why:
   has not foreclosed on it; see "Marionette's seam choice" above.
 - **No bus-level replica/client distinction.** Single `NodeId` namespace.
   Justification: Marionette is generic, not VSR-specific.
-- **Pull-shaped receive (`nextDelivery`).** TigerBeetle is callback-shaped.
+- **Pull-shaped receive (`receive`).** TigerBeetle is callback-shaped.
   Justification: pull is simpler in the single-threaded simulator; the
   production impl buffers internally and the user pulls.
 - **Sim and prod converge on silent-drop send semantics.** TigerBeetle does

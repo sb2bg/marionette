@@ -341,8 +341,8 @@ disk.restart status=ok
 
 ## Network
 
-`mar.Network(Payload)` is the app-facing network handle. Simulation and
-production setup both return this typed handle shape, while simulator-control
+`mar.Endpoint(Message)` is the app-facing network handle. Simulation and
+production setup both return this typed endpoint shape, while simulator-control
 faults remain on `control.network`.
 
 See [Network Model](network.md) for the design contract and current limits.
@@ -350,29 +350,32 @@ See [Network API Direction](network-api.md) for the split between app-facing
 network authority and test-only simulator-control operations.
 
 ```zig
-const Payload = struct { value: u64 };
+const Message = struct { value: u64 };
 
 const sim = try world.simulate(.{ .network = .{
     .nodes = 4,
     .path_capacity = 64,
 } });
-const net = try sim.network(Payload);
+const sender = try sim.endpoint(Message, 0);
+const receiver = try sim.endpoint(Message, 1);
 
 try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
 try sim.control.network.setLatency(.{
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
-try net.send(0, 1, .{ .value = 42 });
+try sender.send(1, .{ .value = 42 });
 
-while (try net.nextDelivery()) |packet| {
-    _ = packet.payload;
+while (try receiver.receive()) |envelope| {
+    _ = envelope.from;
+    _ = envelope.message;
 }
 ```
 
-`send` records `network.send` or `network.drop`. `nextDelivery` records
+`send` records `network.send` or `network.drop`. `receive` records
 `network.deliver`, advances world time when the next queued packet is in the
-future, and returns `null` when the network has no pending work.
+future for that endpoint, and returns `null` when the endpoint has no pending
+messages.
 
 Latency values must align with the world's tick size because Phase 0 simulated
 time advances in whole ticks.

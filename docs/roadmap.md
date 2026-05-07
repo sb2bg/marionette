@@ -29,12 +29,13 @@ probabilistic network faults remain valuable but are not a disk blocker.
 
 The current network surface is:
 
-- `mar.Network(Payload)`: app-facing typed handle with `send` and
-  `nextDelivery`, returned by both simulation and production setup.
+- `mar.Endpoint(Message)`: app-facing typed process endpoint with `send(to,
+  message)` and `receive()`, returned by both simulation and production setup.
+  `mar.Network(Message)` remains a compatibility alias.
 - `World.simulate(.{ .network = ... })`: world-owned simulator network
   construction with `sim.control.network` for fault orchestration and
-  `sim.network(Payload)` for typed app handles.
-- `Production.network(Payload)`: production-shaped local in-process handle for
+  `sim.endpoint(Message, node)` for typed app endpoints.
+- `Production.endpoint(Message, node)`: production-shaped local in-process endpoint for
   same-process parity tests; it is not a cross-process transport, and real
   socket backing is still future work.
 - `mar.UnstableNetwork(Payload, NetworkOptions)`: packet core with declared
@@ -43,7 +44,7 @@ The current network surface is:
 - `sim.control.tick()`: outer tick that advances `World` and evolves subsystem
   fault state. `sim.control.runFor(duration)` steps tick by tick rather than
   jumping time.
-- `network.nextDelivery()`: the public delivery loop primitive, routing time
+- `endpoint.receive()`: the public delivery loop primitive, routing time
   movement through the simulated network handle.
 
 The current disk surface is:
@@ -91,7 +92,7 @@ buses, linearizability checker, time-travel debugging.
 - `mar.DiskControl`: simulator-control disk capability.
 - `World.simulate`: world-owned simulator construction.
 - `Env.disk`: app-facing simulation disk capability.
-- `mar.Network(Payload)`, `mar.NetworkControl`, `SimNetworkOptions`, and
+- `mar.Endpoint(Message)`, `mar.NetworkControl`, `SimNetworkOptions`, and
   composition-root network accessors for simulation and production-shaped
   setup.
 - Trace format with per-line validation (`isValidTracePayload`).
@@ -295,20 +296,21 @@ entry point changed instead of adding a compatibility wrapper.
 
 ---
 
-### Completed: Replace callback drain with `nextDelivery`
+### Completed: Replace callback drain with pull receive
 
-**Status:** Done. `network.nextDelivery()` is the public network delivery
-primitive.
+**Status:** Done. The public network delivery primitive is pull-shaped. It was
+originally `network.nextDelivery()` and is now node-scoped as
+`endpoint.receive()`.
 
 **Why it mattered:** Callback-shaped delivery made example code harder to read
-and encouraged packet-core access. `nextDelivery()` keeps delivery top-to-bottom
-and advances simulated time through the simulation wrapper.
+and encouraged packet-core access. Pull receive keeps delivery top-to-bottom and
+advances simulated time through the simulation wrapper.
 
 **Scope:**
 
 - Remove `UnstableNetwork.drainUntilIdle`.
 - Make `NetworkSimulation.drainUntilIdle` internal.
-- Update the replicated-register example to use `while (try net.nextDelivery())`.
+- Update the replicated-register example to use pull-shaped receives.
 
 **Acceptance criteria:**
 
@@ -576,13 +578,13 @@ checker that fails when a network-visible operation was not durable.
 ### 15. Real production network transport
 
 Marionette's parity claim ("the same code runs in production and under the
-simulator") is true only inside one OS process today. `Production.network`
+simulator") is true only inside one OS process today. `Production.endpoint`
 is a same-process FIFO. Closing the gap is a real engineering project, not
 a thin wrapper over `std.net`.
 
 The full target is in `docs/network-production.md`. Read it before picking
 up any sub-task. The headline shape is "TigerBeetle MessageBus, behind
-Marionette's existing `Network(Payload)` vtable": length-prefixed framing
+Marionette's existing `Endpoint(Message)` vtable": length-prefixed framing
 with checksums, refcounted preallocated message pool, lazy outbound connect
 with seeded jittered backoff, async close discipline, bounded per-peer
 queues, silent-drop send on full queue and unreachable peer.
@@ -598,9 +600,9 @@ header and body checksums, roundtrip tests. No sockets. Lives in
 exhaustion returns a hard error. Used by both sim and prod once integrated.
 Lives in `src/message_pool.zig`.
 
-**15c. Topology config and `Production.network(Payload, opts)`.**
-Production handle accepts peers and self id. Initially returns the same
-in-process FIFO behavior; the API change is the gate.
+**15c. Topology config and `Production.endpoint(Message, opts)`.**
+Production endpoint accepts peers and self id. Initially returns the same
+in-process FIFO behavior; the topology API change is the gate.
 
 **15d. Single-peer end-to-end socket transport.** Two processes, one peer
 each, real send and receive over the new framing. Loopback only.
@@ -627,10 +629,10 @@ Steps 15a and 15b are independent and can land in parallel. 15c through
 ### 16. Named-bus composition
 
 Deferred until at least two independent examples have driven the shape.
-Currently a single `Network(Payload)` per simulation is sufficient; the
-moment a second example needs both an RPC channel and a gossip channel
-in the same process, this becomes blocking. Likely shape is sketched in
-`docs/network-api.md`.
+Currently a single unnamed bus per message type is sufficient; many node
+endpoints share that bus. The moment a second example needs both an RPC channel
+and a gossip channel in the same process, this becomes blocking. Likely shape
+is an explicit bus key on endpoint setup, as sketched in `docs/network-api.md`.
 
 ### 17. Multi-replica fault atlas
 
@@ -683,7 +685,7 @@ parallel part behind an interface Marionette can simulate sequentially.
 Users call `sim.control.tick()` (or `sim.control.runFor(duration)`). Each
 subsystem exposes an internal fault-evolution hook called by that outer
 simulation tick. No public
-`sim.network().tick()`, no public `sim.disk().tick()`. This avoids the
+`sim.endpoint().tick()`, no public `sim.disk().tick()`. This avoids the
 footgun where users forget to tick one subsystem.
 
 ### Flow-inspired
@@ -715,17 +717,17 @@ calls into the simulator, which breaks determinism-by-simulated-time.
 
 `Control.network` exposes only operations that make sense for a test harness:
 `setFaults`, `setNode`, `setLink`, `partition`, `heal`, `healLinks`, `clog`,
-`unclog`, `unclogAll`. Application-shaped operations (`send`, `nextDelivery`)
-live on the typed network handle. No test-only operation will ever leak into
+`unclog`, `unclogAll`. Application-shaped operations (`send`, `receive`)
+live on typed endpoints. No test-only operation will ever leak into
 app-facing APIs.
 
 ### Real production network adapters are deferred, with a target
 
-The app-facing typed handle exists for simulation and for same-process
+The app-facing typed endpoint exists for simulation and for same-process
 parity tests. Real sockets are deferred but no longer open-ended.
 `docs/network-production.md` records the target architecture and the
 sub-task ordering (roadmap item 15). The headline shape is "TigerBeetle
-MessageBus, behind Marionette's existing `Network(Payload)` vtable":
+MessageBus, behind Marionette's existing `Endpoint(Message)` vtable":
 length-prefixed framing with checksums, refcounted preallocated message
 pool, lazy connect with seeded jittered backoff, async close, bounded
 per-peer queues, silent-drop send.
@@ -733,7 +735,7 @@ per-peer queues, silent-drop send.
 Settled choices, recorded so they don't get rediscussed:
 
 - **The user-visible seam is the existing vtable.** Marionette will not
-  parametrize `Network(Payload)` on an IO backend at the public API.
+  parametrize `Endpoint(Message)` on an IO backend at the public API.
   The vtable already gives the sim/prod swap; adding a generic IO type
   would push library internals into every user call site.
 - **Sim and prod converge on silent-drop send semantics.** Today's sim
@@ -791,11 +793,11 @@ so they don't get rediscussed.
   in a Marionette-specific actor DSL.
 - **Cross-process simulation.** In-process only.
 - **TLS, real DNS, arbitrary `std.net` compatibility.** The app-facing
-  network is narrower than `std.net`: it carries typed `Network(Payload)`
+  network is narrower than `std.net`: it carries typed `Endpoint(Message)`
   traffic and nothing else. The production transport (roadmap item 15)
   uses real sockets internally, but it is not a general socket library
   and will not expose stream or datagram primitives outside the
-  `Network(Payload)` shape. Users who want raw sockets should reach for
+  `Endpoint(Message)` shape. Users who want raw sockets should reach for
   `std.net` directly.
 - **Unconstrained "chaos" disk faults.** All disk faults pass through a
   recoverability-aware fault model.

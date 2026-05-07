@@ -61,8 +61,8 @@ same discipline in a generic API, not the same product-specific surface.
 
 ## Current API
 
-The current app-facing type is `mar.Network(Payload)`. Simulation setup
-creates the backing topology and returns typed handles from the composition
+The current app-facing type is `mar.Endpoint(Message)`. Simulation setup
+creates the backing topology and returns node-scoped typed endpoints from the composition
 root:
 
 ```zig
@@ -71,7 +71,8 @@ const sim = try world.simulate(.{ .network = .{
     .service_nodes = 3,
     .path_capacity = 64,
 } });
-const net = try sim.network(Payload);
+const sender = try sim.endpoint(Message, 0);
+const receiver = try sim.endpoint(Message, 1);
 ```
 
 `nodes` declares the total simulated process ids. With the example above,
@@ -83,11 +84,11 @@ which ids are replicas/services and which ids are clients. Clients still
 participate in the topology and can be partitioned from services, but automatic
 node isolation chooses from the service prefix.
 
-`Payload` is user-owned data. Marionette only schedules and traces the packet
+`Message` is user-owned data. Marionette only schedules and traces the packet
 metadata:
 
 ```zig
-const Payload = struct {
+const Message = struct {
     value: u64,
 };
 
@@ -96,21 +97,21 @@ try sim.control.network.setLatency(.{
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
-try net.send(0, 1, .{ .value = 42 });
+try sender.send(1, .{ .value = 42 });
 ```
 
-Deliverable packets are consumed explicitly:
+Deliverable messages are consumed explicitly:
 
 ```zig
-while (try net.nextDelivery()) |packet| {
-    try apply(packet.payload);
+while (try receiver.receive()) |envelope| {
+    try apply(envelope.from, envelope.message);
 }
 ```
 
-`nextDelivery` advances simulated time when needed and returns `null` when the
-network has no pending work.
+`receive` advances simulated time when needed and returns `null` when the
+endpoint has no pending messages.
 
-Application-shaped code sends and drains through the typed handle, while fault
+Application-shaped code sends and drains through typed endpoints, while fault
 orchestration goes through `sim.control.network`. `mar.UnstableNetwork` remains
 the lower-level packet-core primitive for focused simulator work.
 

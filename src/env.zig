@@ -305,7 +305,7 @@ pub const Production = struct {
     clock: clock_module.ProductionClock,
     random_source: std.Random.IoSource,
     tracer: Tracer,
-    network_teardowns: std.ArrayList(network_module.ProductionNetworkTeardown) = .empty,
+    network_entries: std.ArrayList(network_module.ProductionNetworkEntry) = .empty,
 
     pub const Options = struct {
         allocator: std.mem.Allocator = std.heap.smp_allocator,
@@ -328,11 +328,25 @@ pub const Production = struct {
         };
     }
 
-    pub fn network(self: *Production, comptime Payload: type) std.mem.Allocator.Error!network_module.TypedNetwork(Payload) {
-        const created = try network_module.initProductionNetwork(Payload, self.allocator);
-        errdefer created.teardown.deinit(created.teardown.ptr, self.allocator);
-        try self.network_teardowns.append(self.allocator, created.teardown);
-        return created.network;
+    pub fn endpoint(
+        self: *Production,
+        comptime Payload: type,
+        node: network_module.NodeId,
+    ) std.mem.Allocator.Error!network_module.Endpoint(Payload) {
+        return try network_module.productionEndpoint(Payload, self.allocator, &self.network_entries, node);
+    }
+
+    pub fn endpointRange(
+        self: *Production,
+        comptime Payload: type,
+        comptime count: usize,
+        first_node: network_module.NodeId,
+    ) std.mem.Allocator.Error![count]network_module.Endpoint(Payload) {
+        var endpoints: [count]network_module.Endpoint(Payload) = undefined;
+        for (&endpoints, 0..) |*endpoint_handle, index| {
+            endpoint_handle.* = try self.endpoint(Payload, first_node + @as(network_module.NodeId, @intCast(index)));
+        }
+        return endpoints;
     }
 
     pub fn env(self: *Production) Env {
@@ -345,13 +359,13 @@ pub const Production = struct {
     }
 
     pub fn deinit(self: *Production) void {
-        var index = self.network_teardowns.items.len;
+        var index = self.network_entries.items.len;
         while (index > 0) {
             index -= 1;
-            const teardown = self.network_teardowns.items[index];
+            const teardown = self.network_entries.items[index].teardown;
             teardown.deinit(teardown.ptr, self.allocator);
         }
-        self.network_teardowns.deinit(self.allocator);
+        self.network_entries.deinit(self.allocator);
         self.disk.deinit();
         self.* = undefined;
     }

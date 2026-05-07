@@ -133,8 +133,8 @@ portable shapes Marionette needs:
 
 - A small cluster model with three replicas.
 - Seeded message drops and delivery latency.
-- `world.simulate(.{ .network = ... })` producing a typed
-  `mar.Network(MessagePayload)` handle backed by fixed-topology per-link
+- `world.simulate(.{ .network = ... })` producing typed
+  `mar.Endpoint(MessagePayload)` node endpoints backed by fixed-topology per-link
   queues ordered by `(deliver_at, packet_id)`.
 - A partition scenario that drops queued packets through directed link filters.
 - Runtime network fault configuration through `control.network.setFaults(...)`.
