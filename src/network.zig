@@ -61,12 +61,35 @@ pub const NetworkFaultOptions = struct {
     unpartition_stability_min_ns: clock_module.Duration = 0,
 };
 
+pub const NetworkLossOptions = struct {
+    drop_rate: env_module.BuggifyRate = .never(),
+};
+
+pub const NetworkLatencyOptions = struct {
+    min_latency_ns: clock_module.Duration = 0,
+    latency_jitter_ns: clock_module.Duration = 0,
+};
+
+pub const NetworkClogOptions = struct {
+    path_clog_rate: env_module.BuggifyRate = .never(),
+    path_clog_duration_ns: clock_module.Duration = 0,
+};
+
+pub const NetworkPartitionDynamicsOptions = struct {
+    partition_rate: env_module.BuggifyRate = .never(),
+    unpartition_rate: env_module.BuggifyRate = .never(),
+    partition_stability_min_ns: clock_module.Duration = 0,
+    unpartition_stability_min_ns: clock_module.Duration = 0,
+};
+
 /// Runtime topology for a composition-root network simulation.
 pub const SimNetworkOptions = struct {
     /// Total simulated processes/nodes.
     nodes: usize,
-    /// Processes eligible for automatic node-isolating partitions. Defaults to
-    /// all configured processes when zero.
+    /// Prefix of process ids eligible for automatic node-isolating partitions.
+    /// Use this when the topology includes client ids that should experience
+    /// partitions but should not be selected as the isolated service node.
+    /// Defaults to all configured processes when zero.
     service_nodes: usize = 0,
     /// Maximum packets queued on one directed path.
     path_capacity: usize = 64,
@@ -79,6 +102,10 @@ pub const AnyNetworkControl = struct {
 
     pub const VTable = struct {
         set_faults: *const fn (*anyopaque, NetworkFaultOptions) anyerror!void,
+        set_lossiness: *const fn (*anyopaque, NetworkLossOptions) anyerror!void,
+        set_latency: *const fn (*anyopaque, NetworkLatencyOptions) anyerror!void,
+        set_clogs: *const fn (*anyopaque, NetworkClogOptions) anyerror!void,
+        set_partition_dynamics: *const fn (*anyopaque, NetworkPartitionDynamicsOptions) anyerror!void,
         set_node: *const fn (*anyopaque, NodeId, bool) anyerror!void,
         set_link: *const fn (*anyopaque, NodeId, NodeId, bool) anyerror!void,
         clog: *const fn (*anyopaque, NodeId, NodeId, clock_module.Duration) anyerror!void,
@@ -98,6 +125,22 @@ pub const AnyNetworkControl = struct {
 
     pub fn setFaults(self: AnyNetworkControl, faults: NetworkFaultOptions) !void {
         try self.vtable.set_faults(self.ptr, faults);
+    }
+
+    pub fn setLossiness(self: AnyNetworkControl, options: NetworkLossOptions) !void {
+        try self.vtable.set_lossiness(self.ptr, options);
+    }
+
+    pub fn setLatency(self: AnyNetworkControl, options: NetworkLatencyOptions) !void {
+        try self.vtable.set_latency(self.ptr, options);
+    }
+
+    pub fn setClogs(self: AnyNetworkControl, options: NetworkClogOptions) !void {
+        try self.vtable.set_clogs(self.ptr, options);
+    }
+
+    pub fn setPartitionDynamics(self: AnyNetworkControl, options: NetworkPartitionDynamicsOptions) !void {
+        try self.vtable.set_partition_dynamics(self.ptr, options);
     }
 
     pub fn setNode(self: AnyNetworkControl, node: NodeId, up: bool) !void {
@@ -292,6 +335,22 @@ const SharedRuntime = struct {
         if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
     }
 
+    fn validateClogs(self: *const SharedRuntime, options: NetworkClogOptions) !void {
+        try validateRate(options.path_clog_rate);
+        if (options.path_clog_rate.numerator > 0) {
+            try self.validatePositiveTickDuration(options.path_clog_duration_ns);
+        } else if (options.path_clog_duration_ns != 0 and options.path_clog_duration_ns % self.world.clock().tick_ns != 0) {
+            return error.InvalidDuration;
+        }
+    }
+
+    fn validatePartitionDynamics(self: *const SharedRuntime, options: NetworkPartitionDynamicsOptions) !void {
+        try validateRate(options.partition_rate);
+        try validateRate(options.unpartition_rate);
+        try self.validateTickAlignedDuration(options.partition_stability_min_ns);
+        try self.validateTickAlignedDuration(options.unpartition_stability_min_ns);
+    }
+
     fn setFaults(self: *SharedRuntime, faults: NetworkFaultOptions) !void {
         try self.validateFaultProfile(faults);
         self.faults = faults;
@@ -311,6 +370,57 @@ const SharedRuntime = struct {
                 faults.unpartition_rate.denominator,
                 faults.partition_stability_min_ns,
                 faults.unpartition_stability_min_ns,
+            },
+        );
+    }
+
+    fn setLossiness(self: *SharedRuntime, options: NetworkLossOptions) !void {
+        try validateRate(options.drop_rate);
+        self.faults.drop_rate = options.drop_rate;
+        try self.world.record(
+            "network.lossiness drop_rate={}/{}",
+            .{ options.drop_rate.numerator, options.drop_rate.denominator },
+        );
+    }
+
+    fn setLatency(self: *SharedRuntime, options: NetworkLatencyOptions) !void {
+        var faults = self.faults;
+        faults.min_latency_ns = options.min_latency_ns;
+        faults.latency_jitter_ns = options.latency_jitter_ns;
+        try self.validateFaultLatency(faults);
+        self.faults.min_latency_ns = options.min_latency_ns;
+        self.faults.latency_jitter_ns = options.latency_jitter_ns;
+        try self.world.record(
+            "network.latency min_latency_ns={} latency_jitter_ns={}",
+            .{ options.min_latency_ns, options.latency_jitter_ns },
+        );
+    }
+
+    fn setClogs(self: *SharedRuntime, options: NetworkClogOptions) !void {
+        try self.validateClogs(options);
+        self.faults.path_clog_rate = options.path_clog_rate;
+        self.faults.path_clog_duration_ns = options.path_clog_duration_ns;
+        try self.world.record(
+            "network.clog_faults path_clog_rate={}/{} path_clog_duration_ns={}",
+            .{ options.path_clog_rate.numerator, options.path_clog_rate.denominator, options.path_clog_duration_ns },
+        );
+    }
+
+    fn setPartitionDynamics(self: *SharedRuntime, options: NetworkPartitionDynamicsOptions) !void {
+        try self.validatePartitionDynamics(options);
+        self.faults.partition_rate = options.partition_rate;
+        self.faults.unpartition_rate = options.unpartition_rate;
+        self.faults.partition_stability_min_ns = options.partition_stability_min_ns;
+        self.faults.unpartition_stability_min_ns = options.unpartition_stability_min_ns;
+        try self.world.record(
+            "network.partition_dynamics partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}",
+            .{
+                options.partition_rate.numerator,
+                options.partition_rate.denominator,
+                options.unpartition_rate.numerator,
+                options.unpartition_rate.denominator,
+                options.partition_stability_min_ns,
+                options.unpartition_stability_min_ns,
             },
         );
     }
@@ -528,6 +638,10 @@ fn sharedControl(ptr: *anyopaque) *SharedRuntime {
 
 const shared_control_vtable: AnyNetworkControl.VTable = .{
     .set_faults = sharedControlSetFaults,
+    .set_lossiness = sharedControlSetLossiness,
+    .set_latency = sharedControlSetLatency,
+    .set_clogs = sharedControlSetClogs,
+    .set_partition_dynamics = sharedControlSetPartitionDynamics,
     .set_node = sharedControlSetNode,
     .set_link = sharedControlSetLink,
     .clog = sharedControlClog,
@@ -543,6 +657,22 @@ const shared_control_vtable: AnyNetworkControl.VTable = .{
 
 fn sharedControlSetFaults(ptr: *anyopaque, faults: NetworkFaultOptions) anyerror!void {
     try sharedControl(ptr).setFaults(faults);
+}
+
+fn sharedControlSetLossiness(ptr: *anyopaque, options: NetworkLossOptions) anyerror!void {
+    try sharedControl(ptr).setLossiness(options);
+}
+
+fn sharedControlSetLatency(ptr: *anyopaque, options: NetworkLatencyOptions) anyerror!void {
+    try sharedControl(ptr).setLatency(options);
+}
+
+fn sharedControlSetClogs(ptr: *anyopaque, options: NetworkClogOptions) anyerror!void {
+    try sharedControl(ptr).setClogs(options);
+}
+
+fn sharedControlSetPartitionDynamics(ptr: *anyopaque, options: NetworkPartitionDynamicsOptions) anyerror!void {
+    try sharedControl(ptr).setPartitionDynamics(options);
 }
 
 fn sharedControlSetNode(ptr: *anyopaque, node: NodeId, up: bool) anyerror!void {
@@ -593,6 +723,10 @@ var unavailable_network_control_ctx: u8 = 0;
 
 const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
     .set_faults = unavailableControlSetFaults,
+    .set_lossiness = unavailableControlSetLossiness,
+    .set_latency = unavailableControlSetLatency,
+    .set_clogs = unavailableControlSetClogs,
+    .set_partition_dynamics = unavailableControlSetPartitionDynamics,
     .set_node = unavailableControlSetNode,
     .set_link = unavailableControlSetLink,
     .clog = unavailableControlClog,
@@ -607,6 +741,22 @@ const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
 };
 
 fn unavailableControlSetFaults(_: *anyopaque, _: NetworkFaultOptions) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlSetLossiness(_: *anyopaque, _: NetworkLossOptions) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlSetLatency(_: *anyopaque, _: NetworkLatencyOptions) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlSetClogs(_: *anyopaque, _: NetworkClogOptions) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlSetPartitionDynamics(_: *anyopaque, _: NetworkPartitionDynamicsOptions) anyerror!void {
     return error.NetworkUnavailable;
 }
 

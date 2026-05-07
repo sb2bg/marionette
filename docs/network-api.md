@@ -24,7 +24,7 @@ const sim = try world.simulate(.{ .network = .{
 } });
 
 const net = try sim.network(Payload);
-try sim.control.network.setFaults(.{ .drop_rate = .percent(20) });
+try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
 try net.send(3, 0, .{ .value = 42 });
 
 while (try net.nextDelivery()) |packet| {
@@ -87,7 +87,7 @@ on `control`, `World`, `std.net`, or `UnstableNetwork`.
 The simulator-control authority is for tests, scenarios, and future schedulers:
 
 ```zig
-try sim.control.network.setFaults(.{ .drop_rate = .percent(20) });
+try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
 try sim.control.network.setNode(1, false);
 try sim.control.network.clog(0, 1, 100 * ns_per_ms);
 try sim.control.network.partition(&left, &right);

@@ -22,7 +22,7 @@ test "examples: retry queue scenario is replayable" {
 }
 
 test "examples: retry queue checker catches duplicate completion" {
-    var report = try retry_queue.runBuggyScenario(std.testing.allocator, 0xC0FFEE);
+    var report = try retry_queue.runBuggyScenarioReport(std.testing.allocator, 0xC0FFEE);
     defer report.deinit();
 
     switch (report) {
@@ -46,13 +46,13 @@ test "examples: replicated register scenario is replayable" {
 
     try std.testing.expectEqualStrings(a, b);
     try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=replicated-register-smoke") != null);
-    try std.testing.expect(std.mem.indexOf(u8, a, "network.faults drop_rate=20/100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.lossiness drop_rate=20/100") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.write.quorum") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "register.check committed_agreement=ok") != null);
 }
 
 test "examples: replicated register checker catches committed divergence" {
-    var report = try replicated_register.runBuggyScenario(std.testing.allocator, 0xC0FFEE);
+    var report = try replicated_register.runBuggyScenarioReport(std.testing.allocator, 0xC0FFEE);
     defer report.deinit();
 
     switch (report) {
@@ -100,13 +100,13 @@ test "examples: durable broadcast scenario is replayable" {
     try std.testing.expectEqualStrings(a, b);
     try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=durable-broadcast-smoke") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "disk.sync") != null);
-    try std.testing.expect(std.mem.indexOf(u8, a, "network.faults drop_rate=10/100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.lossiness drop_rate=10/100") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "durable.broadcast.quorum op=1 value=41") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "durable.check quorum_durable=ok") != null);
 }
 
 test "examples: durable broadcast checker catches broadcast before sync" {
-    var report = try durable_broadcast.runBuggyScenario(std.testing.allocator, 0xC0FFEE);
+    var report = try durable_broadcast.runBuggyScenarioReport(std.testing.allocator, 0xC0FFEE);
     defer report.deinit();
 
     switch (report) {

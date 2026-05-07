@@ -37,16 +37,12 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return runTrace(allocator, seed, "durable-broadcast-smoke", scenario);
 }
 
-pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = tick_ns,
-        .name = "durable-broadcast-bug",
-        .init = Harness.init,
-        .scenario = buggyScenario,
-        .checks = &checks,
-    });
+pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return runReport(allocator, seed, "durable-broadcast-smoke", scenario);
+}
+
+pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return runReport(allocator, seed, "durable-broadcast-bug", buggyScenario);
 }
 
 fn runTrace(
@@ -55,15 +51,7 @@ fn runTrace(
     name: []const u8,
     comptime scenario_fn: fn (*Harness) anyerror!void,
 ) ![]u8 {
-    var report = try mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = tick_ns,
-        .name = name,
-        .init = Harness.init,
-        .scenario = scenario_fn,
-        .checks = &checks,
-    });
+    var report = try runReport(allocator, seed, name, scenario_fn);
     defer report.deinit();
 
     switch (report) {
@@ -73,6 +61,23 @@ fn runTrace(
             return error.DurableBroadcastScenarioFailed;
         },
     }
+}
+
+fn runReport(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    name: []const u8,
+    comptime scenario_fn: fn (*Harness) anyerror!void,
+) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = tick_ns,
+        .name = name,
+        .init = Harness.init,
+        .scenario = scenario_fn,
+        .checks = &checks,
+    });
 }
 
 pub const Harness = struct {
@@ -100,19 +105,22 @@ pub const Harness = struct {
 };
 
 pub fn scenario(harness: *Harness) !void {
-    try harness.control.network.setFaults(.{
-        .drop_rate = .percent(10),
+    try harness.control.network.setLossiness(.{ .drop_rate = .percent(10) });
+    try harness.control.network.setLatency(.{
         .min_latency_ns = tick_ns,
         .latency_jitter_ns = 2 * tick_ns,
+    });
+    try harness.control.network.setClogs(.{
         .path_clog_rate = .percent(5),
         .path_clog_duration_ns = 2 * tick_ns,
+    });
+    try harness.control.network.setPartitionDynamics(.{
         .partition_rate = .percent(5),
         .unpartition_rate = .percent(20),
         .partition_stability_min_ns = 2 * tick_ns,
         .unpartition_stability_min_ns = 2 * tick_ns,
     });
 
-    try harness.control.tick();
     try harness.service.submit(.{
         .op = .{ .id = 1, .value = 41 },
         .retry_limit = 8,
@@ -147,23 +155,20 @@ const SyncMode = enum {
 };
 
 const Replica = struct {
-    accepted_op_id: u64 = 0,
-    accepted_value: u64 = 0,
+    accepted_op: ?Op = null,
 
     fn accept(self: *Replica, op: Op) bool {
-        if (op.id < self.accepted_op_id) return false;
-        if (op.id == self.accepted_op_id and self.accepted_op_id != 0 and op.value != self.accepted_value) {
-            return false;
+        if (self.accepted_op) |current| {
+            if (op.id < current.id) return false;
+            if (op.id == current.id and op.value != current.value) return false;
         }
 
-        self.accepted_op_id = op.id;
-        self.accepted_value = op.value;
+        self.accepted_op = op;
         return true;
     }
 
     fn accepted(self: Replica) ?Op {
-        if (self.accepted_op_id == 0) return null;
-        return .{ .id = self.accepted_op_id, .value = self.accepted_value };
+        return self.accepted_op;
     }
 };
 

@@ -78,7 +78,10 @@ const net = try sim.network(Payload);
 valid process ids are `0`, `1`, `2`, and `3`. `path_capacity` is per directed
 link, not global. `service_nodes` declares the prefix of process ids eligible
 for automatic node-isolating partitions; when omitted or zero, all processes
-are eligible.
+are eligible. This is explicit because `.nodes` alone does not tell Marionette
+which ids are replicas/services and which ids are clients. Clients still
+participate in the topology and can be partitioned from services, but automatic
+node isolation chooses from the service prefix.
 
 `Payload` is user-owned data. Marionette only schedules and traces the packet
 metadata:
@@ -88,8 +91,8 @@ const Payload = struct {
     value: u64,
 };
 
-try sim.control.network.setFaults(.{
-    .drop_rate = .percent(20),
+try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
+try sim.control.network.setLatency(.{
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });
@@ -290,7 +293,7 @@ records `network.drop` and does not enqueue the payload.
 The current drop model uses `BuggifyRate`:
 
 ```zig
-try sim.control.network.setFaults(.{ .drop_rate = .percent(20) });
+try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
 ```
 
 This keeps the API consistent with BUGGIFY without making packet drops into
@@ -319,6 +322,10 @@ Current network trace events:
 - `network.heal disabled_count={} down_count={} clogged_count={}`
 - `network.heal_links disabled_count={}`
 - `network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={} path_clog_rate={}/{} path_clog_duration_ns={} partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}`
+- `network.lossiness drop_rate={}/{}`
+- `network.latency min_latency_ns={} latency_jitter_ns={}`
+- `network.clog_faults path_clog_rate={}/{} path_clog_duration_ns={}`
+- `network.partition_dynamics partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}`
 
 The payload is not dumped into the core network trace. User code should record
 domain-specific payload facts separately when useful, as the replicated
@@ -333,26 +340,33 @@ simulation control advances time with `sim.control.tick()` or
 deterministic clog deadlines; random partition or clog probabilities do not
 fire from observation methods.
 
-The runtime fault profile is separate from static topology:
+The runtime fault profile is separate from static topology. Prefer focused
+control calls for scenario readability:
 
 ```zig
-const faults = mar.NetworkFaultOptions{
-    .drop_rate = .percent(1),
+try sim.control.network.setLossiness(.{ .drop_rate = .percent(1) });
+try sim.control.network.setLatency(.{
     .min_latency_ns = 1 * ns_per_ms,
     .latency_jitter_ns = 2 * ns_per_ms,
-    .path_clog_rate = .percent(1),
-    .path_clog_duration_ns = 50 * ns_per_ms,
+});
+try sim.control.network.setClogs(.{
+    .path_clog_rate = .percent(10),
+    .path_clog_duration_ns = 2 * ns_per_ms,
+});
+try sim.control.network.setPartitionDynamics(.{
     .partition_rate = .percent(1),
     .unpartition_rate = .percent(5),
     .partition_stability_min_ns = 20 * ns_per_ms,
     .unpartition_stability_min_ns = 20 * ns_per_ms,
-};
+});
 ```
 
-`SimNetworkOptions` describes what exists; `NetworkFaultOptions` describes how
-the simulator may perturb it during a run. Automatic partitioning currently
-isolates one random service node from every other configured process and heals
-only after the unpartition stability floor has elapsed and the unpartition
+`SimNetworkOptions` describes what exists; runtime fault controls describe how
+the simulator may perturb it during a run. `setFaults` remains available for
+whole-profile replacement when tests need one aggregate update. Automatic
+partitioning currently isolates one random service node from every other
+configured process and heals only after the unpartition stability floor has
+elapsed and the unpartition
 roll fires. Explicit `partition`, `heal`, `setLink`, and `clog` calls remain
 immediate scenario actions.
 

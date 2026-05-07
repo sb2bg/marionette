@@ -30,18 +30,14 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return runTrace(allocator, seed, "replicated-register-smoke", scenario);
 }
 
+pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return runReport(allocator, seed, "replicated-register-smoke", scenario);
+}
+
 /// Run a deliberately buggy scenario. Tests use this to prove the checker
 /// catches divergent committed state without making the normal suite fail.
-pub fn runBuggyScenario(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = tick_ns,
-        .name = "replicated-register-bug",
-        .init = Harness.init,
-        .scenario = buggyScenario,
-        .checks = &checks,
-    });
+pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return runReport(allocator, seed, "replicated-register-bug", buggyScenario);
 }
 
 /// Run a scenario that writes through a partition and return an owned trace.
@@ -60,15 +56,7 @@ fn runTrace(
     name: []const u8,
     comptime scenario_fn: fn (*Harness) anyerror!void,
 ) ![]u8 {
-    var report = try mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = tick_ns,
-        .name = name,
-        .init = Harness.init,
-        .scenario = scenario_fn,
-        .checks = &checks,
-    });
+    var report = try runReport(allocator, seed, name, scenario_fn);
     defer report.deinit();
 
     switch (report) {
@@ -78,6 +66,23 @@ fn runTrace(
             return error.ReplicatedRegisterScenarioFailed;
         },
     }
+}
+
+fn runReport(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    name: []const u8,
+    comptime scenario_fn: fn (*Harness) anyerror!void,
+) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = tick_ns,
+        .name = name,
+        .init = Harness.init,
+        .scenario = scenario_fn,
+        .checks = &checks,
+    });
 }
 
 pub const Harness = struct {
@@ -105,7 +110,7 @@ fn committedRegisterIsSafe(harness: *const Harness) !void {
 }
 
 pub fn scenario(harness: *Harness) !void {
-    try harness.control.network.setFaults(.{ .drop_rate = .percent(20) });
+    try harness.control.network.setLossiness(.{ .drop_rate = .percent(20) });
     try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 8 });
 }
 
@@ -133,19 +138,22 @@ pub fn conflictScenario(harness: *Harness) !void {
 }
 
 pub fn swarmScenario(harness: *Harness) !void {
-    try harness.control.network.setFaults(.{
-        .drop_rate = .percent(10),
+    try harness.control.network.setLossiness(.{ .drop_rate = .percent(10) });
+    try harness.control.network.setLatency(.{
         .min_latency_ns = tick_ns,
         .latency_jitter_ns = 2 * tick_ns,
+    });
+    try harness.control.network.setClogs(.{
         .path_clog_rate = .percent(10),
         .path_clog_duration_ns = 2 * tick_ns,
+    });
+    try harness.control.network.setPartitionDynamics(.{
         .partition_rate = .percent(5),
         .unpartition_rate = .percent(20),
         .partition_stability_min_ns = 3 * tick_ns,
         .unpartition_stability_min_ns = 3 * tick_ns,
     });
 
-    try harness.control.tick();
     try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 12 });
     try harness.control.network.heal();
     try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });

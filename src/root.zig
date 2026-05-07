@@ -125,6 +125,18 @@ pub const NetworkOptions = @import("network.zig").NetworkOptions;
 /// Runtime fault configuration for app-facing network sends.
 pub const NetworkFaultOptions = @import("network.zig").NetworkFaultOptions;
 
+/// Runtime network loss configuration.
+pub const NetworkLossOptions = @import("network.zig").NetworkLossOptions;
+
+/// Runtime network latency configuration.
+pub const NetworkLatencyOptions = @import("network.zig").NetworkLatencyOptions;
+
+/// Runtime network path-clog configuration.
+pub const NetworkClogOptions = @import("network.zig").NetworkClogOptions;
+
+/// Runtime automatic partition and heal dynamics.
+pub const NetworkPartitionDynamicsOptions = @import("network.zig").NetworkPartitionDynamicsOptions;
+
 /// Runtime topology for a composition-root network simulation.
 pub const SimNetworkOptions = @import("network.zig").SimNetworkOptions;
 

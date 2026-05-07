@@ -358,8 +358,8 @@ const sim = try world.simulate(.{ .network = .{
 } });
 const net = try sim.network(Payload);
 
-try sim.control.network.setFaults(.{
-    .drop_rate = .percent(20),
+try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
+try sim.control.network.setLatency(.{
     .min_latency_ns = 1_000_000,
     .latency_jitter_ns = 2_000_000,
 });

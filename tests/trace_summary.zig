@@ -14,13 +14,13 @@ pub fn expectReplicatedRegisterSummary(allocator: std.mem.Allocator) !void {
     try summary.writeSummary(&writer);
 
     try std.testing.expectEqualStrings(
-        \\trace.events total=36
+        \\trace.events total=38 final_time_ns=2000000
         \\trace.run name=replicated-register-smoke
         \\trace.subsystem name=network count=12
         \\trace.subsystem name=register count=11
         \\trace.subsystem name=replica count=5
         \\trace.subsystem name=run count=1
-        \\trace.subsystem name=world count=7
+        \\trace.subsystem name=world count=9
         \\trace.event_top rank=1 name=register.message count=6
         \\trace.event_top rank=2 name=world.random_int_less_than count=6
         \\trace.event_top rank=3 name=network.deliver count=5
@@ -28,9 +28,9 @@ pub fn expectReplicatedRegisterSummary(allocator: std.mem.Allocator) !void {
         \\trace.event_top rank=5 name=replica.accept count=3
         \\trace.event_top rank=6 name=register.check count=2
         \\trace.event_top rank=7 name=replica.commit count=2
-        \\trace.event_top rank=8 name=network.drop count=1
+        \\trace.event_top rank=8 name=world.tick count=2
         \\trace.singleton name=network.drop
-        \\trace.singleton name=network.faults
+        \\trace.singleton name=network.lossiness
         \\trace.singleton name=register.write.attempt
         \\trace.singleton name=register.write.quorum
         \\trace.singleton name=register.write.start
