@@ -98,7 +98,7 @@ pub const Harness = struct {
             .replicas = Replicas.init(
                 sim.env,
                 try sim.endpoint(MessagePayload, client_node_id),
-                try sim.endpointRange(MessagePayload, replica_count, 0),
+                try sim.endpoints(MessagePayload, replica_count, 0),
             ),
             .control = sim.control,
         };
@@ -492,7 +492,7 @@ test "register: same code on simulated and production network handles" {
     var sim_replicas = Replicas.init(
         sim.env,
         try sim.endpoint(MessagePayload, client_node_id),
-        try sim.endpointRange(MessagePayload, replica_count, 0),
+        try sim.endpoints(MessagePayload, replica_count, 0),
     );
     try sim_replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
     try checkCommittedAgreement(&sim_replicas);
@@ -510,7 +510,7 @@ test "register: same code on simulated and production network handles" {
     var prod_replicas = Replicas.init(
         production.env(),
         try production.endpoint(MessagePayload, client_node_id),
-        try production.endpointRange(MessagePayload, replica_count, 0),
+        try production.endpoints(MessagePayload, replica_count, 0),
     );
     try prod_replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
     try checkCommittedAgreement(&prod_replicas);

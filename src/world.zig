@@ -173,7 +173,7 @@ pub const World = struct {
             return try network_module.endpointFromControl(Payload, self.control.network, node);
         }
 
-        pub fn endpointRange(
+        pub fn endpoints(
             self: Simulation,
             comptime Payload: type,
             comptime count: usize,

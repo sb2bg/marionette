@@ -100,7 +100,7 @@ pub const Harness = struct {
             .service = DurableBroadcast.init(
                 sim.env,
                 try sim.endpoint(MessagePayload, client_node_id),
-                try sim.endpointRange(MessagePayload, replica_count, 0),
+                try sim.endpoints(MessagePayload, replica_count, 0),
             ),
             .control = sim.control,
         };
@@ -522,7 +522,7 @@ test "durable broadcast: same app code on simulated and production handles" {
     var sim_service = try writeBroadcastRecover(
         sim.env,
         try sim.endpoint(MessagePayload, client_node_id),
-        try sim.endpointRange(MessagePayload, replica_count, 0),
+        try sim.endpoints(MessagePayload, replica_count, 0),
     );
     try durableServiceIsSafe(&sim_service);
 
@@ -539,7 +539,7 @@ test "durable broadcast: same app code on simulated and production handles" {
     var prod_service = try writeBroadcastRecover(
         production.env(),
         try production.endpoint(MessagePayload, client_node_id),
-        try production.endpointRange(MessagePayload, replica_count, 0),
+        try production.endpoints(MessagePayload, replica_count, 0),
     );
     try durableServiceIsSafe(&prod_service);
 }

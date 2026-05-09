@@ -336,7 +336,7 @@ pub const Production = struct {
         return try network_module.productionEndpoint(Payload, self.allocator, &self.network_entries, node);
     }
 
-    pub fn endpointRange(
+    pub fn endpoints(
         self: *Production,
         comptime Payload: type,
         comptime count: usize,

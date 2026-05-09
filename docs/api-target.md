@@ -57,13 +57,13 @@ pub const Sim = struct {
     env: Env,
     control: Control,
     pub fn endpoint(self: Sim, comptime Message: type, node: NodeId) !Endpoint(Message);
-    pub fn endpointRange(self: Sim, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
+    pub fn endpoints(self: Sim, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
 };
 
 pub const Production = struct {
     pub fn env(self: *Production) Env;
     pub fn endpoint(self: *Production, comptime Message: type, node: NodeId) !Endpoint(Message);
-    pub fn endpointRange(self: *Production, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
+    pub fn endpoints(self: *Production, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
 };
 ```
 

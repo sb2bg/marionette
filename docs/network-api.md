@@ -85,7 +85,7 @@ fn init(world: *mar.World) !Harness {
         .service = Service.init(
             sim.env,
             try sim.endpoint(Message, client_node_id),
-            try sim.endpointRange(Message, replica_count, 0),
+            try sim.endpoints(Message, replica_count, 0),
         ),
         .control = sim.control,
     };
