@@ -342,11 +342,11 @@ pub const Production = struct {
         comptime count: usize,
         first_node: network_module.NodeId,
     ) std.mem.Allocator.Error![count]network_module.Endpoint(Payload) {
-        var endpoints: [count]network_module.Endpoint(Payload) = undefined;
-        for (&endpoints, 0..) |*endpoint_handle, index| {
+        var handles: [count]network_module.Endpoint(Payload) = undefined;
+        for (&handles, 0..) |*endpoint_handle, index| {
             endpoint_handle.* = try self.endpoint(Payload, first_node + @as(network_module.NodeId, @intCast(index)));
         }
-        return endpoints;
+        return handles;
     }
 
     pub fn env(self: *Production) Env {
