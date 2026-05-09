@@ -128,11 +128,12 @@ That gives the simulator a known universe for partitions, per-link queues,
 node state, and future liveness cores. It also makes invalid topology use
 return `InvalidNode` instead of silently creating new processes by accident.
 
-Each directed path owns its own queue and enabled/disabled state. `popReady`
-scans the heads of all path queues and picks the ready packet with the lowest
-`(deliver_at, packet_id)`. The scan is acceptable for Phase 0 capacities; a
-later scheduler can add an index over active paths without changing the
-per-link model needed for clogging and path-local capacity.
+Each directed path owns its own queue and enabled/disabled state. The packet
+core scans path queue heads and picks the ready packet with the lowest
+`(deliver_at, packet_id)` for the receiving endpoint. The scan is acceptable
+for Phase 0 capacities; a later scheduler can add an index over active paths
+without changing the per-link model needed for clogging and path-local
+capacity.
 
 ## Node State
 
@@ -171,7 +172,7 @@ try sim.control.network.setLink(0, 1, false);
 ```
 
 If a packet from node `0` to node `1` is already queued when the link is
-disabled, it remains queued. When it becomes ready, `popReady` drops it and
+disabled, it remains queued. When it becomes ready, endpoint receive drops it and
 records:
 
 ```text
@@ -197,9 +198,9 @@ try sim.control.network.clog(0, 1, 100 * ns_per_ms);
 ```
 
 If a packet for `0 -> 1` is ready at `t=10ms` but the path is clogged until
-`t=100ms`, `popReady` skips that path and may deliver packets from other paths
-first. `nextDeliveryAt` reports the earliest time at which any queued packet
-can actually make progress, accounting for active clogs.
+`t=100ms`, endpoint receive skips that path and may deliver packets from other
+paths addressed to that endpoint first. The packet core's internal
+next-delivery calculation accounts for active clogs.
 
 Clear one path clog explicitly with:
 
@@ -213,10 +214,11 @@ Clear all active clogs with:
 try sim.control.network.unclogAll();
 ```
 
-Clogs also expire when simulated time reaches `until_ns`. `popReady` evolves
-that deterministic state before selecting a packet as a backstop. Scenario and
-scheduler code should move simulated time through `sim.control.tick()` or
-`sim.control.runFor(...)` so network faults evolve at the same boundary as the clock.
+Clogs also expire when simulated time reaches `until_ns`. Endpoint receive
+evolves that deterministic expiry state before selecting a packet as a
+backstop. Scenario and scheduler code should move simulated time through
+`sim.control.tick()` or `sim.control.runFor(...)` so probabilistic network
+faults evolve at the same boundary as the clock.
 
 ## Partitions
 

@@ -17,8 +17,10 @@ Harnesses own simulator control. Production-shaped code does not import or hold
 `expectPass`, `expectFuzz`, and `expectFailure` are assertive test helpers
 built on top of it.
 
-Faults are configuration, not per-call parameters. Network drops and latency
-are set through `control.network.setFaults(...)`; disk faults are set through
+Faults are configuration, not per-call parameters. Network loss, latency,
+clogs, and automatic partition dynamics are set through focused
+`control.network` methods such as `setLossiness(...)`, `setLatency(...)`,
+`setClogs(...)`, and `setPartitionDynamics(...)`; disk faults are set through
 `control.disk.setFaults(...)`.
 
 Empty options are not options. Disk crash and restart calls are `crash()` and
@@ -43,7 +45,7 @@ pub const Env = struct {
 pub const Control = SimControl;
 
 pub fn Endpoint(comptime Message: type) type;
-pub const Network = Endpoint; // compatibility alias
+pub const Network = Endpoint; // temporary type-name alias
 
 pub const SimNetworkOptions = struct {
     nodes: usize,
@@ -104,7 +106,7 @@ while (try endpoint.receive()) |envelope| {
 Scenario faults look like:
 
 ```zig
-try harness.control.network.setFaults(.{ .drop_rate = .percent(20) });
+try harness.control.network.setLossiness(.{ .drop_rate = .percent(20) });
 try harness.control.network.partition(&isolated, &majority);
 try harness.control.network.heal();
 ```

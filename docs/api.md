@@ -450,10 +450,14 @@ count, final simulated timestamp when present, replay context, subsystem and
 event counts, singleton events, network send/drop/delivery counts, drop
 reasons, and per-link network counts.
 
-## `run`
+## `runCase` And `run`
 
-`mar.run(allocator, options, scenario)` executes a scenario twice with the same
-seed and compares byte-identical traces.
+`mar.runCase(opts)` is the primary stateful scenario runner. It initializes
+fresh state for each replay attempt, executes a scenario twice with the same
+seed, runs named checks, and compares byte-identical traces.
+
+`mar.run(allocator, options, scenario)` remains the lower-level world-only
+runner for scenarios that do not need structured state.
 
 ```zig
 fn scenario(world: *mar.World) !void {
@@ -468,18 +472,11 @@ defer report.deinit();
 Runs can carry replay-visible tags and typed attributes:
 
 ```zig
-const SmokeRunProfile = struct {
-    replicas: u64,
-    packet_loss_percent: u8,
-};
-
-const profile: SmokeRunProfile = .{
-    .replicas = 3,
-    .packet_loss_percent = 20,
-};
-
 const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
-const attributes = mar.runAttributesFrom(profile);
+const attributes = [_]mar.RunAttribute{
+    mar.runAttribute("replicas", @as(u64, 3)),
+    mar.runAttribute("packet_loss_percent", @as(u8, 20)),
+};
 
 var report = try mar.run(std.testing.allocator, .{
     .seed = 0x1234,
@@ -492,14 +489,12 @@ var report = try mar.run(std.testing.allocator, .{
 `name`, `tags`, and `attributes` are recorded into the trace before
 scenario code runs and are included in failure summaries. Tags are loose
 searchable labels. Attributes are stable scalar facts needed to reproduce the
-run without forcing tools to parse presentation strings.
-`mar.runAttributesFrom` derives those facts from a scalar-only run config
-struct so the trace-visible values stay tied to the scenario config.
-
-The helper intentionally treats field names as exported attribute keys and
-emits fields in declaration order. Use `mar.runAttribute` directly when a
-stable exported key should differ from an internal field name. Runtime behavior
-should read from the profile, not from derived attributes.
+run without forcing tools to parse presentation strings. Use
+`mar.runAttribute` when writing exported metadata names directly.
+`mar.runAttributesFrom` remains available for scalar-only config structs, but
+it intentionally treats field names as exported attribute keys and emits fields
+in declaration order. Runtime behavior should read from the config, not from
+derived attributes.
 
 World-only checks can be attached to the run options:
 
@@ -521,7 +516,7 @@ var report = try mar.run(std.testing.allocator, .{
 defer report.deinit();
 ```
 
-Stateful scenarios should usually use the struct-config runner. It infers the
+Stateful scenarios should usually use `runCase`. It infers the
 state type from the initializer, and run metadata such as `name`, `tags`, and
 `attributes` is optional:
 
@@ -590,8 +585,8 @@ try mar.expectFuzz(.{
 ```
 
 Use `mar.expectFailure` when proving a checker catches a known-buggy scenario.
-The older positional runners remain available for code that needs explicit
-lifecycle teardown or world-only scenarios.
+Use the lower-level `mar.run` for world-only scenarios. The older
+`runWithState*` positional helpers are internal implementation details.
 
 The return value is `mar.RunReport`:
 

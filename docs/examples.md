@@ -137,7 +137,9 @@ portable shapes Marionette needs:
   `mar.Endpoint(MessagePayload)` node endpoints backed by fixed-topology per-link
   queues ordered by `(deliver_at, packet_id)`.
 - A partition scenario that drops queued packets through directed link filters.
-- Runtime network fault configuration through `control.network.setFaults(...)`.
+- Runtime network fault configuration through focused `control.network`
+  helpers such as `setLossiness(...)`, `setLatency(...)`, `setClogs(...)`,
+  and `setPartitionDynamics(...)`.
 - `runCase` / `expectPass` / `expectFuzz` / `expectFailure` for scenario runs.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
 - A named `mar.StateCheck` that inspects structured harness state.

@@ -116,20 +116,20 @@ Where do run options go? How do I name a checker failure? How do I keep a seed
 from being the only clue in a bug report?
 
 The last one matters more than it sounds. A seed by itself isn't enough once a
-test has profiles, retry limits, queue capacities, replica counts, and fault
-probabilities. Marionette records that context before scenario code even
+test has run names, tags, retry limits, queue capacities, replica counts, and
+fault probabilities. Marionette records that context before scenario code even
 starts:
 
 ```text
 event=1 run.name value=replicated-register-smoke
 event=2 run.tag value=scenario:smoke
 event=3 run.attribute key=replicas value=uint:3
-event=4 run.attribute key=proposal_drop_percent value=uint:20
+event=4 run.attribute key=packet_loss_percent value=uint:20
 ```
 
 Not glamorous, but exactly the kind of thing I want in place before the
-simulator grows real network and disk fault models. A future failure report
-shouldn't make you reverse-engineer what the seed expanded into.
+simulator grows deeper fault profiles. A failure report should not make you
+reverse-engineer what the seed expanded into.
 
 ## What isn't built yet
 

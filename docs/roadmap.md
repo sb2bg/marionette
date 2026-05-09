@@ -31,7 +31,8 @@ The current network surface is:
 
 - `mar.Endpoint(Message)`: app-facing typed process endpoint with `send(to,
   message)` and `receive()`, returned by both simulation and production setup.
-  `mar.Network(Message)` remains a compatibility alias.
+  `mar.Network(Message)` remains a temporary type-name alias, but new code and
+  docs should use `Endpoint`.
 - `World.simulate(.{ .network = ... })`: world-owned simulator network
   construction with `sim.control.network` for fault orchestration and
   `sim.endpoint(Message, node)` for typed app endpoints.
@@ -308,9 +309,9 @@ advances simulated time through the simulation wrapper.
 
 **Scope:**
 
-- Remove `UnstableNetwork.drainUntilIdle`.
-- Make `NetworkSimulation.drainUntilIdle` internal.
-- Update the replicated-register example to use pull-shaped receives.
+- Remove the callback-shaped public drain surface.
+- Keep packet-core delivery helpers confined to low-level network tests.
+- Update the replicated-register example to use endpoint `receive()`.
 
 **Acceptance criteria:**
 
@@ -716,10 +717,11 @@ calls into the simulator, which breaks determinism-by-simulated-time.
 ### Simulator-control is separate from the packet core
 
 `Control.network` exposes only operations that make sense for a test harness:
-`setFaults`, `setNode`, `setLink`, `partition`, `heal`, `healLinks`, `clog`,
-`unclog`, `unclogAll`. Application-shaped operations (`send`, `receive`)
-live on typed endpoints. No test-only operation will ever leak into
-app-facing APIs.
+`setLossiness`, `setLatency`, `setClogs`, `setPartitionDynamics`,
+`setFaults` for aggregate replacement, `setNode`, `setLink`, `partition`,
+`heal`, `healLinks`, `clog`, `unclog`, and `unclogAll`. Application-shaped
+operations (`send`, `receive`) live on typed endpoints. No test-only operation
+will ever leak into app-facing APIs.
 
 ### Real production network adapters are deferred, with a target
 

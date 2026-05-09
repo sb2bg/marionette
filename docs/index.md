@@ -98,7 +98,7 @@ simulation and mirrors `env`'s structure.
 try control.disk.crash();
 try control.disk.corruptSector(path, offset);
 try control.network.partition(&side_a, &side_b);
-try control.network.setFaults(.{ .drop_rate = .percent(20) });
+try control.network.setLossiness(.{ .drop_rate = .percent(20) });
 try control.network.heal();
 ```
 
@@ -123,10 +123,11 @@ fn partitionScenario(harness: *Harness) !void {
 }
 ```
 
-Messages have configurable drop rates, latency distributions, and reordering
-through `control.network.setFaults(...)`. Application code sends through a
-node-scoped endpoint with `endpoint.send(to, message)` and receives with
-`while (try endpoint.receive()) |envelope|`.
+Messages have configurable loss, latency, clogs, and partition dynamics
+through focused `control.network` calls such as `setLossiness(...)`,
+`setLatency(...)`, and `setPartitionDynamics(...)`. Application code sends
+through a node-scoped endpoint with `endpoint.send(to, message)` and receives
+with `while (try endpoint.receive()) |envelope|`.
 
 ## Traces
 

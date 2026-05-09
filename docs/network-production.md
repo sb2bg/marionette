@@ -131,7 +131,8 @@ demands it.
 
 ### Topology declaration
 
-Production setup requires a topology config absent in simulation:
+The item-15 target production setup requires a topology config absent in the
+current in-process stub:
 
 ```zig
 const endpoint = try production.endpoint(Message, .{
@@ -146,7 +147,9 @@ const endpoint = try production.endpoint(Message, .{
 ```
 
 Simulation does not need this; `World.simulate(.{ .network = .{ .nodes = N }
-})` declares topology implicitly.
+})` declares topology implicitly. Today `Production.endpoint(Message, node)`
+accepts only a `NodeId` and returns a same-process FIFO endpoint; the topology
+options above are the socket-backed target.
 
 This will be a deliberate divergence between production and simulation setup:
 production declares peer addresses and listener state, while simulation
@@ -250,8 +253,10 @@ to the IO backend (i.e. blocks on a poll) until one arrives or until a
 configured deadline expires; the deadline is exposed via a future
 `receiveWithin(duration)` variant if needed.
 
-For v1, `receive` blocks indefinitely until a message is available or the
-endpoint is closed. Callers that need a non-blocking poll use the
+For v1, the socket-backed `receive` blocks indefinitely until a message is
+available or the endpoint is closed. The current in-process production stub is
+non-blocking and returns `null` when no queued message is addressed to the
+endpoint. Callers that need an explicit production poll API use a future
 trySend / tryRecv pattern, deferred until a real example asks for it.
 
 ### IO backend

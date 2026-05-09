@@ -1,9 +1,13 @@
 # Run
 
-`mar.run` is the Phase 0 scenario wrapper. It executes one scenario twice with
-the same seed and compares the resulting traces byte-for-byte.
+`mar.runCase` is the primary stateful scenario wrapper. It initializes a fresh
+state value for each replay attempt, executes the scenario twice with the same
+seed, runs named checks, and compares the resulting traces byte-for-byte.
 
-## Shape
+`mar.run` remains the lower-level world-only wrapper for scenarios that do not
+need structured state.
+
+## World-Only Shape
 
 ```zig
 const std = @import("std");
@@ -16,13 +20,10 @@ fn scenario(world: *mar.World) !void {
 }
 
 test "scenario is deterministic" {
-    const SmokeRunProfile = struct {
-        requests: u64,
-    };
-
-    const profile: SmokeRunProfile = .{ .requests = 1 };
     const tags = [_][]const u8{ "scenario:smoke" };
-    const attributes = mar.runAttributesFrom(profile);
+    const attributes = [_]mar.RunAttribute{
+        mar.runAttribute("requests", @as(u64, 1)),
+    };
 
     var report = try mar.run(std.testing.allocator, .{
         .seed = 0x1234,
@@ -74,10 +75,10 @@ the raw trace. Known-bug scenarios return nonzero when they fail unless
 ## Failure Reports
 
 Failures are not returned as bare scenario errors because that would lose the
-trace. Instead, `mar.run` captures:
+trace. Instead, the runner captures:
 
 - Seed and run options.
-- Profile name, tags, and typed attributes.
+- Run name, tags, and typed attributes.
 - Failure kind.
 - First trace.
 - Second trace when a second run happened.
@@ -108,18 +109,11 @@ that seed. Use a run name, tags, and attributes to make the expanded run shape
 visible. Both `mar.runCase` and the lower-level `mar.run` options use `.name`:
 
 ```zig
-const SmokeRunProfile = struct {
-    replicas: u64,
-    packet_loss_percent: u8,
-};
-
-const profile: SmokeRunProfile = .{
-    .replicas = 3,
-    .packet_loss_percent = 20,
-};
-
 const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
-const attributes = mar.runAttributesFrom(profile);
+const attributes = [_]mar.RunAttribute{
+    mar.runAttribute("replicas", @as(u64, 3)),
+    mar.runAttribute("packet_loss_percent", @as(u8, 20)),
+};
 
 var report = try mar.run(std.testing.allocator, .{
     .seed = 0x1234,
@@ -141,13 +135,12 @@ event=5 run.attribute key=packet_loss_percent value=uint:20
 
 Tags should be stable scalar labels. Attribute keys should be stable scalar
 text, and values should use the narrow typed union Marionette exposes.
-`mar.runAttributesFrom` derives attributes from a scalar-only run config
-struct using field names as keys and declaration order as output order. That
-makes field names part of the exported trace contract. Use `mar.runAttribute`
-directly when a stable exported key should differ from an internal field name.
-Runtime behavior should read from the config, not from derived attributes. Do
-not put pointers, addresses, unordered dumps, or machine-local paths in run
-metadata.
+Use `mar.runAttribute` when writing exported metadata names directly.
+`mar.runAttributesFrom` is still available for scalar-only config structs, but
+field names become exported trace keys, so it is best for small config structs
+whose field names are already stable public metadata. Runtime behavior should
+read from the config, not from derived attributes. Do not put pointers,
+addresses, unordered dumps, or machine-local paths in run metadata.
 
 ## Checks
 

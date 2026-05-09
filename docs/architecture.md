@@ -13,8 +13,8 @@ Given the same Marionette version, Zig version, target platform, user code,
 simulation options, and seed, a Marionette simulation must produce the same
 declared result and byte-identical Marionette trace across repeated runs. The
 guarantee applies only to behavior routed through Marionette-controlled
-authorities: simulated time, seeded randomness, disk, future network,
-future scheduling, and explicit trace events. Marionette does not guarantee
+authorities: simulated time, seeded randomness, disk, network, future
+scheduling, and explicit trace events. Marionette does not guarantee
 stability for host wall-clock time, OS thread scheduling, stack or heap
 addresses, pointer identity, unordered map iteration, external syscalls, data
 read from real devices, or behavior from dependencies that bypass the
@@ -32,13 +32,14 @@ Phase 0 has:
 - `Control`, the harness-facing counterpart for simulator-only controls.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
-- `mar.run`, which executes a scenario twice and compares traces.
+- `mar.runCase`, the primary stateful scenario runner, and lower-level
+  `mar.run` for world-only scenarios. Both execute a scenario twice and compare
+  traces.
 - Run names, tags, and `RunAttribute`, which make expanded run facts
   replay-visible in traces and failure summaries without losing scalar value
-  types.
-- `runAttributesFrom`, a small helper for deriving typed attributes from the
-  same scalar run config struct a scenario uses. Field names are exported
-  attribute keys, and runtime behavior must not depend on derived attributes.
+  types. `runAttribute` is the preferred direct constructor; `runAttributesFrom`
+  remains available for scalar-only config structs whose field names are stable
+  exported metadata keys.
 - `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
 - `mar.runCase` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.
@@ -155,9 +156,9 @@ test "single request is replayable" {
 }
 ```
 
-This is not yet the final multi-node API. The target Phase 2 version should
-let the user pass a simulator-provided network authority in the same style,
-without rewriting the application around a Marionette-only runtime.
+The same composition-root pattern is now used for networked examples: build a
+simulation, pass `sim.env` plus node-scoped `Endpoint(Message)` handles into
+the production-shaped code, and keep `sim.control` in the harness.
 
 ## Production Cost And BUGGIFY
 
@@ -236,18 +237,20 @@ is not deterministic enough.
 
 ## Multi-Node Authority Shape
 
-The preferred Phase 2 shape is a per-node handle:
+The current Phase 2 shape is a per-node endpoint handle:
 
 ```zig
-fn nodeMain(node: *mar.Node) !void {
-    try node.network().send(.{ .to = 2, .body = "ping" });
+fn nodeMain(env: mar.Env, endpoint: mar.Endpoint(Message)) !void {
+    try env.record("node.send to={}", .{2});
+    try endpoint.send(2, .{ .ping = {} });
 }
 ```
 
-Each `Node` would expose the node's identity, clock view, random/fault hooks,
-network view, and storage view. The shared `World` remains the owner of global
-simulation state, but application code should usually receive `Node`, not
-`World` plus a loose node id.
+Each `Endpoint(Message)` is bound to one `NodeId`. Application code can send
+only as that node and receives only messages addressed to that node. The shared
+`World` remains the owner of global simulation state, but application code
+should receive `Env` plus typed node-scoped endpoints, not `World` plus a loose
+node id.
 
 Rejected alternatives for now:
 
@@ -256,8 +259,8 @@ Rejected alternatives for now:
 - Giving each node an independent world. This weakens global ordering and makes
   network partitions harder to represent correctly.
 
-Under a partition, two nodes differ because their `Node.network()` authorities
-consult the world's partition state through their node identity.
+Under a partition, two endpoints differ because their node-scoped authorities
+consult the world's partition state through their bound `NodeId`.
 
 ## Invariants And Liveness
 
@@ -332,25 +335,30 @@ a time. Running two independent simulations concurrently in the same process is
 fine if each thread owns a different `World` and they do not share simulated
 state. Cross-world coordination is outside Marionette's determinism contract.
 
-## `run` Walkthrough
+## `runCase` Walkthrough
 
-`mar.run(allocator, .{ .seed = 0x1234 }, myTest)` chronology:
+`mar.runCase(.{ .seed = 0x1234, .init = init, .scenario = scenario, ... })`
+chronology:
 
 1. Freeze the seed, start time, tick size, checks, and trace settings.
 2. Construct one `World`.
 3. Create exactly one clock authority and one PRNG authority inside the world.
-4. Invoke the user's scenario with that world.
-5. On every event, pick simulator decisions from the world's PRNG.
-6. Route all time movement through the world's clock.
-7. Record stable event data into the trace.
-8. If the scenario succeeds, run configured checks in order.
-9. Stop on success, scenario error, or check error.
-10. Preserve a partial trace if the scenario or a check returned an error.
-11. If the first run passed, rerun the same scenario with the same seed.
-12. Compare byte-identical traces.
-13. Return `RunReport.passed` with one owned trace, or `RunReport.failed` with
+4. Invoke the user's initializer with that world to build fresh scenario state.
+5. Invoke the user's scenario with that state.
+6. On every event, pick simulator decisions from the world's PRNG.
+7. Route all time movement through the world's clock and simulator controls.
+8. Record stable event data into the trace.
+9. If the scenario succeeds, run configured checks in order.
+10. Deinitialize state if a `.deinit` hook was provided.
+11. Stop on success, scenario error, check error, or deinit error.
+12. Preserve a partial trace if the scenario, a check, or deinit returned an error.
+13. If the first run passed, rerun the same scenario with the same seed.
+14. Compare byte-identical traces.
+15. Return `RunReport.passed` with one owned trace, or `RunReport.failed` with
     seed, options, event counts, failure kind, traces, error name when
     available, and check name when a check failed.
+
+`mar.run` follows the same replay/report discipline for world-only scenarios.
 
 The dangerous spots are scheduler choice, time advancement, raw randomness,
 unordered state dumps, and host APIs. Those must stay under simulator control.
