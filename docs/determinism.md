@@ -13,7 +13,7 @@ interfaces:
 - Time through `Env.clock`, `Control`, or `World`.
 - Randomness through an environment, seeded `Random`, or `World`.
 - Disk through Marionette's `Disk` capability.
-- Network through the future Network interface.
+- Network through Marionette `Endpoint` handles.
 - Scheduling through the future scheduler.
 
 Do not call host sources directly from simulated code.
@@ -25,9 +25,9 @@ These are banned in simulated code:
 - `std.time.*`
 - `std.Random` without an explicit seed.
 - `std.crypto.random`
-- `std.Thread.spawn`
+- Host thread APIs such as `std.Thread.*`
 - Filesystem calls outside Marionette's `Disk` capability.
-- Network calls outside the future Network interface.
+- Network calls outside Marionette `Endpoint` handles.
 - Pointer identity as a source of ordering or hashing.
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.
 

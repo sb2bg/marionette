@@ -45,14 +45,14 @@ pub const Allow = struct {
 // rule shape. Marionette should stay focused on deterministic-simulation hazards first.
 pub const default_patterns = [_]Pattern{
     .{ .needle = "std.time", .reason = "use Env.clock or World.clock()", .match = .prefix },
-    .{ .needle = "std.Thread", .reason = "simulated components must be single-threaded", .match = .prefix },
+    .{ .needle = "std.Thread", .reason = "use Marionette cooperative tasks; do not use host threads in simulated code", .match = .prefix },
     .{ .needle = "std.crypto.random", .reason = "use seeded Marionette randomness", .match = .prefix },
     .{ .needle = "std.fs.cwd", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.fs.openFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.fs.createFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.fs.copyFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.fs.deleteFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
-    .{ .needle = "std.net", .reason = "route network access through the future Network interface", .match = .prefix },
+    .{ .needle = "std.net", .reason = "route network access through Marionette Endpoint handles", .match = .prefix },
 };
 
 pub const default_allowed = [_]Allow{
@@ -389,6 +389,43 @@ test "tidy flags prefix patterns" {
     try std.testing.expectEqualStrings("std.time", result.violations.items[0].pattern.needle);
 }
 
+test "tidy flags host threads" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/bad_thread.zig",
+        \\fn worker() void {}
+        \\fn bad() !void {
+        \\    _ = try std.Thread.spawn(.{}, worker, .{});
+        \\}
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
+    try std.testing.expectEqualStrings("std.Thread", result.violations.items[0].pattern.needle);
+}
+
+test "tidy flags direct network access" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/bad_network.zig",
+        "fn bad(address: std.net.Address) void { _ = address; }\n",
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
+    try std.testing.expectEqualStrings("std.net", result.violations.items[0].pattern.needle);
+}
+
 test "tidy ignores comments and string literals" {
     var result: ScanResult = .{};
     defer result.deinit(std.testing.allocator);
@@ -461,6 +498,29 @@ test "tidy identifies aliases when matching patterns" {
     try std.testing.expectEqual(@as(usize, 14), result.violations.items[0].column);
     try std.testing.expectEqual(@as(usize, 2), result.violations.items[1].line);
     try std.testing.expectEqual(@as(usize, 13), result.violations.items[1].column);
+}
+
+test "tidy identifies aliases to host threads" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/thread_alias.zig",
+        \\const Thread = std.Thread;
+        \\fn worker() void {}
+        \\fn bad() !void {
+        \\    _ = try Thread.spawn(.{}, worker, .{});
+        \\}
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
+    try std.testing.expectEqualStrings("std.Thread", result.violations.items[0].pattern.needle);
+    try std.testing.expectEqualStrings("std.Thread", result.violations.items[1].pattern.needle);
 }
 
 test "tidy accepts caller-provided patterns" {
