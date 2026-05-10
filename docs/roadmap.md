@@ -670,36 +670,43 @@ Lives in `src/message_pool.zig`.
 Production endpoint accepts peers and self id. Initially returns the same
 in-process FIFO behavior; the topology API change is the gate.
 
-**15d. Internal network IO seam.** Introduce the smallest socket backend
+**15d. ByteEndpoint and codec bridge.** Add an app-facing byte transport with
+explicit ownership semantics (`send` copies or sends an acquired buffer;
+`receive` returns a releasable byte message). This is the bridge for future Zig
+network/RPC libraries that want Marionette as a backend without adopting typed
+`Endpoint(Message)` directly. Keep `Endpoint(Message)` for value-message
+examples; do not make borrowed slice payloads magically deep-copy.
+
+**15e. Internal network IO seam.** Introduce the smallest socket backend
 interface the production bus needs while keeping `Endpoint(Message)` unchanged.
 Start with a real backend; add fake IO tests once the seam has enough shape.
 
-**15e. Single-peer end-to-end socket transport.** Two processes, one peer
+**15f. Single-peer end-to-end socket transport.** Two processes, one peer
 each, real send and receive over the new framing. Loopback only.
 
-**15f. Production-bus fake IO tests.** Exercise partial frame reads/writes,
+**15g. Production-bus fake IO tests.** Exercise partial frame reads/writes,
 EOF mid-frame, reconnect timing, and close discipline against the production
 bus machinery without replacing normal `World` simulation.
 
-**15g. Multi-peer with internal connection management.** Lazy outbound
+**15h. Multi-peer with internal connection management.** Lazy outbound
 connect, inbound listener, peer-type resolution from the first valid frame.
 
-**15h. Reconnect with seeded jittered backoff.** Connection drop and
+**15i. Reconnect with seeded jittered backoff.** Connection drop and
 recovery tested end to end. Jitter seed comes from the local `NodeId` so
 multiple peers reconnecting to a flapping node naturally desynchronize.
 
-**15i. Bounded send and recv queues with silent-drop semantics.** Sim
+**15j. Bounded send and recv queues with silent-drop semantics.** Sim
 reconciles to the same drop semantics as part of this step:
 `error.EventQueueFull` becomes a trace-visible `network.drop reason=queue_full`
 event in both impls, and `send` no longer surfaces transient errors.
 
-**15j. Cross-process parity test.** The replicated-register example runs
+**15k. Cross-process parity test.** The replicated-register example runs
 on N OS processes, same source, same scenario, real sockets. This closes
 item 15.
 
 Steps 15a and 15b are independent and can land in parallel. 15c through
-15j are sequential, except fake IO coverage can grow incrementally after
-15d creates the internal seam.
+15k are sequential, except fake IO coverage can grow incrementally after
+15e creates the internal seam.
 
 ### 16. Named-bus composition
 

@@ -66,6 +66,8 @@ pub const Pool = struct {
     }
 
     pub fn acquire(self: *Pool, len: usize) PoolError!Message {
+        // Each message occupies one fixed-size slot, so buffer_size is this
+        // pool's maximum storable message length.
         if (len > self.buffer_size) return error.MessageTooLarge;
         if (self.free_count == 0) return error.PoolExhausted;
 

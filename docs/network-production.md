@@ -319,29 +319,34 @@ Each item ships on its own. Cross-process parity is the done-signal.
 3. **Topology config and `Production.endpoint(Message, opts)`.** Production
    endpoint accepts peers and self id. Initially returns the same in-process
    FIFO behavior as today; the topology API change is the gate.
-4. **Internal network IO seam.** Introduce the smallest socket backend
+4. **ByteEndpoint and codec bridge.** Add an app-facing byte transport with
+   explicit ownership semantics (`send` copies or sends an acquired buffer;
+   `receive` returns a releasable byte message). This gives future Zig
+   network/RPC libraries a Marionette backend target without forcing them to
+   use typed value-message endpoints directly.
+5. **Internal network IO seam.** Introduce the smallest socket backend
    interface the production bus needs: listen, connect, read, write, close,
    sleep/backoff, and monotonic time as needed. Start with one real backend.
    Keep it internal; `Endpoint(Message)` signatures do not mention it.
-5. **Single-peer end-to-end socket transport.** Two processes, one peer each,
+6. **Single-peer end-to-end socket transport.** Two processes, one peer each,
    real send and receive with the new framing. Loopback only.
-6. **Production-bus fake IO tests.** Add a small deterministic/fake IO backend
+7. **Production-bus fake IO tests.** Add a small deterministic/fake IO backend
    for the production bus, focused on partial frame reads/writes, EOF
    mid-frame, reconnect timing, and close discipline. This tests production bus
    machinery without replacing normal `World` simulation.
-7. **Multi-peer with internal connection management.** Lazy outbound connect,
+8. **Multi-peer with internal connection management.** Lazy outbound connect,
    inbound listener, peer-type resolution from frames.
-8. **Reconnect with seeded jittered backoff.** Connection drop and recovery
+9. **Reconnect with seeded jittered backoff.** Connection drop and recovery
    tested end to end. Jitter seed comes from the local `NodeId`.
-9. **Bounded send and recv queues with silent-drop semantics.** Sim reconciles
+10. **Bounded send and recv queues with silent-drop semantics.** Sim reconciles
    to the same drop semantics as part of this step.
-10. **Cross-process parity test.** The replicated-register example runs on N
+11. **Cross-process parity test.** The replicated-register example runs on N
    OS processes. Same source, same scenario, real network. This is the
    done-signal that closes roadmap item 15.
 
 Steps 1 and 2 are independent of the rest and can be picked up in parallel.
-Steps 3-10 are sequential, except that the fake IO tests can grow
-incrementally alongside steps 5-8 once the internal seam exists.
+Steps 3-11 are sequential, except that the fake IO tests can grow
+incrementally alongside steps 6-9 once the internal seam exists.
 
 ## Open questions
 
