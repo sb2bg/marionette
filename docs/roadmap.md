@@ -627,27 +627,36 @@ Lives in `src/message_pool.zig`.
 Production endpoint accepts peers and self id. Initially returns the same
 in-process FIFO behavior; the topology API change is the gate.
 
-**15d. Single-peer end-to-end socket transport.** Two processes, one peer
+**15d. Internal network IO seam.** Introduce the smallest socket backend
+interface the production bus needs while keeping `Endpoint(Message)` unchanged.
+Start with a real backend; add fake IO tests once the seam has enough shape.
+
+**15e. Single-peer end-to-end socket transport.** Two processes, one peer
 each, real send and receive over the new framing. Loopback only.
 
-**15e. Multi-peer with internal connection management.** Lazy outbound
+**15f. Production-bus fake IO tests.** Exercise partial frame reads/writes,
+EOF mid-frame, reconnect timing, and close discipline against the production
+bus machinery without replacing normal `World` simulation.
+
+**15g. Multi-peer with internal connection management.** Lazy outbound
 connect, inbound listener, peer-type resolution from the first valid frame.
 
-**15f. Reconnect with seeded jittered backoff.** Connection drop and
+**15h. Reconnect with seeded jittered backoff.** Connection drop and
 recovery tested end to end. Jitter seed comes from the local `NodeId` so
 multiple peers reconnecting to a flapping node naturally desynchronize.
 
-**15g. Bounded send and recv queues with silent-drop semantics.** Sim
+**15i. Bounded send and recv queues with silent-drop semantics.** Sim
 reconciles to the same drop semantics as part of this step:
 `error.EventQueueFull` becomes a trace-visible `network.drop reason=queue_full`
 event in both impls, and `send` no longer surfaces transient errors.
 
-**15h. Cross-process parity test.** The replicated-register example runs
+**15j. Cross-process parity test.** The replicated-register example runs
 on N OS processes, same source, same scenario, real sockets. This closes
 item 15.
 
 Steps 15a and 15b are independent and can land in parallel. 15c through
-15h are sequential.
+15j are sequential, except fake IO coverage can grow incrementally after
+15d creates the internal seam.
 
 ### 16. Named-bus composition
 
@@ -833,7 +842,7 @@ Deferred, not foreclosed:
   can exercise the *real* production bus code (framing, recv-buffer
   reassembly, connection state) against a deterministic test IO that
   simulates partial reads, EOF mid-frame, and similar IO-edge behaviors.
-  The vtable seam does not deliver that coverage. Sub-tasks 15d-15g
+  The vtable seam does not deliver that coverage. Sub-tasks 15d-15i
   should structure their syscalls behind a small internal IO abstraction
   so a deterministic impl is cheap to add later. The decision to ship
   one is deferred until 15d lands. See `docs/network-production.md`
@@ -841,7 +850,7 @@ Deferred, not foreclosed:
 
 The current production handle is a same-process FIFO adapter for shape
 parity only; do not use it as evidence of cross-process transport support
-until item 15h ships.
+until item 15j ships.
 
 ### Trace format is strict ASCII, line-oriented, validated at write time
 
@@ -931,7 +940,7 @@ become confusing.
 ---
 
 Last meaningful update: TigerBeetle MessageBus study; roadmap item 15
-restructured into production-transport sub-tasks (15a-15h) and named-bus
+restructured into production-transport sub-tasks (15a-15j) and named-bus
 composition split into a separate item 16. See `docs/network-production.md`
 for the target architecture. Update this roadmap in the same PR as any
 substantive code change. Contributors should expect the roadmap to reflect

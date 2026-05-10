@@ -87,16 +87,44 @@ committing to one yet:
 
 - Sub-tasks 15a (framing) and 15b (buffer pool) are already independent of
   IO and are fuzzable directly.
-- Sub-tasks 15d-15g (sockets, connection management, queues) should
-  structure their IO calls behind a small internal abstraction, even if
-  the only impl is the real one. That keeps a future deterministic IO
-  impl cheap to add.
+- The socket transport, connection-management, reconnect, and queueing steps
+  should structure their IO calls behind a small internal abstraction, even if
+  the only impl is the real one. That keeps a future deterministic IO impl
+  cheap to add.
 - A decision on whether to actually ship a deterministic IO + bus-impl
   fuzzer is deferred until 15d lands and we know what the IO surface
   looks like in practice. At that point we either commit to internal
   parameterization or drop the option.
 
 The user-visible API is unaffected by this question either way.
+
+### Why this differs from `std.testing.io`
+
+`std.Io` is a host-I/O execution surface. It is useful for production adapters
+and for ordinary unit tests that should use Zig's testing backend instead of a
+real process-global backend. Marionette already uses this shape for
+`RealDisk`: production setup receives `std.Io`, and `RealDisk` routes host file
+operations through it.
+
+That is not the same thing as deterministic simulation. `SimDisk` does not use
+`std.testing.io` to fake crashes, torn writes, latency, or corrupt sectors. It
+owns an in-memory disk model, routes every fault decision through `World`, and
+exposes only the app-facing `Disk` capability to service code. `std.testing.io`
+helps test the production disk adapter; `SimDisk` is the simulator.
+
+The network plan follows the same split:
+
+- `Endpoint(Message)` is the app-facing capability shared by sim and prod.
+- `TypedRuntime(Message)` is the cheap deterministic simulator bus owned by
+  `World`.
+- The future production bus should use an internal IO backend for sockets.
+- A fake/deterministic IO backend may later test the production bus itself,
+  especially partial reads, reconnects, EOF mid-frame, and queue behavior.
+
+Normal cluster simulation should not route through a fake socket stack by
+default. VOPR makes the same tradeoff: the production MessageBus can be fuzzed
+with a deterministic IO seam, while full-cluster simulation uses a simpler
+in-memory message bus.
 
 ## Target architecture
 
@@ -291,20 +319,29 @@ Each item ships on its own. Cross-process parity is the done-signal.
 3. **Topology config and `Production.endpoint(Message, opts)`.** Production
    endpoint accepts peers and self id. Initially returns the same in-process
    FIFO behavior as today; the topology API change is the gate.
-4. **Single-peer end-to-end socket transport.** Two processes, one peer each,
+4. **Internal network IO seam.** Introduce the smallest socket backend
+   interface the production bus needs: listen, connect, read, write, close,
+   sleep/backoff, and monotonic time as needed. Start with one real backend.
+   Keep it internal; `Endpoint(Message)` signatures do not mention it.
+5. **Single-peer end-to-end socket transport.** Two processes, one peer each,
    real send and receive with the new framing. Loopback only.
-5. **Multi-peer with internal connection management.** Lazy outbound connect,
+6. **Production-bus fake IO tests.** Add a small deterministic/fake IO backend
+   for the production bus, focused on partial frame reads/writes, EOF
+   mid-frame, reconnect timing, and close discipline. This tests production bus
+   machinery without replacing normal `World` simulation.
+7. **Multi-peer with internal connection management.** Lazy outbound connect,
    inbound listener, peer-type resolution from frames.
-6. **Reconnect with seeded jittered backoff.** Connection drop and recovery
-   tested end to end.
-7. **Bounded send and recv queues with silent-drop semantics.** Sim
-   reconciles to the same drop semantics as part of this step.
-8. **Cross-process parity test.** The replicated-register example runs on N
+8. **Reconnect with seeded jittered backoff.** Connection drop and recovery
+   tested end to end. Jitter seed comes from the local `NodeId`.
+9. **Bounded send and recv queues with silent-drop semantics.** Sim reconciles
+   to the same drop semantics as part of this step.
+10. **Cross-process parity test.** The replicated-register example runs on N
    OS processes. Same source, same scenario, real network. This is the
    done-signal that closes roadmap item 15.
 
 Steps 1 and 2 are independent of the rest and can be picked up in parallel.
-Steps 3-8 are sequential.
+Steps 3-10 are sequential, except that the fake IO tests can grow
+incrementally alongside steps 5-8 once the internal seam exists.
 
 ## Open questions
 
