@@ -155,9 +155,17 @@ pub fn swarmScenario(harness: *Harness) !void {
         .unpartition_stability_min_ns = 3 * tick_ns,
     });
 
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 12 });
+    try harness.control.runFor(4 * tick_ns);
+    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 6 });
+
+    try harness.control.runFor(4 * tick_ns);
+    try harness.replicas.write(.{ .version = 2, .value = 42, .retry_limit = 6 });
+
     try harness.control.network.heal();
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
+    try harness.control.network.setLossiness(.{});
+    try harness.control.network.setClogs(.{});
+    try harness.control.network.setPartitionDynamics(.{});
+    try harness.replicas.write(.{ .version = 2, .value = 42, .retry_limit = 2 });
 }
 
 const Replica = struct {
@@ -478,6 +486,41 @@ test "register: swarm fuzz" {
         .scenario = swarmScenario,
         .checks = &checks,
     });
+}
+
+test "register: swarm fuzz exercises tick-evolved network faults" {
+    var saw_auto_partition = false;
+    var saw_auto_clog = false;
+
+    for (0..100) |iteration| {
+        var report = try mar.runCase(.{
+            .allocator = std.testing.allocator,
+            .seed = 0xC0FFEE + @as(u64, @intCast(iteration)),
+            .tick_ns = tick_ns,
+            .init = Harness.init,
+            .scenario = swarmScenario,
+            .checks = &checks,
+        });
+        defer report.deinit();
+
+        switch (report) {
+            .passed => |passed| {
+                saw_auto_partition = saw_auto_partition or
+                    std.mem.indexOf(u8, passed.trace, "network.auto_partition") != null;
+                saw_auto_clog = saw_auto_clog or
+                    std.mem.indexOf(u8, passed.trace, "automatic=true") != null;
+            },
+            .failed => |failure| {
+                failure.print();
+                return error.ExpectedRunPass;
+            },
+        }
+
+        if (saw_auto_partition and saw_auto_clog) break;
+    }
+
+    try std.testing.expect(saw_auto_partition);
+    try std.testing.expect(saw_auto_clog);
 }
 
 test "register: same code on simulated and production network handles" {
