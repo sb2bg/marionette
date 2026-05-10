@@ -37,11 +37,6 @@ while (try replica.receive()) |envelope| {
 }
 ```
 
-`mar.Network(Message)` remains a temporary type-name alias for
-`mar.Endpoint(Message)` for now, but new docs and examples should use
-`Endpoint`. It is not the old global-bus API; the app-facing methods are
-`send(to, message)` and `receive()`.
-
 The simulator network owns a fixed topology, per-link packet queues, packet ids,
 seeded drops, latency, node and link state, and deterministic delivery order.
 Older packet-core wrappers remain confined to low-level network tests; public

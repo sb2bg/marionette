@@ -31,8 +31,6 @@ The current network surface is:
 
 - `mar.Endpoint(Message)`: app-facing typed process endpoint with `send(to,
   message)` and `receive()`, returned by both simulation and production setup.
-  `mar.Network(Message)` remains a temporary type-name alias, but new code and
-  docs should use `Endpoint`.
 - `World.simulate(.{ .network = ... })`: world-owned simulator network
   construction with `sim.control.network` for fault orchestration and
   `sim.endpoint(Message, node)` for typed app endpoints.

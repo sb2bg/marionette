@@ -45,7 +45,6 @@ pub const Env = struct {
 pub const Control = SimControl;
 
 pub fn Endpoint(comptime Message: type) type;
-pub const Network = Endpoint; // temporary type-name alias
 
 pub const SimNetworkOptions = struct {
     nodes: usize,

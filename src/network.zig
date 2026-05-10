@@ -20,9 +20,6 @@ pub const NodeId = u16;
 pub const NetworkError = error{
     /// The simulation was not configured with a network.
     NetworkUnavailable,
-    /// Reserved for older duplicate-handle validation. Endpoint views for the
-    /// same message type now intentionally share one unnamed bus runtime.
-    NetworkHandleAlreadyExists,
     /// A node/process id is outside the configured topology.
     InvalidNode,
     /// A duration is zero where progress requires a positive interval, not
@@ -208,9 +205,6 @@ pub fn Endpoint(comptime Message: type) type {
         }
     };
 }
-
-/// Backwards-compatible type name for the app-facing endpoint.
-pub const TypedNetwork = Endpoint;
 
 const SharedRuntime = struct {
     world: *World,
@@ -937,7 +931,7 @@ fn TypedRuntime(comptime Payload: type) type {
                     };
                 }
 
-                const deliver_at = self.nextDeliveryAtFor(node) orelse return null;
+                const deliver_at = self.nextDeliveryAt() orelse return null;
                 const now_ns = self.shared.world.now();
                 if (deliver_at <= now_ns) return null;
                 try self.runForDeterministicFaults(deliver_at - now_ns);
@@ -965,11 +959,10 @@ fn TypedRuntime(comptime Payload: type) type {
             }
         }
 
-        fn nextDeliveryAtFor(self: *const Self, node: NodeId) ?clock_module.Timestamp {
+        fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
             var best: ?clock_module.Timestamp = null;
             for (self.queues, 0..) |queue, index| {
                 const packet = if (queue.items.len == 0) continue else queue.items[0];
-                if (packet.to != node) continue;
                 const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
                 if (best == null or ready_at < best.?) best = ready_at;
             }
@@ -2236,6 +2229,34 @@ test "composition network: endpoints for the same payload share one runtime" {
     const envelope = (try node_1.receive()).?;
     try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
     try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
+}
+
+test "composition network: receive advances only to global next delivery" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .path_capacity = 4 } });
+    const node_0 = try sim.endpoint(TestPayload, 0);
+    const node_1 = try sim.endpoint(TestPayload, 1);
+    const node_2 = try sim.endpoint(TestPayload, 2);
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try node_2.send(1, .{ .value = 10 });
+    try sim.control.network.setLatency(.{ .min_latency_ns = 20 });
+    try node_2.send(0, .{ .value = 20 });
+
+    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try node_0.receive());
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
+
+    const earlier = (try node_1.receive()).?;
+    try std.testing.expectEqual(@as(NodeId, 2), earlier.from);
+    try std.testing.expectEqual(@as(u64, 10), earlier.message.value);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
+
+    const later = (try node_0.receive()).?;
+    try std.testing.expectEqual(@as(NodeId, 2), later.from);
+    try std.testing.expectEqual(@as(u64, 20), later.message.value);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
 }
 
 fn runCompositionClogTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {

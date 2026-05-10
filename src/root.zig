@@ -140,9 +140,6 @@ pub const SimNetworkOptions = @import("network.zig").SimNetworkOptions;
 /// Typed app-facing process endpoint.
 pub const Endpoint = @import("network.zig").Endpoint;
 
-/// Backwards-compatible type name for the app-facing endpoint.
-pub const Network = @import("network.zig").Endpoint;
-
 /// Simulator-control network capability.
 pub const NetworkControl = @import("network.zig").AnyNetworkControl;
 
