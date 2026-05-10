@@ -5,6 +5,7 @@
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
+const network_frame_module = @import("network_frame.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
 const trace_summary_module = @import("trace_summary.zig");
@@ -143,6 +144,9 @@ pub const Endpoint = @import("network.zig").Endpoint;
 /// Simulator-control network capability.
 pub const NetworkControl = @import("network.zig").AnyNetworkControl;
 
+/// Production network frame encoding helpers.
+pub const NetworkFrame = network_frame_module;
+
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 
@@ -228,6 +232,7 @@ test {
     _ = @import("disk.zig");
     _ = @import("env.zig");
     _ = @import("network.zig");
+    _ = @import("network_frame.zig");
     _ = @import("run.zig");
     _ = @import("run_types.zig");
     _ = @import("scheduler.zig");
