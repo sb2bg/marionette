@@ -334,10 +334,10 @@ design context. Pick from the top unless coordinating otherwise.
 
 ### Completed: Probabilistic tick-evolved network faults with stability floors
 
-**Status:** Done. `NetworkFaultOptions` now includes tick-evolved per-path
-clogs and automatic node-isolating partitions with stability floors. The
-replicated-register example has a swarm fuzz scenario that exercises the
-profile.
+**Status:** Done. Network control now has focused lossiness, latency, clog,
+and partition-dynamics setters. Clogs and automatic node-isolating partitions
+are tick-evolved and have stability floors. The replicated-register example
+has a swarm fuzz scenario that exercises the profile.
 
 **Why now:** The outer `sim.control.tick()` is built and the packet-core drain bypass
 is gone. This is the next piece that makes VOPR-style swarm testing possible,
@@ -345,8 +345,8 @@ and the first disk-backed recovery example is now in place.
 
 **Scope:**
 
-- Add a runtime `NetworkFaultOptions`/profile object separate from static
-  `SimNetworkOptions` topology and capacity.
+- Add runtime fault controls separate from static `SimNetworkOptions`
+  topology and capacity.
 - Per-path clog probability per tick, with minimum clog duration.
 - The first automatic partition strategy is narrow: isolate one random
   service node from all other service nodes and clients, hold it for at
@@ -492,7 +492,7 @@ and item 5.
 
 Ship `smoke`, `swarm`, `replay`, `performance` as first-class named
 profiles that expand into `RunOptions`, `SimNetworkOptions`, and runtime
-`NetworkFaultOptions`. The replicated register example already manually
+network fault controls. The replicated register example already manually
 constructs these; lift them into the library. Depends on item 4.
 
 ### 8. Replace the `EventQueue` linear-scan pop with a heap

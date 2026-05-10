@@ -324,7 +324,6 @@ Current network trace events:
 - `network.auto_heal node={}`
 - `network.heal disabled_count={} down_count={} clogged_count={}`
 - `network.heal_links disabled_count={}`
-- `network.faults drop_rate={}/{} min_latency_ns={} latency_jitter_ns={} path_clog_rate={}/{} path_clog_duration_ns={} partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}`
 - `network.lossiness drop_rate={}/{}`
 - `network.latency min_latency_ns={} latency_jitter_ns={}`
 - `network.clog_faults path_clog_rate={}/{} path_clog_duration_ns={}`
@@ -365,13 +364,12 @@ try sim.control.network.setPartitionDynamics(.{
 ```
 
 `SimNetworkOptions` describes what exists; runtime fault controls describe how
-the simulator may perturb it during a run. `setFaults` remains available for
-whole-profile replacement when tests need one aggregate update. Automatic
+the simulator may perturb it during a run. The focused setters replace their
+own fault family and leave the other fault families unchanged. Automatic
 partitioning currently isolates one random service node from every other
 configured process and heals only after the unpartition stability floor has
-elapsed and the unpartition
-roll fires. Explicit `partition`, `heal`, `setLink`, and `clog` calls remain
-immediate scenario actions.
+elapsed and the unpartition roll fires. Explicit `partition`, `heal`,
+`setLink`, and `clog` calls remain immediate scenario actions.
 
 ## Current Limits
 

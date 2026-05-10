@@ -127,7 +127,7 @@ Marionette's fault model should follow the same pattern. Every recurring
 fault type needs at least a probability, a minimum duration or cooldown, a
 scope, and a trace event when state changes. A Bernoulli decision every tick
 isn't enough to find interesting bugs. For network specifically, the next
-layer is a runtime `NetworkFaultOptions` profile separate from static topology.
+layer is runtime fault control separate from static topology.
 
 ### 8. Storage faults need a fault model
 

@@ -122,9 +122,6 @@ pub const UnstableNetworkOptions = @import("network.zig").NetworkOptions;
 /// Fixed topology and per-path capacity for one network simulation.
 pub const NetworkOptions = @import("network.zig").NetworkOptions;
 
-/// Runtime fault configuration for app-facing network sends.
-pub const NetworkFaultOptions = @import("network.zig").NetworkFaultOptions;
-
 /// Runtime network loss configuration.
 pub const NetworkLossOptions = @import("network.zig").NetworkLossOptions;
 
