@@ -66,10 +66,11 @@ The current disk surface is:
   example. It checks that quorum-acknowledged operations are recoverable from
   durable storage after crash/restart.
 
-What is not built yet: a real socket-backed production network adapter
-(scoped under roadmap item 15, with `docs/network-production.md` as the
-target architecture), liveness mode, named simulation profiles, named network
-buses, linearizability checker, time-travel debugging.
+What is not built yet: a deterministic allocation authority and allocation
+fault model, a real socket-backed production network adapter (scoped under
+roadmap item 15, with `docs/network-production.md` as the target
+architecture), liveness mode, named simulation profiles, named network buses,
+linearizability checker, time-travel debugging.
 
 ### Shipped primitives (stable enough to build on)
 
@@ -493,13 +494,55 @@ profiles that expand into `RunOptions`, `SimNetworkOptions`, and runtime
 network fault controls. The replicated register example already manually
 constructs these; lift them into the library. Depends on item 4.
 
-### 8. Replace the `EventQueue` linear-scan pop with a heap
+### 8. Deterministic allocation authority and allocation-fault model
+
+Allocation is already explicit in Marionette examples, but it is not yet a
+simulated authority. That leaves two gaps: user code can still silently reach
+for process-global allocators, and Marionette cannot yet model deterministic
+OOM, quotas, or allocation-pressure bugs.
+
+Do this before allocator behavior becomes baked into examples and before the
+task scheduler creates more long-lived dynamic state.
+
+Acceptance criteria:
+
+- Define the app-facing shape: probably a standard `std.mem.Allocator` wrapper
+  returned from `Env` or alongside `Env`, plus a production adapter that wraps
+  a user-provided backing allocator with no faults by default.
+- Define the harness-facing control surface: deterministic fail-after,
+  quota/max-live-bytes, and optional `BuggifyRate` allocation failures. Fault
+  configuration lives on `control`, not at each allocation call site.
+- Trace allocation decisions without recording raw addresses: allocation id,
+  requested length/alignment, result, live bytes, and failure reason are useful;
+  pointer values are not replay-stable and must never enter the trace.
+- Decide whether frees/reallocs are traced always or only under a verbose
+  profile. The default should catch leaks and OOM behavior without making
+  every trace unreadable.
+- Add a linter default or documented project rule for global allocators such
+  as `std.heap.page_allocator` in simulated code once the replacement API
+  exists. Until then, projects can add that ban through `addTidyStep`.
+- Add a small example or extend an existing one so an allocation failure is a
+  real modeled branch, not only a unit test of the allocator wrapper.
+
+Design notes:
+
+- This should lean on Zig's `std.mem.Allocator` interface instead of inventing
+  a Marionette-only allocation API if possible. The simulator value is in the
+  backing policy, trace, and control surface.
+- Deterministic allocator testing is about failure timing and resource
+  pressure, not address determinism. Code that hashes or orders raw pointer
+  identity is still banned by the determinism rules.
+- Keep this separate from Marionette's own internal allocations at first.
+  Internal trace and simulator bookkeeping may continue to use the run
+  allocator; the modeled allocator is for user/application behavior.
+
+### 9. Replace the `EventQueue` linear-scan pop with a heap
 
 Not urgent. The comment in `scheduler.zig` already flags this. Do it when
 benchmarking shows the scheduler is hot, or when a user picks it up as a
 learning task.
 
-### 9. Generalize `service_nodes` to `partitionable_nodes: []const NodeId`
+### 10. Generalize `service_nodes` to `partitionable_nodes: []const NodeId`
 
 `SimNetworkOptions.service_nodes: usize` is currently a prefix count: nodes
 `0..service_nodes-1` are eligible for automatic node-isolating partitions.
@@ -615,8 +658,8 @@ queues, silent-drop send on full queue and unreachable peer.
 Implementation order. Each sub-task ships independently. Cross-process
 parity is the done-signal.
 
-**15a. Wire format and framing primitive.** Encode and decode helpers,
-header and body checksums, roundtrip tests. No sockets. Lives in
+**15a. Wire format and framing primitive.** Started. Encode and decode helpers,
+header and body checksums, roundtrip and corruption tests. No sockets. Lives in
 `src/network_frame.zig`.
 
 **15b. Buffer pool primitive.** Refcounted preallocated message pool. Pool

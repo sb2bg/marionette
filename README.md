@@ -176,7 +176,7 @@ You write trace records with `env.record(...)` from anywhere. Application code, 
 
 ## Status
 
-Marionette is early. The API shape is converging but not yet stable; expect breaking changes between minor versions until 0.1. The simulator currently models disk, network, and clock; allocator simulation is in progress.
+Marionette is early. The API shape is converging but not yet stable; expect breaking changes between minor versions until 0.1. The simulator currently models disk, network, and clock; allocator simulation is planned.
 
 If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 

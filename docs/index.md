@@ -170,7 +170,7 @@ Passing runs return traces for persistence, diffing, or external tooling.
 
 Marionette is early. The API shape is converging but not yet stable; expect
 breaking changes between minor versions until 0.1. The simulator currently
-models disk, network, and clock; allocator simulation is in progress.
+models disk, network, and clock; allocator simulation is planned.
 
 The [`examples/`](../examples/) directory is the best place to start.
 
