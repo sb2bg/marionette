@@ -799,6 +799,9 @@ pub fn productionEndpoint(
     node: NodeId,
 ) std.mem.Allocator.Error!Endpoint(Payload) {
     const payload_name = @typeName(Payload);
+    // Linear lookup is intentional while Production is a same-process parity
+    // adapter with only a few payload types. Replace this registry with an
+    // indexed map if production endpoints become numerous.
     for (entries.items) |entry| {
         if (std.mem.eql(u8, entry.payload_name, payload_name)) {
             const runtime: *ProductionRuntime(Payload) = @ptrCast(@alignCast(entry.ptr));

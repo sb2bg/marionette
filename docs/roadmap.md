@@ -501,6 +501,30 @@ Not urgent. The comment in `scheduler.zig` already flags this. Do it when
 benchmarking shows the scheduler is hot, or when a user picks it up as a
 learning task.
 
+### 9. Generalize `service_nodes` to `partitionable_nodes: []const NodeId`
+
+`SimNetworkOptions.service_nodes: usize` is currently a prefix count: nodes
+`0..service_nodes-1` are eligible for automatic node-isolating partitions.
+This works for both current examples (services packed at low IDs, client
+at the high ID) but it bakes a packing-order constraint into the API. It
+cannot express:
+
+- Non-zero-based service ranges (services `{2, 3, 4}`).
+- Interleaved service/client topologies.
+- Symmetric configurations where any node may be selected.
+
+**Trigger for action:** when a third caller sets `service_nodes`, or when a
+real example needs a non-prefix subset.
+
+**Replacement:** `partitionable_nodes: []const NodeId = &.{}` (empty means
+"all configured processes," matching today's `service_nodes = 0` default).
+Migration is one PR that updates `SimNetworkOptions`, the auto-partition
+selection in `evolveAutoPartition`, and every caller. Two callers today;
+five-minute change. Cost grows linearly with new callers.
+
+Hold until the third example forces the question. Do not pre-emptively
+redesign for hypothetical layouts.
+
 ---
 
 ## Phase 1: Disk
