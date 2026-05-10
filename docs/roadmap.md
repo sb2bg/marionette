@@ -662,12 +662,68 @@ is an explicit bus key on endpoint setup, as sketched in `docs/network-api.md`.
 Add a VOPR-style cluster atlas that preserves recoverability invariants
 across replicas. This belongs after the disk-backed replicated example exists.
 
-### 18. Cooperative simulation scheduler
+### 18. Cooperative task scheduler and production task abstraction
 
-Spawn deterministic simulated tasks/nodes, route sleeps and simulated IO
-through one scheduler, and trace every runnable-task decision. Production
-routing may use a different backend, but simulation semantics define the
-contract. This is Flow-inspired in goal, not a Flow clone.
+Add a small Marionette task abstraction and deterministic cooperative
+scheduler. Users write actor/task-shaped code against Marionette authorities;
+simulation runs those tasks on one single-threaded scheduler, routes sleeps and
+simulated IO waits through that scheduler, and traces every runnable-task
+decision.
+
+The production story is not "simulate cooperative tasks, then run arbitrary OS
+threads and claim equivalence." Production backends should preserve as much of
+the simulated contract as possible:
+
+- **Single-thread cooperative event loop:** strongest parity. Same task/yield
+  model as simulation, backed by real time and real IO.
+- **Shared-nothing thread-per-core:** acceptable scale-out shape. Each OS
+  thread owns its own scheduler/world-like state; cross-thread communication is
+  message passing, not shared mutable state.
+- **Preemptive user threads:** explicit escape hatch only. Marionette may help
+  structure the logical concurrency, but it does not test memory-ordering,
+  missed-wakeup, lock, or data-race bugs.
+
+This scheduler tests logical concurrency: timeout-vs-response races,
+message-order races, retries, elections, and IO interleavings at Marionette
+authority boundaries. It does not test kernel thread scheduling or CPU memory
+model behavior. That belongs to tools in the Shuttle/Loom family, not to
+Marionette's DST contract.
+
+Before implementing this item, study:
+
+- [FoundationDB simulation testing](https://apple.github.io/foundationdb/testing.html):
+  the clearest public writeup of single-process deterministic cluster
+  simulation tied to an actor-style concurrency model.
+- TigerBeetle internals:
+  [ARCHITECTURE](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/ARCHITECTURE.md),
+  [TIGER_STYLE](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md),
+  and VOPR internals. Focus on the single-threaded simulation boundary,
+  weak transport contract, assertion discipline, and why correctness does not
+  depend on simulating kernel threads.
+- Seastar's shared-nothing model:
+  [shared-nothing design](https://seastar.io/shared-nothing),
+  [async tutorial](https://docs.seastar.io/master/tutorial.html), and
+  [Seastar threads](https://docs.seastar.io/master/group__thread-module.html).
+  Extract the production architecture lesson: one shard per core, explicit
+  message passing, cooperative work units, no shared mutable state across
+  cores.
+- [madsim](https://docs.rs/madsim/latest/madsim/) and its
+  [repository](https://github.com/madsim-rs/madsim): compare the Rust async
+  runtime swap model against Marionette's explicit authority-passing style.
+
+Do not start API design until the notes above answer these questions:
+
+- What is the smallest task primitive Marionette needs: spawn, sleep,
+  wait-for-IO, join/cancel, mailbox, or something narrower?
+- Where are yield points allowed, and how are they made replay-visible?
+- What is the production parity target: single-thread event loop first,
+  thread-per-core later, and preemptive threads as escape hatch only?
+- How does the scheduler interact with existing `Endpoint.receive`,
+  `Disk.read/write/sync`, `Clock.sleep`, and `SimControl.tick/runFor`?
+- What failure report should identify the scheduled task, runnable set, and
+  scheduling decision that led to a bug?
+
+This is Flow/madsim-inspired in goal.
 
 ---
 
@@ -711,7 +767,7 @@ simulation tick. No public
 `sim.endpoint().tick()`, no public `sim.disk().tick()`. This avoids the
 footgun where users forget to tick one subsystem.
 
-### Flow-inspired
+### Cooperative tasks, not OS thread simulation
 
 Marionette may eventually grow a small cooperative task scheduler: spawned
 simulated tasks, deterministic sleeps, deterministic IO waits, and one
@@ -723,8 +779,11 @@ Marionette will not build a new language or a preemptive user-thread runtime.
 Simulated tasks are single-threaded and yield only at Marionette authority
 boundaries such as sleep, network, disk, or explicit scheduler calls.
 
-Production backends may eventually route the same high-level API to real IO or
-event loops. The deterministic guarantee only covers effects
+Production backends should prefer a real cooperative event loop or a
+shared-nothing thread-per-core layout. Running the same logical tasks on
+arbitrary preemptive threads is allowed only as a documented guarantee
+demotion: Marionette still tests the protocol-level interleavings, but not
+memory-level concurrency bugs. The deterministic guarantee only covers effects
 that go through Marionette authorities; arbitrary production thread races are
 outside the simulator's model.
 
