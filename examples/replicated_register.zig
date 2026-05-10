@@ -18,6 +18,11 @@ const MessagePayload = struct {
     value: u64,
 };
 
+const RegisterValue = struct {
+    version: u64,
+    value: u64,
+};
+
 const Endpoint = mar.Endpoint(MessagePayload);
 
 pub const checks = [_]mar.StateCheck(Harness){
@@ -169,28 +174,26 @@ pub fn swarmScenario(harness: *Harness) !void {
 }
 
 const Replica = struct {
-    accepted_version: u64 = 0,
-    accepted_value: u64 = 0,
-    committed_version: u64 = 0,
-    committed_value: u64 = 0,
+    accepted: ?RegisterValue = null,
+    committed: ?RegisterValue = null,
 
     fn accept(self: *Replica, version: u64, value: u64) bool {
-        if (version < self.accepted_version) return false;
-        if (version == self.accepted_version and self.accepted_version != 0 and value != self.accepted_value) {
-            return false;
+        if (self.accepted) |current| {
+            if (version < current.version) return false;
+            if (version == current.version and value != current.value) return false;
         }
-        self.accepted_version = version;
-        self.accepted_value = value;
+
+        self.accepted = .{ .version = version, .value = value };
         return true;
     }
 
     fn commit(self: *Replica, version: u64, value: u64) bool {
-        if (version < self.committed_version) return false;
-        if (version == self.committed_version and self.committed_version != 0 and value != self.committed_value) {
-            return false;
+        if (self.committed) |current| {
+            if (version < current.version) return false;
+            if (version == current.version and value != current.value) return false;
         }
-        self.committed_version = version;
-        self.committed_value = value;
+
+        self.committed = .{ .version = version, .value = value };
         return true;
     }
 };
@@ -314,8 +317,7 @@ const Replicas = struct {
     }
 
     fn forceCommit(self: *Replicas, replica_index: usize, version: u64, value: u64) !void {
-        self.state[replica_index].committed_version = version;
-        self.state[replica_index].committed_value = value;
+        self.state[replica_index].committed = .{ .version = version, .value = value };
         try self.env.record(
             "replica.commit replica={} version={} value={} forced=true",
             .{ replica_index, version, value },
@@ -325,32 +327,28 @@ const Replicas = struct {
 
 fn checkCommittedAgreement(replicas: *const Replicas) !void {
     var committed_count: u8 = 0;
-    var expected_version: u64 = 0;
-    var expected_value: u64 = 0;
-    var have_expected = false;
+    var expected: ?RegisterValue = null;
 
     for (replicas.state, 0..) |replica, replica_index| {
-        if (replica.committed_version == 0) continue;
+        const committed = replica.committed orelse continue;
         committed_count += 1;
 
-        if (!have_expected) {
-            expected_version = replica.committed_version;
-            expected_value = replica.committed_value;
-            have_expected = true;
+        if (expected == null) {
+            expected = committed;
             continue;
         }
 
-        if (replica.committed_version != expected_version or
-            replica.committed_value != expected_value)
+        if (committed.version != expected.?.version or
+            committed.value != expected.?.value)
         {
             try replicas.env.record(
                 "register.invariant_violation kind=committed_divergence replica={} expected_version={} expected_value={} actual_version={} actual_value={}",
                 .{
                     replica_index,
-                    expected_version,
-                    expected_value,
-                    replica.committed_version,
-                    replica.committed_value,
+                    expected.?.version,
+                    expected.?.value,
+                    committed.version,
+                    committed.value,
                 },
             );
             return error.CommittedDivergence;
@@ -365,13 +363,13 @@ fn checkCommittedAgreement(replicas: *const Replicas) !void {
 
 fn checkCommittedQuorumAccepted(replicas: *const Replicas) !void {
     for (replicas.state, 0..) |replica, replica_index| {
-        if (replica.committed_version == 0) continue;
+        const committed = replica.committed orelse continue;
 
-        const accepted_count = countAccepted(replicas, replica.committed_version, replica.committed_value);
+        const accepted_count = countAccepted(replicas, committed.version, committed.value);
         if (accepted_count < quorum) {
             try replicas.env.record(
                 "register.invariant_violation kind=commit_without_accepted_quorum replica={} version={} value={} accepted_count={}",
-                .{ replica_index, replica.committed_version, replica.committed_value, accepted_count },
+                .{ replica_index, committed.version, committed.value, accepted_count },
             );
             return error.CommitWithoutAcceptedQuorum;
         }
@@ -388,10 +386,18 @@ fn checkReplicaCommitted(
 ) !void {
     const replica_index: usize = @intCast(replica_id);
     const replica = replicas.state[replica_index];
-    if (replica.committed_version != version or replica.committed_value != value) {
+    const committed = replica.committed orelse {
+        try replicas.env.record(
+            "register.invariant_violation kind=replica_not_committed replica={} expected_version={} expected_value={} actual_version=null actual_value=null",
+            .{ replica_id, version, value },
+        );
+        return error.ReplicaNotCommitted;
+    };
+
+    if (committed.version != version or committed.value != value) {
         try replicas.env.record(
             "register.invariant_violation kind=replica_not_committed replica={} expected_version={} expected_value={} actual_version={} actual_value={}",
-            .{ replica_id, version, value, replica.committed_version, replica.committed_value },
+            .{ replica_id, version, value, committed.version, committed.value },
         );
         return error.ReplicaNotCommitted;
     }
@@ -405,7 +411,8 @@ fn checkReplicaCommitted(
 fn countAccepted(replicas: *const Replicas, version: u64, value: u64) u8 {
     var count: u8 = 0;
     for (replicas.state) |replica| {
-        if (replica.accepted_version == version and replica.accepted_value == value) {
+        const accepted = replica.accepted orelse continue;
+        if (accepted.version == version and accepted.value == value) {
             count += 1;
         }
     }
