@@ -662,7 +662,7 @@ parity is the done-signal.
 header and body checksums, roundtrip and corruption tests. No sockets. Lives in
 `src/network_frame.zig`.
 
-**15b. Buffer pool primitive.** Refcounted preallocated message pool. Pool
+**15b. Buffer pool primitive.** Started. Refcounted preallocated message pool. Pool
 exhaustion returns a hard error. Used by both sim and prod once integrated.
 Lives in `src/message_pool.zig`.
 
