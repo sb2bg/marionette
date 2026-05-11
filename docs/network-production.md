@@ -159,8 +159,8 @@ demands it.
 
 ### Topology declaration
 
-The item-15 target production setup requires a topology config absent in the
-current in-process stub:
+The item-15 target production setup uses a topology config already accepted by
+the current in-process stub:
 
 ```zig
 const endpoint = try production.endpoint(Message, .{
@@ -175,9 +175,9 @@ const endpoint = try production.endpoint(Message, .{
 ```
 
 Simulation does not need this; `World.simulate(.{ .network = .{ .nodes = N }
-})` declares topology implicitly. Today `Production.endpoint(Message, node)`
-accepts only a `NodeId` and returns a same-process FIFO endpoint; the topology
-options above are the socket-backed target.
+})` declares topology implicitly. Today `Production.endpoint(Message, opts)`
+accepts this topology shape and still returns a same-process FIFO endpoint; the
+socket-backed runtime behind the options is future work.
 
 This will be a deliberate divergence between production and simulation setup:
 production declares peer addresses and listener state, while simulation
@@ -316,9 +316,9 @@ Each item ships on its own. Cross-process parity is the done-signal.
 2. **Buffer pool primitive.** Refcounted, preallocated pool. Pool exhaustion
    returns hard error. Lives in `src/message_pool.zig`. Used by both sim and
    prod once integrated.
-3. **Topology config and `Production.endpoint(Message, opts)`.** Production
-   endpoint accepts peers and self id. Initially returns the same in-process
-   FIFO behavior as today; the topology API change is the gate.
+3. **Topology config and `Production.endpoint(Message, opts)`.** Started.
+   Production endpoint accepts peers and self id. It still returns the same
+   in-process FIFO behavior as today; the topology API change is the gate.
 4. **ByteEndpoint and codec bridge.** Add an app-facing byte transport with
    explicit ownership semantics (`send` copies or sends an acquired buffer;
    `receive` returns a releasable byte message). This gives future Zig

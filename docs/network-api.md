@@ -111,10 +111,11 @@ own `NodeId` is the sender.
 
 ## Production Path
 
-`Production.endpoint(Message, node)` exists today and returns the same typed
-endpoint shape as simulation. Its current backing is local and in-process,
-useful for same-process parity tests and for proving that production-shaped code
-does not depend on simulator control. It is not a cross-process transport.
+`Production.endpoint(Message, opts)` exists today and returns the same typed
+endpoint shape as simulation. `opts` declares the local `self` node and peer
+topology. Its current backing is local and in-process, useful for same-process
+parity tests and for proving that production-shaped code does not depend on
+simulator control. It is not a cross-process transport.
 
 A real socket-backed production transport is scoped under roadmap item 15. The
 target architecture lives in `docs/network-production.md`: TigerBeetle

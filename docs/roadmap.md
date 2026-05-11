@@ -34,9 +34,9 @@ The current network surface is:
 - `World.simulate(.{ .network = ... })`: world-owned simulator network
   construction with `sim.control.network` for fault orchestration and
   `sim.endpoint(Message, node)` for typed app endpoints.
-- `Production.endpoint(Message, node)`: production-shaped local in-process endpoint for
-  same-process parity tests; it is not a cross-process transport, and real
-  socket backing is still future work.
+- `Production.endpoint(Message, opts)`: production-shaped local in-process endpoint
+  with declared self id and peer topology; it is not a cross-process transport,
+  and real socket backing is still future work.
 - `mar.UnstableNetwork(Payload, NetworkOptions)`: packet core with declared
   topology, per-link queues, send-time drops, latency with jitter, link/node
   state, and per-path clogging.
@@ -666,8 +666,8 @@ header and body checksums, roundtrip and corruption tests. No sockets. Lives in
 exhaustion returns a hard error. Used by both sim and prod once integrated.
 Lives in `src/message_pool.zig`.
 
-**15c. Topology config and `Production.endpoint(Message, opts)`.**
-Production endpoint accepts peers and self id. Initially returns the same
+**15c. Topology config and `Production.endpoint(Message, opts)`.** Started.
+Production endpoint accepts peers and self id. It still returns the same
 in-process FIFO behavior; the topology API change is the gate.
 
 **15d. ByteEndpoint and codec bridge.** Add an app-facing byte transport with
@@ -989,9 +989,9 @@ become confusing.
 
 ---
 
-Last meaningful update: TigerBeetle MessageBus study; roadmap item 15
-restructured into production-transport sub-tasks (15a-15j) and named-bus
-composition split into a separate item 16. See `docs/network-production.md`
-for the target architecture. Update this roadmap in the same PR as any
-substantive code change. Contributors should expect the roadmap to reflect
-the true state of the code.
+Last meaningful update: production endpoint topology options started; roadmap
+item 15 restructured into production-transport sub-tasks (15a-15k) and
+named-bus composition split into a separate item 16. See
+`docs/network-production.md` for the target architecture. Update this roadmap
+in the same PR as any substantive code change. Contributors should expect the
+roadmap to reflect the true state of the code.

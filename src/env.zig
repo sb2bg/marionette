@@ -331,20 +331,23 @@ pub const Production = struct {
     pub fn endpoint(
         self: *Production,
         comptime Payload: type,
-        node: network_module.NodeId,
-    ) std.mem.Allocator.Error!network_module.Endpoint(Payload) {
-        return try network_module.productionEndpoint(Payload, self.allocator, &self.network_entries, node);
+        options: network_module.ProductionEndpointOptions,
+    ) network_module.ProductionNetworkError!network_module.Endpoint(Payload) {
+        return try network_module.productionEndpoint(Payload, self.allocator, &self.network_entries, options);
     }
 
     pub fn endpoints(
         self: *Production,
         comptime Payload: type,
         comptime count: usize,
-        first_node: network_module.NodeId,
-    ) std.mem.Allocator.Error![count]network_module.Endpoint(Payload) {
+        options: network_module.ProductionEndpointsOptions,
+    ) network_module.ProductionNetworkError![count]network_module.Endpoint(Payload) {
         var handles: [count]network_module.Endpoint(Payload) = undefined;
         for (&handles, 0..) |*endpoint_handle, index| {
-            endpoint_handle.* = try self.endpoint(Payload, first_node + @as(network_module.NodeId, @intCast(index)));
+            endpoint_handle.* = try self.endpoint(Payload, .{
+                .self = options.first_node + @as(network_module.NodeId, @intCast(index)),
+                .peers = options.peers,
+            });
         }
         return handles;
     }

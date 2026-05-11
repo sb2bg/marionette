@@ -93,6 +93,35 @@ pub const SimNetworkOptions = struct {
     path_capacity: usize = 64,
 };
 
+/// One peer in a production network topology.
+pub const ProductionPeer = struct {
+    id: NodeId,
+    address: []const u8,
+};
+
+/// Production endpoint construction options.
+///
+/// The current production runtime is still an in-process FIFO. These options
+/// are the socket-backed shape it will grow into: one local process id, one
+/// listener address, and the full peer table used to resolve remote ids.
+pub const ProductionEndpointOptions = struct {
+    self: NodeId,
+    peers: []const ProductionPeer,
+    listen: ?[]const u8 = null,
+};
+
+/// Bulk helper options for same-process production parity tests.
+pub const ProductionEndpointsOptions = struct {
+    first_node: NodeId,
+    peers: []const ProductionPeer,
+};
+
+pub const ProductionNetworkError = std.mem.Allocator.Error || error{
+    ProductionTopologyEmpty,
+    ProductionTopologyDuplicatePeer,
+    ProductionTopologyMissingSelf,
+};
+
 /// Type-erased simulator-control view for network fault orchestration.
 pub const AnyNetworkControl = struct {
     ptr: *anyopaque,
@@ -790,8 +819,10 @@ pub fn productionEndpoint(
     comptime Payload: type,
     allocator: std.mem.Allocator,
     entries: *std.ArrayList(ProductionNetworkEntry),
-    node: NodeId,
-) std.mem.Allocator.Error!Endpoint(Payload) {
+    options: ProductionEndpointOptions,
+) ProductionNetworkError!Endpoint(Payload) {
+    try validateProductionEndpointOptions(options);
+
     const payload_name = @typeName(Payload);
     // Linear lookup is intentional while Production is a same-process parity
     // adapter with only a few payload types. Replace this registry with an
@@ -799,7 +830,7 @@ pub fn productionEndpoint(
     for (entries.items) |entry| {
         if (std.mem.eql(u8, entry.payload_name, payload_name)) {
             const runtime: *ProductionRuntime(Payload) = @ptrCast(@alignCast(entry.ptr));
-            return runtime.handle(node);
+            return runtime.handle(options.self);
         }
     }
 
@@ -812,7 +843,22 @@ pub fn productionEndpoint(
         .teardown = .{ .ptr = runtime, .deinit = ProductionRuntime(Payload).deinitOpaque },
     });
 
-    return runtime.handle(node);
+    return runtime.handle(options.self);
+}
+
+fn validateProductionEndpointOptions(options: ProductionEndpointOptions) ProductionNetworkError!void {
+    if (options.peers.len == 0) return error.ProductionTopologyEmpty;
+
+    var found_self = false;
+    for (options.peers, 0..) |peer, index| {
+        if (peer.id == options.self) found_self = true;
+
+        for (options.peers[0..index]) |previous| {
+            if (previous.id == peer.id) return error.ProductionTopologyDuplicatePeer;
+        }
+    }
+
+    if (!found_self) return error.ProductionTopologyMissingSelf;
 }
 
 fn TypedRuntime(comptime Payload: type) type {
@@ -2224,6 +2270,67 @@ test "composition network: endpoints for the same payload share one runtime" {
     const node_0 = try sim.endpoint(TestPayload, 0);
     const node_1 = try sim.endpoint(TestPayload, 1);
     _ = try sim.endpoint(OtherTestPayload, 1);
+
+    try node_0.send(1, .{ .value = 42 });
+    const envelope = (try node_1.receive()).?;
+    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
+    try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
+}
+
+test "production endpoint: requires declared topology" {
+    var entries: std.ArrayList(ProductionNetworkEntry) = .empty;
+    defer entries.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.ProductionTopologyEmpty, productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
+        .self = 0,
+        .peers = &.{},
+    }));
+
+    const missing_self = [_]ProductionPeer{
+        .{ .id = 1, .address = "127.0.0.1:4241" },
+    };
+    try std.testing.expectError(error.ProductionTopologyMissingSelf, productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
+        .self = 0,
+        .peers = &missing_self,
+    }));
+
+    const duplicate_peer = [_]ProductionPeer{
+        .{ .id = 0, .address = "127.0.0.1:4240" },
+        .{ .id = 0, .address = "127.0.0.1:4241" },
+    };
+    try std.testing.expectError(error.ProductionTopologyDuplicatePeer, productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
+        .self = 0,
+        .peers = &duplicate_peer,
+    }));
+}
+
+test "production endpoint: topology-shaped handles still share in-process runtime" {
+    var entries: std.ArrayList(ProductionNetworkEntry) = .empty;
+    defer {
+        var index = entries.items.len;
+        while (index > 0) {
+            index -= 1;
+            const teardown = entries.items[index].teardown;
+            teardown.deinit(teardown.ptr, std.testing.allocator);
+        }
+        entries.deinit(std.testing.allocator);
+    }
+
+    const peers = [_]ProductionPeer{
+        .{ .id = 0, .address = "127.0.0.1:4240" },
+        .{ .id = 1, .address = "127.0.0.1:4241" },
+    };
+
+    const node_0 = try productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
+        .self = 0,
+        .peers = &peers,
+        .listen = peers[0].address,
+    });
+    const node_1 = try productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
+        .self = 1,
+        .peers = &peers,
+        .listen = peers[1].address,
+    });
 
     try node_0.send(1, .{ .value = 42 });
     const envelope = (try node_1.receive()).?;

@@ -11,6 +11,12 @@ const replica_count = 3;
 const quorum = 2;
 const max_messages = 64;
 const client_node_id: mar.NodeId = replica_count;
+const production_peers = [_]mar.ProductionPeer{
+    .{ .id = 0, .address = "127.0.0.1:4240" },
+    .{ .id = 1, .address = "127.0.0.1:4241" },
+    .{ .id = 2, .address = "127.0.0.1:4242" },
+    .{ .id = client_node_id, .address = "127.0.0.1:4243" },
+};
 
 const MessagePayload = struct {
     kind: enum { propose, commit },
@@ -559,8 +565,15 @@ test "register: same code on simulated and production network handles" {
 
     var prod_replicas = Replicas.init(
         production.env(),
-        try production.endpoint(MessagePayload, client_node_id),
-        try production.endpoints(MessagePayload, replica_count, 0),
+        try production.endpoint(MessagePayload, .{
+            .self = client_node_id,
+            .peers = &production_peers,
+            .listen = "127.0.0.1:4243",
+        }),
+        try production.endpoints(MessagePayload, replica_count, .{
+            .first_node = 0,
+            .peers = &production_peers,
+        }),
     );
     try prod_replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
     try checkCommittedAgreement(&prod_replicas);

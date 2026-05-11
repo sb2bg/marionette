@@ -139,6 +139,18 @@ pub const NetworkPartitionDynamicsOptions = @import("network.zig").NetworkPartit
 /// Runtime topology for a composition-root network simulation.
 pub const SimNetworkOptions = @import("network.zig").SimNetworkOptions;
 
+/// One peer in a production network topology.
+pub const ProductionPeer = @import("network.zig").ProductionPeer;
+
+/// Production endpoint construction options.
+pub const ProductionEndpointOptions = @import("network.zig").ProductionEndpointOptions;
+
+/// Bulk helper options for same-process production parity tests.
+pub const ProductionEndpointsOptions = @import("network.zig").ProductionEndpointsOptions;
+
+/// Errors returned while constructing production endpoints.
+pub const ProductionNetworkError = @import("network.zig").ProductionNetworkError;
+
 /// Typed app-facing process endpoint.
 pub const Endpoint = @import("network.zig").Endpoint;
 

@@ -14,6 +14,12 @@ const replica_count = 3;
 const quorum = 2;
 const client_node_id: mar.NodeId = replica_count;
 const max_messages = 96;
+const production_peers = [_]mar.ProductionPeer{
+    .{ .id = 0, .address = "127.0.0.1:4250" },
+    .{ .id = 1, .address = "127.0.0.1:4251" },
+    .{ .id = 2, .address = "127.0.0.1:4252" },
+    .{ .id = client_node_id, .address = "127.0.0.1:4253" },
+};
 
 const Op = struct {
     id: u64,
@@ -538,8 +544,15 @@ test "durable broadcast: same app code on simulated and production handles" {
 
     var prod_service = try writeBroadcastRecover(
         production.env(),
-        try production.endpoint(MessagePayload, client_node_id),
-        try production.endpoints(MessagePayload, replica_count, 0),
+        try production.endpoint(MessagePayload, .{
+            .self = client_node_id,
+            .peers = &production_peers,
+            .listen = "127.0.0.1:4253",
+        }),
+        try production.endpoints(MessagePayload, replica_count, .{
+            .first_node = 0,
+            .peers = &production_peers,
+        }),
     );
     try durableServiceIsSafe(&prod_service);
 }
