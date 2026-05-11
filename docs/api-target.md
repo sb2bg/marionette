@@ -57,12 +57,16 @@ pub const Sim = struct {
     control: Control,
     pub fn endpoint(self: Sim, comptime Message: type, node: NodeId) !Endpoint(Message);
     pub fn endpoints(self: Sim, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
+    pub fn byteEndpoint(self: Sim, node: NodeId) !ByteEndpoint;
+    pub fn byteEndpoints(self: Sim, comptime count: usize, first_node: NodeId) ![count]ByteEndpoint;
 };
 
 pub const Production = struct {
     pub fn env(self: *Production) Env;
     pub fn endpoint(self: *Production, comptime Message: type, opts: ProductionEndpointOptions) !Endpoint(Message);
     pub fn endpoints(self: *Production, comptime Message: type, comptime count: usize, opts: ProductionEndpointsOptions) ![count]Endpoint(Message);
+    pub fn byteEndpoint(self: *Production, opts: ProductionEndpointOptions) !ByteEndpoint;
+    pub fn byteEndpoints(self: *Production, comptime count: usize, opts: ProductionEndpointsOptions) ![count]ByteEndpoint;
 };
 ```
 
@@ -82,6 +86,12 @@ handle. `Production.endpoint(Message, opts)` currently provides a local
 in-process production-shaped endpoint with declared peer topology for
 same-process parity tests; it is not a cross-process transport. A real socket
 adapter is still future work.
+
+`ByteEndpoint` is the byte-oriented sibling for libraries that want Marionette
+behind their own protocol API. `send(to, bytes)` copies borrowed bytes before
+returning; `acquire(len)` plus `sendMessage(to, message)` transfers an acquired
+pool buffer without a second copy; `receive()` returns a releasable message that
+the caller must release.
 
 ## Example Shape
 

@@ -10,6 +10,7 @@ const std = @import("std");
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
+const message_pool_module = @import("message_pool.zig");
 const scheduler = @import("scheduler.zig");
 const World = @import("world.zig").World;
 
@@ -121,6 +122,13 @@ pub const ProductionNetworkError = std.mem.Allocator.Error || error{
     ProductionTopologyDuplicatePeer,
     ProductionTopologyMissingSelf,
 };
+
+pub const default_byte_pool_options: message_pool_module.Options = .{
+    .buffers = 64,
+    .buffer_size = 64 * 1024,
+};
+
+pub const ProductionByteEndpointError = ProductionNetworkError || message_pool_module.PoolError;
 
 /// Type-erased simulator-control view for network fault orchestration.
 pub const AnyNetworkControl = struct {
@@ -235,6 +243,55 @@ pub fn Endpoint(comptime Message: type) type {
     };
 }
 
+/// App-facing byte endpoint with explicit message ownership.
+pub const ByteEndpoint = struct {
+    ptr: *anyopaque,
+    self_node: NodeId,
+    vtable: *const VTable,
+
+    pub const Message = message_pool_module.Message;
+
+    pub const Envelope = struct {
+        from: NodeId,
+        message: Message,
+    };
+
+    pub const VTable = struct {
+        acquire: *const fn (*anyopaque, usize) anyerror!Message,
+        send_bytes: *const fn (*anyopaque, NodeId, NodeId, []const u8) anyerror!void,
+        send_message: *const fn (*anyopaque, NodeId, NodeId, Message) anyerror!void,
+        receive: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
+    };
+
+    pub fn node(self: ByteEndpoint) NodeId {
+        return self.self_node;
+    }
+
+    /// Acquire an owned message buffer from this endpoint's runtime pool.
+    pub fn acquire(self: ByteEndpoint, len: usize) !Message {
+        return try self.vtable.acquire(self.ptr, len);
+    }
+
+    /// Copy borrowed bytes into the endpoint runtime before enqueueing.
+    pub fn send(self: ByteEndpoint, to: NodeId, bytes: []const u8) !void {
+        try self.vtable.send_bytes(self.ptr, self.self_node, to, bytes);
+    }
+
+    /// Enqueue an acquired message without copying.
+    ///
+    /// On success the endpoint runtime owns `message`; on error the caller
+    /// still owns it and must release it.
+    pub fn sendMessage(self: ByteEndpoint, to: NodeId, message: Message) !void {
+        try self.vtable.send_message(self.ptr, self.self_node, to, message);
+    }
+
+    /// Return the next message for this endpoint. The caller owns the returned
+    /// message and must release it.
+    pub fn receive(self: ByteEndpoint) !?Envelope {
+        return try self.vtable.receive(self.ptr, self.self_node);
+    }
+};
+
 const SharedRuntime = struct {
     world: *World,
     process_count: usize,
@@ -244,6 +301,7 @@ const SharedRuntime = struct {
     links: []Link,
     down_nodes: []bool,
     typed_runtimes: std.ArrayList(TypedRuntimeEntry) = .empty,
+    byte_runtime: ?*SimByteRuntime = null,
     auto_partitioned_node: ?NodeId = null,
     auto_partition_changed_at_ns: clock_module.Timestamp = 0,
 
@@ -804,6 +862,12 @@ pub fn endpointFromControl(comptime Payload: type, control: AnyNetworkControl, n
     return try TypedRuntime(Payload).endpoint(shared, node);
 }
 
+pub fn byteEndpointFromControl(control: AnyNetworkControl, node: NodeId) !ByteEndpoint {
+    const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
+    try shared.validateNode(node);
+    return try SimByteRuntime.endpoint(shared, node);
+}
+
 pub const ProductionNetworkTeardown = struct {
     ptr: *anyopaque,
     deinit: *const fn (*anyopaque, std.mem.Allocator) void,
@@ -841,6 +905,34 @@ pub fn productionEndpoint(
         .payload_name = payload_name,
         .ptr = runtime,
         .teardown = .{ .ptr = runtime, .deinit = ProductionRuntime(Payload).deinitOpaque },
+    });
+
+    return runtime.handle(options.self);
+}
+
+const production_byte_runtime_name = "marionette.ByteEndpoint";
+
+pub fn productionByteEndpoint(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(ProductionNetworkEntry),
+    options: ProductionEndpointOptions,
+) ProductionByteEndpointError!ByteEndpoint {
+    try validateProductionEndpointOptions(options);
+
+    for (entries.items) |entry| {
+        if (std.mem.eql(u8, entry.payload_name, production_byte_runtime_name)) {
+            const runtime: *ProductionByteRuntime = @ptrCast(@alignCast(entry.ptr));
+            return runtime.handle(options.self);
+        }
+    }
+
+    const runtime = try ProductionByteRuntime.init(allocator, default_byte_pool_options);
+    errdefer runtime.deinit();
+
+    try entries.append(allocator, .{
+        .payload_name = production_byte_runtime_name,
+        .ptr = runtime,
+        .teardown = .{ .ptr = runtime, .deinit = ProductionByteRuntime.deinitOpaque },
     });
 
     return runtime.handle(options.self);
@@ -1088,6 +1180,271 @@ fn TypedRuntime(comptime Payload: type) type {
         };
     };
 }
+
+const SimByteRuntime = struct {
+    const Self = @This();
+    const Packet = struct {
+        id: u64,
+        from: NodeId,
+        to: NodeId,
+        deliver_at: clock_module.Timestamp,
+        payload: ByteEndpoint.Message,
+    };
+
+    shared: *SharedRuntime,
+    pool: message_pool_module.Pool,
+    queues: []std.ArrayList(Packet),
+    next_packet_id: u64 = 0,
+
+    fn endpoint(shared: *SharedRuntime, node: NodeId) !ByteEndpoint {
+        const runtime = try getOrInit(shared);
+        return runtime.handle(node);
+    }
+
+    fn getOrInit(shared: *SharedRuntime) !*Self {
+        if (shared.byte_runtime) |existing| return existing;
+
+        const allocator = shared.world.allocator;
+        const runtime = try allocator.create(Self);
+        var runtime_initialized = false;
+        errdefer if (!runtime_initialized) allocator.destroy(runtime);
+
+        const path_count = shared.process_count * shared.process_count;
+        const queues = try allocator.alloc(std.ArrayList(Packet), path_count);
+        var queues_moved = false;
+        errdefer if (!queues_moved) allocator.free(queues);
+        @memset(queues, .empty);
+
+        var pool = try message_pool_module.Pool.init(allocator, default_byte_pool_options);
+        var pool_moved = false;
+        errdefer if (!pool_moved) pool.deinit();
+
+        runtime.* = .{
+            .shared = shared,
+            .pool = pool,
+            .queues = queues,
+        };
+        queues_moved = true;
+        pool_moved = true;
+        runtime_initialized = true;
+        errdefer runtime.free(allocator);
+
+        shared.byte_runtime = runtime;
+        errdefer shared.byte_runtime = null;
+
+        try shared.world.registerTeardown(runtime, deinit);
+        return runtime;
+    }
+
+    fn handle(self: *Self, node: NodeId) ByteEndpoint {
+        return .{ .ptr = self, .self_node = node, .vtable = &vtable };
+    }
+
+    fn acquire(self: *Self, len: usize) !ByteEndpoint.Message {
+        return try self.pool.acquire(len);
+    }
+
+    fn sendBytes(self: *Self, from: NodeId, to: NodeId, bytes: []const u8) !void {
+        const message = try self.acquire(bytes.len);
+        var sent = false;
+        defer if (!sent) message.release();
+
+        @memcpy(message.bytes(), bytes);
+        try self.sendMessage(from, to, message);
+        sent = true;
+    }
+
+    fn sendMessage(self: *Self, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !void {
+        const shared = self.shared;
+        try shared.validateNode(from);
+        try shared.validateNode(to);
+        try validateRate(shared.faults.drop_rate);
+        try shared.validateFaultLatency(shared.faults);
+
+        const packet_id = self.next_packet_id;
+        self.next_packet_id += 1;
+
+        if (shared.down_nodes[@intCast(from)]) {
+            try shared.world.record("network.drop id={} from={} to={} reason=source_down", .{ packet_id, from, to });
+            message.release();
+            return;
+        }
+
+        const drop_roll = try shared.world.randomIntLessThan(u32, shared.faults.drop_rate.denominator);
+        if (drop_roll < shared.faults.drop_rate.numerator) {
+            try shared.world.record(
+                "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
+                .{ packet_id, from, to, shared.faults.drop_rate.numerator, shared.faults.drop_rate.denominator, drop_roll },
+            );
+            message.release();
+            return;
+        }
+
+        const latency_ns = try self.latency();
+        if (std.math.maxInt(clock_module.Timestamp) - shared.world.now() < latency_ns) {
+            return error.InvalidDuration;
+        }
+
+        const packet: Packet = .{
+            .id = packet_id,
+            .from = from,
+            .to = to,
+            .deliver_at = shared.world.now() + latency_ns,
+            .payload = message,
+        };
+
+        const queue = &self.queues[try shared.pathIndex(from, to)];
+        if (queue.items.len >= shared.path_capacity) return error.EventQueueFull;
+        try queue.append(shared.world.allocator, packet);
+        var index = queue.items.len - 1;
+        while (index > 0 and packetLessThan(queue.items[index], queue.items[index - 1])) : (index -= 1) {
+            std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
+        }
+
+        try shared.world.record(
+            "network.send id={} from={} to={} deliver_at={} latency_ns={}",
+            .{ packet.id, packet.from, packet.to, packet.deliver_at, latency_ns },
+        );
+    }
+
+    fn receive(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {
+        try self.shared.validateNode(node);
+
+        while (true) {
+            try self.shared.expireDeterministicFaults();
+            if (try self.popReadyFor(node)) |packet| {
+                return .{
+                    .from = packet.from,
+                    .message = packet.payload,
+                };
+            }
+
+            const deliver_at = self.nextDeliveryAt() orelse return null;
+            const now_ns = self.shared.world.now();
+            if (deliver_at <= now_ns) return null;
+            try self.runForDeterministicFaults(deliver_at - now_ns);
+        }
+    }
+
+    fn popReadyFor(self: *Self, node: NodeId) !?Packet {
+        while (true) {
+            const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
+            const ready = self.queues[link_index].orderedRemove(0);
+
+            if (self.shared.down_nodes[@intCast(ready.to)]) {
+                ready.payload.release();
+                try self.shared.world.record("network.drop id={} from={} to={} reason=destination_down", .{ ready.id, ready.from, ready.to });
+                continue;
+            }
+
+            const link = self.shared.links[try self.shared.pathIndex(ready.from, ready.to)];
+            if (!link.enabled()) {
+                ready.payload.release();
+                try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
+                continue;
+            }
+
+            try self.shared.world.record("network.deliver id={} from={} to={} now_ns={}", .{ ready.id, ready.from, ready.to, self.shared.world.now() });
+            return ready;
+        }
+    }
+
+    fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
+        var best: ?clock_module.Timestamp = null;
+        for (self.queues, 0..) |queue, index| {
+            const packet = if (queue.items.len == 0) continue else queue.items[0];
+            const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
+            if (best == null or ready_at < best.?) best = ready_at;
+        }
+        return best;
+    }
+
+    fn nextReadyLinkIndexFor(self: *const Self, node: NodeId) ?usize {
+        var best_index: ?usize = null;
+        var best_packet: Packet = undefined;
+        for (self.queues, 0..) |queue, index| {
+            if (queue.items.len == 0) continue;
+            const packet = queue.items[0];
+            if (packet.to != node) continue;
+            if (packet.deliver_at > self.shared.world.now()) continue;
+            if (self.shared.links[index].clogged_until > self.shared.world.now()) continue;
+            if (best_index == null or packetLessThan(packet, best_packet)) {
+                best_index = index;
+                best_packet = packet;
+            }
+        }
+        return best_index;
+    }
+
+    fn latency(self: *Self) !clock_module.Duration {
+        const faults = self.shared.faults;
+        const tick_ns = self.shared.world.clock().tick_ns;
+        if (faults.latency_jitter_ns == 0) return faults.min_latency_ns;
+
+        const jitter_ticks = try self.shared.world.randomIntLessThan(
+            clock_module.Duration,
+            faults.latency_jitter_ns / tick_ns + 1,
+        );
+        return faults.min_latency_ns + jitter_ticks * tick_ns;
+    }
+
+    fn runForDeterministicFaults(self: *Self, duration_ns: clock_module.Duration) !void {
+        const tick_ns = self.shared.world.clock().tick_ns;
+        if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+        var remaining = duration_ns;
+        while (remaining > 0) : (remaining -= tick_ns) {
+            try self.shared.world.tick();
+            try self.shared.expireDeterministicFaults();
+        }
+    }
+
+    fn packetLessThan(a: Packet, b: Packet) bool {
+        return a.deliver_at < b.deliver_at or
+            (a.deliver_at == b.deliver_at and a.id < b.id);
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const runtime: *Self = @ptrCast(@alignCast(ptr));
+        runtime.free(allocator);
+    }
+
+    fn free(self: *Self, allocator: std.mem.Allocator) void {
+        for (self.queues) |*queue| {
+            for (queue.items) |packet| packet.payload.release();
+            queue.deinit(allocator);
+        }
+        allocator.free(self.queues);
+        self.pool.deinit();
+        allocator.destroy(self);
+    }
+
+    fn fromOpaque(ptr: *anyopaque) *Self {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn vtableAcquire(ptr: *anyopaque, len: usize) anyerror!ByteEndpoint.Message {
+        return try fromOpaque(ptr).acquire(len);
+    }
+
+    fn vtableSendBytes(ptr: *anyopaque, from: NodeId, to: NodeId, bytes: []const u8) anyerror!void {
+        try fromOpaque(ptr).sendBytes(from, to, bytes);
+    }
+
+    fn vtableSendMessage(ptr: *anyopaque, from: NodeId, to: NodeId, message: ByteEndpoint.Message) anyerror!void {
+        try fromOpaque(ptr).sendMessage(from, to, message);
+    }
+
+    fn vtableReceive(ptr: *anyopaque, node: NodeId) anyerror!?ByteEndpoint.Envelope {
+        return try fromOpaque(ptr).receive(node);
+    }
+
+    const vtable: ByteEndpoint.VTable = .{
+        .acquire = vtableAcquire,
+        .send_bytes = vtableSendBytes,
+        .send_message = vtableSendMessage,
+        .receive = vtableReceive,
+    };
+};
 
 fn ProductionRuntime(comptime Payload: type) type {
     const Handle = Endpoint(Payload);
@@ -1641,6 +1998,116 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
         }
     };
 }
+
+const ProductionByteRuntime = struct {
+    const Self = @This();
+    const Packet = struct {
+        id: u64,
+        from: NodeId,
+        to: NodeId,
+        payload: ByteEndpoint.Message,
+    };
+
+    allocator: std.mem.Allocator,
+    pool: message_pool_module.Pool,
+    queue: std.ArrayList(Packet) = .empty,
+    next_packet_id: u64 = 0,
+
+    fn init(allocator: std.mem.Allocator, pool_options: message_pool_module.Options) !*Self {
+        const runtime = try allocator.create(Self);
+        errdefer allocator.destroy(runtime);
+
+        const pool = try message_pool_module.Pool.init(allocator, pool_options);
+        errdefer pool.deinit();
+
+        runtime.* = .{
+            .allocator = allocator,
+            .pool = pool,
+        };
+        return runtime;
+    }
+
+    fn handle(self: *Self, node: NodeId) ByteEndpoint {
+        return .{ .ptr = self, .self_node = node, .vtable = &vtable };
+    }
+
+    fn acquire(self: *Self, len: usize) !ByteEndpoint.Message {
+        return try self.pool.acquire(len);
+    }
+
+    fn sendBytes(self: *Self, from: NodeId, to: NodeId, bytes: []const u8) !void {
+        const message = try self.acquire(bytes.len);
+        var sent = false;
+        defer if (!sent) message.release();
+
+        @memcpy(message.bytes(), bytes);
+        try self.sendMessage(from, to, message);
+        sent = true;
+    }
+
+    fn sendMessage(self: *Self, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !void {
+        const packet: Packet = .{
+            .id = self.next_packet_id,
+            .from = from,
+            .to = to,
+            .payload = message,
+        };
+        self.next_packet_id += 1;
+        try self.queue.append(self.allocator, packet);
+    }
+
+    fn receive(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {
+        for (self.queue.items, 0..) |packet, index| {
+            if (packet.to != node) continue;
+            const ready = self.queue.orderedRemove(index);
+            return .{
+                .from = ready.from,
+                .message = ready.payload,
+            };
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *Self) void {
+        for (self.queue.items) |packet| packet.payload.release();
+        self.queue.deinit(self.allocator);
+        self.pool.deinit();
+        const allocator = self.allocator;
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+
+    pub fn deinitOpaque(ptr: *anyopaque, _: std.mem.Allocator) void {
+        fromOpaque(ptr).deinit();
+    }
+
+    fn fromOpaque(ptr: *anyopaque) *Self {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn vtableAcquire(ptr: *anyopaque, len: usize) anyerror!ByteEndpoint.Message {
+        return try fromOpaque(ptr).acquire(len);
+    }
+
+    fn vtableSendBytes(ptr: *anyopaque, from: NodeId, to: NodeId, bytes: []const u8) anyerror!void {
+        try fromOpaque(ptr).sendBytes(from, to, bytes);
+    }
+
+    fn vtableSendMessage(ptr: *anyopaque, from: NodeId, to: NodeId, message: ByteEndpoint.Message) anyerror!void {
+        try fromOpaque(ptr).sendMessage(from, to, message);
+    }
+
+    fn vtableReceive(ptr: *anyopaque, node: NodeId) anyerror!?ByteEndpoint.Envelope {
+        return try fromOpaque(ptr).receive(node);
+    }
+
+    const vtable: ByteEndpoint.VTable = .{
+        .acquire = vtableAcquire,
+        .send_bytes = vtableSendBytes,
+        .send_message = vtableSendMessage,
+        .receive = vtableReceive,
+    };
+};
 
 /// Build a small simulator wrapper that owns one unstable packet core.
 pub fn NetworkSimulation(comptime Payload: type, comptime network_options: NetworkOptions) type {
@@ -2336,6 +2803,80 @@ test "production endpoint: topology-shaped handles still share in-process runtim
     const envelope = (try node_1.receive()).?;
     try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
     try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
+}
+
+test "composition byte endpoint: send copies borrowed bytes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const node_0 = try sim.byteEndpoint(0);
+    const node_1 = try sim.byteEndpoint(1);
+
+    var bytes = [_]u8{ 'p', 'i', 'n', 'g' };
+    try node_0.send(1, &bytes);
+    bytes[0] = 'x';
+
+    const envelope = (try node_1.receive()).?;
+    defer envelope.message.release();
+
+    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
+    try std.testing.expectEqualStrings("ping", envelope.message.bytes());
+}
+
+test "composition byte endpoint: send acquired message transfers ownership" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const node_0 = try sim.byteEndpoint(0);
+    const node_1 = try sim.byteEndpoint(1);
+
+    const message = try node_0.acquire(4);
+    @memcpy(message.bytes(), "pong");
+    try node_0.sendMessage(1, message);
+
+    const envelope = (try node_1.receive()).?;
+    defer envelope.message.release();
+
+    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
+    try std.testing.expectEqualStrings("pong", envelope.message.bytes());
+}
+
+test "production byte endpoint: topology-shaped handles share byte runtime" {
+    var entries: std.ArrayList(ProductionNetworkEntry) = .empty;
+    defer {
+        var index = entries.items.len;
+        while (index > 0) {
+            index -= 1;
+            const teardown = entries.items[index].teardown;
+            teardown.deinit(teardown.ptr, std.testing.allocator);
+        }
+        entries.deinit(std.testing.allocator);
+    }
+
+    const peers = [_]ProductionPeer{
+        .{ .id = 0, .address = "127.0.0.1:4240" },
+        .{ .id = 1, .address = "127.0.0.1:4241" },
+    };
+
+    const node_0 = try productionByteEndpoint(std.testing.allocator, &entries, .{
+        .self = 0,
+        .peers = &peers,
+        .listen = peers[0].address,
+    });
+    const node_1 = try productionByteEndpoint(std.testing.allocator, &entries, .{
+        .self = 1,
+        .peers = &peers,
+        .listen = peers[1].address,
+    });
+
+    try node_0.send(1, "prod");
+    const envelope = (try node_1.receive()).?;
+    defer envelope.message.release();
+
+    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
+    try std.testing.expectEqualStrings("prod", envelope.message.bytes());
 }
 
 test "composition network: receive advances only to global next delivery" {

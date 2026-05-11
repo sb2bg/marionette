@@ -670,12 +670,14 @@ Lives in `src/message_pool.zig`.
 Production endpoint accepts peers and self id. It still returns the same
 in-process FIFO behavior; the topology API change is the gate.
 
-**15d. ByteEndpoint and codec bridge.** Add an app-facing byte transport with
-explicit ownership semantics (`send` copies or sends an acquired buffer;
-`receive` returns a releasable byte message). This is the bridge for future Zig
-network/RPC libraries that want Marionette as a backend without adopting typed
+**15d. ByteEndpoint and codec bridge.** Started. `ByteEndpoint` exists for sim
+and production setup with explicit ownership semantics: `send` copies borrowed
+bytes, `sendMessage` transfers an acquired buffer, and `receive` returns a
+releasable byte message. This is the bridge for future Zig network/RPC
+libraries that want Marionette as a backend without adopting typed
 `Endpoint(Message)` directly. Keep `Endpoint(Message)` for value-message
-examples; do not make borrowed slice payloads magically deep-copy.
+examples; do not make borrowed slice payloads magically deep-copy. Typed codec
+helpers are still deferred until a real integration needs them.
 
 **15e. Internal network IO seam.** Introduce the smallest socket backend
 interface the production bus needs while keeping `Endpoint(Message)` unchanged.

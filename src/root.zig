@@ -151,8 +151,17 @@ pub const ProductionEndpointsOptions = @import("network.zig").ProductionEndpoint
 /// Errors returned while constructing production endpoints.
 pub const ProductionNetworkError = @import("network.zig").ProductionNetworkError;
 
+/// Errors returned while constructing production byte endpoints.
+pub const ProductionByteEndpointError = @import("network.zig").ProductionByteEndpointError;
+
 /// Typed app-facing process endpoint.
 pub const Endpoint = @import("network.zig").Endpoint;
+
+/// App-facing byte endpoint with explicit message ownership.
+pub const ByteEndpoint = @import("network.zig").ByteEndpoint;
+
+/// Default byte endpoint pool sizing.
+pub const default_byte_pool_options = @import("network.zig").default_byte_pool_options;
 
 /// Simulator-control network capability.
 pub const NetworkControl = @import("network.zig").AnyNetworkControl;

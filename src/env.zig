@@ -336,6 +336,13 @@ pub const Production = struct {
         return try network_module.productionEndpoint(Payload, self.allocator, &self.network_entries, options);
     }
 
+    pub fn byteEndpoint(
+        self: *Production,
+        options: network_module.ProductionEndpointOptions,
+    ) network_module.ProductionByteEndpointError!network_module.ByteEndpoint {
+        return try network_module.productionByteEndpoint(self.allocator, &self.network_entries, options);
+    }
+
     pub fn endpoints(
         self: *Production,
         comptime Payload: type,
@@ -345,6 +352,21 @@ pub const Production = struct {
         var handles: [count]network_module.Endpoint(Payload) = undefined;
         for (&handles, 0..) |*endpoint_handle, index| {
             endpoint_handle.* = try self.endpoint(Payload, .{
+                .self = options.first_node + @as(network_module.NodeId, @intCast(index)),
+                .peers = options.peers,
+            });
+        }
+        return handles;
+    }
+
+    pub fn byteEndpoints(
+        self: *Production,
+        comptime count: usize,
+        options: network_module.ProductionEndpointsOptions,
+    ) network_module.ProductionByteEndpointError![count]network_module.ByteEndpoint {
+        var handles: [count]network_module.ByteEndpoint = undefined;
+        for (&handles, 0..) |*endpoint_handle, index| {
+            endpoint_handle.* = try self.byteEndpoint(.{
                 .self = options.first_node + @as(network_module.NodeId, @intCast(index)),
                 .peers = options.peers,
             });

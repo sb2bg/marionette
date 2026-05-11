@@ -319,11 +319,13 @@ Each item ships on its own. Cross-process parity is the done-signal.
 3. **Topology config and `Production.endpoint(Message, opts)`.** Started.
    Production endpoint accepts peers and self id. It still returns the same
    in-process FIFO behavior as today; the topology API change is the gate.
-4. **ByteEndpoint and codec bridge.** Add an app-facing byte transport with
-   explicit ownership semantics (`send` copies or sends an acquired buffer;
-   `receive` returns a releasable byte message). This gives future Zig
-   network/RPC libraries a Marionette backend target without forcing them to
-   use typed value-message endpoints directly.
+4. **ByteEndpoint and codec bridge.** Started. `ByteEndpoint` exists for sim
+   and production setup with explicit ownership semantics: `send` copies
+   borrowed bytes, `sendMessage` transfers an acquired buffer, and `receive`
+   returns a releasable byte message. This gives future Zig network/RPC
+   libraries a Marionette backend target without forcing them to use typed
+   value-message endpoints directly. Typed codec helpers are deferred until a
+   real integration needs them.
 5. **Internal network IO seam.** Introduce the smallest socket backend
    interface the production bus needs: listen, connect, read, write, close,
    sleep/backoff, and monotonic time as needed. Start with one real backend.

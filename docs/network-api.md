@@ -109,6 +109,21 @@ The important constraint is that fault orchestration is separate from the
 app-shaped send path. App `send` takes only `to` and `message`; the endpoint's
 own `NodeId` is the sender.
 
+## Byte Endpoint
+
+`ByteEndpoint` is the byte-oriented app surface for code that already owns a
+wire protocol. It has the same node-scoped shape as `Endpoint(Message)`, but it
+makes byte ownership explicit:
+
+- `send(to, bytes)` copies borrowed bytes before returning.
+- `acquire(len)` returns a pool-owned buffer.
+- `sendMessage(to, message)` transfers an acquired buffer on success.
+- `receive()` returns `{ from, message }`; the caller must release the message.
+
+This is the intended integration point for future Zig networking/RPC libraries
+that want Marionette as a test or transport backend without exposing
+`Endpoint(Message)` to their users.
+
 ## Production Path
 
 `Production.endpoint(Message, opts)` exists today and returns the same typed
