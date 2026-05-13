@@ -679,9 +679,11 @@ libraries that want Marionette as a backend without adopting typed
 examples; do not make borrowed slice payloads magically deep-copy. Typed codec
 helpers are still deferred until a real integration needs them.
 
-**15e. Internal network IO seam.** Introduce the smallest socket backend
-interface the production bus needs while keeping `Endpoint(Message)` unchanged.
-Start with a real backend; add fake IO tests once the seam has enough shape.
+**15e. Internal network IO seam.** Started. `src/network_io.zig` defines the
+smallest backend shape the production bus needs so far: listen, connect, accept,
+read, write, close, monotonic time, and sleep. Exact read/write helpers and a
+fake backend cover short reads/writes and closed-peer behavior. Keep
+`Endpoint(Message)` unchanged. A real socket adapter is still future work.
 
 **15f. Single-peer end-to-end socket transport.** Two processes, one peer
 each, real send and receive over the new framing. Loopback only.

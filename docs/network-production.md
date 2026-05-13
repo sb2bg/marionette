@@ -183,8 +183,21 @@ This will be a deliberate divergence between production and simulation setup:
 production declares peer addresses and listener state, while simulation
 declares a node count. The returned endpoint shape is the same. Application
 code that holds an `Endpoint(Message)` is unaware of how its peers were
-declared. The current in-process production stub still accepts just a `NodeId`;
-the topology options are the item-15 target.
+declared.
+
+### Why endpoints stay above listen/connect/read/write
+
+Marionette simulates the app's distributed effect boundary, not the host socket
+syscall API. App code should own a node-scoped endpoint and exchange messages;
+the production bus can then decide whether those messages are delivered by an
+in-memory simulator, a fake production IO backend, or real sockets.
+
+Putting listen/connect/read/write directly in app code would make every app own
+framing, buffering, partial reads, reconnects, and stream lifetimes. It would
+also make the simulator mimic a byte stream instead of the thing Marionette
+needs to control: message delivery, drops, delay, partitions, and process
+identity. The stream seam still exists, but it is internal to the production
+transport where it can be tested with fake IO.
 
 ### Identity model
 
@@ -326,10 +339,11 @@ Each item ships on its own. Cross-process parity is the done-signal.
    libraries a Marionette backend target without forcing them to use typed
    value-message endpoints directly. Typed codec helpers are deferred until a
    real integration needs them.
-5. **Internal network IO seam.** Introduce the smallest socket backend
-   interface the production bus needs: listen, connect, read, write, close,
-   sleep/backoff, and monotonic time as needed. Start with one real backend.
-   Keep it internal; `Endpoint(Message)` signatures do not mention it.
+5. **Internal network IO seam.** Started. `src/network_io.zig` defines the
+   internal listen/connect/read/write/close/time seam plus exact read/write
+   helpers and a fake backend that forces short reads/writes and close behavior.
+   Keep it internal; `Endpoint(Message)` signatures do not mention it. A real
+   socket adapter is still future work.
 6. **Single-peer end-to-end socket transport.** Two processes, one peer each,
    real send and receive with the new framing. Loopback only.
 7. **Production-bus fake IO tests.** Add a small deterministic/fake IO backend
