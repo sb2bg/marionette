@@ -176,8 +176,9 @@ const endpoint = try production.endpoint(Message, .{
 
 Simulation does not need this; `World.simulate(.{ .network = .{ .nodes = N }
 })` declares topology implicitly. Today `Production.endpoint(Message, opts)`
-accepts this topology shape and still returns a same-process FIFO endpoint; the
-socket-backed runtime behind the options is future work.
+accepts this topology shape and still returns a same-process FIFO endpoint.
+`Production.byteEndpoint(opts)` uses the socket-backed runtime when `.listen`
+is configured.
 
 This will be a deliberate divergence between production and simulation setup:
 production declares peer addresses and listener state, while simulation
@@ -342,12 +343,13 @@ Each item ships on its own. Cross-process parity is the done-signal.
 5. **Internal network IO seam.** Started. `src/network_io.zig` defines the
    internal listen/connect/read/write/close/time seam plus exact read/write
    helpers and a fake backend that forces short reads/writes and close behavior.
-   Keep it internal; `Endpoint(Message)` signatures do not mention it. A real
-   socket adapter is still future work.
-6. **Single-peer end-to-end socket transport.** Started. The internal IO seam
-   has a host socket backend, and `src/network_transport.zig` can send and
-   receive one framed payload over fake IO or a real loopback socket. Next:
-   wire this under `Production.byteEndpoint` for one peer. Loopback only.
+   Keep it internal; `Endpoint(Message)` signatures do not mention it. A host
+   socket adapter exists for the first loopback transport slice.
+6. **Single-peer end-to-end socket transport.** Started.
+   `Production.byteEndpoint` uses framed loopback sockets when `.listen` is
+   configured. The old in-process FIFO remains for same-process production
+   parity setups without `.listen`. Loopback only; reconnect, background
+   receive, and multi-peer connection management are still future work.
 7. **Production-bus fake IO tests.** Add a small deterministic/fake IO backend
    for the production bus, focused on partial frame reads/writes, EOF
    mid-frame, reconnect timing, and close discipline. This tests production bus

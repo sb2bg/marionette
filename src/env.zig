@@ -7,6 +7,7 @@ const std = @import("std");
 
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
+const network_io_module = @import("network_io.zig");
 const network_module = @import("network.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
@@ -305,6 +306,7 @@ pub const Production = struct {
     clock: clock_module.ProductionClock,
     random_source: std.Random.IoSource,
     tracer: Tracer,
+    network_io: network_io_module.Host,
     network_entries: std.ArrayList(network_module.ProductionNetworkEntry) = .empty,
 
     pub const Options = struct {
@@ -325,6 +327,7 @@ pub const Production = struct {
             .clock = .init(),
             .random_source = .{ .io = options.io },
             .tracer = options.tracer orelse .none(),
+            .network_io = .init(options.allocator, options.io),
         };
     }
 
@@ -340,7 +343,7 @@ pub const Production = struct {
         self: *Production,
         options: network_module.ProductionEndpointOptions,
     ) network_module.ProductionByteEndpointError!network_module.ByteEndpoint {
-        return try network_module.productionByteEndpoint(self.allocator, &self.network_entries, options);
+        return try network_module.productionByteEndpoint(self.allocator, self.network_io.io(), &self.network_entries, options);
     }
 
     pub fn endpoints(
@@ -484,6 +487,55 @@ test "env: production exposes production authorities" {
     try env.disk.read(.{ .path = "prod/wal.log", .offset = 0, .buffer = &buffer });
     try std.testing.expectEqualStrings("abcd", &buffer);
     try std.testing.expect(!try env.buggify(.drop_packet, .percent(50)));
+}
+
+test "env: production byte endpoints use loopback sockets when listen is configured" {
+    var server_tmp = std.testing.tmpDir(.{});
+    defer server_tmp.cleanup();
+    var client_tmp = std.testing.tmpDir(.{});
+    defer client_tmp.cleanup();
+
+    var server = try Production.init(.{
+        .root_dir = server_tmp.dir,
+        .io = std.testing.io,
+    });
+    defer server.deinit();
+
+    var client = try Production.init(.{
+        .root_dir = client_tmp.dir,
+        .io = std.testing.io,
+    });
+    defer client.deinit();
+
+    const peers = [_]network_module.ProductionPeer{
+        .{ .id = 0, .address = "127.0.0.1:43158" },
+        .{ .id = 1, .address = "127.0.0.1:43159" },
+    };
+
+    const server_endpoint = server.byteEndpoint(.{
+        .self = 0,
+        .peers = &peers,
+        .listen = peers[0].address,
+    }) catch |err| switch (err) {
+        error.AddressInUse, error.NetworkUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+
+    const client_endpoint = client.byteEndpoint(.{
+        .self = 1,
+        .peers = &peers,
+        .listen = peers[1].address,
+    }) catch |err| switch (err) {
+        error.AddressInUse, error.NetworkUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+
+    try client_endpoint.send(0, "sock");
+    const envelope = (try server_endpoint.receive()).?;
+    defer envelope.message.release();
+
+    try std.testing.expectEqual(@as(network_module.NodeId, 1), envelope.from);
+    try std.testing.expectEqualStrings("sock", envelope.message.bytes());
 }
 
 test "env: simulation buggify is traced" {

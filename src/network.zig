@@ -11,6 +11,8 @@ const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
 const message_pool_module = @import("message_pool.zig");
+const network_io_module = @import("network_io.zig");
+const network_transport_module = @import("network_transport.zig");
 const scheduler = @import("scheduler.zig");
 const World = @import("world.zig").World;
 
@@ -128,7 +130,7 @@ pub const default_byte_pool_options: message_pool_module.Options = .{
     .buffer_size = 64 * 1024,
 };
 
-pub const ProductionByteEndpointError = ProductionNetworkError || message_pool_module.PoolError;
+pub const ProductionByteEndpointError = ProductionNetworkError || message_pool_module.PoolError || network_io_module.NetworkIoError;
 
 /// Type-erased simulator-control view for network fault orchestration.
 pub const AnyNetworkControl = struct {
@@ -914,6 +916,7 @@ const production_byte_runtime_name = "marionette.ByteEndpoint";
 
 pub fn productionByteEndpoint(
     allocator: std.mem.Allocator,
+    io: ?network_io_module.NetworkIo,
     entries: *std.ArrayList(ProductionNetworkEntry),
     options: ProductionEndpointOptions,
 ) ProductionByteEndpointError!ByteEndpoint {
@@ -926,7 +929,7 @@ pub fn productionByteEndpoint(
         }
     }
 
-    const runtime = try ProductionByteRuntime.init(allocator, default_byte_pool_options);
+    const runtime = try ProductionByteRuntime.init(allocator, default_byte_pool_options, io, options);
     errdefer runtime.deinit();
 
     try entries.append(allocator, .{
@@ -2001,6 +2004,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
 const ProductionByteRuntime = struct {
     const Self = @This();
+
     const Packet = struct {
         id: u64,
         from: NodeId,
@@ -2008,22 +2012,70 @@ const ProductionByteRuntime = struct {
         payload: ByteEndpoint.Message,
     };
 
+    const SocketPeer = struct {
+        id: NodeId,
+        address: []u8,
+    };
+
+    const Outbound = struct {
+        peer: NodeId,
+        connection: network_io_module.Connection,
+    };
+
+    const Mode = union(enum) {
+        fifo: Fifo,
+        socket: Socket,
+    };
+
+    const Fifo = struct {
+        queue: std.ArrayList(Packet) = .empty,
+        next_packet_id: u64 = 0,
+    };
+
+    const Socket = struct {
+        io: network_io_module.NetworkIo,
+        self: NodeId,
+        peers: []SocketPeer,
+        listener: ?network_io_module.Listener,
+        inbound: ?network_io_module.Connection = null,
+        outbound: ?Outbound = null,
+    };
+
     allocator: std.mem.Allocator,
     pool: message_pool_module.Pool,
-    queue: std.ArrayList(Packet) = .empty,
-    next_packet_id: u64 = 0,
+    mode: Mode,
 
-    fn init(allocator: std.mem.Allocator, pool_options: message_pool_module.Options) !*Self {
+    fn init(
+        allocator: std.mem.Allocator,
+        pool_options: message_pool_module.Options,
+        io: ?network_io_module.NetworkIo,
+        options: ProductionEndpointOptions,
+    ) !*Self {
         const runtime = try allocator.create(Self);
         errdefer allocator.destroy(runtime);
 
-        const pool = try message_pool_module.Pool.init(allocator, pool_options);
-        errdefer pool.deinit();
+        var pool = try message_pool_module.Pool.init(allocator, pool_options);
+        var pool_moved = false;
+        errdefer if (!pool_moved) pool.deinit();
 
-        runtime.* = .{
-            .allocator = allocator,
-            .pool = pool,
-        };
+        if (options.listen) |listen_address| {
+            const network_io = io orelse return error.NetworkUnavailable;
+            var socket = try initSocket(allocator, network_io, options, listen_address);
+            errdefer deinitSocket(allocator, &socket);
+
+            runtime.* = .{
+                .allocator = allocator,
+                .pool = pool,
+                .mode = .{ .socket = socket },
+            };
+        } else {
+            runtime.* = .{
+                .allocator = allocator,
+                .pool = pool,
+                .mode = .{ .fifo = .{} },
+            };
+        }
+        pool_moved = true;
         return runtime;
     }
 
@@ -2046,20 +2098,34 @@ const ProductionByteRuntime = struct {
     }
 
     fn sendMessage(self: *Self, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !void {
+        switch (self.mode) {
+            .fifo => |*fifo| try self.sendFifo(fifo, from, to, message),
+            .socket => |*socket| try self.sendSocket(socket, from, to, message),
+        }
+    }
+
+    fn receive(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {
+        return switch (self.mode) {
+            .fifo => |*fifo| self.receiveFifo(fifo, node),
+            .socket => |*socket| try self.receiveSocket(socket, node),
+        };
+    }
+
+    fn sendFifo(self: *Self, fifo: *Fifo, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !void {
         const packet: Packet = .{
-            .id = self.next_packet_id,
+            .id = fifo.next_packet_id,
             .from = from,
             .to = to,
             .payload = message,
         };
-        self.next_packet_id += 1;
-        try self.queue.append(self.allocator, packet);
+        fifo.next_packet_id += 1;
+        try fifo.queue.append(self.allocator, packet);
     }
 
-    fn receive(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {
-        for (self.queue.items, 0..) |packet, index| {
+    fn receiveFifo(_: *Self, fifo: *Fifo, node: NodeId) ?ByteEndpoint.Envelope {
+        for (fifo.queue.items, 0..) |packet, index| {
             if (packet.to != node) continue;
-            const ready = self.queue.orderedRemove(index);
+            const ready = fifo.queue.orderedRemove(index);
             return .{
                 .from = ready.from,
                 .message = ready.payload,
@@ -2068,13 +2134,119 @@ const ProductionByteRuntime = struct {
         return null;
     }
 
+    fn sendSocket(self: *Self, socket: *Socket, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !void {
+        std.debug.assert(from == socket.self);
+
+        const connection = try outboundConnection(socket, to);
+        const frame_len = try network_transport_module.frameLen(message.bytes().len);
+        const scratch = try self.allocator.alloc(u8, frame_len);
+        defer self.allocator.free(scratch);
+
+        var sent = false;
+        defer if (sent) message.release();
+
+        try network_transport_module.sendFrame(connection, scratch, from, to, message.bytes());
+        sent = true;
+    }
+
+    fn receiveSocket(self: *Self, socket: *Socket, node: NodeId) !?ByteEndpoint.Envelope {
+        std.debug.assert(node == socket.self);
+
+        const connection = try self.inboundConnection(socket);
+        const received = try network_transport_module.receiveFrame(connection, &self.pool);
+        if (received.to != node) {
+            received.message.release();
+            return null;
+        }
+
+        return .{
+            .from = received.from,
+            .message = received.message,
+        };
+    }
+
+    fn outboundConnection(socket: *Socket, to: NodeId) !network_io_module.Connection {
+        if (socket.outbound) |outbound| {
+            if (outbound.peer == to) return outbound.connection;
+            outbound.connection.close();
+            socket.outbound = null;
+        }
+
+        const address = peerAddress(socket, to) orelse return error.AddressNotFound;
+        const connection = try socket.io.connect(address);
+        socket.outbound = .{ .peer = to, .connection = connection };
+        return connection;
+    }
+
+    fn inboundConnection(_: *Self, socket: *Socket) !network_io_module.Connection {
+        if (socket.inbound) |connection| return connection;
+        const listener = socket.listener orelse return error.ConnectionClosed;
+        const connection = (try listener.accept()) orelse return error.ConnectionClosed;
+        socket.inbound = connection;
+        return connection;
+    }
+
     pub fn deinit(self: *Self) void {
-        for (self.queue.items) |packet| packet.payload.release();
-        self.queue.deinit(self.allocator);
+        switch (self.mode) {
+            .fifo => |*fifo| deinitFifo(self.allocator, fifo),
+            .socket => |*socket| deinitSocket(self.allocator, socket),
+        }
         self.pool.deinit();
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
+    }
+
+    fn initSocket(
+        allocator: std.mem.Allocator,
+        io: network_io_module.NetworkIo,
+        options: ProductionEndpointOptions,
+        listen_address: []const u8,
+    ) !Socket {
+        const peers = try allocator.alloc(SocketPeer, options.peers.len);
+        var copied: usize = 0;
+        errdefer {
+            for (peers[0..copied]) |peer| allocator.free(peer.address);
+            allocator.free(peers);
+        }
+
+        for (options.peers, 0..) |peer, index| {
+            peers[index] = .{
+                .id = peer.id,
+                .address = try allocator.dupe(u8, peer.address),
+            };
+            copied += 1;
+        }
+
+        const listener = try io.listen(listen_address);
+        errdefer listener.close();
+
+        return .{
+            .io = io,
+            .self = options.self,
+            .peers = peers,
+            .listener = listener,
+        };
+    }
+
+    fn deinitFifo(allocator: std.mem.Allocator, fifo: *Fifo) void {
+        for (fifo.queue.items) |packet| packet.payload.release();
+        fifo.queue.deinit(allocator);
+    }
+
+    fn deinitSocket(allocator: std.mem.Allocator, socket: *Socket) void {
+        if (socket.outbound) |outbound| outbound.connection.close();
+        if (socket.inbound) |connection| connection.close();
+        if (socket.listener) |listener| listener.close();
+        for (socket.peers) |peer| allocator.free(peer.address);
+        allocator.free(socket.peers);
+    }
+
+    fn peerAddress(socket: *const Socket, id: NodeId) ?[]const u8 {
+        for (socket.peers) |peer| {
+            if (peer.id == id) return peer.address;
+        }
+        return null;
     }
 
     pub fn deinitOpaque(ptr: *anyopaque, _: std.mem.Allocator) void {
@@ -2860,15 +3032,13 @@ test "production byte endpoint: topology-shaped handles share byte runtime" {
         .{ .id = 1, .address = "127.0.0.1:4241" },
     };
 
-    const node_0 = try productionByteEndpoint(std.testing.allocator, &entries, .{
+    const node_0 = try productionByteEndpoint(std.testing.allocator, null, &entries, .{
         .self = 0,
         .peers = &peers,
-        .listen = peers[0].address,
     });
-    const node_1 = try productionByteEndpoint(std.testing.allocator, &entries, .{
+    const node_1 = try productionByteEndpoint(std.testing.allocator, null, &entries, .{
         .self = 1,
         .peers = &peers,
-        .listen = peers[1].address,
     });
 
     try node_0.send(1, "prod");

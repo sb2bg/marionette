@@ -683,12 +683,14 @@ helpers are still deferred until a real integration needs them.
 smallest backend shape the production bus needs so far: listen, connect, accept,
 read, write, close, monotonic time, and sleep. Exact read/write helpers and a
 fake backend cover short reads/writes and closed-peer behavior. Keep
-`Endpoint(Message)` unchanged. A real socket adapter is still future work.
+`Endpoint(Message)` unchanged. A host socket adapter exists for the first
+loopback transport slice.
 
-**15f. Single-peer end-to-end socket transport.** Started. The internal IO seam
-has a host socket backend, and `src/network_transport.zig` can send and receive
-one framed payload over fake IO or a real loopback socket. Next: wire this under
-`Production.byteEndpoint` for one peer. Loopback only.
+**15f. Single-peer end-to-end socket transport.** Started.
+`Production.byteEndpoint` uses framed loopback sockets when `.listen` is
+configured. The old in-process FIFO remains for same-process production parity
+setups without `.listen`. Loopback only; reconnect, background receive, and
+multi-peer connection management are still future work.
 
 **15g. Production-bus fake IO tests.** Exercise partial frame reads/writes,
 EOF mid-frame, reconnect timing, and close discipline against the production

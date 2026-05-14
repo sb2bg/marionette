@@ -17,6 +17,10 @@ pub const ReceivedFrame = struct {
     message: message_pool.Message,
 };
 
+pub fn frameLen(payload_len: usize) network_frame.FrameError!usize {
+    return try network_frame.encodedLen(payload_len);
+}
+
 pub fn sendFrame(
     connection: network_io.Connection,
     scratch: []u8,

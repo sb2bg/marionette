@@ -84,8 +84,9 @@ var replica_0 = Replica.init(sim.env, try sim.endpoint(Message, 0));
 The design keeps `Env` non-generic and passes `Endpoint(Message)` as a sibling
 handle. `Production.endpoint(Message, opts)` currently provides a local
 in-process production-shaped endpoint with declared peer topology for
-same-process parity tests; it is not a cross-process transport. A real socket
-adapter is still future work.
+same-process parity tests. `Production.byteEndpoint(opts)` uses that same local
+adapter unless `opts.listen` is set, in which case it uses the first
+socket-backed loopback transport slice.
 
 `ByteEndpoint` is the byte-oriented sibling for libraries that want Marionette
 behind their own protocol API. `send(to, bytes)` copies borrowed bytes before

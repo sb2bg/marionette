@@ -1,8 +1,9 @@
 # Network API Direction
 
 This document describes the current network API shape. Marionette exposes the
-same app-facing typed endpoint shape from simulation and production setup. The
-production backing is still a local in-process adapter, not a socket stack.
+same app-facing typed endpoint shape from simulation and production setup.
+Production byte endpoints can use either the local same-process adapter or the
+first socket-backed transport slice when listener topology is configured.
 
 Application code should not care whether messages come from deterministic
 simulator events or production IO. The composition root chooses the backing and
@@ -128,15 +129,14 @@ that want Marionette as a test or transport backend without exposing
 
 `Production.endpoint(Message, opts)` exists today and returns the same typed
 endpoint shape as simulation. `opts` declares the local `self` node and peer
-topology. Its current backing is local and in-process, useful for same-process
-parity tests and for proving that production-shaped code does not depend on
-simulator control. It is not a cross-process transport.
+topology. Typed production endpoints still use the local in-process adapter.
 
-A real socket-backed production transport is scoped under roadmap item 15. The
-target architecture lives in `docs/network-production.md`: TigerBeetle
-MessageBus shape behind the existing endpoint vtable, with length-prefixed
-framing, refcounted message pool, lazy connect with seeded jittered backoff,
-async close, bounded per-peer queues, and silent-drop send semantics.
+`Production.byteEndpoint(opts)` uses the same local in-process adapter unless
+`opts.listen` is set. With `listen`, it uses the first socket-backed loopback
+transport slice behind the same `ByteEndpoint`/`ByteTransport` surface.
+Reconnect, background receive, typed-codec bridging, and multi-peer connection
+management remain scoped under roadmap item 15. The target architecture lives
+in `docs/network-production.md`.
 
 The standing rules until 15h ships:
 
