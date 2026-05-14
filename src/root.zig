@@ -160,6 +160,9 @@ pub const Endpoint = @import("network.zig").Endpoint;
 /// App-facing byte endpoint with explicit message ownership.
 pub const ByteEndpoint = @import("network.zig").ByteEndpoint;
 
+/// Small facade for protocol adapters built on byte endpoints.
+pub const ByteTransport = @import("network.zig").ByteTransport;
+
 /// Default byte endpoint pool sizing.
 pub const default_byte_pool_options = @import("network.zig").default_byte_pool_options;
 

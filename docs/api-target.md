@@ -94,6 +94,11 @@ returning; `acquire(len)` plus `sendMessage(to, message)` transfers an acquired
 pool buffer without a second copy; `receive()` returns a releasable message that
 the caller must release.
 
+`ByteTransport` is the preferred small wrapper for protocol adapters that do
+not want to expose message-pool ownership. It wraps `ByteEndpoint` with
+`send(to, bytes)`, `receive()` plus `deinit`, and an optional builder returned
+by `acquire(len)`.
+
 ## Example Shape
 
 Network-shaped examples should split into:

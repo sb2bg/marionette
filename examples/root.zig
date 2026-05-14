@@ -8,6 +8,7 @@ pub const replicated_register = @import("replicated_register.zig");
 pub const durable_broadcast = @import("durable_broadcast.zig");
 pub const kv_store = @import("kv_store.zig");
 pub const idempotency_bug = @import("idempotency_bug.zig");
+pub const toy_sql_db = @import("toy_sql_db.zig");
 
 test "examples: retry queue scenario is replayable" {
     const a = try retry_queue.runScenario(std.testing.allocator, 0xC0FFEE);
@@ -188,6 +189,14 @@ test "examples: idempotency bug failing seed is replayable" {
     try std.testing.expect(std.mem.indexOf(u8, a_trace, "idempotency.deposit account=bob") != null);
     try std.testing.expect(std.mem.indexOf(u8, a_trace, "reason=global_duplicate") != null);
     try std.testing.expect(std.mem.indexOf(u8, a_trace, "idempotency.invariant_violation") != null);
+}
+
+test "examples: toy SQL database uses byte transport adapter" {
+    const trace = try toy_sql_db.runScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "network.send") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "network.deliver") != null);
 }
 
 test "examples: idempotency seed search finds the bug" {

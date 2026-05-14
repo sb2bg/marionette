@@ -294,6 +294,80 @@ pub const ByteEndpoint = struct {
     }
 };
 
+/// Convenience wrapper for protocol adapters built on top of `ByteEndpoint`.
+///
+/// Adapter authors can use this instead of touching pool messages directly:
+/// received messages have `deinit`, borrowed sends copy bytes, and builders
+/// transfer an acquired buffer on successful send.
+pub const ByteTransport = struct {
+    endpoint: ByteEndpoint,
+
+    pub const Received = struct {
+        from_node: NodeId,
+        message: ByteEndpoint.Message,
+
+        pub fn from(self: Received) NodeId {
+            return self.from_node;
+        }
+
+        pub fn bytes(self: Received) []const u8 {
+            return self.message.bytes();
+        }
+
+        pub fn deinit(self: *Received) void {
+            self.message.release();
+            self.* = undefined;
+        }
+    };
+
+    pub const Builder = struct {
+        endpoint: ByteEndpoint,
+        message: ByteEndpoint.Message,
+        sent: bool = false,
+
+        pub fn bytes(self: Builder) []u8 {
+            return self.message.bytes();
+        }
+
+        pub fn send(self: *Builder, to: NodeId) !void {
+            try self.endpoint.sendMessage(to, self.message);
+            self.sent = true;
+        }
+
+        pub fn deinit(self: *Builder) void {
+            if (!self.sent) self.message.release();
+            self.* = undefined;
+        }
+    };
+
+    pub fn init(endpoint: ByteEndpoint) ByteTransport {
+        return .{ .endpoint = endpoint };
+    }
+
+    pub fn node(self: ByteTransport) NodeId {
+        return self.endpoint.node();
+    }
+
+    pub fn send(self: ByteTransport, to: NodeId, bytes: []const u8) !void {
+        try self.endpoint.send(to, bytes);
+    }
+
+    pub fn receive(self: ByteTransport) !?Received {
+        const envelope = (try self.endpoint.receive()) orelse return null;
+        return .{
+            .from_node = envelope.from,
+            .message = envelope.message,
+        };
+    }
+
+    pub fn acquire(self: ByteTransport, len: usize) !Builder {
+        return .{
+            .endpoint = self.endpoint,
+            .message = try self.endpoint.acquire(len),
+        };
+    }
+};
+
 const SharedRuntime = struct {
     world: *World,
     process_count: usize,
@@ -3013,6 +3087,26 @@ test "composition byte endpoint: send acquired message transfers ownership" {
 
     try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
     try std.testing.expectEqualStrings("pong", envelope.message.bytes());
+}
+
+test "byte transport: builder sends pooled bytes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const node_0 = ByteTransport.init(try sim.byteEndpoint(0));
+    const node_1 = ByteTransport.init(try sim.byteEndpoint(1));
+
+    var builder = try node_0.acquire(5);
+    defer builder.deinit();
+    @memcpy(builder.bytes(), "hello");
+    try builder.send(1);
+
+    var received = (try node_1.receive()).?;
+    defer received.deinit();
+
+    try std.testing.expectEqual(@as(NodeId, 0), received.from());
+    try std.testing.expectEqualStrings("hello", received.bytes());
 }
 
 test "production byte endpoint: topology-shaped handles share byte runtime" {

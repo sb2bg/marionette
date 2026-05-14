@@ -125,6 +125,30 @@ This is the intended integration point for future Zig networking/RPC libraries
 that want Marionette as a test or transport backend without exposing
 `Endpoint(Message)` to their users.
 
+`ByteTransport` is the friendlier facade for most protocol adapters. It wraps a
+`ByteEndpoint`, exposes `send(to, bytes)` and `receive()` with `deinit`, and
+keeps pool-message details out of user adapter code. Adapters that need to
+encode directly into a pooled buffer can use `acquire(len)` and then
+`builder.send(to)`.
+
+The intended shape is:
+
+```zig
+const SqlProtocol = struct {
+    transport: mar.ByteTransport,
+
+    fn sendQuery(self: SqlProtocol, to: mar.NodeId, sql: []const u8) !void {
+        try self.transport.send(to, sql);
+    }
+
+    fn receiveQuery(self: SqlProtocol) !?Request {
+        var message = (try self.transport.receive()) orelse return null;
+        defer message.deinit();
+        return try decodeRequest(message.bytes());
+    }
+};
+```
+
 ## Production Path
 
 `Production.endpoint(Message, opts)` exists today and returns the same typed
