@@ -236,14 +236,19 @@ hashes, the hash algorithm must be named and stable.
 - Recoverability budgets: start with a conservative single-node default and
   explicit destructive mode; defer strong multi-replica budgets.
 - Misdirected writes: document as a future named fault, not Phase 1 default.
+- File lifecycle operations beyond `read`, `write`, and `sync` are deferred
+  but required for real storage-engine compatibility. The first external
+  target, `lispking/kvdb`, needs file size metadata, EOF-aware reads,
+  truncate/clear, delete, and rename for WAL replay and compaction. Track this
+  under the roadmap item for disk file lifecycle and EOF-aware reads.
 
 ## Open Questions
 
 - How closely should the production `Disk` adapter align with future `std.Io`
   file APIs?
-- Should Phase 1 expose `create/delete/rename`, or should the first WAL
-  example avoid directory semantics entirely?
 - Should `sync` be per-file only, or should there also be a whole-disk sync?
+- If `rename` is modeled, should directory sync be part of the first crash
+  semantics or an explicit later durability boundary?
 - What is the smallest explicit API for declaring recovery windows?
 - What is the first reusable shape for a VOPR-style fault atlas once
   Marionette has more than one storage example?

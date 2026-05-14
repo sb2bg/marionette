@@ -440,7 +440,50 @@ Design notes:
 - Establish a simple magic naming convention or registry comment while touching
   the framing code; `kv_store` uses `MKV1`, durable broadcast uses `MDB1`.
 
-### 4. Bug-detection fuzz coverage
+### 4. Disk file lifecycle and EOF-aware reads for real storage engines
+
+The append-only WAL examples only needed sector-addressed `read`, `write`, and
+`sync`. A real embedded database such as `lispking/kvdb` needs a wider storage
+authority before it can run meaningfully under Marionette: file size metadata,
+EOF-aware reads, truncate/clear, delete, and atomic-ish rename for compaction.
+
+This is the first external-compatibility gap discovered by inspecting a real
+Zig storage engine. Add the smallest deterministic disk surface that can port
+`kvdb`'s pager/WAL layer without letting application code reach back to
+`std.fs`.
+
+Acceptance criteria:
+
+- Add a `Disk.stat` or equivalent metadata operation that returns at least file
+  size. It must be deterministic, trace-visible, and backed by both `SimDisk`
+  and `RealDisk`.
+- Add an EOF-aware read shape for variable-length files. The current
+  sector-oriented `read(..., buffer)` zero-fills short reads, which is useful
+  for page storage but insufficient for WAL iteration that must distinguish EOF
+  from zero bytes.
+- Add `truncate` or `clear` for WAL reset, with crash semantics documented.
+- Add `delete` for WAL cleanup and `rename` for compaction-style replacement.
+  Rename should define whether it is atomic in simulation, what happens across
+  crash, and whether parent-directory sync is modeled or explicitly deferred.
+- Keep logical paths rooted in Marionette's disk namespace. No host absolute
+  paths or current-working-directory behavior should leak into app code.
+- Update `RealDisk`, `SimDisk`, trace events, docs, and tidy examples together.
+- Add a small compatibility scenario that ports the storage-facing slice of
+  `kvdb` or a local surrogate with the same operations: open database, append
+  WAL records, commit, reopen/recover, compact via rename, and clear/delete the
+  WAL.
+
+Design notes:
+
+- Do not expose a full `std.fs.File` replacement. Keep the authority narrow and
+  operation-shaped so every effect can be traced and faulted.
+- Treat rename/delete/truncate as disk operations with recoverability
+  semantics, not mere filesystem conveniences.
+- If the exact crash semantics are unclear, land the no-crash deterministic
+  behavior first and explicitly reject those operations while crashed; then add
+  crash-window modeling as a follow-up.
+
+### 5. Bug-detection fuzz coverage
 
 Most deliberately buggy examples are single-seed demonstrations. Add a small
 fuzz/search layer where the bug is probabilistic, so the suite proves failures
@@ -455,7 +498,7 @@ Acceptance criteria:
 - Decide whether replicated-register and KV should also get bug-search tests,
   or document why single-seed demonstration is enough for those cases.
 
-### 5. Durable-broadcast scenario split and multi-record variant
+### 6. Durable-broadcast scenario split and multi-record variant
 
 The first durable-broadcast example intentionally compresses fault setup,
 submit, crash/restart, recovery, heal, and rebroadcast into one scenario. Split
@@ -471,7 +514,7 @@ Acceptance criteria:
 - Add or sketch a multi-record variant so recovery bugs after record zero are
   reachable.
 
-### 6. Crash / restart simulation
+### 7. Crash / restart simulation
 
 Extend `sim.control.tick()` to roll per-node crash and restart probabilities with
 stability floors. Crashed nodes are already expressible via
@@ -479,7 +522,7 @@ stability floors. Crashed nodes are already expressible via
 and no separation between "paused" and "crashed." Work this after item 4
 so the probabilistic fault machinery is shared.
 
-### 6. Liveness mode transition
+### 8. Liveness mode transition
 
 A one-shot `sim.transitionToLiveness(core: []const NodeId)` that zeroes
 probabilistic fault rates, restores the core's links, brings the core's
@@ -487,14 +530,14 @@ nodes up, and leaves non-core failures permanent. See VOPR's
 `transition_to_liveness_mode` for the reference shape. Depends on item 4
 and item 5.
 
-### 7. Named simulation profiles
+### 9. Named simulation profiles
 
 Ship `smoke`, `swarm`, `replay`, `performance` as first-class named
 profiles that expand into `RunOptions`, `SimNetworkOptions`, and runtime
 network fault controls. The replicated register example already manually
 constructs these; lift them into the library. Depends on item 4.
 
-### 8. Deterministic allocation authority and allocation-fault model
+### 10. Deterministic allocation authority and allocation-fault model
 
 Allocation is already explicit in Marionette examples, but it is not yet a
 simulated authority. That leaves two gaps: user code can still silently reach
@@ -536,13 +579,13 @@ Design notes:
   Internal trace and simulator bookkeeping may continue to use the run
   allocator; the modeled allocator is for user/application behavior.
 
-### 9. Replace the `EventQueue` linear-scan pop with a heap
+### 11. Replace the `EventQueue` linear-scan pop with a heap
 
 Not urgent. The comment in `scheduler.zig` already flags this. Do it when
 benchmarking shows the scheduler is hot, or when a user picks it up as a
 learning task.
 
-### 10. Generalize `service_nodes` to `partitionable_nodes: []const NodeId`
+### 12. Generalize `service_nodes` to `partitionable_nodes: []const NodeId`
 
 `SimNetworkOptions.service_nodes: usize` is currently a prefix count: nodes
 `0..service_nodes-1` are eligible for automatic node-isolating partitions.
