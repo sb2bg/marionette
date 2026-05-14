@@ -5,6 +5,7 @@
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
+const codec_module = @import("codec.zig");
 const message_pool_module = @import("message_pool.zig");
 const network_frame_module = @import("network_frame.zig");
 const run_module = @import("run.zig");
@@ -162,6 +163,15 @@ pub const ByteEndpoint = @import("network.zig").ByteEndpoint;
 
 /// Small facade for protocol adapters built on byte endpoints.
 pub const ByteTransport = @import("network.zig").ByteTransport;
+
+/// Typed facade for protocol codecs built on byte transports.
+pub const CodecTransport = @import("network.zig").CodecTransport;
+
+/// Built-in codecs for `CodecTransport`.
+pub const codec = codec_module;
+
+/// Receive lifetime declaration used by codecs.
+pub const CodecRecvLifetime = codec_module.RecvLifetime;
 
 /// Default byte endpoint pool sizing.
 pub const default_byte_pool_options = @import("network.zig").default_byte_pool_options;

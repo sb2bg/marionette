@@ -183,15 +183,15 @@ This is intentionally tiny. Its job is to make the future scheduler, network,
 and invariant APIs concrete enough to critique before they become core library
 surface.
 
-## Toy SQL DB
+## Toy DB
 
 Source: [`examples/toy_sql_db.zig`](https://github.com/sb2bg/marionette/blob/main/examples/toy_sql_db.zig)
 
-The toy SQL database is a tiny protocol-adapter example. It accepts only
-`PING`, `INSERT INTO kv VALUES N`, and `SELECT value FROM kv`. Its purpose is
-not SQL coverage; it shows how a user-owned protocol can wrap
-`mar.ByteTransport` so database code sees parsed `Request` values and typed
-`Response` values instead of Marionette vtables or message-pool handles.
+The toy database is a tiny protocol-adapter example. Its wire format is just a
+one-byte tag plus an optional little-endian `i64`. Its purpose is not SQL
+coverage; it shows how a user-owned protocol can declare codecs for
+`mar.CodecTransport` so database code sees typed `Request` and `Response`
+values instead of Marionette vtables, byte buffers, or message-pool handles.
 
 The scenario drives a client and server over simulated byte endpoints, so the
 same adapter shape can later sit on production byte endpoints.

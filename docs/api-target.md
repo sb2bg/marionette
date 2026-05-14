@@ -45,6 +45,12 @@ pub const Env = struct {
 pub const Control = SimControl;
 
 pub fn Endpoint(comptime Message: type) type;
+pub fn CodecTransport(comptime Codec: type) type;
+
+pub const codec = struct {
+    pub const bytes = ...;
+    pub fn fixed(comptime Send: type, comptime Recv: type) type;
+};
 
 pub const SimNetworkOptions = struct {
     nodes: usize,
@@ -98,6 +104,11 @@ the caller must release.
 not want to expose message-pool ownership. It wraps `ByteEndpoint` with
 `send(to, bytes)`, `receive()` plus `deinit`, and an optional builder returned
 by `acquire(len)`.
+
+`CodecTransport(Codec)` is the preferred typed wrapper for protocol adapters.
+The codec declares `Send`, `Recv`, `recv_lifetime`, `encode`, and `decode`.
+Received handles own the underlying bytes until `deinit`; borrowed codecs can
+opt into `take(allocator)` by providing `cloneRecv`.
 
 ## Example Shape
 
