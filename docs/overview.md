@@ -1,6 +1,8 @@
 # Overview
 
-Marionette is a deterministic simulation testing (DST) library for Zig.
+Marionette is a deterministic I/O and simulation testing library for Zig.
+The long-term target is to become the deterministic `std.Io` implementation
+for Zig.
 
 The core promise: write a service against a Marionette environment for time,
 randomness, disk, and network. In production, that environment routes to direct
@@ -9,16 +11,15 @@ the same execution from the same seed.
 
 Marionette is still experimental, but the core replay loop is real: seeded
 randomness, simulated time, trace logging, twice-and-compare replay, trace
-summaries, named post-scenario checks, and a deterministic disk authority with
-replayable faults and crash/restart simulation. It also has an unstable
-deterministic network sketch for examples, while the stable app-facing network
-API is still being designed. A real scheduler and richer replay tooling are
-planned.
+summaries, named post-scenario checks, and deterministic disk/network
+authorities with replayable faults. A deterministic `std.Io` implementation,
+real scheduler, and richer replay tooling are planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
 the replay artifact bytes, see [Trace Format](trace-format.md). For
 simulation-only fault hooks, see [BUGGIFY](buggify.md). For storage faults,
-see [Disk Fault Model](disk-fault-model.md).
+see [Disk Fault Model](disk-fault-model.md). For the long-term `std.Io`
+direction, see [std.Io Direction](std-io-direction.md).
 
 ## What This Solves
 

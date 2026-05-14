@@ -1,4 +1,4 @@
-//! Marionette: deterministic simulation testing for Zig.
+//! Marionette: deterministic I/O and simulation testing for Zig.
 //!
 //! Public API entry point.
 

@@ -1,5 +1,5 @@
 site_name: Marionette
-site_description: Deterministic simulation testing for Zig.
+site_description: Deterministic I/O and simulation testing for Zig.
 site_url: https://sb2bg.github.io/marionette/
 repo_url: https://github.com/sb2bg/marionette
 repo_name: sb2bg/marionette
@@ -37,6 +37,7 @@ nav:
       - BUGGIFY: buggify.md
       - Network Model: network.md
       - Network API Direction: network-api.md
+      - std.Io Direction: std-io-direction.md
       - Disk Fault Model: disk-fault-model.md
       - API: api.md
       - Determinism: determinism.md

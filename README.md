@@ -14,7 +14,12 @@
 
 [![CI](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
 
-Deterministic simulation testing for Zig.
+Deterministic I/O and simulation testing for Zig.
+
+Long term, Marionette is aiming to be the deterministic `std.Io` for Zig:
+production libraries accept `std.Io`, and tests swap in Marionette's
+deterministic implementation. Today, Marionette ships the simulator, trace,
+fault, disk, and network primitives that make that direction concrete.
 
 Write your code against `env`. In tests, drive `control` to inject faults. The same code runs on the simulator and on real hardware.
 

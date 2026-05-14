@@ -39,6 +39,7 @@ pub const Env = struct {
     clock: EnvClock,
     random: EnvRandom,
     tracer: Tracer,
+    pub fn io(self: Env) ?std.Io;
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void;
 };
 
@@ -79,6 +80,11 @@ pub const Production = struct {
 `runCase` accepts optional `.deinit = State.deinit` for state that owns
 non-world resources. The older positional `runWithState*` helpers are internal
 implementation details, not part of the public teaching surface.
+
+`Env.io()` is the forward-compatible `std.Io` accessor. Production envs return
+the host `std.Io` supplied to `Production.init`; simulation envs return `null`
+until Marionette has a deterministic `std.Io` implementation. See
+[Marionette as Deterministic std.Io](std-io-direction.md).
 
 The current network endpoint is obtained from the composition root:
 

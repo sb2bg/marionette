@@ -268,11 +268,20 @@ pub const Tracer = struct {
 var noop_tracer_ctx: u8 = 0;
 
 pub const Env = struct {
+    io_backend: ?std.Io = null,
     disk: disk_module.Disk,
     clock: Clock,
     random: Random,
     tracer: Tracer,
     buggify_enabled: bool = false,
+
+    /// Return the std.Io backing this environment, when one exists today.
+    ///
+    /// Production envs return their host `std.Io`. Simulation envs return null
+    /// until Marionette ships a deterministic `std.Io` implementation.
+    pub fn io(self: Env) ?std.Io {
+        return self.io_backend;
+    }
 
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void {
         try self.tracer.record(fmt, args);
@@ -302,6 +311,7 @@ pub const Env = struct {
 
 pub const Production = struct {
     allocator: std.mem.Allocator,
+    io_backend: std.Io,
     disk: disk_module.RealDisk,
     clock: clock_module.ProductionClock,
     random_source: std.Random.IoSource,
@@ -323,6 +333,7 @@ pub const Production = struct {
     pub fn init(options: Options) disk_module.DiskError!Production {
         return .{
             .allocator = options.allocator,
+            .io_backend = options.io,
             .disk = try disk_module.RealDisk.init(options.root_dir, options.io, options.disk),
             .clock = .init(),
             .random_source = .{ .io = options.io },
@@ -379,6 +390,7 @@ pub const Production = struct {
 
     pub fn env(self: *Production) Env {
         return .{
+            .io_backend = self.io_backend,
             .disk = self.disk.disk(),
             .clock = .fromProduction(&self.clock),
             .random = .fromProduction(&self.random_source),
@@ -436,6 +448,7 @@ test "env: simulation routes through world capabilities" {
     _ = try sim.env.random.intLessThan(u64, 100);
 
     try std.testing.expectEqual(@as(clock_module.Timestamp, 10), sim.env.clock.now());
+    try std.testing.expect(sim.env.io() == null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
 }
@@ -479,6 +492,7 @@ test "env: production exposes production authorities" {
 
     const env = production.env();
 
+    try std.testing.expect(env.io() != null);
     _ = env.clock.now();
     _ = try env.random.intLessThan(u8, 10);
     try env.disk.write(.{ .path = "prod/wal.log", .offset = 0, .bytes = "abcd" });

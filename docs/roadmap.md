@@ -13,6 +13,10 @@ If you are jumping back into the project after a break: read
 [Design Decisions](#design-decisions) section for the reasoning behind recent
 architectural calls.
 
+The long-term architecture is [Marionette as deterministic `std.Io`](std-io-direction.md):
+production-shaped code should eventually accept `std.Io`, while Marionette
+provides the deterministic implementation for tests.
+
 ---
 
 ## Current Status
@@ -58,6 +62,9 @@ The current disk surface is:
   restart authority over the same `SimDisk` backing state.
 - `World.simulate(...)`: constructs world-owned simulator resources and
   returns `{ env: Env, control: Control }`.
+- `Env.io()`: currently returns the host `std.Io` in production envs and null
+  in simulation envs. Simulation will return deterministic `std.Io` once the
+  runtime exists.
 - `Env.disk`: app-facing simulation disk view exposing only `read`,
   `write`, and `sync`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing

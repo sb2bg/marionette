@@ -249,10 +249,12 @@ creates parent directories on write, reads missing or short files as
 zero-filled sectors, and uses the same sector alignment checks as `SimDisk`.
 
 The `io` argument is the production host I/O backend used to perform
-filesystem calls and provide host randomness. It is not Marionette's simulator
-hook. Simulated tests should use the `Disk` returned by
-`world.simulate(...).env.disk`; harness code keeps the matching `DiskControl`
-for faults, crash, restart, and corruption.
+filesystem calls and provide host randomness. `production.env().io()` returns
+that same host `std.Io`. Simulation envs currently return `null` from `io()`
+until Marionette ships a deterministic `std.Io` implementation; see
+[`std.Io` Direction](std-io-direction.md). Simulated tests should use the
+`Disk` returned by `world.simulate(...).env.disk`; harness code keeps the
+matching `DiskControl` for faults, crash, restart, and corruption.
 
 Application code receives `Env` with an attached `Disk` field and uses only the
 app-facing operations:

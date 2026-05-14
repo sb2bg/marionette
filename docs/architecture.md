@@ -84,7 +84,9 @@ variables, thread-locals, or build flags.
 For Phase 0, Marionette owns small interfaces for time and randomness because
 they are needed now and they are not solved by `std.Io`. For disk and network,
 the long-term preference is to align with Zig's `std.Io` direction rather than
-inventing a permanent incompatible ecosystem. The migration plan is:
+inventing a permanent incompatible ecosystem. See
+[std.Io Direction](std-io-direction.md) for the destination architecture. The
+migration plan is:
 
 - Keep Marionette's public effect surface narrow while `std.Io` is unstable.
 - Model disk and network behind adapters that can wrap `std.Io` when its shape
