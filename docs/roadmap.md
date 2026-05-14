@@ -685,8 +685,10 @@ read, write, close, monotonic time, and sleep. Exact read/write helpers and a
 fake backend cover short reads/writes and closed-peer behavior. Keep
 `Endpoint(Message)` unchanged. A real socket adapter is still future work.
 
-**15f. Single-peer end-to-end socket transport.** Two processes, one peer
-each, real send and receive over the new framing. Loopback only.
+**15f. Single-peer end-to-end socket transport.** Started. The internal IO seam
+has a host socket backend, and `src/network_transport.zig` can send and receive
+one framed payload over fake IO or a real loopback socket. Next: wire this under
+`Production.byteEndpoint` for one peer. Loopback only.
 
 **15g. Production-bus fake IO tests.** Exercise partial frame reads/writes,
 EOF mid-frame, reconnect timing, and close discipline against the production

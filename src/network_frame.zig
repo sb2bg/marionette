@@ -84,11 +84,20 @@ pub fn encode(buffer: []u8, options: EncodeOptions) FrameError![]u8 {
 pub fn decode(frame: []const u8) FrameError!Decoded {
     if (frame.len < header_len) return error.FrameTooSmall;
 
-    const header = try decodeHeader(frame[0..header_len]);
+    const header_bytes = frame[0..header_len];
+    const header = try decodeHeader(header_bytes);
     if (header.frame_len != frame.len) return error.InvalidSize;
 
-    const payload = frame[payload_offset..];
-    const expected_body_checksum = std.mem.readInt(u128, frame[checksum_body_offset..][0..checksum_size], .little);
+    return try decodeParts(header_bytes, frame[payload_offset..]);
+}
+
+pub fn decodeParts(header_bytes: []const u8, payload: []const u8) FrameError!Decoded {
+    if (header_bytes.len < header_len) return error.FrameTooSmall;
+
+    const header = try decodeHeader(header_bytes);
+    if (payload.len != header.payload_len) return error.InvalidSize;
+
+    const expected_body_checksum = std.mem.readInt(u128, header_bytes[checksum_body_offset..][0..checksum_size], .little);
     if (checksum(payload) != expected_body_checksum) {
         return error.BodyChecksumMismatch;
     }
@@ -182,6 +191,22 @@ test "network frame: decodes header before body" {
     try std.testing.expectEqual(@as(usize, payload.len), header.payload_len);
     try std.testing.expectEqual(@as(u16, 1), header.from);
     try std.testing.expectEqual(@as(u16, 2), header.to);
+}
+
+test "network frame: decodes header and payload parts" {
+    const payload = "hello";
+    var buffer: [header_len + payload.len]u8 = undefined;
+
+    const frame = try encode(&buffer, .{
+        .from = 1,
+        .to = 2,
+        .payload = payload,
+    });
+    const decoded = try decodeParts(frame[0..header_len], frame[payload_offset..]);
+
+    try std.testing.expectEqual(@as(u16, 1), decoded.from);
+    try std.testing.expectEqual(@as(u16, 2), decoded.to);
+    try std.testing.expectEqualStrings(payload, decoded.payload);
 }
 
 test "network frame: rejects too-small buffers" {

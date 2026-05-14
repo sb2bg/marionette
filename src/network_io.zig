@@ -12,7 +12,9 @@ pub const NetworkIoError = std.mem.Allocator.Error || error{
     AddressInUse,
     AddressNotFound,
     ConnectionClosed,
+    InvalidAddress,
     ListenerClosed,
+    NetworkUnavailable,
 };
 
 pub const NetworkIo = struct {
@@ -101,6 +103,267 @@ pub fn writeAll(connection: Connection, bytes: []const u8) NetworkIoError!void {
         offset += written;
     }
 }
+
+pub const Host = struct {
+    allocator: std.mem.Allocator,
+    io_backend: std.Io,
+
+    const ListenerState = struct {
+        allocator: std.mem.Allocator,
+        io_backend: std.Io,
+        server: std.Io.net.Server,
+        closed: bool = false,
+    };
+
+    const ConnectionState = struct {
+        allocator: std.mem.Allocator,
+        io_backend: std.Io,
+        stream: std.Io.net.Stream,
+        closed: bool = false,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, io_backend: std.Io) Host {
+        return .{
+            .allocator = allocator,
+            .io_backend = io_backend,
+        };
+    }
+
+    pub fn io(self: *Host) NetworkIo {
+        return .{ .ptr = self, .vtable = &network_io_vtable };
+    }
+
+    fn listen(self: *Host, address_text: []const u8) NetworkIoError!Listener {
+        const address = parseAddress(address_text) catch return error.InvalidAddress;
+        const server = std.Io.net.IpAddress.listen(&address, self.io_backend, .{
+            .reuse_address = true,
+        }) catch |err| return mapListenError(err);
+        errdefer server.socket.close(self.io_backend);
+
+        const state = try self.allocator.create(ListenerState);
+        state.* = .{
+            .allocator = self.allocator,
+            .io_backend = self.io_backend,
+            .server = server,
+        };
+        return .{ .ptr = state, .vtable = &listener_vtable };
+    }
+
+    fn connect(self: *Host, address_text: []const u8) NetworkIoError!Connection {
+        const address = parseAddress(address_text) catch return error.InvalidAddress;
+        const stream = std.Io.net.IpAddress.connect(&address, self.io_backend, .{
+            .mode = .stream,
+            .protocol = .tcp,
+        }) catch |err| return mapConnectError(err);
+        errdefer stream.close(self.io_backend);
+
+        const state = try self.allocator.create(ConnectionState);
+        state.* = .{
+            .allocator = self.allocator,
+            .io_backend = self.io_backend,
+            .stream = stream,
+        };
+        return .{ .ptr = state, .vtable = &connection_vtable };
+    }
+
+    fn now(self: *Host) clock_module.Timestamp {
+        const timestamp = std.Io.Clock.real.now(self.io_backend);
+        std.debug.assert(timestamp.nanoseconds >= 0);
+        return @intCast(timestamp.nanoseconds);
+    }
+
+    fn sleep(self: *Host, duration_ns: clock_module.Duration) NetworkIoError!void {
+        std.Io.sleep(self.io_backend, .fromNanoseconds(duration_ns), .awake) catch {
+            return error.NetworkUnavailable;
+        };
+    }
+
+    fn listenerAccept(listener: *ListenerState) NetworkIoError!?Connection {
+        if (listener.closed) return error.ListenerClosed;
+        const stream = listener.server.accept(listener.io_backend) catch |err| return mapAcceptError(err);
+        errdefer stream.close(listener.io_backend);
+
+        const state = try listener.allocator.create(ConnectionState);
+        state.* = .{
+            .allocator = listener.allocator,
+            .io_backend = listener.io_backend,
+            .stream = stream,
+        };
+        return .{ .ptr = state, .vtable = &connection_vtable };
+    }
+
+    fn listenerClose(listener: *ListenerState) void {
+        if (!listener.closed) {
+            listener.server.deinit(listener.io_backend);
+            listener.closed = true;
+        }
+        const allocator = listener.allocator;
+        allocator.destroy(listener);
+    }
+
+    fn connectionRead(connection: *ConnectionState, buffer: []u8) NetworkIoError!usize {
+        if (connection.closed) return error.ConnectionClosed;
+        if (buffer.len == 0) return 0;
+        var data: [1][]u8 = .{buffer};
+        return connection.io_backend.vtable.netRead(
+            connection.io_backend.userdata,
+            connection.stream.socket.handle,
+            &data,
+        ) catch |err| return mapReadError(err);
+    }
+
+    fn connectionWrite(connection: *ConnectionState, bytes: []const u8) NetworkIoError!usize {
+        if (connection.closed) return error.ConnectionClosed;
+        if (bytes.len == 0) return 0;
+        const data: [1][]const u8 = .{bytes};
+        return connection.io_backend.vtable.netWrite(
+            connection.io_backend.userdata,
+            connection.stream.socket.handle,
+            "",
+            &data,
+            1,
+        ) catch |err| return mapWriteError(err);
+    }
+
+    fn connectionClose(connection: *ConnectionState) void {
+        if (!connection.closed) {
+            connection.stream.close(connection.io_backend);
+            connection.closed = true;
+        }
+        const allocator = connection.allocator;
+        allocator.destroy(connection);
+    }
+
+    fn parseAddress(address_text: []const u8) !std.Io.net.IpAddress {
+        return std.Io.net.IpAddress.parseLiteral(address_text);
+    }
+
+    fn mapListenError(err: anyerror) NetworkIoError {
+        return switch (err) {
+            error.AddressInUse => error.AddressInUse,
+            error.AddressUnavailable,
+            error.AddressFamilyUnsupported,
+            => error.InvalidAddress,
+            error.NetworkDown => error.NetworkUnavailable,
+            else => error.NetworkUnavailable,
+        };
+    }
+
+    fn mapConnectError(err: anyerror) NetworkIoError {
+        return switch (err) {
+            error.ConnectionRefused,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            => error.AddressNotFound,
+            error.AddressUnavailable,
+            error.AddressFamilyUnsupported,
+            => error.InvalidAddress,
+            error.ConnectionResetByPeer,
+            error.SocketUnconnected,
+            => error.ConnectionClosed,
+            error.NetworkDown => error.NetworkUnavailable,
+            else => error.NetworkUnavailable,
+        };
+    }
+
+    fn mapAcceptError(err: anyerror) NetworkIoError {
+        return switch (err) {
+            error.WouldBlock => error.AddressNotFound,
+            error.SocketNotListening => error.ListenerClosed,
+            error.ConnectionAborted => error.ConnectionClosed,
+            error.NetworkDown => error.NetworkUnavailable,
+            else => error.NetworkUnavailable,
+        };
+    }
+
+    fn mapReadError(err: anyerror) NetworkIoError {
+        return switch (err) {
+            error.ConnectionResetByPeer,
+            error.SocketUnconnected,
+            error.EndOfStream,
+            => error.ConnectionClosed,
+            error.NetworkDown => error.NetworkUnavailable,
+            else => error.NetworkUnavailable,
+        };
+    }
+
+    fn mapWriteError(err: anyerror) NetworkIoError {
+        return switch (err) {
+            error.ConnectionResetByPeer,
+            error.ConnectionRefused,
+            error.SocketUnconnected,
+            => error.ConnectionClosed,
+            error.NetworkDown,
+            error.NetworkUnreachable,
+            error.HostUnreachable,
+            => error.NetworkUnavailable,
+            else => error.NetworkUnavailable,
+        };
+    }
+
+    fn vtableListen(ptr: *anyopaque, address: []const u8) NetworkIoError!Listener {
+        const host: *Host = @ptrCast(@alignCast(ptr));
+        return try host.listen(address);
+    }
+
+    fn vtableConnect(ptr: *anyopaque, address: []const u8) NetworkIoError!Connection {
+        const host: *Host = @ptrCast(@alignCast(ptr));
+        return try host.connect(address);
+    }
+
+    fn vtableNow(ptr: *anyopaque) clock_module.Timestamp {
+        const host: *Host = @ptrCast(@alignCast(ptr));
+        return host.now();
+    }
+
+    fn vtableSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) NetworkIoError!void {
+        const host: *Host = @ptrCast(@alignCast(ptr));
+        try host.sleep(duration_ns);
+    }
+
+    fn vtableAccept(ptr: *anyopaque) NetworkIoError!?Connection {
+        const listener: *ListenerState = @ptrCast(@alignCast(ptr));
+        return try listenerAccept(listener);
+    }
+
+    fn vtableListenerClose(ptr: *anyopaque) void {
+        const listener: *ListenerState = @ptrCast(@alignCast(ptr));
+        listenerClose(listener);
+    }
+
+    fn vtableRead(ptr: *anyopaque, buffer: []u8) NetworkIoError!usize {
+        const connection: *ConnectionState = @ptrCast(@alignCast(ptr));
+        return try connectionRead(connection, buffer);
+    }
+
+    fn vtableWrite(ptr: *anyopaque, bytes: []const u8) NetworkIoError!usize {
+        const connection: *ConnectionState = @ptrCast(@alignCast(ptr));
+        return try connectionWrite(connection, bytes);
+    }
+
+    fn vtableConnectionClose(ptr: *anyopaque) void {
+        const connection: *ConnectionState = @ptrCast(@alignCast(ptr));
+        connectionClose(connection);
+    }
+
+    const network_io_vtable: NetworkIo.VTable = .{
+        .listen = vtableListen,
+        .connect = vtableConnect,
+        .now = vtableNow,
+        .sleep = vtableSleep,
+    };
+
+    const listener_vtable: Listener.VTable = .{
+        .accept = vtableAccept,
+        .close = vtableListenerClose,
+    };
+
+    const connection_vtable: Connection.VTable = .{
+        .read = vtableRead,
+        .write = vtableWrite,
+        .close = vtableConnectionClose,
+    };
+};
 
 pub const Fake = struct {
     allocator: std.mem.Allocator,

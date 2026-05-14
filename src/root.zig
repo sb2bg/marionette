@@ -260,6 +260,7 @@ test {
     _ = @import("network.zig");
     _ = @import("network_frame.zig");
     _ = @import("network_io.zig");
+    _ = @import("network_transport.zig");
     _ = @import("run.zig");
     _ = @import("run_types.zig");
     _ = @import("scheduler.zig");
