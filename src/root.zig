@@ -84,6 +84,9 @@ pub const EnvRandomError = env_module.RandomError;
 /// App-facing trace capability.
 pub const Tracer = env_module.Tracer;
 
+/// Narrow structured recording capability for `std.Io`-shaped code.
+pub const Recorder = env_module.Recorder;
+
 /// Errors returned by trace capabilities.
 pub const TracerError = env_module.TracerError;
 

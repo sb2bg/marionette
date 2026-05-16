@@ -265,6 +265,22 @@ pub const Tracer = struct {
     fn noopTracerRecordPayload(_: *anyopaque, _: []const u8) TracerError!void {}
 };
 
+pub const Recorder = struct {
+    tracer: Tracer,
+
+    pub fn none() Recorder {
+        return .{ .tracer = .none() };
+    }
+
+    pub fn fromTracer(tracer: Tracer) Recorder {
+        return .{ .tracer = tracer };
+    }
+
+    pub fn record(self: Recorder, comptime fmt: []const u8, args: anytype) TracerError!void {
+        try self.tracer.record(fmt, args);
+    }
+};
+
 var noop_tracer_ctx: u8 = 0;
 
 pub const Env = struct {
@@ -283,8 +299,12 @@ pub const Env = struct {
         return self.io_backend;
     }
 
+    pub fn recorder(self: Env) Recorder {
+        return .fromTracer(self.tracer);
+    }
+
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void {
-        try self.tracer.record(fmt, args);
+        try self.recorder().record(fmt, args);
     }
 
     /// Draw and trace a simulation-only fault hook.
@@ -451,6 +471,17 @@ test "env: simulation routes through world capabilities" {
     try std.testing.expect(sim.env.io() == null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
+}
+
+test "env: recorder is a narrow trace capability" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const recorder = sim.env.recorder();
+
+    try recorder.record("recorder.message value={}", .{42});
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "recorder.message value=42") != null);
 }
 
 test "env: simulation exposes app-facing disk operations" {

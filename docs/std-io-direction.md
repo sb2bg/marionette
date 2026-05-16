@@ -3,10 +3,10 @@
 This document sets the long-term direction for Marionette: become the
 deterministic `std.Io` implementation for Zig.
 
-The design is forward-looking. Zig 0.16 introduced the `std.Io` interface, but
-the coroutine-backed implementations needed for a full single-threaded
-cooperative simulator are still evolving. Marionette should move toward this
-shape without pretending the full runtime exists today.
+The design is forward-looking. Zig 0.16 introduced the `std.Io` interface and
+the fiber primitives needed to build stackful coroutine runtimes on supported
+architectures. That makes an experimental deterministic `std.Io` backend
+possible sooner than expected, but the API and implementation are still moving.
 
 ## Vision
 
@@ -74,21 +74,32 @@ Marionette simulator state.
 All decisions that can vary between runnable tasks must be seed-determined and
 trace-visible enough to replay failures.
 
-## Coroutine Constraint
+## Fiber and Evented Boundary
 
 The hard part is suspension. A deterministic single-threaded `std.Io`
 implementation needs to stop a task at I/O points, run another task, then resume
 the first task later.
 
-Without stable Zig coroutine support, there are three choices:
+Zig 0.16 exposes low-level fiber context switching on supported architectures
+and uses it inside `std.Io.Evented`. Marionette should not use
+`std.Io.Evented` as its simulator backend. Evented is built on kernel or OS
+event sources such as io_uring, kqueue, and platform dispatch mechanisms; their
+completion order is outside Marionette's control. That breaks the replay
+guarantee.
 
-- hand-write state machines, which defeats the purpose;
-- ship platform-specific stackful coroutines, which is high-risk and likely to
-  be rewritten later;
-- design now and implement the full scheduler when Zig support is ready.
+Marionette wants the lower-level fiber machinery, not the OS event loop. The
+deterministic backend should implement the `std.Io` vtable itself, schedule
+fibers with `World`'s seeded ordering, and route file/network operations through
+Marionette's simulated disk and network state.
 
-Marionette should take the third path for now. Do not build a libucontext or
-assembly coroutine runtime yet.
+This means Phase 1 is not blocked on inventing coroutines from scratch. It is
+blocked on whether the current fiber stack and `std.Io` surface are acceptable
+for an experimental backend. The answer can be "yes" for small opt-in tests
+before it is "yes" for production-grade large simulations.
+
+Do not build a separate libucontext or assembly coroutine runtime. If Marionette
+experiments with fibers, it should use Zig's `std.Io.fiber` primitives directly
+and keep the backend clearly marked experimental.
 
 ## Existing Primitives
 
@@ -126,6 +137,39 @@ preserving rich traces where users want them.
 
 Do not make general-purpose libraries depend on `mar.Env` just to get tracing.
 
+## External Network
+
+The deterministic simulator models a closed network. Code running under
+Marionette's deterministic `std.Io` should only be able to reach endpoints that
+the simulation declares.
+
+The default behavior for external hostnames or addresses is failure, such as
+`error.HostNotFound` or `error.NetworkUnreachable`, depending on where the
+lookup or connect fails. This strict default keeps DST runs hermetic and
+replayable.
+
+Tests that need external services should route names into simulator-owned
+servers. The small core should be:
+
+- alias this name or address to a simulator node or listener;
+- let user code run the fake service as ordinary Marionette-shaped server code;
+- let that server use simulator time, disk, network, and faults.
+
+Marionette should not grow a generic wiremock-style matcher DSL by default.
+Request matching, canned responses, sequencing, and protocol-specific behavior
+grow without a clean stopping point. If a test needs an etcd-shaped service, an
+S3-shaped service, or a SQL-shaped service, the user should be able to run a
+small fake server inside the simulator using normal Zig code.
+
+A future community package can provide reusable fake services for common
+protocols. That is different from making Marionette itself responsible for
+behavior-faithful simulators for every external dependency.
+
+Real network passthrough is an explicit escape hatch, not a default. It should
+be opt-in, visible in the trace, and documented as breaking deterministic replay.
+This is useful for smoke tests and integration suites, but those runs are not
+DST runs in the strict sense.
+
 ## Phases
 
 Phase 0 is the current bridge:
@@ -133,16 +177,20 @@ Phase 0 is the current bridge:
 - expose `Env.io()` with the honest optional contract;
 - keep building explicit-control primitives;
 - document the deterministic `std.Io` destination;
-- avoid a fake coroutine runtime.
+- add small non-coroutine pieces where they help users migrate to `io`-shaped
+  code.
 
-Phase 1 begins when coroutine support is tractable:
+Phase 1 is experimental deterministic `std.Io`:
 
-- implement the deterministic scheduler;
+- implement a Marionette `std.Io` vtable backed by Zig fiber primitives;
+- implement the deterministic scheduler for small opt-in simulations;
 - route sleep, queue, file, and network I/O through `World`;
-- make simulation `Env.io()` return a real deterministic `std.Io`.
+- make simulation `Env.io()` return a real deterministic `std.Io`;
+- document memory and platform caveats clearly.
 
-Phase 2 is ecosystem leverage:
+Phase 2 is production readiness and ecosystem leverage:
 
+- shrink or eliminate the fiber-stack caveats as Zig's coroutine work matures;
 - standard and third-party libraries accept `std.Io`;
 - Marionette can run those libraries unchanged under deterministic simulation;
 - Marionette-specific I/O primitives remain available for precise protocol
@@ -166,6 +214,8 @@ outside the simulator.
 - When should `Env.io()` become non-optional?
 - Should Marionette introduce `mar.Recorder` before or after the deterministic
   `std.Io` implementation?
+- What exact API registers external network mocks, and how much should it model
+  before users ask for more?
 - Should `Endpoint(Message)` be renamed or documented as `MessageBus(Message)`
   before public users depend on it?
 - How much of `std.Io` should Phase 1 implement before the project claims

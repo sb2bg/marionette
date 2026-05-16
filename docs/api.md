@@ -55,7 +55,21 @@ fn service(env: anytype) !void {
 ```
 
 `mar.Env` is the concrete app-facing capability bundle. Its disk, clock,
-random, and tracer authorities are fields, not lazy accessors.
+random, and tracer authorities are fields, not lazy accessors. `env.io()`
+returns the backing `std.Io` when Marionette has one today; currently that is
+production-only. `env.recorder()` returns a narrow structured recording
+capability for code that should not depend on all of `Env`.
+
+Production-shaped libraries should prefer taking the smallest capabilities they
+need. For example, code that only needs I/O and trace events can accept
+`std.Io` plus `mar.Recorder`:
+
+```zig
+fn put(io: std.Io, recorder: mar.Recorder, key: u64, value: u64) !void {
+    _ = io;
+    try recorder.record("kv.put key={} value={}", .{ key, value });
+}
+```
 
 Simulation builds app and harness views together through `World.simulate`:
 

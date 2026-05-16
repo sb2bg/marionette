@@ -40,6 +40,7 @@ pub const Env = struct {
     random: EnvRandom,
     tracer: Tracer,
     pub fn io(self: Env) ?std.Io;
+    pub fn recorder(self: Env) Recorder;
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void;
 };
 
@@ -85,6 +86,10 @@ implementation details, not part of the public teaching surface.
 the host `std.Io` supplied to `Production.init`; simulation envs return `null`
 until Marionette has a deterministic `std.Io` implementation. See
 [Marionette as Deterministic std.Io](std-io-direction.md).
+
+`Env.recorder()` returns a narrow structured recording capability. Code that is
+otherwise production-shaped should prefer accepting `std.Io` plus
+`mar.Recorder` instead of accepting all of `Env` only to emit trace events.
 
 The current network endpoint is obtained from the composition root:
 
