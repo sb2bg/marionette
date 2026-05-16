@@ -5,6 +5,7 @@
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
+const io_module = @import("io.zig");
 const codec_module = @import("codec.zig");
 const message_pool_module = @import("message_pool.zig");
 const network_frame_module = @import("network_frame.zig");
@@ -65,6 +66,9 @@ pub const DiskError = disk_module.DiskError;
 
 /// Concrete app-facing environment capability bundle.
 pub const Env = env_module.Env;
+
+/// Minimal deterministic `std.Io` backend helpers.
+pub const SimIo = io_module;
 
 /// Production capability composition root.
 pub const Production = env_module.Production;

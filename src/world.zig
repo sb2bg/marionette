@@ -9,6 +9,7 @@ const std = @import("std");
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
+const io_module = @import("io.zig");
 const network_module = @import("network.zig");
 const random_module = @import("random.zig");
 
@@ -220,6 +221,7 @@ pub const World = struct {
 
         return .{
             .env = .{
+                .io_backend = io_module.fromWorld(self),
                 .disk = sim_disk.disk(),
                 .clock = env_module.Clock.fromWorld(self),
                 .random = env_module.Random.fromWorld(self),

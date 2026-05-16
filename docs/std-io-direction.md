@@ -18,7 +18,7 @@ The desired user model is:
 
 ```zig
 const sim = try world.simulate(.{});
-const io = sim.env.io().?;
+const io = sim.env.io();
 
 try io.concurrent(serverLoop, .{io});
 try clientThatAcceptsIo(io);
@@ -48,14 +48,16 @@ code should not hold it.
 contract is intentionally narrow:
 
 - production envs return the host `std.Io` supplied to `Production.init`;
-- simulation envs return `null` until Marionette ships a deterministic
-  `std.Io` implementation.
+- simulation envs return Marionette's current deterministic `std.Io` backend.
 
-This avoids shipping a fake deterministic runtime while still making the API
-direction explicit.
+The simulation backend supports deterministic clock and random operations today.
+It also supports synchronous `async` for functions that complete immediately.
+`concurrent`, filesystem, network, and process operations fail closed until they
+are routed through simulator-owned state.
 
-The eventual target is for simulation envs to return a deterministic `std.Io`
-that routes time, files, network, queues, and concurrency through `World`.
+The eventual target is for simulation envs to return a fuller deterministic
+`std.Io` that routes time, files, network, queues, and concurrency through
+`World`.
 
 ## Mapping
 
@@ -174,7 +176,7 @@ DST runs in the strict sense.
 
 Phase 0 is the current bridge:
 
-- expose `Env.io()` with the honest optional contract;
+- expose `Env.io()` with deterministic clock/random support in simulation;
 - keep building explicit-control primitives;
 - document the deterministic `std.Io` destination;
 - add small non-coroutine pieces where they help users migrate to `io`-shaped
@@ -185,7 +187,8 @@ Phase 1 is experimental deterministic `std.Io`:
 - implement a Marionette `std.Io` vtable backed by Zig fiber primitives;
 - implement the deterministic scheduler for small opt-in simulations;
 - route sleep, queue, file, and network I/O through `World`;
-- make simulation `Env.io()` return a real deterministic `std.Io`;
+- expand simulation `Env.io()` from the Phase 0 backend into a suspending
+  deterministic `std.Io`;
 - document memory and platform caveats clearly.
 
 Phase 2 is production readiness and ecosystem leverage:
@@ -211,7 +214,8 @@ outside the simulator.
 
 ## Open Questions
 
-- When should `Env.io()` become non-optional?
+- How much of the `std.Io` vtable should the Phase 0 backend support before
+  fiber scheduling begins?
 - Should Marionette introduce `mar.Recorder` before or after the deterministic
   `std.Io` implementation?
 - What exact API registers external network mocks, and how much should it model

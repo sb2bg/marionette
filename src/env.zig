@@ -284,18 +284,18 @@ pub const Recorder = struct {
 var noop_tracer_ctx: u8 = 0;
 
 pub const Env = struct {
-    io_backend: ?std.Io = null,
+    io_backend: std.Io = .failing,
     disk: disk_module.Disk,
     clock: Clock,
     random: Random,
     tracer: Tracer,
     buggify_enabled: bool = false,
 
-    /// Return the std.Io backing this environment, when one exists today.
+    /// Return the std.Io backing this environment.
     ///
-    /// Production envs return their host `std.Io`. Simulation envs return null
-    /// until Marionette ships a deterministic `std.Io` implementation.
-    pub fn io(self: Env) ?std.Io {
+    /// Production envs return their host `std.Io`. Simulation envs return
+    /// Marionette's current deterministic `std.Io` backend.
+    pub fn io(self: Env) std.Io {
         return self.io_backend;
     }
 
@@ -468,7 +468,7 @@ test "env: simulation routes through world capabilities" {
     _ = try sim.env.random.intLessThan(u64, 100);
 
     try std.testing.expectEqual(@as(clock_module.Timestamp, 10), sim.env.clock.now());
-    try std.testing.expect(sim.env.io() == null);
+    _ = sim.env.io();
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
 }
@@ -523,7 +523,7 @@ test "env: production exposes production authorities" {
 
     const env = production.env();
 
-    try std.testing.expect(env.io() != null);
+    _ = env.io();
     _ = env.clock.now();
     _ = try env.random.intLessThan(u8, 10);
     try env.disk.write(.{ .path = "prod/wal.log", .offset = 0, .bytes = "abcd" });

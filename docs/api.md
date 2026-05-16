@@ -56,9 +56,10 @@ fn service(env: anytype) !void {
 
 `mar.Env` is the concrete app-facing capability bundle. Its disk, clock,
 random, and tracer authorities are fields, not lazy accessors. `env.io()`
-returns the backing `std.Io` when Marionette has one today; currently that is
-production-only. `env.recorder()` returns a narrow structured recording
-capability for code that should not depend on all of `Env`.
+returns the backing `std.Io`: host I/O in production envs, and Marionette's
+current deterministic backend in simulation envs. `env.recorder()` returns a
+narrow structured recording capability for code that should not depend on all
+of `Env`.
 
 Production-shaped libraries should prefer taking the smallest capabilities they
 need. For example, code that only needs I/O and trace events can accept
@@ -264,11 +265,13 @@ zero-filled sectors, and uses the same sector alignment checks as `SimDisk`.
 
 The `io` argument is the production host I/O backend used to perform
 filesystem calls and provide host randomness. `production.env().io()` returns
-that same host `std.Io`. Simulation envs currently return `null` from `io()`
-until Marionette ships a deterministic `std.Io` implementation; see
-[`std.Io` Direction](std-io-direction.md). Simulated tests should use the
-`Disk` returned by `world.simulate(...).env.disk`; harness code keeps the
-matching `DiskControl` for faults, crash, restart, and corruption.
+that same host `std.Io`. Simulation envs return Marionette's current
+deterministic `std.Io` backend; it supports deterministic clock/random
+operations today and fails closed for filesystem/network/process operations not
+yet routed through the simulator. See [`std.Io` Direction](std-io-direction.md).
+Simulated tests should use the `Disk` returned by
+`world.simulate(...).env.disk`; harness code keeps the matching `DiskControl`
+for faults, crash, restart, and corruption.
 
 Application code receives `Env` with an attached `Disk` field and uses only the
 app-facing operations:
