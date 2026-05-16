@@ -66,8 +66,9 @@ The current disk surface is:
   current deterministic `std.Io` backend in simulation envs. The simulation
   backend supports clock/sleep/random, synchronous `async`, and immediate
   `Io.Queue` operations today, plus an in-memory TCP stream subset for
-  `std.Io.net`. It fails closed for filesystem/process operations, datagrams,
-  DNS, and real external network access not yet routed through the simulator.
+  `std.Io.net` and a flat `std.Io.File` subset over `SimDisk`. It fails closed
+  for full directory/filesystem behavior, process operations, datagrams, DNS,
+  and real external network access not yet routed through the simulator.
 - `Env.disk`: app-facing simulation disk view exposing only `read`,
   `write`, and `sync`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
@@ -461,6 +462,14 @@ This is the first external-compatibility gap discovered by inspecting a real
 Zig storage engine. Add the smallest deterministic disk surface that can port
 `kvdb`'s pager/WAL layer without letting application code reach back to
 `std.fs`.
+
+Current partial progress: simulation `Env.io()` now exposes a flat
+`std.Io.File` subset over `SimDisk`, including byte-oriented positional
+read/write, length/stat, setLength, sync, and close. That is enough for
+production-shaped code that already accepts `std.Io`, but it is not a complete
+replacement for this item: Marionette's narrow `Disk` capability still lacks
+metadata, EOF-aware reads, delete, and rename, and the `std.Io` subset does not
+model full directory/filesystem behavior.
 
 Acceptance criteria:
 

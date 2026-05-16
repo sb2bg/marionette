@@ -6,6 +6,7 @@
 
 const std = @import("std");
 
+const disk_module = @import("disk.zig");
 const World = @import("world.zig").World;
 
 const Io = std.Io;
@@ -14,6 +15,9 @@ const SocketHandle = Io.net.Socket.Handle;
 pub const Backend = struct {
     allocator: std.mem.Allocator,
     world: *World,
+    disk: disk_module.Disk,
+    sector_size: u64,
+    files: std.ArrayList(FileMeta) = .empty,
     handles: std.ArrayList(HandleEntry) = .empty,
     next_handle: SocketHandle = 1000,
 
@@ -24,7 +28,18 @@ pub const Backend = struct {
         const State = union(enum) {
             listener: *ListenerState,
             connection: *ConnectionState,
+            file: *FileState,
         };
+    };
+
+    const FileMeta = struct {
+        path: []u8,
+        len: u64 = 0,
+
+        fn deinit(self: *FileMeta, allocator: std.mem.Allocator) void {
+            allocator.free(self.path);
+            self.* = undefined;
+        }
     };
 
     const ListenerState = struct {
@@ -40,10 +55,19 @@ pub const Backend = struct {
         closed: bool = false,
     };
 
-    pub fn init(allocator: std.mem.Allocator, world: *World) Backend {
+    const FileState = struct {
+        file_index: usize,
+        read: bool,
+        write: bool,
+        closed: bool = false,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, world: *World, disk: disk_module.Disk, sector_size: u64) Backend {
         return .{
             .allocator = allocator,
             .world = world,
+            .disk = disk,
+            .sector_size = sector_size,
         };
     }
 
@@ -57,8 +81,13 @@ pub const Backend = struct {
                 connection_state.inbox.deinit(self.allocator);
                 self.allocator.destroy(connection_state);
             },
+            .file => |file_state| {
+                self.allocator.destroy(file_state);
+            },
         };
         self.handles.deinit(self.allocator);
+        for (self.files.items) |*file_meta| file_meta.deinit(self.allocator);
+        self.files.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -92,6 +121,7 @@ pub const Backend = struct {
                 if (!listener_state.closed and listener_state.address.eql(address)) return entry;
             },
             .connection => {},
+            .file => {},
         };
         return null;
     }
@@ -99,14 +129,60 @@ pub const Backend = struct {
     fn listener(self: *Backend, handle: SocketHandle) ?*ListenerState {
         return switch ((self.findEntry(handle) orelse return null).state) {
             .listener => |state| state,
-            .connection => null,
+            .connection, .file => null,
         };
     }
 
     fn connection(self: *Backend, handle: SocketHandle) ?*ConnectionState {
         return switch ((self.findEntry(handle) orelse return null).state) {
-            .listener => null,
+            .listener, .file => null,
             .connection => |state| state,
+        };
+    }
+
+    fn file(self: *Backend, handle: Io.File.Handle) ?*FileState {
+        return switch ((self.findEntry(@intCast(handle)) orelse return null).state) {
+            .listener, .connection => null,
+            .file => |state| state,
+        };
+    }
+
+    fn fileMeta(self: *Backend, file_state: *const FileState) *FileMeta {
+        return &self.files.items[file_state.file_index];
+    }
+
+    fn findFileMetaIndex(self: *Backend, path: []const u8) ?usize {
+        for (self.files.items, 0..) |file_meta, index| {
+            if (std.mem.eql(u8, file_meta.path, path)) return index;
+        }
+        return null;
+    }
+
+    fn createFileMeta(self: *Backend, path: []const u8) std.mem.Allocator.Error!usize {
+        const owned_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(owned_path);
+        try self.files.append(self.allocator, .{ .path = owned_path });
+        return self.files.items.len - 1;
+    }
+
+    fn openFileHandle(
+        self: *Backend,
+        file_index: usize,
+        read: bool,
+        write: bool,
+    ) std.mem.Allocator.Error!Io.File {
+        const file_state = try self.allocator.create(FileState);
+        errdefer self.allocator.destroy(file_state);
+        file_state.* = .{
+            .file_index = file_index,
+            .read = read,
+            .write = write,
+        };
+
+        const handle = try self.createHandle(.{ .file = file_state });
+        return .{
+            .handle = @intCast(handle),
+            .flags = .{ .nonblocking = false },
         };
     }
 };
@@ -148,12 +224,12 @@ const sim_vtable: Io.VTable = .{
     .dirCreateDirPathOpen = Io.failingDirCreateDirPathOpen,
     .dirOpenDir = Io.failingDirOpenDir,
     .dirStat = Io.failingDirStat,
-    .dirStatFile = Io.failingDirStatFile,
-    .dirAccess = Io.failingDirAccess,
-    .dirCreateFile = Io.failingDirCreateFile,
+    .dirStatFile = simDirStatFile,
+    .dirAccess = simDirAccess,
+    .dirCreateFile = simDirCreateFile,
     .dirCreateFileAtomic = Io.failingDirCreateFileAtomic,
-    .dirOpenFile = Io.failingDirOpenFile,
-    .dirClose = Io.unreachableDirClose,
+    .dirOpenFile = simDirOpenFile,
+    .dirClose = simDirClose,
     .dirRead = Io.noDirRead,
     .dirRealPath = Io.failingDirRealPath,
     .dirRealPathFile = Io.failingDirRealPathFile,
@@ -170,20 +246,20 @@ const sim_vtable: Io.VTable = .{
     .dirSetTimestamps = Io.noDirSetTimestamps,
     .dirHardLink = Io.failingDirHardLink,
 
-    .fileStat = Io.failingFileStat,
-    .fileLength = Io.failingFileLength,
-    .fileClose = Io.unreachableFileClose,
-    .fileWritePositional = Io.failingFileWritePositional,
+    .fileStat = simFileStat,
+    .fileLength = simFileLength,
+    .fileClose = simFileClose,
+    .fileWritePositional = simFileWritePositional,
     .fileWriteFileStreaming = Io.noFileWriteFileStreaming,
     .fileWriteFilePositional = Io.noFileWriteFilePositional,
-    .fileReadPositional = Io.failingFileReadPositional,
+    .fileReadPositional = simFileReadPositional,
     .fileSeekBy = Io.failingFileSeekBy,
     .fileSeekTo = Io.failingFileSeekTo,
-    .fileSync = Io.failingFileSync,
+    .fileSync = simFileSync,
     .fileIsTty = Io.unreachableFileIsTty,
     .fileEnableAnsiEscapeCodes = Io.unreachableFileEnableAnsiEscapeCodes,
     .fileSupportsAnsiEscapeCodes = Io.unreachableFileSupportsAnsiEscapeCodes,
-    .fileSetLength = Io.failingFileSetLength,
+    .fileSetLength = simFileSetLength,
     .fileSetOwner = Io.failingFileSetOwner,
     .fileSetPermissions = Io.failingFileSetPermissions,
     .fileSetTimestamps = Io.noFileSetTimestamps,
@@ -307,6 +383,351 @@ fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     };
     if (duration.nanoseconds <= 0) return;
     world.clock().runFor(@intCast(duration.nanoseconds));
+}
+
+fn simDirCreateFile(
+    userdata: ?*anyopaque,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    options: Io.Dir.CreateFileOptions,
+) Io.File.OpenError!Io.File {
+    _ = dir;
+    if (options.lock != .none) return error.FileLocksUnsupported;
+    if (!isValidSimPath(sub_path)) return error.FileNotFound;
+
+    const backend = backendFromUserdata(userdata);
+    const file_index = if (backend.findFileMetaIndex(sub_path)) |index| b: {
+        if (options.exclusive) return error.PathAlreadyExists;
+        if (options.truncate) backend.files.items[index].len = 0;
+        break :b index;
+    } else backend.createFileMeta(sub_path) catch return error.SystemResources;
+
+    return backend.openFileHandle(file_index, options.read, true) catch return error.SystemResources;
+}
+
+fn simDirOpenFile(
+    userdata: ?*anyopaque,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    options: Io.Dir.OpenFileOptions,
+) Io.File.OpenError!Io.File {
+    _ = dir;
+    _ = options.allow_directory;
+    if (options.path_only) return error.AccessDenied;
+    if (options.lock != .none) return error.FileLocksUnsupported;
+    if (!isValidSimPath(sub_path)) return error.FileNotFound;
+
+    const backend = backendFromUserdata(userdata);
+    const file_index = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+    return backend.openFileHandle(file_index, options.isRead(), options.isWrite()) catch return error.SystemResources;
+}
+
+fn simDirClose(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
+    _ = userdata;
+    _ = dirs;
+}
+
+fn simDirStatFile(
+    userdata: ?*anyopaque,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    options: Io.Dir.StatFileOptions,
+) Io.Dir.StatFileError!Io.File.Stat {
+    _ = dir;
+    _ = options.follow_symlinks;
+    if (!isValidSimPath(sub_path)) return error.FileNotFound;
+
+    const backend = backendFromUserdata(userdata);
+    const file_index = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+    return buildFileStat(backend, file_index);
+}
+
+fn simDirAccess(
+    userdata: ?*anyopaque,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    options: Io.Dir.AccessOptions,
+) Io.Dir.AccessError!void {
+    _ = dir;
+    if (options.execute) return error.AccessDenied;
+    if (!isValidSimPath(sub_path)) return error.FileNotFound;
+
+    const backend = backendFromUserdata(userdata);
+    _ = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+}
+
+fn simFileStat(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.AccessDenied;
+    if (state.closed) return error.AccessDenied;
+    return buildFileStat(backend, state.file_index);
+}
+
+fn buildFileStat(backend: *Backend, file_index: usize) Io.File.Stat {
+    const meta = &backend.files.items[file_index];
+    const now = Io.Timestamp.fromNanoseconds(@intCast(backend.world.now()));
+    return .{
+        .inode = @intCast(file_index + 1),
+        .nlink = 1,
+        .size = meta.len,
+        .permissions = .default_file,
+        .kind = .file,
+        .atime = now,
+        .mtime = now,
+        .ctime = now,
+        .block_size = @intCast(@min(backend.sector_size, std.math.maxInt(Io.File.BlockSize))),
+    };
+}
+
+fn simFileLength(userdata: ?*anyopaque, file: Io.File) Io.File.LengthError!u64 {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.AccessDenied;
+    if (state.closed) return error.AccessDenied;
+    return backend.fileMeta(state).len;
+}
+
+fn simFileClose(userdata: ?*anyopaque, files: []const Io.File) void {
+    const backend = backendFromUserdata(userdata);
+    for (files) |file| {
+        if (backend.file(file.handle)) |state| state.closed = true;
+    }
+}
+
+fn simFileReadPositional(
+    userdata: ?*anyopaque,
+    file: Io.File,
+    data: []const []u8,
+    offset: u64,
+) Io.File.ReadPositionalError!usize {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.NotOpenForReading;
+    if (state.closed or !state.read) return error.NotOpenForReading;
+
+    const meta = backend.fileMeta(state);
+    if (offset >= meta.len) return 0;
+
+    var cursor = offset;
+    var total: usize = 0;
+    for (data) |buffer| {
+        if (buffer.len == 0) continue;
+        if (cursor >= meta.len) break;
+        const available = @min(@as(u64, @intCast(buffer.len)), meta.len - cursor);
+        const read_len: usize = @intCast(available);
+        readDiskBytes(backend, meta.path, buffer[0..read_len], cursor) catch |err| return mapDiskReadError(err);
+        cursor += read_len;
+        total += read_len;
+        if (read_len < buffer.len) break;
+    }
+    return total;
+}
+
+fn simFileWritePositional(
+    userdata: ?*anyopaque,
+    file: Io.File,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+    offset: u64,
+) Io.File.WritePositionalError!usize {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.NotOpenForWriting;
+    if (state.closed or !state.write) return error.NotOpenForWriting;
+
+    const meta = backend.fileMeta(state);
+    var cursor = offset;
+    var total: usize = 0;
+
+    writePart(backend, meta, header, &cursor, &total) catch |err| return mapDiskWriteError(err);
+    if (data.len > 0) {
+        for (data[0 .. data.len - 1]) |bytes| {
+            writePart(backend, meta, bytes, &cursor, &total) catch |err| return mapDiskWriteError(err);
+        }
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| {
+            writePart(backend, meta, pattern, &cursor, &total) catch |err| return mapDiskWriteError(err);
+        }
+    }
+    return total;
+}
+
+fn simFileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.AccessDenied;
+    if (state.closed) return error.AccessDenied;
+    backend.disk.sync(.{ .path = backend.fileMeta(state).path }) catch |err| return mapDiskSyncError(err);
+}
+
+fn simFileSetLength(userdata: ?*anyopaque, file: Io.File, new_length: u64) Io.File.SetLengthError!void {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.AccessDenied;
+    if (state.closed or !state.write) return error.AccessDenied;
+    const meta = backend.fileMeta(state);
+    if (new_length > meta.len) {
+        zeroDiskBytes(backend, meta.path, meta.len, new_length - meta.len) catch return error.InputOutput;
+    }
+    meta.len = new_length;
+}
+
+fn isValidSimPath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    if (std.fs.path.isAbsolute(path)) return false;
+
+    var parts = std.mem.splitAny(u8, path, "/\\");
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        if (std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
+}
+
+fn writePart(
+    backend: *Backend,
+    meta: *Backend.FileMeta,
+    bytes: []const u8,
+    cursor: *u64,
+    total: *usize,
+) disk_module.DiskError!void {
+    if (bytes.len == 0) return;
+    if (cursor.* > meta.len) {
+        try zeroDiskBytes(backend, meta.path, meta.len, cursor.* - meta.len);
+    }
+    try writeDiskBytes(backend, meta.path, bytes, cursor.*);
+    const len_u64: u64 = @intCast(bytes.len);
+    if (std.math.maxInt(u64) - cursor.* < len_u64) return error.InvalidRange;
+    cursor.* += len_u64;
+    total.* += bytes.len;
+    meta.len = @max(meta.len, cursor.*);
+}
+
+fn readDiskBytes(
+    backend: *Backend,
+    path: []const u8,
+    dest: []u8,
+    offset: u64,
+) disk_module.DiskError!void {
+    if (dest.len == 0) return;
+    const sector_size = try sectorSizeUsize(backend);
+    var sector = try backend.allocator.alloc(u8, sector_size);
+    defer backend.allocator.free(sector);
+
+    var remaining = dest;
+    var cursor = offset;
+    while (remaining.len > 0) {
+        const sector_offset_u64 = cursor % backend.sector_size;
+        const sector_offset: usize = @intCast(sector_offset_u64);
+        const sector_start = cursor - sector_offset_u64;
+        const copy_len = @min(remaining.len, sector_size - sector_offset);
+
+        try backend.disk.read(.{
+            .path = path,
+            .offset = sector_start,
+            .buffer = sector,
+        });
+        @memcpy(remaining[0..copy_len], sector[sector_offset..][0..copy_len]);
+
+        remaining = remaining[copy_len..];
+        cursor += copy_len;
+    }
+}
+
+fn writeDiskBytes(
+    backend: *Backend,
+    path: []const u8,
+    src: []const u8,
+    offset: u64,
+) disk_module.DiskError!void {
+    if (src.len == 0) return;
+    const sector_size = try sectorSizeUsize(backend);
+    var sector = try backend.allocator.alloc(u8, sector_size);
+    defer backend.allocator.free(sector);
+
+    var remaining = src;
+    var cursor = offset;
+    while (remaining.len > 0) {
+        const sector_offset_u64 = cursor % backend.sector_size;
+        const sector_offset: usize = @intCast(sector_offset_u64);
+        const sector_start = cursor - sector_offset_u64;
+        const copy_len = @min(remaining.len, sector_size - sector_offset);
+
+        if (sector_offset == 0 and copy_len == sector_size) {
+            @memcpy(sector, remaining[0..copy_len]);
+        } else {
+            try backend.disk.read(.{
+                .path = path,
+                .offset = sector_start,
+                .buffer = sector,
+            });
+            @memcpy(sector[sector_offset..][0..copy_len], remaining[0..copy_len]);
+        }
+        try backend.disk.write(.{
+            .path = path,
+            .offset = sector_start,
+            .bytes = sector,
+        });
+
+        remaining = remaining[copy_len..];
+        cursor += copy_len;
+    }
+}
+
+fn zeroDiskBytes(
+    backend: *Backend,
+    path: []const u8,
+    offset: u64,
+    len: u64,
+) disk_module.DiskError!void {
+    if (len == 0) return;
+    const sector_size = try sectorSizeUsize(backend);
+    var zeros = try backend.allocator.alloc(u8, sector_size);
+    defer backend.allocator.free(zeros);
+    @memset(zeros, 0);
+
+    var remaining = len;
+    var cursor = offset;
+    while (remaining > 0) {
+        const write_len: usize = @intCast(@min(remaining, @as(u64, @intCast(zeros.len))));
+        try writeDiskBytes(backend, path, zeros[0..write_len], cursor);
+        cursor += write_len;
+        remaining -= write_len;
+    }
+}
+
+fn sectorSizeUsize(backend: *const Backend) disk_module.DiskError!usize {
+    if (backend.sector_size == 0) return error.InvalidAlignment;
+    if (backend.sector_size > std.math.maxInt(usize)) return error.InvalidRange;
+    return @intCast(backend.sector_size);
+}
+
+fn mapDiskReadError(err: disk_module.DiskError) Io.File.ReadPositionalError {
+    return switch (err) {
+        error.OutOfMemory => error.SystemResources,
+        else => error.InputOutput,
+    };
+}
+
+fn mapDiskWriteError(err: disk_module.DiskError) Io.File.WritePositionalError {
+    return switch (err) {
+        error.OutOfMemory => error.SystemResources,
+        else => error.InputOutput,
+    };
+}
+
+fn mapDiskSyncError(err: disk_module.DiskError) Io.File.SyncError {
+    return switch (err) {
+        error.DiskUnavailable,
+        error.DiskCrashed,
+        error.WriteError,
+        error.ReadError,
+        error.InvalidAlignment,
+        error.InvalidDuration,
+        error.InvalidPath,
+        error.InvalidRate,
+        error.InvalidRange,
+        error.OutOfMemory,
+        error.InvalidTracePayload,
+        => error.InputOutput,
+    };
 }
 
 fn simNetListenIp(
@@ -453,6 +874,7 @@ fn simNetClose(userdata: ?*anyopaque, handles: []const SocketHandle) void {
         switch (entry.state) {
             .listener => |listener| listener.closed = true,
             .connection => |connection| connection.closed = true,
+            .file => |file| file.closed = true,
         }
     }
 }
@@ -463,7 +885,7 @@ fn simNetShutdown(userdata: ?*anyopaque, handle: SocketHandle, how: Io.net.Shutd
 }
 
 fn testIo(world: *World) Backend {
-    return .init(std.testing.allocator, world);
+    return .init(std.testing.allocator, world, disk_module.Disk.unavailable(), 4096);
 }
 
 test "io: simulation clock and sleep use world time" {
@@ -568,6 +990,76 @@ test "io: simulation queue works for immediately ready operations" {
 
     queue.close(io);
     try std.testing.expectError(error.Closed, queue.putOne(io, 3));
+}
+
+test "io: simulation files use byte semantics over SimDisk" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "data.bin", .{ .read = true });
+    defer file.close(io);
+
+    try file.writePositionalAll(io, "abcdef", 1);
+    try std.testing.expectEqual(@as(u64, 7), try file.length(io));
+
+    var buffer: [8]u8 = undefined;
+    const read_len = try file.readPositionalAll(io, &buffer, 0);
+    try std.testing.expectEqual(@as(usize, 7), read_len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 'a', 'b', 'c', 'd', 'e', 'f' }, buffer[0..read_len]);
+
+    try file.sync(io);
+}
+
+test "io: simulation files reopen tracked metadata" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    {
+        var file = try Io.Dir.cwd().createFile(io, "state.bin", .{});
+        defer file.close(io);
+        try file.writePositionalAll(io, "ok", 0);
+        try file.sync(io);
+    }
+
+    var reopened = try Io.Dir.cwd().openFile(io, "state.bin", .{ .allow_directory = false });
+    defer reopened.close(io);
+    try std.testing.expectEqual(@as(u64, 2), try reopened.length(io));
+    try std.testing.expectEqual(@as(u64, 2), (try Io.Dir.cwd().statFile(io, "state.bin", .{})).size);
+    try Io.Dir.cwd().access(io, "state.bin", .{ .read = true });
+
+    var buffer: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try reopened.readPositionalAll(io, &buffer, 0));
+    try std.testing.expectEqualStrings("ok", &buffer);
+}
+
+test "io: simulation files zero sparse and extended ranges" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "sparse.bin", .{ .read = true });
+    defer file.close(io);
+
+    try file.writePositionalAll(io, "old-data", 0);
+    try file.setLength(io, 0);
+    try file.writePositionalAll(io, "x", 5);
+
+    var sparse: [6]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try file.readPositionalAll(io, &sparse, 0));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 'x' }, &sparse);
+
+    try file.setLength(io, 9);
+    var extended: [9]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 9), try file.readPositionalAll(io, &extended, 0));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 'x', 0, 0, 0 }, &extended);
 }
 
 test "io: simulation tcp stream connects, accepts, reads, and writes" {

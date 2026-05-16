@@ -268,8 +268,11 @@ filesystem calls and provide host randomness. `production.env().io()` returns
 that same host `std.Io`. Simulation envs return Marionette's current
 deterministic `std.Io` backend; it supports deterministic clock/random
 operations, synchronous `async`, immediate `Io.Queue` operations, and an
-in-memory TCP stream subset today. Filesystem/process operations, datagrams,
-DNS, and real external network access still fail closed. See
+in-memory TCP stream subset today. It also supports a flat file subset over
+`SimDisk`: create/open, access/statFile, positional read/write,
+length/stat/setLength, sync, and close. Full directory/filesystem behavior,
+process operations, datagrams, DNS, and real external network access still fail
+closed. See
 [`std.Io` Direction](std-io-direction.md).
 Simulated tests should use the `Disk` returned by
 `world.simulate(...).env.disk`; harness code keeps the matching `DiskControl`

@@ -422,6 +422,10 @@ pub const SimDisk = struct {
         return .{ .ptr = self, .vtable = &control_vtable };
     }
 
+    pub fn sectorSize(self: *const Self) u64 {
+        return self.options.sector_size;
+    }
+
     pub fn deinit(self: *Self) void {
         for (self.files.items) |*file| file.deinit(self.world.allocator);
         self.files.deinit(self.world.allocator);

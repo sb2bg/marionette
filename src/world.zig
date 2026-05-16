@@ -218,7 +218,7 @@ pub const World = struct {
         var sim_io_registered = false;
         errdefer if (!sim_io_registered) self.allocator.destroy(sim_io);
 
-        sim_io.* = io_module.Backend.init(self.allocator, self);
+        sim_io.* = io_module.Backend.init(self.allocator, self, sim_disk.disk(), sim_disk.sectorSize());
         errdefer if (!sim_io_registered) sim_io.deinit();
 
         try self.registerTeardown(sim_io, io_module.deinitBackendOpaque);

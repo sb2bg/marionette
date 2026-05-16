@@ -236,11 +236,13 @@ hashes, the hash algorithm must be named and stable.
 - Recoverability budgets: start with a conservative single-node default and
   explicit destructive mode; defer strong multi-replica budgets.
 - Misdirected writes: document as a future named fault, not Phase 1 default.
-- File lifecycle operations beyond `read`, `write`, and `sync` are deferred
-  but required for real storage-engine compatibility. The first external
-  target, `lispking/kvdb`, needs file size metadata, EOF-aware reads,
-  truncate/clear, delete, and rename for WAL replay and compaction. Track this
-  under the roadmap item for disk file lifecycle and EOF-aware reads.
+- File lifecycle operations beyond `read`, `write`, and `sync` are still
+  deferred on the narrow `Disk` capability but required for real
+  storage-engine compatibility. Simulation `Env.io()` now has a flat
+  `std.Io.File` subset over `SimDisk` with length/stat, EOF-aware positional
+  reads, and setLength; delete and rename remain open. Track the broader
+  capability work under the roadmap item for disk file lifecycle and EOF-aware
+  reads.
 
 ## Open Questions
 
