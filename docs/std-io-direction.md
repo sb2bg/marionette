@@ -53,9 +53,13 @@ contract is intentionally narrow:
 The simulation backend supports deterministic clock, sleep, random, and
 `randomSecure` operations today. It also supports synchronous `async` and
 `Group.async` for functions that complete immediately, inert cancellation checks,
-and `Io.Queue` operations that can complete without parking. `concurrent`,
-blocking queue waits, filesystem, network, and process operations fail closed
-until they are routed through simulator-owned state.
+`Io.Queue` operations that can complete without parking, and a small in-memory
+TCP stream subset for `std.Io.net` listen/connect/accept/read/write/close.
+Empty accepts return `error.WouldBlock`; empty stream reads return
+`error.Timeout` while the peer remains open.
+`concurrent`, blocking queue waits, filesystem, process operations, datagrams,
+DNS, and real external network access fail closed until they are routed through
+simulator-owned state.
 
 The eventual target is for simulation envs to return a fuller deterministic
 `std.Io` that routes time, files, network, queues, and concurrency through

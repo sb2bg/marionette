@@ -267,9 +267,10 @@ The `io` argument is the production host I/O backend used to perform
 filesystem calls and provide host randomness. `production.env().io()` returns
 that same host `std.Io`. Simulation envs return Marionette's current
 deterministic `std.Io` backend; it supports deterministic clock/random
-operations, synchronous `async`, and immediate `Io.Queue` operations today, and
-fails closed for filesystem/network/process operations not yet routed through
-the simulator. See [`std.Io` Direction](std-io-direction.md).
+operations, synchronous `async`, immediate `Io.Queue` operations, and an
+in-memory TCP stream subset today. Filesystem/process operations, datagrams,
+DNS, and real external network access still fail closed. See
+[`std.Io` Direction](std-io-direction.md).
 Simulated tests should use the `Disk` returned by
 `world.simulate(...).env.disk`; harness code keeps the matching `DiskControl`
 for faults, crash, restart, and corruption.

@@ -65,8 +65,9 @@ The current disk surface is:
 - `Env.io()`: returns the host `std.Io` in production envs and Marionette's
   current deterministic `std.Io` backend in simulation envs. The simulation
   backend supports clock/sleep/random, synchronous `async`, and immediate
-  `Io.Queue` operations today, and fails closed for filesystem/network/process
-  operations not yet routed through the simulator.
+  `Io.Queue` operations today, plus an in-memory TCP stream subset for
+  `std.Io.net`. It fails closed for filesystem/process operations, datagrams,
+  DNS, and real external network access not yet routed through the simulator.
 - `Env.disk`: app-facing simulation disk view exposing only `read`,
   `write`, and `sync`.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing

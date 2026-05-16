@@ -86,8 +86,9 @@ implementation details, not part of the public teaching surface.
 the host `std.Io` supplied to `Production.init`; simulation envs return
 Marionette's current deterministic backend. That backend supports deterministic
 clock, sleep, random, `randomSecure`, synchronous `async`, immediate
-`Io.Queue` operations, and closed failures for filesystem/network/process
-operations that are not routed through the simulator yet. See
+`Io.Queue` operations, and an in-memory TCP stream subset for
+`std.Io.net`. Filesystem/process operations, datagrams, DNS, and real external
+network access still fail closed. See
 [Marionette as Deterministic std.Io](std-io-direction.md).
 
 `Env.recorder()` returns a narrow structured recording capability. Code that is

@@ -214,6 +214,16 @@ pub const World = struct {
 
         try self.registerTeardown(sim_disk, deinitSimDisk);
 
+        const sim_io = try self.allocator.create(io_module.Backend);
+        var sim_io_registered = false;
+        errdefer if (!sim_io_registered) self.allocator.destroy(sim_io);
+
+        sim_io.* = io_module.Backend.init(self.allocator, self);
+        errdefer if (!sim_io_registered) sim_io.deinit();
+
+        try self.registerTeardown(sim_io, io_module.deinitBackendOpaque);
+        sim_io_registered = true;
+
         const network_control = if (options.network) |network_options|
             try network_module.initSimControl(self, network_options)
         else
@@ -221,7 +231,7 @@ pub const World = struct {
 
         return .{
             .env = .{
-                .io_backend = io_module.fromWorld(self),
+                .io_backend = sim_io.io(),
                 .disk = sim_disk.disk(),
                 .clock = env_module.Clock.fromWorld(self),
                 .random = env_module.Random.fromWorld(self),
