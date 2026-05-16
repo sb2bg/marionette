@@ -29,9 +29,9 @@ const sim_vtable: Io.VTable = .{
     .groupAwait = Io.unreachableGroupAwait,
     .groupCancel = Io.unreachableGroupCancel,
 
-    .recancel = Io.unreachableRecancel,
-    .swapCancelProtection = Io.unreachableSwapCancelProtection,
-    .checkCancel = Io.unreachableCheckCancel,
+    .recancel = noRecancel,
+    .swapCancelProtection = noSwapCancelProtection,
+    .checkCancel = noCheckCancel,
 
     .futexWait = Io.noFutexWait,
     .futexWaitUncancelable = Io.noFutexWaitUncancelable,
@@ -117,7 +117,7 @@ const sim_vtable: Io.VTable = .{
     .progressParentFile = Io.failingProgressParentFile,
 
     .random = simRandom,
-    .randomSecure = Io.failingRandomSecure,
+    .randomSecure = simRandomSecure,
 
     .now = simNow,
     .clockResolution = simClockResolution,
@@ -156,6 +156,24 @@ fn simRandom(userdata: ?*anyopaque, buffer: []u8) void {
     worldFromUserdata(userdata).unsafeUntracedRandom().bytes(buffer);
 }
 
+fn simRandomSecure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
+    simRandom(userdata, buffer);
+}
+
+fn noRecancel(userdata: ?*anyopaque) void {
+    _ = userdata;
+}
+
+fn noSwapCancelProtection(userdata: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
+    _ = userdata;
+    _ = new;
+    return .unblocked;
+}
+
+fn noCheckCancel(userdata: ?*anyopaque) Io.Cancelable!void {
+    _ = userdata;
+}
+
 fn simNow(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
     if (!supportsClock(clock)) return .zero;
     return .fromNanoseconds(@intCast(worldFromUserdata(userdata).now()));
@@ -183,7 +201,7 @@ fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
         },
     };
     if (duration.nanoseconds <= 0) return;
-    world.runFor(@intCast(duration.nanoseconds)) catch unreachable;
+    world.clock().runFor(@intCast(duration.nanoseconds));
 }
 
 test "io: simulation clock and sleep use world time" {
@@ -211,6 +229,65 @@ test "io: simulation random is deterministic" {
     Io.random(fromWorld(&b), &b_bytes);
 
     try std.testing.expectEqualSlices(u8, &a_bytes, &b_bytes);
+}
+
+test "io: simulation randomSecure is deterministic" {
+    var a = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer a.deinit();
+    var b = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer b.deinit();
+
+    var a_bytes: [16]u8 = undefined;
+    var b_bytes: [16]u8 = undefined;
+
+    try Io.randomSecure(fromWorld(&a), &a_bytes);
+    try Io.randomSecure(fromWorld(&b), &b_bytes);
+
+    try std.testing.expectEqualSlices(u8, &a_bytes, &b_bytes);
+}
+
+test "io: simulation async completes synchronously" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const Helper = struct {
+        fn addOne(value: u32) u32 {
+            return value + 1;
+        }
+    };
+
+    const io = fromWorld(&world);
+    var future = Io.async(io, Helper.addOne, .{41});
+    try std.testing.expectEqual(@as(u32, 42), future.await(io));
+    try std.testing.expectError(error.ConcurrencyUnavailable, Io.concurrent(io, Helper.addOne, .{41}));
+}
+
+test "io: simulation cancellation checks are inert before fibers" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const io = fromWorld(&world);
+    try Io.checkCancel(io);
+    try std.testing.expectEqual(Io.CancelProtection.unblocked, Io.swapCancelProtection(io, .blocked));
+    Io.recancel(io);
+}
+
+test "io: simulation queue works for immediately ready operations" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const io = fromWorld(&world);
+    var backing: [4]u8 = undefined;
+    var queue = Io.Queue(u8).init(&backing);
+
+    try queue.putAll(io, &.{ 1, 2 });
+
+    var out: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try queue.get(io, &out, 2));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, &out);
+
+    queue.close(io);
+    try std.testing.expectError(error.Closed, queue.putOne(io, 3));
 }
 
 test "io: unsupported network fails closed" {

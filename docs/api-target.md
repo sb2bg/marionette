@@ -85,9 +85,10 @@ implementation details, not part of the public teaching surface.
 `Env.io()` is the forward-compatible `std.Io` accessor. Production envs return
 the host `std.Io` supplied to `Production.init`; simulation envs return
 Marionette's current deterministic backend. That backend supports deterministic
-clock and random operations today, synchronous `async`, and closed failures for
-filesystem/network/process operations that are not routed through the simulator
-yet. See [Marionette as Deterministic std.Io](std-io-direction.md).
+clock, sleep, random, `randomSecure`, synchronous `async`, immediate
+`Io.Queue` operations, and closed failures for filesystem/network/process
+operations that are not routed through the simulator yet. See
+[Marionette as Deterministic std.Io](std-io-direction.md).
 
 `Env.recorder()` returns a narrow structured recording capability. Code that is
 otherwise production-shaped should prefer accepting `std.Io` plus

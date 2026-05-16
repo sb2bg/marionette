@@ -50,10 +50,12 @@ contract is intentionally narrow:
 - production envs return the host `std.Io` supplied to `Production.init`;
 - simulation envs return Marionette's current deterministic `std.Io` backend.
 
-The simulation backend supports deterministic clock and random operations today.
-It also supports synchronous `async` for functions that complete immediately.
-`concurrent`, filesystem, network, and process operations fail closed until they
-are routed through simulator-owned state.
+The simulation backend supports deterministic clock, sleep, random, and
+`randomSecure` operations today. It also supports synchronous `async` and
+`Group.async` for functions that complete immediately, inert cancellation checks,
+and `Io.Queue` operations that can complete without parking. `concurrent`,
+blocking queue waits, filesystem, network, and process operations fail closed
+until they are routed through simulator-owned state.
 
 The eventual target is for simulation envs to return a fuller deterministic
 `std.Io` that routes time, files, network, queues, and concurrency through
