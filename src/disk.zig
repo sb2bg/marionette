@@ -12,6 +12,7 @@ const traceField = @import("world.zig").traceField;
 
 pub const DiskError = error{
     DiskUnavailable,
+    FileNotFound,
     InvalidAlignment,
     InvalidDuration,
     InvalidPath,
@@ -43,11 +44,22 @@ pub const Disk = struct {
     pub const Read = DiskRead;
     pub const Write = DiskWrite;
     pub const Sync = DiskSync;
+    pub const Stat = DiskStat;
+    pub const StatResult = DiskStatResult;
+    pub const ReadSome = DiskReadSome;
+    pub const SetLength = DiskSetLength;
+    pub const Delete = DiskDelete;
+    pub const Rename = DiskRename;
 
     pub const VTable = struct {
         read: *const fn (*anyopaque, Read) DiskError!void,
         write: *const fn (*anyopaque, Write) DiskError!void,
         sync: *const fn (*anyopaque, Sync) DiskError!void,
+        stat: *const fn (*anyopaque, Stat) DiskError!StatResult,
+        read_some: *const fn (*anyopaque, ReadSome) DiskError!usize,
+        set_length: *const fn (*anyopaque, SetLength) DiskError!void,
+        delete: *const fn (*anyopaque, Delete) DiskError!void,
+        rename: *const fn (*anyopaque, Rename) DiskError!void,
     };
 
     pub fn read(self: Disk, options: Read) DiskError!void {
@@ -62,6 +74,30 @@ pub const Disk = struct {
         try self.vtable.sync(self.ptr, options);
     }
 
+    pub fn stat(self: Disk, options: Stat) DiskError!StatResult {
+        return try self.vtable.stat(self.ptr, options);
+    }
+
+    /// Read up to `buffer.len` bytes, returning the number of bytes copied.
+    ///
+    /// Unlike `read`, this is EOF-aware and byte-oriented. It does not
+    /// zero-fill past the current logical file size.
+    pub fn readSome(self: Disk, options: ReadSome) DiskError!usize {
+        return try self.vtable.read_some(self.ptr, options);
+    }
+
+    pub fn setLength(self: Disk, options: SetLength) DiskError!void {
+        try self.vtable.set_length(self.ptr, options);
+    }
+
+    pub fn delete(self: Disk, options: Delete) DiskError!void {
+        try self.vtable.delete(self.ptr, options);
+    }
+
+    pub fn rename(self: Disk, options: Rename) DiskError!void {
+        try self.vtable.rename(self.ptr, options);
+    }
+
     pub fn unavailable() Disk {
         return .{ .ptr = &unavailable_disk_ctx, .vtable = &unavailable_disk_vtable };
     }
@@ -73,6 +109,11 @@ const unavailable_disk_vtable: Disk.VTable = .{
     .read = unavailableRead,
     .write = unavailableWrite,
     .sync = unavailableSync,
+    .stat = unavailableStat,
+    .read_some = unavailableReadSome,
+    .set_length = unavailableSetLength,
+    .delete = unavailableDelete,
+    .rename = unavailableRename,
 };
 
 fn unavailableRead(_: *anyopaque, _: Disk.Read) DiskError!void {
@@ -84,6 +125,26 @@ fn unavailableWrite(_: *anyopaque, _: Disk.Write) DiskError!void {
 }
 
 fn unavailableSync(_: *anyopaque, _: Disk.Sync) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableStat(_: *anyopaque, _: Disk.Stat) DiskError!Disk.StatResult {
+    return error.DiskUnavailable;
+}
+
+fn unavailableReadSome(_: *anyopaque, _: Disk.ReadSome) DiskError!usize {
+    return error.DiskUnavailable;
+}
+
+fn unavailableSetLength(_: *anyopaque, _: Disk.SetLength) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableDelete(_: *anyopaque, _: Disk.Delete) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableRename(_: *anyopaque, _: Disk.Rename) DiskError!void {
     return error.DiskUnavailable;
 }
 
@@ -134,6 +195,34 @@ pub const DiskWrite = struct {
 
 pub const DiskSync = struct {
     path: []const u8,
+};
+
+pub const DiskStat = struct {
+    path: []const u8,
+};
+
+pub const DiskStatResult = struct {
+    size: u64,
+};
+
+pub const DiskReadSome = struct {
+    path: []const u8,
+    offset: u64,
+    buffer: []u8,
+};
+
+pub const DiskSetLength = struct {
+    path: []const u8,
+    len: u64,
+};
+
+pub const DiskDelete = struct {
+    path: []const u8,
+};
+
+pub const DiskRename = struct {
+    old_path: []const u8,
+    new_path: []const u8,
 };
 
 pub const DiskCrash = struct {};
@@ -236,6 +325,65 @@ pub const RealDisk = struct {
         };
     }
 
+    fn stat(self: *Self, options: Disk.Stat) DiskError!Disk.StatResult {
+        try self.validatePath(options.path);
+        const file_stat = self.root.statFile(self.io, options.path, .{}) catch |err| {
+            return mapStatError(err);
+        };
+        return .{ .size = file_stat.size };
+    }
+
+    fn readSome(self: *Self, options: Disk.ReadSome) DiskError!usize {
+        try self.validatePath(options.path);
+        try validateByteRange(options.offset, options.buffer.len);
+
+        var file = self.root.openFile(self.io, options.path, .{
+            .mode = .read_only,
+            .allow_directory = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            else => return mapOpenReadError(err),
+        };
+        defer file.close(self.io);
+
+        return file.readPositionalAll(self.io, options.buffer, options.offset) catch |err| {
+            return mapReadError(err);
+        };
+    }
+
+    fn setLength(self: *Self, options: Disk.SetLength) DiskError!void {
+        try self.validatePath(options.path);
+
+        var file = self.root.openFile(self.io, options.path, .{
+            .mode = .read_write,
+            .allow_directory = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            else => return mapOpenWriteError(err),
+        };
+        defer file.close(self.io);
+
+        file.setLength(self.io, options.len) catch |err| {
+            return mapSetLengthError(err);
+        };
+    }
+
+    fn delete(self: *Self, options: Disk.Delete) DiskError!void {
+        try self.validatePath(options.path);
+        self.root.deleteFile(self.io, options.path) catch |err| {
+            return mapDeleteError(err);
+        };
+    }
+
+    fn rename(self: *Self, options: Disk.Rename) DiskError!void {
+        try self.validatePath(options.old_path);
+        try self.validatePath(options.new_path);
+        try self.ensureParentDirs(options.new_path);
+        std.Io.Dir.rename(self.root, options.old_path, self.root, options.new_path, self.io) catch |err| {
+            return mapRenameError(err);
+        };
+    }
+
     fn ensureParentDirs(self: *Self, path: []const u8) DiskError!void {
         const parent = std.fs.path.dirname(path) orelse return;
         if (parent.len == 0) return;
@@ -265,6 +413,11 @@ pub const RealDisk = struct {
         .read = diskRead,
         .write = diskWrite,
         .sync = diskSync,
+        .stat = diskStat,
+        .read_some = diskReadSome,
+        .set_length = diskSetLength,
+        .delete = diskDelete,
+        .rename = diskRename,
     };
 
     fn fromOpaque(ptr: *anyopaque) *Self {
@@ -281,6 +434,26 @@ pub const RealDisk = struct {
 
     fn diskSync(ptr: *anyopaque, options: Disk.Sync) DiskError!void {
         try fromOpaque(ptr).sync(options);
+    }
+
+    fn diskStat(ptr: *anyopaque, options: Disk.Stat) DiskError!Disk.StatResult {
+        return try fromOpaque(ptr).stat(options);
+    }
+
+    fn diskReadSome(ptr: *anyopaque, options: Disk.ReadSome) DiskError!usize {
+        return try fromOpaque(ptr).readSome(options);
+    }
+
+    fn diskSetLength(ptr: *anyopaque, options: Disk.SetLength) DiskError!void {
+        try fromOpaque(ptr).setLength(options);
+    }
+
+    fn diskDelete(ptr: *anyopaque, options: Disk.Delete) DiskError!void {
+        try fromOpaque(ptr).delete(options);
+    }
+
+    fn diskRename(ptr: *anyopaque, options: Disk.Rename) DiskError!void {
+        try fromOpaque(ptr).rename(options);
     }
 };
 
@@ -337,6 +510,56 @@ fn mapSyncError(err: std.Io.File.SyncError) DiskError {
     };
 }
 
+fn mapStatError(err: std.Io.Dir.StatFileError) DiskError {
+    return switch (err) {
+        error.FileNotFound => error.FileNotFound,
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.IsDir,
+        error.NotDir,
+        error.SymLinkLoop,
+        => error.InvalidPath,
+        else => error.ReadError,
+    };
+}
+
+fn mapSetLengthError(err: std.Io.File.SetLengthError) DiskError {
+    return switch (err) {
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.NonResizable,
+        => error.InvalidPath,
+        else => error.WriteError,
+    };
+}
+
+fn mapDeleteError(err: std.Io.Dir.DeleteFileError) DiskError {
+    return switch (err) {
+        error.FileNotFound => error.FileNotFound,
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.IsDir,
+        error.NotDir,
+        error.SymLinkLoop,
+        => error.InvalidPath,
+        else => error.WriteError,
+    };
+}
+
+fn mapRenameError(err: std.Io.Dir.RenameError) DiskError {
+    return switch (err) {
+        error.FileNotFound => error.FileNotFound,
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.IsDir,
+        error.NotDir,
+        error.SymLinkLoop,
+        error.CrossDevice,
+        => error.InvalidPath,
+        else => error.WriteError,
+    };
+}
+
 fn mapCreateDirError(err: std.Io.Dir.CreateDirPathError) DiskError {
     return switch (err) {
         error.AccessDenied,
@@ -346,6 +569,11 @@ fn mapCreateDirError(err: std.Io.Dir.CreateDirPathError) DiskError {
         => error.InvalidPath,
         else => error.WriteError,
     };
+}
+
+fn validateByteRange(offset: u64, len: usize) DiskError!void {
+    const len_u64: u64 = @intCast(len);
+    if (std.math.maxInt(u64) - offset < len_u64) return error.InvalidRange;
 }
 
 pub const SimDisk = struct {
@@ -364,6 +592,7 @@ pub const SimDisk = struct {
 
     const File = struct {
         path: []u8,
+        len: u64 = 0,
         sectors: std.ArrayList(Sector) = .empty,
 
         fn deinit(self: *File, allocator: std.mem.Allocator) void {
@@ -554,6 +783,166 @@ pub const SimDisk = struct {
         });
     }
 
+    fn stat(self: *Self, options: Disk.Stat) DiskError!Disk.StatResult {
+        try self.validatePath(options.path);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        const size = self.visibleLength(options.path) orelse {
+            try self.recordPathOp("disk.stat", op_id, options.path, "not_found", latency_ns);
+            return error.FileNotFound;
+        };
+
+        try self.world.recordFields("disk.stat", &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = options.path }),
+            traceField("status", .{ .literal = "ok" }),
+            traceField("size", .{ .uint = size }),
+            traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+        return .{ .size = size };
+    }
+
+    fn readSome(self: *Self, options: Disk.ReadSome) DiskError!usize {
+        try self.validatePath(options.path);
+        try validateByteRange(options.offset, options.buffer.len);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        const size = self.visibleLength(options.path) orelse {
+            try self.recordRangeOp(
+                "disk.read_some",
+                op_id,
+                options.path,
+                options.offset,
+                options.buffer.len,
+                "not_found",
+                latency_ns,
+            );
+            return error.FileNotFound;
+        };
+
+        if (try self.rollFault(op_id, options.path, "read_error", self.faults.read_error_rate)) {
+            try self.recordRangeOp(
+                "disk.read_some",
+                op_id,
+                options.path,
+                options.offset,
+                options.buffer.len,
+                "io_error",
+                latency_ns,
+            );
+            return error.ReadError;
+        }
+
+        const read_len: usize = if (options.offset >= size)
+            0
+        else
+            @intCast(@min(@as(u64, @intCast(options.buffer.len)), size - options.offset));
+
+        if (read_len > 0) {
+            @memset(options.buffer[0..read_len], 0);
+            if (self.findFile(options.path)) |file| {
+                try self.readBytes(file, options.offset, options.buffer[0..read_len]);
+            }
+            self.overlayPendingWrites(options.path, options.offset, options.buffer[0..read_len]);
+        }
+
+        const corrupt = read_len > 0 and
+            (self.rangeHasCorruptionBytes(options.path, options.offset, read_len) or
+                try self.rollFault(op_id, options.path, "corrupt_read", self.faults.corrupt_read_rate));
+        const status = if (corrupt) "corrupt" else "ok";
+        if (corrupt) {
+            options.buffer[0] ^= 0xff;
+        }
+
+        try self.world.recordFields("disk.read_some", &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = options.path }),
+            traceField("offset", .{ .uint = options.offset }),
+            traceField("requested_len", .{ .uint = @intCast(options.buffer.len) }),
+            traceField("read_len", .{ .uint = @intCast(read_len) }),
+            traceField("status", .{ .literal = status }),
+            traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+        return read_len;
+    }
+
+    fn setLength(self: *Self, options: Disk.SetLength) DiskError!void {
+        try self.validatePath(options.path);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        const committed = try self.commitPendingWrites(options.path);
+        const file = self.findFile(options.path) orelse {
+            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, committed, "not_found", latency_ns);
+            return error.FileNotFound;
+        };
+
+        try self.truncateFile(file, options.len);
+        file.len = options.len;
+        try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, committed, "ok", latency_ns);
+    }
+
+    fn delete(self: *Self, options: Disk.Delete) DiskError!void {
+        try self.validatePath(options.path);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        const committed = try self.commitPendingWrites(options.path);
+        const index = self.findFileIndex(options.path) orelse {
+            try self.recordLifecycleOp("disk.delete", op_id, options.path, null, committed, "not_found", latency_ns);
+            return error.FileNotFound;
+        };
+
+        var file = self.files.orderedRemove(index);
+        file.deinit(self.world.allocator);
+        self.clearPendingWritesFor(options.path);
+        try self.recordLifecycleOp("disk.delete", op_id, options.path, null, committed, "ok", latency_ns);
+    }
+
+    fn rename(self: *Self, options: Disk.Rename) DiskError!void {
+        try self.validatePath(options.old_path);
+        try self.validatePath(options.new_path);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        const committed = try self.commitPendingWrites(options.old_path);
+        const old_index = self.findFileIndex(options.old_path) orelse {
+            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "not_found", latency_ns);
+            return error.FileNotFound;
+        };
+        if (std.mem.eql(u8, options.old_path, options.new_path)) {
+            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "ok", latency_ns);
+            return;
+        }
+
+        const owned_new_path = try self.world.allocator.dupe(u8, options.new_path);
+        errdefer self.world.allocator.free(owned_new_path);
+
+        if (self.findFileIndex(options.new_path)) |new_index| {
+            if (new_index != old_index) {
+                var old_index_adjusted = old_index;
+                var old_new = self.files.orderedRemove(new_index);
+                old_new.deinit(self.world.allocator);
+                if (new_index < old_index_adjusted) old_index_adjusted -= 1;
+                self.clearPendingWritesFor(options.new_path);
+                self.world.allocator.free(self.files.items[old_index_adjusted].path);
+                self.files.items[old_index_adjusted].path = owned_new_path;
+            }
+        } else {
+            self.world.allocator.free(self.files.items[old_index].path);
+            self.files.items[old_index].path = owned_new_path;
+        }
+
+        try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "ok", latency_ns);
+    }
+
     fn crash(self: *Self, _: Crash) DiskError!void {
         try self.ensureRunning();
 
@@ -709,6 +1098,13 @@ pub const SimDisk = struct {
         return null;
     }
 
+    fn findFileIndex(self: *Self, path: []const u8) ?usize {
+        for (self.files.items, 0..) |*file, index| {
+            if (std.mem.eql(u8, file.path, path)) return index;
+        }
+        return null;
+    }
+
     fn getOrCreateFile(self: *Self, path: []const u8) DiskError!*File {
         if (self.findFile(path)) |file| return file;
 
@@ -740,6 +1136,18 @@ pub const SimDisk = struct {
         });
     }
 
+    fn clearPendingWritesFor(self: *Self, path: []const u8) void {
+        var index: usize = 0;
+        while (index < self.pending_writes.items.len) {
+            if (!std.mem.eql(u8, self.pending_writes.items[index].path, path)) {
+                index += 1;
+                continue;
+            }
+            var pending = self.pending_writes.orderedRemove(index);
+            pending.deinit(self.world.allocator);
+        }
+    }
+
     fn commitPendingWrites(self: *Self, path: []const u8) DiskError!u64 {
         var committed: u64 = 0;
         var index: usize = 0;
@@ -766,6 +1174,7 @@ pub const SimDisk = struct {
     fn applyFullWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
         const file = try self.getOrCreateFile(pending.path);
         try self.writeSectors(file, pending.offset, pending.bytes);
+        file.len = @max(file.len, try endOffset(pending.offset, pending.bytes.len));
     }
 
     fn applyTornWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
@@ -774,6 +1183,7 @@ pub const SimDisk = struct {
 
         const file = try self.getOrCreateFile(pending.path);
         try self.writeBytes(file, pending.offset, pending.bytes[0..torn_len]);
+        file.len = @max(file.len, try endOffset(pending.offset, torn_len));
     }
 
     fn findSector(_: *Self, file: *File, index: u64) ?*Sector {
@@ -811,6 +1221,23 @@ pub const SimDisk = struct {
         }
     }
 
+    fn readBytes(self: *Self, file: *File, offset: u64, buffer: []u8) DiskError!void {
+        var remaining = buffer;
+        var cursor = offset;
+        const sector_size: usize = @intCast(self.options.sector_size);
+
+        while (remaining.len > 0) {
+            const sector_index = cursor / self.options.sector_size;
+            const sector_offset: usize = @intCast(cursor % self.options.sector_size);
+            const readable = @min(sector_size - sector_offset, remaining.len);
+            if (self.findSector(file, sector_index)) |sector| {
+                @memcpy(remaining[0..readable], sector.bytes[sector_offset..][0..readable]);
+            }
+            remaining = remaining[readable..];
+            cursor += readable;
+        }
+    }
+
     fn rangeHasCorruption(self: *Self, path: []const u8, offset: u64, len: usize) bool {
         const file = self.findFile(path) orelse return false;
         var remaining = len;
@@ -826,6 +1253,41 @@ pub const SimDisk = struct {
         }
 
         return false;
+    }
+
+    fn rangeHasCorruptionBytes(self: *Self, path: []const u8, offset: u64, len: usize) bool {
+        const file = self.findFile(path) orelse return false;
+        var remaining = len;
+        var cursor = offset;
+        const sector_size: usize = @intCast(self.options.sector_size);
+
+        while (remaining > 0) {
+            const sector_index = cursor / self.options.sector_size;
+            const sector_offset: usize = @intCast(cursor % self.options.sector_size);
+            const readable = @min(sector_size - sector_offset, remaining);
+            if (self.findSector(file, sector_index)) |sector| {
+                if (sector.corrupt) return true;
+            }
+            remaining -= readable;
+            cursor += readable;
+        }
+
+        return false;
+    }
+
+    fn visibleLength(self: *Self, path: []const u8) ?u64 {
+        var found = false;
+        var len: u64 = 0;
+        if (self.findFile(path)) |file| {
+            found = true;
+            len = file.len;
+        }
+        for (self.pending_writes.items) |*pending| {
+            if (!std.mem.eql(u8, pending.path, path)) continue;
+            found = true;
+            len = @max(len, endOffset(pending.offset, pending.bytes.len) catch std.math.maxInt(u64));
+        }
+        return if (found) len else null;
     }
 
     fn overlayPendingWrites(self: *Self, path: []const u8, offset: u64, buffer: []u8) void {
@@ -871,6 +1333,35 @@ pub const SimDisk = struct {
         }
     }
 
+    fn truncateFile(self: *Self, file: *File, len: u64) DiskError!void {
+        const sector_size = self.options.sector_size;
+        const keep_sector_count = if (len == 0) 0 else (len - 1) / sector_size + 1;
+
+        var index: usize = 0;
+        while (index < file.sectors.items.len) {
+            if (file.sectors.items[index].index < keep_sector_count) {
+                index += 1;
+                continue;
+            }
+            var sector = file.sectors.orderedRemove(index);
+            sector.deinit(self.world.allocator);
+        }
+
+        if (len > 0 and len % sector_size != 0) {
+            const last_sector_index = len / sector_size;
+            const keep_bytes: usize = @intCast(len % sector_size);
+            if (self.findSector(file, last_sector_index)) |sector| {
+                @memset(sector.bytes[keep_bytes..], 0);
+            }
+        }
+    }
+
+    fn endOffset(offset: u64, len: usize) DiskError!u64 {
+        const len_u64: u64 = @intCast(len);
+        if (std.math.maxInt(u64) - offset < len_u64) return error.InvalidRange;
+        return offset + len_u64;
+    }
+
     fn recordCrashWrite(
         self: *Self,
         pending: *const PendingWrite,
@@ -883,6 +1374,72 @@ pub const SimDisk = struct {
             traceField("len", .{ .uint = @intCast(pending.bytes.len) }),
             traceField("result", .{ .literal = result }),
         });
+    }
+
+    fn recordPathOp(
+        self: *Self,
+        name: []const u8,
+        op_id: u64,
+        path: []const u8,
+        status: []const u8,
+        latency_ns: clock_module.Duration,
+    ) DiskError!void {
+        try self.world.recordFields(name, &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = path }),
+            traceField("status", .{ .literal = status }),
+            traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+    }
+
+    fn recordMetadataOp(
+        self: *Self,
+        name: []const u8,
+        op_id: u64,
+        path: []const u8,
+        len: u64,
+        committed: u64,
+        status: []const u8,
+        latency_ns: clock_module.Duration,
+    ) DiskError!void {
+        try self.world.recordFields(name, &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = path }),
+            traceField("len", .{ .uint = len }),
+            traceField("status", .{ .literal = status }),
+            traceField("committed_writes", .{ .uint = committed }),
+            traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+    }
+
+    fn recordLifecycleOp(
+        self: *Self,
+        name: []const u8,
+        op_id: u64,
+        path: []const u8,
+        new_path: ?[]const u8,
+        committed: u64,
+        status: []const u8,
+        latency_ns: clock_module.Duration,
+    ) DiskError!void {
+        if (new_path) |renamed_to| {
+            try self.world.recordFields(name, &.{
+                traceField("op", .{ .uint = op_id }),
+                traceField("path", .{ .text = path }),
+                traceField("new_path", .{ .text = renamed_to }),
+                traceField("status", .{ .literal = status }),
+                traceField("committed_writes", .{ .uint = committed }),
+                traceField("latency_ns", .{ .uint = latency_ns }),
+            });
+        } else {
+            try self.world.recordFields(name, &.{
+                traceField("op", .{ .uint = op_id }),
+                traceField("path", .{ .text = path }),
+                traceField("status", .{ .literal = status }),
+                traceField("committed_writes", .{ .uint = committed }),
+                traceField("latency_ns", .{ .uint = latency_ns }),
+            });
+        }
     }
 
     fn recordRangeOp(
@@ -909,6 +1466,11 @@ pub const SimDisk = struct {
         .read = diskRead,
         .write = diskWrite,
         .sync = diskSync,
+        .stat = diskStat,
+        .read_some = diskReadSome,
+        .set_length = diskSetLength,
+        .delete = diskDelete,
+        .rename = diskRename,
     };
 
     const control_vtable: DiskControl.VTable = .{
@@ -933,6 +1495,26 @@ pub const SimDisk = struct {
 
     fn diskSync(ptr: *anyopaque, options: Disk.Sync) DiskError!void {
         try fromOpaque(ptr).sync(options);
+    }
+
+    fn diskStat(ptr: *anyopaque, options: Disk.Stat) DiskError!Disk.StatResult {
+        return try fromOpaque(ptr).stat(options);
+    }
+
+    fn diskReadSome(ptr: *anyopaque, options: Disk.ReadSome) DiskError!usize {
+        return try fromOpaque(ptr).readSome(options);
+    }
+
+    fn diskSetLength(ptr: *anyopaque, options: Disk.SetLength) DiskError!void {
+        try fromOpaque(ptr).setLength(options);
+    }
+
+    fn diskDelete(ptr: *anyopaque, options: Disk.Delete) DiskError!void {
+        try fromOpaque(ptr).delete(options);
+    }
+
+    fn diskRename(ptr: *anyopaque, options: Disk.Rename) DiskError!void {
+        try fromOpaque(ptr).rename(options);
     }
 
     fn controlSetFaults(ptr: *anyopaque, faults: DiskFaultOptions) DiskError!void {
