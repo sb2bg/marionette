@@ -1618,6 +1618,81 @@ test "disk: real disk rejects invalid paths and unaligned ranges" {
     }));
 }
 
+test "disk: lifecycle operations are deterministic and trace-visible" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    try app_disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try std.testing.expectEqual(@as(u64, 4), (try app_disk.stat(.{ .path = "wal.log" })).size);
+
+    var small: [2]u8 = @splat(0xff);
+    try std.testing.expectEqual(@as(usize, 2), try app_disk.readSome(.{
+        .path = "wal.log",
+        .offset = 2,
+        .buffer = &small,
+    }));
+    try std.testing.expectEqualStrings("cd", &small);
+
+    var eof_buffer: [4]u8 = @splat(0xff);
+    try std.testing.expectEqual(@as(usize, 0), try app_disk.readSome(.{
+        .path = "wal.log",
+        .offset = 4,
+        .buffer = &eof_buffer,
+    }));
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0xff)), &eof_buffer);
+
+    try app_disk.setLength(.{ .path = "wal.log", .len = 2 });
+    try std.testing.expectEqual(@as(u64, 2), (try app_disk.stat(.{ .path = "wal.log" })).size);
+
+    try app_disk.rename(.{ .old_path = "wal.log", .new_path = "archive/wal.log" });
+    try std.testing.expectError(error.FileNotFound, app_disk.stat(.{ .path = "wal.log" }));
+    try std.testing.expectEqual(@as(u64, 2), (try app_disk.stat(.{ .path = "archive/wal.log" })).size);
+
+    try app_disk.delete(.{ .path = "archive/wal.log" });
+    try std.testing.expectError(error.FileNotFound, app_disk.stat(.{ .path = "archive/wal.log" }));
+
+    const trace = world.traceBytes();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.stat op=1 path=wal.log status=ok size=4 latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.read_some op=2 path=wal.log offset=2 requested_len=2 read_len=2 status=ok latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.set_length op=4 path=wal.log len=2 status=ok committed_writes=1 latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.rename op=6 path=wal.log new_path=archive/wal.log status=ok committed_writes=0 latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.delete op=9 path=archive/wal.log status=ok committed_writes=0 latency_ns=10") != null);
+}
+
+test "disk: real disk supports lifecycle operations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    try app_disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try std.testing.expectEqual(@as(u64, 4), (try app_disk.stat(.{ .path = "wal.log" })).size);
+
+    var buffer: [3]u8 = @splat(0xff);
+    try std.testing.expectEqual(@as(usize, 2), try app_disk.readSome(.{
+        .path = "wal.log",
+        .offset = 2,
+        .buffer = &buffer,
+    }));
+    try std.testing.expectEqualSlices(u8, "cd", buffer[0..2]);
+    try std.testing.expectEqual(@as(u8, 0xff), buffer[2]);
+
+    try app_disk.setLength(.{ .path = "wal.log", .len = 1 });
+    try app_disk.rename(.{ .old_path = "wal.log", .new_path = "compact/wal.log" });
+    try std.testing.expectEqual(@as(u64, 1), (try app_disk.stat(.{ .path = "compact/wal.log" })).size);
+    try app_disk.delete(.{ .path = "compact/wal.log" });
+    try std.testing.expectError(error.FileNotFound, app_disk.stat(.{ .path = "compact/wal.log" }));
+}
+
 test "disk: sync consumes operation ids and escapes logical paths" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
