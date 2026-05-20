@@ -35,6 +35,7 @@ pub const Backend = struct {
     const FileMeta = struct {
         path: []u8,
         len: u64 = 0,
+        deleted: bool = false,
 
         fn deinit(self: *FileMeta, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
@@ -153,6 +154,7 @@ pub const Backend = struct {
 
     fn findFileMetaIndex(self: *Backend, path: []const u8) ?usize {
         for (self.files.items, 0..) |file_meta, index| {
+            if (file_meta.deleted) continue;
             if (std.mem.eql(u8, file_meta.path, path)) return index;
         }
         return null;
@@ -163,6 +165,15 @@ pub const Backend = struct {
         errdefer self.allocator.free(owned_path);
         try self.files.append(self.allocator, .{ .path = owned_path });
         return self.files.items.len - 1;
+    }
+
+    fn closeFileHandlesForIndex(self: *Backend, file_index: usize) void {
+        for (self.handles.items) |*entry| switch (entry.state) {
+            .file => |file_state| {
+                if (file_state.file_index == file_index) file_state.closed = true;
+            },
+            .listener, .connection => {},
+        };
     }
 
     fn openFileHandle(
@@ -233,9 +244,9 @@ const sim_vtable: Io.VTable = .{
     .dirRead = Io.noDirRead,
     .dirRealPath = Io.failingDirRealPath,
     .dirRealPathFile = Io.failingDirRealPathFile,
-    .dirDeleteFile = Io.failingDirDeleteFile,
+    .dirDeleteFile = simDirDeleteFile,
     .dirDeleteDir = Io.failingDirDeleteDir,
-    .dirRename = Io.failingDirRename,
+    .dirRename = simDirRename,
     .dirRenamePreserve = Io.failingDirRenamePreserve,
     .dirSymLink = Io.failingDirSymLink,
     .dirReadLink = Io.failingDirReadLink,
@@ -398,7 +409,13 @@ fn simDirCreateFile(
     const backend = backendFromUserdata(userdata);
     const file_index = if (backend.findFileMetaIndex(sub_path)) |index| b: {
         if (options.exclusive) return error.PathAlreadyExists;
-        if (options.truncate) backend.files.items[index].len = 0;
+        if (options.truncate) {
+            backend.disk.setLength(.{ .path = sub_path, .len = 0 }) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return mapDiskOpenError(err),
+            };
+            backend.files.items[index].len = 0;
+        }
         break :b index;
     } else backend.createFileMeta(sub_path) catch return error.SystemResources;
 
@@ -456,10 +473,68 @@ fn simDirAccess(
     _ = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
 }
 
+fn simDirDeleteFile(
+    userdata: ?*anyopaque,
+    dir: Io.Dir,
+    sub_path: []const u8,
+) Io.Dir.DeleteFileError!void {
+    _ = dir;
+    if (!isValidSimPath(sub_path)) return error.FileNotFound;
+
+    const backend = backendFromUserdata(userdata);
+    const file_index = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+    backend.disk.delete(.{ .path = sub_path }) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return mapDiskDeleteError(err),
+    };
+
+    backend.closeFileHandlesForIndex(file_index);
+    backend.files.items[file_index].deleted = true;
+    backend.files.items[file_index].len = 0;
+}
+
+fn simDirRename(
+    userdata: ?*anyopaque,
+    old_dir: Io.Dir,
+    old_sub_path: []const u8,
+    new_dir: Io.Dir,
+    new_sub_path: []const u8,
+) Io.Dir.RenameError!void {
+    _ = old_dir;
+    _ = new_dir;
+    if (!isValidSimPath(old_sub_path)) return error.FileNotFound;
+    if (!isValidSimPath(new_sub_path)) return error.FileNotFound;
+
+    const backend = backendFromUserdata(userdata);
+    const old_index = backend.findFileMetaIndex(old_sub_path) orelse return error.FileNotFound;
+    if (std.mem.eql(u8, old_sub_path, new_sub_path)) return;
+
+    if (backend.findFileMetaIndex(new_sub_path)) |new_index| {
+        backend.disk.delete(.{ .path = new_sub_path }) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return mapDiskRenameError(err),
+        };
+        backend.closeFileHandlesForIndex(new_index);
+        backend.files.items[new_index].deleted = true;
+        backend.files.items[new_index].len = 0;
+    }
+
+    backend.disk.rename(.{ .old_path = old_sub_path, .new_path = new_sub_path }) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (backend.files.items[old_index].len != 0) return error.FileNotFound;
+        },
+        else => return mapDiskRenameError(err),
+    };
+
+    const owned_path = backend.allocator.dupe(u8, new_sub_path) catch return error.SystemResources;
+    backend.allocator.free(backend.files.items[old_index].path);
+    backend.files.items[old_index].path = owned_path;
+}
+
 fn simFileStat(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
     const backend = backendFromUserdata(userdata);
     const state = backend.file(file.handle) orelse return error.AccessDenied;
-    if (state.closed) return error.AccessDenied;
+    if (state.closed or backend.fileMeta(state).deleted) return error.AccessDenied;
     return buildFileStat(backend, state.file_index);
 }
 
@@ -482,7 +557,7 @@ fn buildFileStat(backend: *Backend, file_index: usize) Io.File.Stat {
 fn simFileLength(userdata: ?*anyopaque, file: Io.File) Io.File.LengthError!u64 {
     const backend = backendFromUserdata(userdata);
     const state = backend.file(file.handle) orelse return error.AccessDenied;
-    if (state.closed) return error.AccessDenied;
+    if (state.closed or backend.fileMeta(state).deleted) return error.AccessDenied;
     return backend.fileMeta(state).len;
 }
 
@@ -501,7 +576,7 @@ fn simFileReadPositional(
 ) Io.File.ReadPositionalError!usize {
     const backend = backendFromUserdata(userdata);
     const state = backend.file(file.handle) orelse return error.NotOpenForReading;
-    if (state.closed or !state.read) return error.NotOpenForReading;
+    if (state.closed or !state.read or backend.fileMeta(state).deleted) return error.NotOpenForReading;
 
     const meta = backend.fileMeta(state);
     if (offset >= meta.len) return 0;
@@ -531,7 +606,7 @@ fn simFileWritePositional(
 ) Io.File.WritePositionalError!usize {
     const backend = backendFromUserdata(userdata);
     const state = backend.file(file.handle) orelse return error.NotOpenForWriting;
-    if (state.closed or !state.write) return error.NotOpenForWriting;
+    if (state.closed or !state.write or backend.fileMeta(state).deleted) return error.NotOpenForWriting;
 
     const meta = backend.fileMeta(state);
     var cursor = offset;
@@ -553,18 +628,24 @@ fn simFileWritePositional(
 fn simFileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
     const backend = backendFromUserdata(userdata);
     const state = backend.file(file.handle) orelse return error.AccessDenied;
-    if (state.closed) return error.AccessDenied;
+    if (state.closed or backend.fileMeta(state).deleted) return error.AccessDenied;
     backend.disk.sync(.{ .path = backend.fileMeta(state).path }) catch |err| return mapDiskSyncError(err);
 }
 
 fn simFileSetLength(userdata: ?*anyopaque, file: Io.File, new_length: u64) Io.File.SetLengthError!void {
     const backend = backendFromUserdata(userdata);
     const state = backend.file(file.handle) orelse return error.AccessDenied;
-    if (state.closed or !state.write) return error.AccessDenied;
+    if (state.closed or !state.write or backend.fileMeta(state).deleted) return error.AccessDenied;
     const meta = backend.fileMeta(state);
     if (new_length > meta.len) {
         zeroDiskBytes(backend, meta.path, meta.len, new_length - meta.len) catch return error.InputOutput;
     }
+    backend.disk.setLength(.{ .path = meta.path, .len = new_length }) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (new_length != 0) return error.InputOutput;
+        },
+        else => return mapDiskSetLengthError(err),
+    };
     meta.len = new_length;
 }
 
@@ -716,6 +797,7 @@ fn mapDiskWriteError(err: disk_module.DiskError) Io.File.WritePositionalError {
 fn mapDiskSyncError(err: disk_module.DiskError) Io.File.SyncError {
     return switch (err) {
         error.DiskUnavailable,
+        error.FileNotFound,
         error.DiskCrashed,
         error.WriteError,
         error.ReadError,
@@ -727,6 +809,54 @@ fn mapDiskSyncError(err: disk_module.DiskError) Io.File.SyncError {
         error.OutOfMemory,
         error.InvalidTracePayload,
         => error.InputOutput,
+    };
+}
+
+fn mapDiskOpenError(err: disk_module.DiskError) Io.File.OpenError {
+    return switch (err) {
+        error.OutOfMemory => error.SystemResources,
+        error.FileNotFound => error.FileNotFound,
+        error.InvalidPath,
+        error.InvalidAlignment,
+        error.InvalidRange,
+        => error.FileNotFound,
+        else => error.SystemResources,
+    };
+}
+
+fn mapDiskSetLengthError(err: disk_module.DiskError) Io.File.SetLengthError {
+    return switch (err) {
+        error.OutOfMemory => error.InputOutput,
+        error.FileNotFound => error.AccessDenied,
+        error.InvalidPath,
+        error.InvalidAlignment,
+        error.InvalidRange,
+        => error.AccessDenied,
+        else => error.InputOutput,
+    };
+}
+
+fn mapDiskDeleteError(err: disk_module.DiskError) Io.Dir.DeleteFileError {
+    return switch (err) {
+        error.OutOfMemory => error.SystemResources,
+        error.FileNotFound => error.FileNotFound,
+        error.InvalidPath,
+        error.InvalidAlignment,
+        error.InvalidRange,
+        => error.FileNotFound,
+        else => error.FileSystem,
+    };
+}
+
+fn mapDiskRenameError(err: disk_module.DiskError) Io.Dir.RenameError {
+    return switch (err) {
+        error.OutOfMemory => error.SystemResources,
+        error.FileNotFound => error.FileNotFound,
+        error.InvalidPath,
+        error.InvalidAlignment,
+        error.InvalidRange,
+        => error.FileNotFound,
+        else => error.HardwareFailure,
     };
 }
 
@@ -1060,6 +1190,36 @@ test "io: simulation files zero sparse and extended ranges" {
     var extended: [9]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 9), try file.readPositionalAll(io, &extended, 0));
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 'x', 0, 0, 0 }, &extended);
+}
+
+test "io: simulation files delete and rename through disk authority" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    {
+        var file = try cwd.createFile(io, "wal.log", .{ .read = true });
+        defer file.close(io);
+        try file.writePositionalAll(io, "abcd", 0);
+        try file.sync(io);
+    }
+
+    try std.testing.expectEqual(@as(u64, 4), (try cwd.statFile(io, "wal.log", .{})).size);
+    try cwd.rename("wal.log", cwd, "archive/wal.log", io);
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "wal.log", .{}));
+    try std.testing.expectEqual(@as(u64, 4), (try cwd.statFile(io, "archive/wal.log", .{})).size);
+
+    var renamed = try cwd.openFile(io, "archive/wal.log", .{ .mode = .read_only });
+    defer renamed.close(io);
+    var buffer: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try renamed.readPositionalAll(io, &buffer, 0));
+    try std.testing.expectEqualStrings("abcd", &buffer);
+
+    try cwd.deleteFile(io, "archive/wal.log");
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(io, "archive/wal.log", .{}));
 }
 
 test "io: simulation tcp stream connects, accepts, reads, and writes" {
