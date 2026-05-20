@@ -51,7 +51,8 @@ Phase 0 has:
   `(deliver_at, packet_id)` delivery order.
 - `mar.Endpoint(Message)`, an app-facing typed process endpoint returned by
   simulation and production setup.
-- `mar.Disk`, an app-facing disk capability for `read`, `write`, and `sync`.
+- `mar.Disk`, an app-facing disk capability for sector-oriented
+  `read`/`write`/`sync` plus path-level metadata and lifecycle operations.
 - `mar.SimDisk`, a deterministic disk simulator with logical paths,
   sector-aligned reads/writes, sparse in-memory sectors, deterministic
   latency, operation ids, trace events, read/write IO errors, corrupt reads,

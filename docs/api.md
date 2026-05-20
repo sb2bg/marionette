@@ -202,7 +202,9 @@ not pointer identity or hash-map iteration.
 ## Disk
 
 `mar.Disk` is the app-facing disk capability. It is a concrete, storable
-handle with `read`, `write`, and `sync`. `mar.SimDisk` is the deterministic
+handle with sector-oriented `read`, `write`, and `sync`, plus path-level
+`stat`, EOF-aware `readSome`, `setLength`, `delete`, and `rename`.
+`mar.SimDisk` is the deterministic
 in-memory simulator behind that handle: logical files, sector-aligned
 reads/writes, sparse sectors, deterministic latency, operation ids, trace
 events, replayable read/write/corruption faults, and crash/restart behavior
@@ -243,6 +245,16 @@ try disk.read(.{
 });
 
 try disk.sync(.{ .path = "wal.log" });
+
+const stat = try disk.stat(.{ .path = "wal.log" });
+const read_len = try disk.readSome(.{
+    .path = "wal.log",
+    .offset = 0,
+    .buffer = wal_buffer,
+});
+try disk.setLength(.{ .path = "wal.log", .len = 0 });
+try disk.rename(.{ .old_path = "compact.tmp", .new_path = "data.db" });
+try disk.delete(.{ .path = "wal.log" });
 ```
 
 Construct a production capability bundle by scoping it to a root directory:
@@ -270,8 +282,9 @@ deterministic `std.Io` backend; it supports deterministic clock/random
 operations, synchronous `async`, immediate `Io.Queue` operations, and an
 in-memory TCP stream subset today. It also supports a flat file subset over
 `SimDisk`: create/open, access/statFile, positional read/write,
-length/stat/setLength, sync, and close. Full directory/filesystem behavior,
-process operations, datagrams, DNS, and real external network access still fail
+length/stat/setLength, sync, close, delete, and rename. Full
+directory/filesystem behavior, process operations, datagrams, DNS, and real
+external network access still fail
 closed. See
 [`std.Io` Direction](std-io-direction.md).
 Simulated tests should use the `Disk` returned by
@@ -292,20 +305,35 @@ fn appendRecord(env: mar.Env, sector_bytes: []const u8) !void {
 }
 ```
 
-The `Env.disk` view exposes `read`, `write`, and `sync`.
+The `Env.disk` view exposes `read`, `write`, `sync`, `stat`, `readSome`,
+`setLength`, `delete`, and `rename`.
 Simulator-control operations such as `setFaults`, `crash`, `restart`, and
 `corruptSector` remain on `mar.DiskControl`, exposed through
 `sim.control.disk`, and are kept by the harness or scenario state.
 
-Offsets and lengths must be whole multiples of `sector_size`. Reads from
-unwritten sectors return zero bytes. Logical paths are not host paths and are
-escaped through `World.recordFields` in trace events:
+For sector-oriented `read` and `write`, offsets and lengths must be whole
+multiples of `sector_size`. `readSome` and `setLength` are byte-oriented for
+WAL iteration and file lifecycle code. Reads from unwritten sectors return
+zero bytes; `readSome` returns the number of bytes copied and does not fill
+past EOF. Logical paths are not host paths and are escaped through
+`World.recordFields` in trace events:
 
 ```text
 disk.write op=0 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.read op=1 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.sync op=2 path=wal.log status=ok committed_writes=1 latency_ns=1000000
+disk.stat op=3 path=wal.log status=ok size=4096 latency_ns=1000000
+disk.read_some op=4 path=wal.log offset=0 requested_len=32 read_len=32 status=ok latency_ns=1000000
+disk.set_length op=5 path=wal.log len=0 status=ok committed_writes=0 latency_ns=1000000
+disk.rename op=6 path=compact.tmp new_path=data.db status=ok committed_writes=0 latency_ns=1000000
+disk.delete op=7 path=wal.log status=ok committed_writes=0 latency_ns=1000000
 ```
+
+The first file-lifecycle slice keeps metadata operations deterministic and
+trace-visible, but conservative: `setLength`, `delete`, and `rename` reject
+while crashed, and they commit pending writes for the affected path before
+mutating metadata. Richer crash-window modeling for directory entries and
+rename durability is deferred until an external storage-engine port needs it.
 
 Faults are disabled by default. Enable them through `mar.DiskControl`:
 
@@ -352,8 +380,8 @@ try control.crash();
 try control.restart();
 ```
 
-While crashed, `read`, `write`, and `sync` return `error.DiskCrashed`.
-Crash outcomes are trace-visible:
+While crashed, disk operations return `error.DiskCrashed`. Crash outcomes are
+trace-visible:
 
 ```text
 disk.fault op=3 path=wal.log kind=crash_lost_write rate=1/10 roll=7 fired=false

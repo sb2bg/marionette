@@ -66,11 +66,12 @@ The current disk surface is:
   current deterministic `std.Io` backend in simulation envs. The simulation
   backend supports clock/sleep/random, synchronous `async`, and immediate
   `Io.Queue` operations today, plus an in-memory TCP stream subset for
-  `std.Io.net` and a flat `std.Io.File` subset over `SimDisk`. It fails closed
-  for full directory/filesystem behavior, process operations, datagrams, DNS,
-  and real external network access not yet routed through the simulator.
-- `Env.disk`: app-facing simulation disk view exposing only `read`,
-  `write`, and `sync`.
+  `std.Io.net` and a flat `std.Io.File` subset over `SimDisk`, including
+  delete and rename. It fails closed for full directory/filesystem behavior,
+  process operations, datagrams, DNS, and real external network access not yet
+  routed through the simulator.
+- `Env.disk`: app-facing simulation disk view exposing sector-oriented
+  `read`, `write`, and `sync`, plus file metadata and lifecycle operations.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 - `examples/durable_broadcast.zig`: first disk + network cross-product
@@ -261,7 +262,8 @@ through `Env.disk`.
 
 **Scope:**
 
-- App code can depend on `env.disk` for `read`, `write`, and `sync`.
+- App code can depend on `env.disk` for sector `read`, `write`, and `sync`,
+  plus file metadata and lifecycle operations.
 - Tests and harnesses access simulator-control operations such as `setFaults`,
   `crash`, `restart`, and `corruptSector` through `mar.DiskControl`.
 - The KV example keeps app storage calls on `env.disk` and keeps simulator
@@ -465,30 +467,31 @@ Zig storage engine. Add the smallest deterministic disk surface that can port
 `kvdb`'s pager/WAL layer without letting application code reach back to
 `std.fs`.
 
-Current partial progress: simulation `Env.io()` now exposes a flat
-`std.Io.File` subset over `SimDisk`, including byte-oriented positional
-read/write, length/stat, setLength, sync, and close. That is enough for
-production-shaped code that already accepts `std.Io`, but it is not a complete
-replacement for this item: Marionette's narrow `Disk` capability still lacks
-metadata, EOF-aware reads, delete, and rename, and the `std.Io` subset does not
-model full directory/filesystem behavior.
+Current partial progress: `Disk` now exposes path-level `stat`, EOF-aware
+`readSome`, `setLength`, `delete`, and `rename`, backed by both `SimDisk` and
+`RealDisk`. Simulation `Env.io()` exposes the corresponding flat
+`std.Io.File` subset over `SimDisk`: create/open, access/statFile, positional
+read/write, length/stat, setLength, sync, close, delete, and rename. This is
+still not a complete filesystem model: directory metadata/iteration,
+parent-directory sync semantics, and crash-window modeling for rename/delete
+remain deferred.
 
 Acceptance criteria:
 
-- Add a `Disk.stat` or equivalent metadata operation that returns at least file
-  size. It must be deterministic, trace-visible, and backed by both `SimDisk`
-  and `RealDisk`.
-- Add an EOF-aware read shape for variable-length files. The current
-  sector-oriented `read(..., buffer)` zero-fills short reads, which is useful
-  for page storage but insufficient for WAL iteration that must distinguish EOF
-  from zero bytes.
-- Add `truncate` or `clear` for WAL reset, with crash semantics documented.
-- Add `delete` for WAL cleanup and `rename` for compaction-style replacement.
-  Rename should define whether it is atomic in simulation, what happens across
-  crash, and whether parent-directory sync is modeled or explicitly deferred.
-- Keep logical paths rooted in Marionette's disk namespace. No host absolute
-  paths or current-working-directory behavior should leak into app code.
-- Update `RealDisk`, `SimDisk`, trace events, docs, and tidy examples together.
+- Done: add a `Disk.stat` metadata operation that returns file size. It is
+  deterministic, trace-visible, and backed by both `SimDisk` and `RealDisk`.
+- Done: add an EOF-aware `readSome` shape for variable-length files. The
+  sector-oriented `read(..., buffer)` still zero-fills short reads; `readSome`
+  distinguishes EOF by returning a byte count.
+- Done: add `setLength` for WAL reset. The first slice rejects while crashed
+  and commits pending writes for the affected path before mutating metadata.
+- Done: add `delete` for WAL cleanup and `rename` for compaction-style
+  replacement. The first slice is deterministic and trace-visible but does not
+  yet model parent-directory sync or crash windows for directory entries.
+- Done: keep logical paths rooted in Marionette's disk namespace. No host
+  absolute paths or current-working-directory behavior leaks into app code.
+- Done: update `RealDisk`, `SimDisk`, trace events, docs, and `std.Io` tests
+  together.
 - Add a small compatibility scenario that ports the storage-facing slice of
   `kvdb` or a local surrogate with the same operations: open database, append
   WAL records, commit, reopen/recover, compact via rename, and clear/delete the

@@ -56,7 +56,8 @@ The current `mar.SimDisk` simulator is constructed from `World` by the
 simulation harness or scenario state. It produces two capabilities over the
 same backing state:
 
-- `mar.Disk`: app-facing `read`, `write`, and `sync`.
+- `mar.Disk`: app-facing sector `read`, `write`, and `sync`, plus file
+  metadata and lifecycle operations.
 - `mar.DiskControl`: harness-facing faults, crash/restart, and scripted
   corruption.
 
@@ -225,7 +226,10 @@ hashes, the hash algorithm must be named and stable.
 - Default sector size: 4096 bytes.
 - Default minimum latency: omitted means "match the world's tick duration";
   explicit values are preserved and validated against the tick size.
-- Initial app operations: `read`, `write`, and `sync` are implemented.
+- Initial app operations: sector-oriented `read`, `write`, and `sync` are
+  implemented. Path-level `stat`, EOF-aware `readSome`, `setLength`, `delete`,
+  and `rename` are also implemented as the first real-storage compatibility
+  slice.
 - Initial harness-control operations: `setFaults`, `corruptSector`, `crash`,
   and `restart` are implemented. Read/write IO errors, corrupt reads, scripted
   sector corruption, lost pending writes, and torn pending writes are
@@ -236,13 +240,11 @@ hashes, the hash algorithm must be named and stable.
 - Recoverability budgets: start with a conservative single-node default and
   explicit destructive mode; defer strong multi-replica budgets.
 - Misdirected writes: document as a future named fault, not Phase 1 default.
-- File lifecycle operations beyond `read`, `write`, and `sync` are still
-  deferred on the narrow `Disk` capability but required for real
-  storage-engine compatibility. Simulation `Env.io()` now has a flat
-  `std.Io.File` subset over `SimDisk` with length/stat, EOF-aware positional
-  reads, and setLength; delete and rename remain open. Track the broader
-  capability work under the roadmap item for disk file lifecycle and EOF-aware
-  reads.
+- File lifecycle operations are intentionally narrow and operation-shaped, not
+  a full `std.fs.File` clone. `setLength`, `delete`, and `rename` reject while
+  crashed and commit pending writes for the affected path before mutating
+  metadata. Richer crash-window modeling for directory entries and rename
+  durability is deferred until an external storage-engine port needs it.
 
 ## Open Questions
 

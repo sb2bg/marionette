@@ -59,12 +59,13 @@ Empty accepts return `error.WouldBlock`; empty stream reads return
 `error.Timeout` while the peer remains open. It also supports a flat file subset
 over `SimDisk`: `Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
 `Dir.access`, positional file read/write, `File.length`, `File.stat`,
-`File.setLength`, `File.sync`, and `File.close`. This subset gives
+`File.setLength`, `File.sync`, `File.close`, `Dir.deleteFile`, and
+`Dir.rename`. This subset gives
 byte-oriented `std.Io.File` behavior over the sector-oriented disk simulator
 without modeling a complete filesystem.
-`concurrent`, blocking queue waits, directory metadata and iteration, rename,
-delete, chmod/chown, symlinks, memory maps, process operations, datagrams, DNS,
-and real external network access fail closed until they are routed through
+`concurrent`, blocking queue waits, directory metadata and iteration,
+chmod/chown, symlinks, memory maps, process operations, datagrams, DNS, and real
+external network access fail closed until they are routed through
 simulator-owned state.
 
 The eventual target is for simulation envs to return a fuller deterministic

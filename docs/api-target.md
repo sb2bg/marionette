@@ -90,7 +90,7 @@ clock, sleep, random, `randomSecure`, synchronous `async`, immediate
 `std.Io.net`. It also supports a flat file subset over `SimDisk`:
 `Dir.createFile`, `Dir.openFile`, `Dir.statFile`, `Dir.access`, positional
 file reads and writes, `File.length`, `File.stat`, `File.setLength`,
-`File.sync`, and `File.close`.
+`File.sync`, `File.close`, `Dir.deleteFile`, and `Dir.rename`.
 Full directory/filesystem behavior, process operations, datagrams, DNS, and
 real external network access still fail closed. See
 [Marionette as Deterministic std.Io](std-io-direction.md).
