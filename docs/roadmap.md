@@ -437,7 +437,9 @@ Acceptance criteria:
 - Add a small helper for fixed-size WAL records with magic, sequence/op id,
   payload bytes, and checksum.
 - Migrate `examples/kv_store.zig` and `examples/durable_broadcast.zig` to use
-  it, reducing duplicated encode/decode code in both examples.
+  it, reducing duplicated encode/decode code in both examples. `kv_store` now
+  already uses `std.Io.File` for storage; preserve that shape when extracting
+  the helper.
 - Document the helper with the same worked pattern: magic, key/sequence,
   payload, and checksum fields.
 - Explain why corrupt/torn reads should be detected by user code, not inferred

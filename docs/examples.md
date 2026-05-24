@@ -51,8 +51,11 @@ Source: [`examples/kv_store.zig`](https://github.com/sb2bg/marionette/blob/main/
 
 The KV store is the first disk-backed example. It is intentionally tiny: a
 fixed-size append-only WAL where each sector is one record with a magic value,
-key, value, and checksum. It exists to exercise `mar.Disk` plus the
-`Env`/`Control` harness split, not to be a real database.
+key, value, and checksum. The store itself is production-shaped: it accepts
+`std.Io`, a root `std.Io.Dir`, and a narrow `mar.Recorder`, then uses
+`std.Io.File` positional read/write and `sync`. The harness still owns
+Marionette's `Control` authority for disk faults, crash, restart, and scripted
+corruption.
 
 The correct scenario:
 

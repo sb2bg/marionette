@@ -45,23 +45,23 @@ fn recoveredStateIsSafe(harness: *const Harness) !void {
     const store = &harness.store;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
-        try store.env.record("kv.invariant_violation reason=committed_missing_or_wrong", .{});
+        try store.recorder.record("kv.invariant_violation reason=committed_missing_or_wrong", .{});
         return error.CommittedRecordNotRecovered;
     }
 
     if (store.countKey(volatile_key) != 0) {
-        try store.env.record("kv.invariant_violation reason=unsynced_record_recovered", .{});
+        try store.recorder.record("kv.invariant_violation reason=unsynced_record_recovered", .{});
         return error.UnsyncedRecordRecovered;
     }
 
-    try store.env.record(
+    try store.recorder.record(
         "kv.check recovery=ok committed_key={} committed_value={} recovered_records={}",
         .{ committed_key, committed_value, store.recovered_count },
     );
 }
 
-fn writeAndRecover(env: mar.Env) !KVStore {
-    var store = KVStore.init(env);
+fn writeAndRecover(io: std.Io, root: std.Io.Dir, recorder: mar.Recorder) !KVStore {
+    var store = try KVStore.init(io, root, recorder);
     try store.put(committed_key, committed_value, .sync);
     try store.put(volatile_key, volatile_value, .no_sync);
     try store.recover(.strict);
@@ -102,22 +102,34 @@ pub const Harness = struct {
         } });
 
         return .{
-            .store = KVStore.init(sim.env),
+            .store = try KVStore.init(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder()),
             .control = sim.control,
         };
+    }
+
+    pub fn deinit(self: *Harness) void {
+        self.store.deinit();
     }
 };
 
 const KVStore = struct {
-    env: mar.Env,
+    io: std.Io,
+    recorder: mar.Recorder,
+    wal: std.Io.File,
     next_offset: u64 = 0,
     recovered: [scenario_write_count]Entry = undefined,
     recovered_count: u8 = 0,
 
-    fn init(env: mar.Env) KVStore {
+    fn init(io: std.Io, root: std.Io.Dir, recorder: mar.Recorder) !KVStore {
         return .{
-            .env = env,
+            .io = io,
+            .recorder = recorder,
+            .wal = try root.createFile(io, wal_path, .{ .read = true }),
         };
+    }
+
+    fn deinit(self: *KVStore) void {
+        self.wal.close(self.io);
     }
 
     fn put(self: *KVStore, key: u32, value: u32, sync_mode: SyncMode) !void {
@@ -127,18 +139,14 @@ const KVStore = struct {
         encodeRecord(&bytes, .{ .key = key, .value = value });
 
         const offset = self.next_offset;
-        try self.env.disk.write(.{
-            .path = wal_path,
-            .offset = offset,
-            .bytes = &bytes,
-        });
+        try self.wal.writePositionalAll(self.io, &bytes, offset);
         self.next_offset += record_size;
 
         if (sync_mode == .sync) {
-            try self.env.disk.sync(.{ .path = wal_path });
+            try self.wal.sync(self.io);
         }
 
-        try self.env.record(
+        try self.recorder.record(
             "kv.put key={} value={} offset={} sync={s}",
             .{ key, value, offset, @tagName(sync_mode) },
         );
@@ -151,20 +159,19 @@ const KVStore = struct {
         while (index < scenario_write_count) : (index += 1) {
             const offset = index * record_size;
             var bytes: [record_size]u8 = @splat(0);
-            try self.env.disk.read(.{
-                .path = wal_path,
-                .offset = offset,
-                .buffer = &bytes,
-            });
+            const read_len = try self.wal.readPositionalAll(self.io, &bytes, offset);
+            if (read_len < record_size) {
+                @memset(bytes[read_len..], 0);
+            }
 
             const decoded = decodeRecord(&bytes, mode) orelse {
-                try self.env.record("kv.recover.reject offset={} mode={s}", .{ offset, @tagName(mode) });
+                try self.recorder.record("kv.recover.reject offset={} mode={s}", .{ offset, @tagName(mode) });
                 break;
             };
 
             self.recovered[self.recovered_count] = decoded;
             self.recovered_count += 1;
-            try self.env.record(
+            try self.recorder.record(
                 "kv.recover.record offset={} key={} value={} mode={s}",
                 .{ offset, decoded.key, decoded.value, @tagName(mode) },
             );
@@ -238,6 +245,7 @@ test "kv store: recovery passes through expectation helper" {
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
         .init = Harness.init,
+        .deinit = Harness.deinit,
         .scenario = scenario,
         .checks = &checks,
     });
@@ -250,6 +258,7 @@ test "kv store: recovery fuzz smoke" {
         .seeds = 16,
         .tick_ns = tick_ns,
         .init = Harness.init,
+        .deinit = Harness.deinit,
         .scenario = scenario,
         .checks = &checks,
     });
@@ -261,6 +270,7 @@ test "kv store: buggy recovery fails through expectation helper" {
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
         .init = Harness.init,
+        .deinit = Harness.deinit,
         .scenario = buggyScenario,
         .checks = &checks,
     });
@@ -274,7 +284,8 @@ test "kv store: same app code runs on simulated and real disks" {
         .sector_size = record_size,
         .min_latency_ns = tick_ns,
     } });
-    var sim_store = try writeAndRecover(sim.env);
+    var sim_store = try writeAndRecover(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder());
+    defer sim_store.deinit();
     try expectBothRecordsRecovered(&sim_store);
 
     var tmp = std.testing.tmpDir(.{});
@@ -287,6 +298,8 @@ test "kv store: same app code runs on simulated and real disks" {
     });
     defer production.deinit();
 
-    var prod_store = try writeAndRecover(production.env());
+    const prod_env = production.env();
+    var prod_store = try writeAndRecover(prod_env.io(), tmp.dir, prod_env.recorder());
+    defer prod_store.deinit();
     try expectBothRecordsRecovered(&prod_store);
 }

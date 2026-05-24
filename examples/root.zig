@@ -247,6 +247,7 @@ fn runKvStoreReport(
         .seed = seed,
         .tick_ns = kv_store.tick_ns,
         .init = kv_store.Harness.init,
+        .deinit = kv_store.Harness.deinit,
         .scenario = scenario_fn,
         .checks = &kv_store.checks,
     });
