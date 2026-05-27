@@ -63,8 +63,8 @@ error set has no `WouldBlock` variant. It also supports a flat file subset over
 `File.setLength`, `File.sync`, `File.close`, `Dir.deleteFile`, and
 `Dir.rename`. This subset gives
 byte-oriented `std.Io.File` behavior over the sector-oriented disk simulator
-without modeling a complete filesystem. File stats intentionally report zero
-timestamps until timestamp mutation is explicitly modeled.
+without modeling a complete filesystem. File stats track `mtime` for successful
+content mutations; `atime` and `ctime` remain zero.
 `concurrent`, blocking queue waits, directory metadata and iteration,
 chmod/chown, symlinks, memory maps, process operations, datagrams, DNS, and real
 external network access fail closed until they are routed through

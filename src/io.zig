@@ -35,6 +35,7 @@ pub const Backend = struct {
     const FileMeta = struct {
         path: []u8,
         len: u64 = 0,
+        mtime: Io.Timestamp = .zero,
         deleted: bool = false,
 
         fn deinit(self: *FileMeta, allocator: std.mem.Allocator) void {
@@ -173,6 +174,10 @@ pub const Backend = struct {
 
         try self.files.append(self.allocator, .{ .path = owned_path });
         return self.files.items.len - 1;
+    }
+
+    fn nowTimestamp(self: *const Backend) Io.Timestamp {
+        return Io.Timestamp.fromNanoseconds(@intCast(self.world.now()));
     }
 
     fn closeFileHandlesForIndex(self: *Backend, file_index: usize) void {
@@ -418,11 +423,13 @@ fn simDirCreateFile(
     const file_index = if (backend.findFileMetaIndex(sub_path)) |index| b: {
         if (options.exclusive) return error.PathAlreadyExists;
         if (options.truncate) {
+            const old_len = backend.files.items[index].len;
             backend.disk.setLength(.{ .path = sub_path, .len = 0 }) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return mapDiskOpenError(err),
             };
             backend.files.items[index].len = 0;
+            if (old_len != 0) backend.files.items[index].mtime = backend.nowTimestamp();
         }
         break :b index;
     } else backend.createFileMeta(sub_path) catch return error.SystemResources;
@@ -554,7 +561,7 @@ fn buildFileStat(backend: *Backend, file_index: usize) Io.File.Stat {
         .permissions = .default_file,
         .kind = .file,
         .atime = .zero,
-        .mtime = .zero,
+        .mtime = meta.mtime,
         .ctime = .zero,
         .block_size = @intCast(@min(backend.sector_size, std.math.maxInt(Io.File.BlockSize))),
     };
@@ -628,6 +635,7 @@ fn simFileWritePositional(
             writePart(backend, meta, pattern, &cursor, &total) catch |err| return mapDiskWriteError(err);
         }
     }
+    if (total != 0) meta.mtime = backend.nowTimestamp();
     return total;
 }
 
@@ -643,8 +651,9 @@ fn simFileSetLength(userdata: ?*anyopaque, file: Io.File, new_length: u64) Io.Fi
     const state = backend.file(file.handle) orelse return error.AccessDenied;
     if (state.closed or !state.write or backend.fileMeta(state).deleted) return error.AccessDenied;
     const meta = backend.fileMeta(state);
-    if (new_length > meta.len) {
-        zeroDiskBytes(backend, meta.path, meta.len, new_length - meta.len) catch return error.InputOutput;
+    const old_len = meta.len;
+    if (new_length > old_len) {
+        zeroDiskBytes(backend, meta.path, old_len, new_length - old_len) catch return error.InputOutput;
     }
     backend.disk.setLength(.{ .path = meta.path, .len = new_length }) catch |err| switch (err) {
         error.FileNotFound => {
@@ -653,6 +662,7 @@ fn simFileSetLength(userdata: ?*anyopaque, file: Io.File, new_length: u64) Io.Fi
         else => return mapDiskSetLengthError(err),
     };
     meta.len = new_length;
+    if (new_length != old_len) meta.mtime = backend.nowTimestamp();
 }
 
 fn isValidSimPath(path: []const u8) bool {
@@ -1172,7 +1182,7 @@ test "io: simulation files reopen tracked metadata" {
     const stat = try Io.Dir.cwd().statFile(io, "state.bin", .{});
     try std.testing.expectEqual(@as(u64, 2), stat.size);
     try std.testing.expectEqual(Io.Timestamp.zero, stat.atime);
-    try std.testing.expectEqual(Io.Timestamp.zero, stat.mtime);
+    try std.testing.expect(stat.mtime.nanoseconds > 0);
     try std.testing.expectEqual(Io.Timestamp.zero, stat.ctime);
     try Io.Dir.cwd().access(io, "state.bin", .{ .read = true });
 

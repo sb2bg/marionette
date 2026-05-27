@@ -287,9 +287,9 @@ directory/filesystem behavior, process operations, datagrams, DNS, and real
 external network access still fail
 closed. See
 [`std.Io` Direction](std-io-direction.md).
-Simulated file stats report deterministic size and kind information; access,
-modify, and change timestamps are zero because Marionette does not yet model
-filesystem timestamps.
+Simulated file stats report deterministic size, kind, and mutation-time
+information. `mtime` updates on successful content mutations; access and change
+timestamps remain zero because Marionette does not yet model them.
 Simulated tests should use the `Disk` returned by
 `world.simulate(...).env.disk`; harness code keeps the matching `DiskControl`
 for faults, crash, restart, and corruption.
