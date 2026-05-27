@@ -92,6 +92,8 @@ pub const SimNetworkOptions = struct {
     /// Use this when the topology includes client ids that should experience
     /// partitions but should not be selected as the isolated service node.
     /// Defaults to all configured processes when zero.
+    // TODO(roadmap item 12): replace this prefix count with an explicit
+    // `partitionable_nodes` set before richer topologies depend on it.
     service_nodes: usize = 0,
     /// Maximum packets queued on one directed path.
     path_capacity: usize = 64,
@@ -1116,9 +1118,9 @@ pub fn productionEndpoint(
     try validateProductionEndpointOptions(options);
 
     const payload_name = @typeName(Payload);
-    // Linear lookup is intentional while Production is a same-process parity
-    // adapter with only a few payload types. Replace this registry with an
-    // indexed map if production endpoints become numerous.
+    // TODO(roadmap item 15): linear lookup is acceptable while Production is a
+    // same-process parity adapter with only a few payload types. Replace this
+    // registry with an indexed map if production endpoints become numerous.
     for (entries.items) |entry| {
         if (std.mem.eql(u8, entry.payload_name, payload_name)) {
             const runtime: *ProductionRuntime(Payload) = @ptrCast(@alignCast(entry.ptr));
@@ -1694,6 +1696,9 @@ fn ProductionRuntime(comptime Payload: type) type {
         queue: std.ArrayList(Packet) = .empty,
         next_packet_id: u64 = 0,
 
+        // FIXME(roadmap item 15): this typed production runtime is still an
+        // in-process FIFO. The byte endpoint has the socket-backed path; typed
+        // payloads need either codec-backed sockets or a clear parity-only label.
         fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
             const runtime = try allocator.create(Self);
             runtime.* = .{ .allocator = allocator };
