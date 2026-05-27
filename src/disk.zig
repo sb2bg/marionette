@@ -35,6 +35,9 @@ pub const DiskFaultOptions = struct {
     corrupt_read_rate: env_module.BuggifyRate = .never(),
     crash_lost_write_rate: env_module.BuggifyRate = .never(),
     crash_torn_write_rate: env_module.BuggifyRate = .never(),
+    // TODO(roadmap item 4): add metadata durability faults for create/delete/rename.
+    // Today crashes only decide pending write outcomes, so "file content fsynced but
+    // parent directory entry lost" is not yet a catchable failure mode.
 };
 
 pub const Disk = struct {
@@ -891,6 +894,9 @@ pub const SimDisk = struct {
         try self.validatePath(options.path);
         try self.ensureRunning();
 
+        // FIXME(roadmap item 4): namespace mutations are immediately durable.
+        // Model pending directory metadata plus an explicit directory sync boundary
+        // before treating delete/rename crash behavior as realistic.
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
         const committed = try self.commitPendingWrites(options.path);
@@ -910,6 +916,8 @@ pub const SimDisk = struct {
         try self.validatePath(options.new_path);
         try self.ensureRunning();
 
+        // FIXME(roadmap item 4): rename is atomic in-memory but not crash-window aware.
+        // A real filesystem can lose the directory entry update without parent-dir sync.
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
         const committed = try self.commitPendingWrites(options.old_path);

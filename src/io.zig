@@ -420,6 +420,8 @@ fn simDirCreateFile(
     if (!isValidSimPath(sub_path)) return error.FileNotFound;
 
     const backend = backendFromUserdata(userdata);
+    // TODO(roadmap item 4): wire this through pending directory metadata once
+    // `Disk` exposes an explicit directory sync/durability boundary.
     const file_index = if (backend.findFileMetaIndex(sub_path)) |index| b: {
         if (options.exclusive) return error.PathAlreadyExists;
         if (options.truncate) {
@@ -967,9 +969,10 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
         else
             true;
         if (peer_closed) return 0;
-        // FIXME `Io.net.Stream.Reader.Error` has no WouldBlock variant in Zig 0.16.
-        // Until Marionette has a scheduler that can park this task, Timeout is
-        // the least-wrong way to report "peer open, no bytes available yet."
+        // FIXME(roadmap item 18): `Io.net.Stream.Reader.Error` has no WouldBlock
+        // variant in Zig 0.16. Until Marionette has a scheduler that can park
+        // this task, Timeout is the least-wrong way to report "peer open, no
+        // bytes available yet."
         return error.Timeout;
     }
 
