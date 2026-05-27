@@ -492,6 +492,10 @@ Acceptance criteria:
   absolute paths or current-working-directory behavior leaks into app code.
 - Done: update `RealDisk`, `SimDisk`, trace events, docs, and `std.Io` tests
   together.
+- Add explicit parent-directory durability modeling. Creates, deletes, and
+  renames need pending metadata state plus a directory sync boundary before
+  crash/restart can expose the real "file content fsynced but directory entry
+  lost" bug class.
 - Add a small compatibility scenario that ports the storage-facing slice of
   `kvdb` or a local surrogate with the same operations: open database, append
   WAL records, commit, reopen/recover, compact via rename, and clear/delete the

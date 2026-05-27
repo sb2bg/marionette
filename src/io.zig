@@ -163,6 +163,14 @@ pub const Backend = struct {
     fn createFileMeta(self: *Backend, path: []const u8) std.mem.Allocator.Error!usize {
         const owned_path = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned_path);
+
+        for (self.files.items, 0..) |*file_meta, index| {
+            if (!file_meta.deleted) continue;
+            self.allocator.free(file_meta.path);
+            file_meta.* = .{ .path = owned_path };
+            return index;
+        }
+
         try self.files.append(self.allocator, .{ .path = owned_path });
         return self.files.items.len - 1;
     }
@@ -509,15 +517,9 @@ fn simDirRename(
     const old_index = backend.findFileMetaIndex(old_sub_path) orelse return error.FileNotFound;
     if (std.mem.eql(u8, old_sub_path, new_sub_path)) return;
 
-    if (backend.findFileMetaIndex(new_sub_path)) |new_index| {
-        backend.disk.delete(.{ .path = new_sub_path }) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return mapDiskRenameError(err),
-        };
-        backend.closeFileHandlesForIndex(new_index);
-        backend.files.items[new_index].deleted = true;
-        backend.files.items[new_index].len = 0;
-    }
+    const new_index = backend.findFileMetaIndex(new_sub_path);
+    const owned_path = backend.allocator.dupe(u8, new_sub_path) catch return error.SystemResources;
+    errdefer backend.allocator.free(owned_path);
 
     backend.disk.rename(.{ .old_path = old_sub_path, .new_path = new_sub_path }) catch |err| switch (err) {
         error.FileNotFound => {
@@ -526,7 +528,12 @@ fn simDirRename(
         else => return mapDiskRenameError(err),
     };
 
-    const owned_path = backend.allocator.dupe(u8, new_sub_path) catch return error.SystemResources;
+    if (new_index) |index| {
+        backend.closeFileHandlesForIndex(index);
+        backend.files.items[index].deleted = true;
+        backend.files.items[index].len = 0;
+    }
+
     backend.allocator.free(backend.files.items[old_index].path);
     backend.files.items[old_index].path = owned_path;
 }
@@ -540,16 +547,15 @@ fn simFileStat(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.S
 
 fn buildFileStat(backend: *Backend, file_index: usize) Io.File.Stat {
     const meta = &backend.files.items[file_index];
-    const now = Io.Timestamp.fromNanoseconds(@intCast(backend.world.now()));
     return .{
         .inode = @intCast(file_index + 1),
         .nlink = 1,
         .size = meta.len,
         .permissions = .default_file,
         .kind = .file,
-        .atime = now,
-        .mtime = now,
-        .ctime = now,
+        .atime = .zero,
+        .mtime = .zero,
+        .ctime = .zero,
         .block_size = @intCast(@min(backend.sector_size, std.math.maxInt(Io.File.BlockSize))),
     };
 }
@@ -951,6 +957,9 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
         else
             true;
         if (peer_closed) return 0;
+        // FIXME `Io.net.Stream.Reader.Error` has no WouldBlock variant in Zig 0.16.
+        // Until Marionette has a scheduler that can park this task, Timeout is
+        // the least-wrong way to report "peer open, no bytes available yet."
         return error.Timeout;
     }
 
@@ -1160,7 +1169,11 @@ test "io: simulation files reopen tracked metadata" {
     var reopened = try Io.Dir.cwd().openFile(io, "state.bin", .{ .allow_directory = false });
     defer reopened.close(io);
     try std.testing.expectEqual(@as(u64, 2), try reopened.length(io));
-    try std.testing.expectEqual(@as(u64, 2), (try Io.Dir.cwd().statFile(io, "state.bin", .{})).size);
+    const stat = try Io.Dir.cwd().statFile(io, "state.bin", .{});
+    try std.testing.expectEqual(@as(u64, 2), stat.size);
+    try std.testing.expectEqual(Io.Timestamp.zero, stat.atime);
+    try std.testing.expectEqual(Io.Timestamp.zero, stat.mtime);
+    try std.testing.expectEqual(Io.Timestamp.zero, stat.ctime);
     try Io.Dir.cwd().access(io, "state.bin", .{ .read = true });
 
     var buffer: [2]u8 = undefined;
@@ -1218,8 +1231,22 @@ test "io: simulation files delete and rename through disk authority" {
     try std.testing.expectEqual(@as(usize, 4), try renamed.readPositionalAll(io, &buffer, 0));
     try std.testing.expectEqualStrings("abcd", &buffer);
 
-    try cwd.deleteFile(io, "archive/wal.log");
+    var overwritten = try cwd.createFile(io, "replace.log", .{ .read = true });
+    defer overwritten.close(io);
+    try overwritten.writePositionalAll(io, "xxxx", 0);
+    try overwritten.sync(io);
+
+    try cwd.rename("archive/wal.log", cwd, "replace.log", io);
+    try std.testing.expectError(error.AccessDenied, overwritten.length(io));
     try std.testing.expectError(error.FileNotFound, cwd.openFile(io, "archive/wal.log", .{}));
+
+    var replaced = try cwd.openFile(io, "replace.log", .{ .mode = .read_only });
+    defer replaced.close(io);
+    try std.testing.expectEqual(@as(usize, 4), try replaced.readPositionalAll(io, &buffer, 0));
+    try std.testing.expectEqualStrings("abcd", &buffer);
+
+    try cwd.deleteFile(io, "replace.log");
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(io, "replace.log", .{}));
 }
 
 test "io: simulation tcp stream connects, accepts, reads, and writes" {
