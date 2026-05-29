@@ -61,6 +61,7 @@ pub const Backend = struct {
         file_index: usize,
         read: bool,
         write: bool,
+        cursor: u64 = 0,
         closed: bool = false,
     };
 
@@ -238,7 +239,7 @@ const sim_vtable: Io.VTable = .{
     .futexWaitUncancelable = Io.noFutexWaitUncancelable,
     .futexWake = Io.noFutexWake,
 
-    .operate = Io.failingOperate,
+    .operate = simOperate,
     .batchAwaitAsync = Io.unreachableBatchAwaitAsync,
     .batchAwaitConcurrent = Io.unreachableBatchAwaitConcurrent,
     .batchCancel = Io.unreachableBatchCancel,
@@ -277,8 +278,8 @@ const sim_vtable: Io.VTable = .{
     .fileWriteFileStreaming = Io.noFileWriteFileStreaming,
     .fileWriteFilePositional = Io.noFileWriteFilePositional,
     .fileReadPositional = simFileReadPositional,
-    .fileSeekBy = Io.failingFileSeekBy,
-    .fileSeekTo = Io.failingFileSeekTo,
+    .fileSeekBy = simFileSeekBy,
+    .fileSeekTo = simFileSeekTo,
     .fileSync = simFileSync,
     .fileIsTty = Io.unreachableFileIsTty,
     .fileEnableAnsiEscapeCodes = Io.unreachableFileEnableAnsiEscapeCodes,
@@ -377,6 +378,19 @@ fn noSwapCancelProtection(userdata: ?*anyopaque, new: Io.CancelProtection) Io.Ca
 
 fn noCheckCancel(userdata: ?*anyopaque) Io.Cancelable!void {
     _ = userdata;
+}
+
+fn simOperate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    return switch (operation) {
+        .file_read_streaming => |read| .{
+            .file_read_streaming = simFileReadStreaming(userdata, read.file, read.data),
+        },
+        .file_write_streaming => |write| .{
+            .file_write_streaming = simFileWriteStreaming(userdata, write.file, write.header, write.data, write.splat),
+        },
+        .device_io_control => unreachable,
+        .net_receive => .{ .net_receive = .{ error.NetworkDown, 0 } },
+    };
 }
 
 fn simNow(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
@@ -642,6 +656,85 @@ fn simFileWritePositional(
     }
     if (total != 0) meta.mtime = backend.nowTimestamp();
     return total;
+}
+
+fn simFileReadStreaming(
+    userdata: ?*anyopaque,
+    file: Io.File,
+    data: []const []u8,
+) Io.Operation.FileReadStreaming.Result {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.NotOpenForReading;
+    if (state.closed or !state.read or backend.fileMeta(state).deleted) return error.NotOpenForReading;
+
+    const read_len = simFileReadPositional(userdata, file, data, state.cursor) catch |err| switch (err) {
+        error.NotOpenForReading => return error.NotOpenForReading,
+        error.AccessDenied => return error.AccessDenied,
+        error.SystemResources => return error.SystemResources,
+        error.WouldBlock => return error.WouldBlock,
+        error.LockViolation => return error.LockViolation,
+        error.IsDir => return error.IsDir,
+        else => return error.InputOutput,
+    };
+    if (read_len == 0) return error.EndOfStream;
+    state.cursor += read_len;
+    return read_len;
+}
+
+fn simFileWriteStreaming(
+    userdata: ?*anyopaque,
+    file: Io.File,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+) Io.Operation.FileWriteStreaming.Result {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.NotOpenForWriting;
+    if (state.closed or !state.write or backend.fileMeta(state).deleted) return error.NotOpenForWriting;
+
+    const write_len = simFileWritePositional(userdata, file, header, data, splat, state.cursor) catch |err| switch (err) {
+        error.NotOpenForWriting => return error.NotOpenForWriting,
+        error.AccessDenied => return error.AccessDenied,
+        error.PermissionDenied => return error.PermissionDenied,
+        error.SystemResources => return error.SystemResources,
+        error.WouldBlock => return error.WouldBlock,
+        error.LockViolation => return error.LockViolation,
+        error.NoSpaceLeft => return error.NoSpaceLeft,
+        error.FileTooBig => return error.FileTooBig,
+        error.DiskQuota => return error.DiskQuota,
+        error.DeviceBusy => return error.DeviceBusy,
+        error.BrokenPipe => return error.BrokenPipe,
+        error.NoDevice => return error.NoDevice,
+        error.FileBusy => return error.FileBusy,
+        else => return error.InputOutput,
+    };
+    state.cursor += write_len;
+    return write_len;
+}
+
+fn simFileSeekBy(userdata: ?*anyopaque, file: Io.File, relative_offset: i64) Io.File.SeekError!void {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.AccessDenied;
+    if (state.closed or backend.fileMeta(state).deleted) return error.AccessDenied;
+
+    if (relative_offset < 0) {
+        if (relative_offset == std.math.minInt(i64)) return error.Unseekable;
+        const distance: u64 = @intCast(-relative_offset);
+        if (distance > state.cursor) return error.Unseekable;
+        state.cursor -= distance;
+        return;
+    }
+
+    const distance: u64 = @intCast(relative_offset);
+    if (std.math.maxInt(u64) - state.cursor < distance) return error.Unseekable;
+    state.cursor += distance;
+}
+
+fn simFileSeekTo(userdata: ?*anyopaque, file: Io.File, absolute_offset: u64) Io.File.SeekError!void {
+    const backend = backendFromUserdata(userdata);
+    const state = backend.file(file.handle) orelse return error.AccessDenied;
+    if (state.closed or backend.fileMeta(state).deleted) return error.AccessDenied;
+    state.cursor = absolute_offset;
 }
 
 fn simFileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
@@ -1166,6 +1259,43 @@ test "io: simulation files use byte semantics over SimDisk" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 'a', 'b', 'c', 'd', 'e', 'f' }, buffer[0..read_len]);
 
     try file.sync(io);
+}
+
+test "io: simulation files support std.Io file readers and writers" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "stream.bin", .{ .read = true });
+    defer file.close(io);
+
+    try file.writePositionalAll(io, "abcdefgh", 0);
+
+    var empty_reader_buffer: [0]u8 = .{};
+    var reader = file.reader(io, &empty_reader_buffer);
+    try reader.seekTo(4);
+
+    var read_out: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqualStrings("ef", &read_out);
+
+    var streaming_reader_buffer: [0]u8 = .{};
+    var streaming_reader = file.readerStreaming(io, &streaming_reader_buffer);
+    try streaming_reader.seekTo(2);
+    try std.testing.expectEqual(@as(usize, 2), try streaming_reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqualStrings("cd", &read_out);
+
+    var streaming_writer_buffer: [0]u8 = .{};
+    var streaming_writer = file.writerStreaming(io, &streaming_writer_buffer);
+    try streaming_writer.seekTo(6);
+    try streaming_writer.interface.writeAll("XY");
+    try streaming_writer.flush();
+
+    var final: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 8), try file.readPositionalAll(io, &final, 0));
+    try std.testing.expectEqualStrings("abcdefXY", &final);
 }
 
 test "io: simulation files reopen tracked metadata" {
