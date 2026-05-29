@@ -35,9 +35,7 @@ pub const DiskFaultOptions = struct {
     corrupt_read_rate: env_module.BuggifyRate = .never(),
     crash_lost_write_rate: env_module.BuggifyRate = .never(),
     crash_torn_write_rate: env_module.BuggifyRate = .never(),
-    // TODO(roadmap item 4): add metadata durability faults for create/delete/rename.
-    // Today crashes only decide pending write outcomes, so "file content fsynced but
-    // parent directory entry lost" is not yet a catchable failure mode.
+    crash_lost_metadata_rate: env_module.BuggifyRate = .never(),
 };
 
 pub const Disk = struct {
@@ -47,6 +45,7 @@ pub const Disk = struct {
     pub const Read = DiskRead;
     pub const Write = DiskWrite;
     pub const Sync = DiskSync;
+    pub const SyncDir = DiskSyncDir;
     pub const Stat = DiskStat;
     pub const StatResult = DiskStatResult;
     pub const ReadSome = DiskReadSome;
@@ -58,6 +57,7 @@ pub const Disk = struct {
         read: *const fn (*anyopaque, Read) DiskError!void,
         write: *const fn (*anyopaque, Write) DiskError!void,
         sync: *const fn (*anyopaque, Sync) DiskError!void,
+        sync_dir: *const fn (*anyopaque, SyncDir) DiskError!void,
         stat: *const fn (*anyopaque, Stat) DiskError!StatResult,
         read_some: *const fn (*anyopaque, ReadSome) DiskError!usize,
         set_length: *const fn (*anyopaque, SetLength) DiskError!void,
@@ -75,6 +75,14 @@ pub const Disk = struct {
 
     pub fn sync(self: Disk, options: Sync) DiskError!void {
         try self.vtable.sync(self.ptr, options);
+    }
+
+    /// Persist directory-entry metadata for files under `path`.
+    ///
+    /// Use "." for the root logical directory. File `sync` persists file
+    /// contents; `syncDir` persists creates, deletes, and renames.
+    pub fn syncDir(self: Disk, options: SyncDir) DiskError!void {
+        try self.vtable.sync_dir(self.ptr, options);
     }
 
     pub fn stat(self: Disk, options: Stat) DiskError!StatResult {
@@ -112,6 +120,7 @@ const unavailable_disk_vtable: Disk.VTable = .{
     .read = unavailableRead,
     .write = unavailableWrite,
     .sync = unavailableSync,
+    .sync_dir = unavailableSyncDir,
     .stat = unavailableStat,
     .read_some = unavailableReadSome,
     .set_length = unavailableSetLength,
@@ -128,6 +137,10 @@ fn unavailableWrite(_: *anyopaque, _: Disk.Write) DiskError!void {
 }
 
 fn unavailableSync(_: *anyopaque, _: Disk.Sync) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableSyncDir(_: *anyopaque, _: Disk.SyncDir) DiskError!void {
     return error.DiskUnavailable;
 }
 
@@ -197,6 +210,10 @@ pub const DiskWrite = struct {
 };
 
 pub const DiskSync = struct {
+    path: []const u8,
+};
+
+pub const DiskSyncDir = struct {
     path: []const u8,
 };
 
@@ -328,6 +345,13 @@ pub const RealDisk = struct {
         };
     }
 
+    fn syncDir(self: *Self, options: Disk.SyncDir) DiskError!void {
+        try self.validatePath(options.path);
+        // `std.Io` does not expose directory fsync on all backends yet. Keep
+        // the production adapter surface-compatible; real host durability is
+        // still delegated to the platform and filesystem.
+    }
+
     fn stat(self: *Self, options: Disk.Stat) DiskError!Disk.StatResult {
         try self.validatePath(options.path);
         const file_stat = self.root.statFile(self.io, options.path, .{}) catch |err| {
@@ -416,6 +440,7 @@ pub const RealDisk = struct {
         .read = diskRead,
         .write = diskWrite,
         .sync = diskSync,
+        .sync_dir = diskSyncDir,
         .stat = diskStat,
         .read_some = diskReadSome,
         .set_length = diskSetLength,
@@ -437,6 +462,10 @@ pub const RealDisk = struct {
 
     fn diskSync(ptr: *anyopaque, options: Disk.Sync) DiskError!void {
         try fromOpaque(ptr).sync(options);
+    }
+
+    fn diskSyncDir(ptr: *anyopaque, options: Disk.SyncDir) DiskError!void {
+        try fromOpaque(ptr).syncDir(options);
     }
 
     fn diskStat(ptr: *anyopaque, options: Disk.Stat) DiskError!Disk.StatResult {
@@ -590,12 +619,17 @@ pub const SimDisk = struct {
     pub const Read = DiskRead;
     pub const Write = DiskWrite;
     pub const Sync = DiskSync;
+    pub const SyncDir = DiskSyncDir;
     pub const Crash = DiskCrash;
     pub const Restart = DiskRestart;
 
+    const FileId = u64;
+
     const File = struct {
+        id: FileId,
         path: []u8,
         len: u64 = 0,
+        metadata_durable: bool = true,
         sectors: std.ArrayList(Sector) = .empty,
 
         fn deinit(self: *File, allocator: std.mem.Allocator) void {
@@ -630,12 +664,52 @@ pub const SimDisk = struct {
         }
     };
 
+    const PendingMetadata = struct {
+        op_id: u64,
+        dir: []u8,
+        other_dir: ?[]u8 = null,
+        dir_synced: bool = false,
+        other_dir_synced: bool = false,
+        kind: Kind,
+
+        const Kind = union(enum) {
+            create: FileId,
+            delete: ?File,
+            rename: RenameUndo,
+        };
+
+        const RenameUndo = struct {
+            file_id: FileId,
+            old_path: ?[]u8,
+            replaced: ?File = null,
+
+            fn deinit(self: *RenameUndo, allocator: std.mem.Allocator) void {
+                if (self.old_path) |path| allocator.free(path);
+                if (self.replaced) |*file| file.deinit(allocator);
+                self.* = undefined;
+            }
+        };
+
+        fn deinit(self: *PendingMetadata, allocator: std.mem.Allocator) void {
+            allocator.free(self.dir);
+            if (self.other_dir) |dir| allocator.free(dir);
+            switch (self.kind) {
+                .create => {},
+                .delete => |*file| if (file.*) |*owned| owned.deinit(allocator),
+                .rename => |*undo| undo.deinit(allocator),
+            }
+            self.* = undefined;
+        }
+    };
+
     world: *World,
     options: ResolvedOptions,
     faults: DiskFaultOptions = .{},
     files: std.ArrayList(File) = .empty,
     pending_writes: std.ArrayList(PendingWrite) = .empty,
+    pending_metadata: std.ArrayList(PendingMetadata) = .empty,
     next_op_id: u64 = 0,
+    next_file_id: FileId = 1,
     crashed: bool = false,
 
     pub fn init(world: *World, options: DiskOptions) DiskError!Self {
@@ -663,6 +737,8 @@ pub const SimDisk = struct {
         self.files.deinit(self.world.allocator);
         for (self.pending_writes.items) |*pending| pending.deinit(self.world.allocator);
         self.pending_writes.deinit(self.world.allocator);
+        for (self.pending_metadata.items) |*pending| pending.deinit(self.world.allocator);
+        self.pending_metadata.deinit(self.world.allocator);
         self.* = undefined;
     }
 
@@ -672,6 +748,7 @@ pub const SimDisk = struct {
         try validateFaultRate(faults.corrupt_read_rate);
         try validateFaultRate(faults.crash_lost_write_rate);
         try validateFaultRate(faults.crash_torn_write_rate);
+        try validateFaultRate(faults.crash_lost_metadata_rate);
         self.faults = faults;
     }
 
@@ -786,6 +863,23 @@ pub const SimDisk = struct {
         });
     }
 
+    fn syncDir(self: *Self, options: SyncDir) DiskError!void {
+        try self.validatePath(options.path);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        const committed = self.commitPendingMetadata(options.path);
+
+        try self.world.recordFields("disk.sync_dir", &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = options.path }),
+            traceField("status", .{ .literal = "ok" }),
+            traceField("committed_metadata", .{ .uint = committed }),
+            traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+    }
+
     fn stat(self: *Self, options: Disk.Stat) DiskError!Disk.StatResult {
         try self.validatePath(options.path);
         try self.ensureRunning();
@@ -894,9 +988,6 @@ pub const SimDisk = struct {
         try self.validatePath(options.path);
         try self.ensureRunning();
 
-        // FIXME(roadmap item 4): namespace mutations are immediately durable.
-        // Model pending directory metadata plus an explicit directory sync boundary
-        // before treating delete/rename crash behavior as realistic.
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
         const committed = try self.commitPendingWrites(options.path);
@@ -905,8 +996,18 @@ pub const SimDisk = struct {
             return error.FileNotFound;
         };
 
-        var file = self.files.orderedRemove(index);
-        file.deinit(self.world.allocator);
+        const dir = try self.ownedParentDir(options.path);
+        var dir_owned = true;
+        errdefer if (dir_owned) self.world.allocator.free(dir);
+        try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
+
+        const deleted = self.files.orderedRemove(index);
+        self.pending_metadata.appendAssumeCapacity(.{
+            .op_id = op_id,
+            .dir = dir,
+            .kind = .{ .delete = deleted },
+        });
+        dir_owned = false;
         self.clearPendingWritesFor(options.path);
         try self.recordLifecycleOp("disk.delete", op_id, options.path, null, committed, "ok", latency_ns);
     }
@@ -916,8 +1017,6 @@ pub const SimDisk = struct {
         try self.validatePath(options.new_path);
         try self.ensureRunning();
 
-        // FIXME(roadmap item 4): rename is atomic in-memory but not crash-window aware.
-        // A real filesystem can lose the directory entry update without parent-dir sync.
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
         const committed = try self.commitPendingWrites(options.old_path);
@@ -930,23 +1029,52 @@ pub const SimDisk = struct {
             return;
         }
 
+        const owned_old_path = try self.world.allocator.dupe(u8, options.old_path);
+        var old_path_owned = true;
+        errdefer if (old_path_owned) self.world.allocator.free(owned_old_path);
         const owned_new_path = try self.world.allocator.dupe(u8, options.new_path);
-        errdefer self.world.allocator.free(owned_new_path);
+        var new_path_owned = true;
+        errdefer if (new_path_owned) self.world.allocator.free(owned_new_path);
+        const old_dir = try self.ownedParentDir(options.old_path);
+        var old_dir_owned = true;
+        errdefer if (old_dir_owned) self.world.allocator.free(old_dir);
+        const new_dir = try self.ownedParentDir(options.new_path);
+        var new_dir_owned = true;
+        errdefer if (new_dir_owned) self.world.allocator.free(new_dir);
+        try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
 
+        var file_id: FileId = self.files.items[old_index].id;
+        var replaced: ?File = null;
         if (self.findFileIndex(options.new_path)) |new_index| {
             if (new_index != old_index) {
                 var old_index_adjusted = old_index;
-                var old_new = self.files.orderedRemove(new_index);
-                old_new.deinit(self.world.allocator);
+                replaced = self.files.orderedRemove(new_index);
                 if (new_index < old_index_adjusted) old_index_adjusted -= 1;
                 self.clearPendingWritesFor(options.new_path);
+                file_id = self.files.items[old_index_adjusted].id;
                 self.world.allocator.free(self.files.items[old_index_adjusted].path);
                 self.files.items[old_index_adjusted].path = owned_new_path;
+                new_path_owned = false;
             }
         } else {
             self.world.allocator.free(self.files.items[old_index].path);
             self.files.items[old_index].path = owned_new_path;
+            new_path_owned = false;
         }
+
+        self.pending_metadata.appendAssumeCapacity(.{
+            .op_id = op_id,
+            .dir = old_dir,
+            .other_dir = if (std.mem.eql(u8, old_dir, new_dir)) null else new_dir,
+            .kind = .{ .rename = .{
+                .file_id = file_id,
+                .old_path = owned_old_path,
+                .replaced = replaced,
+            } },
+        });
+        old_path_owned = false;
+        old_dir_owned = false;
+        new_dir_owned = std.mem.eql(u8, old_dir, new_dir);
 
         try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "ok", latency_ns);
     }
@@ -988,6 +1116,30 @@ pub const SimDisk = struct {
             try self.recordCrashWrite(pending, "landed");
         }
         self.clearPendingWrites();
+
+        const pending_metadata_count = self.pending_metadata.items.len;
+        var metadata_kept: u64 = 0;
+        var metadata_lost: u64 = 0;
+        var index = self.pending_metadata.items.len;
+        while (index > 0) {
+            index -= 1;
+            const pending = &self.pending_metadata.items[index];
+            if (try self.rollFault(
+                pending.op_id,
+                pending.dir,
+                "crash_lost_metadata",
+                self.faults.crash_lost_metadata_rate,
+            )) {
+                try self.rollbackPendingMetadata(pending);
+                metadata_lost += 1;
+                try self.recordCrashMetadata(pending, "lost");
+            } else {
+                self.markMetadataDurable(pending);
+                metadata_kept += 1;
+                try self.recordCrashMetadata(pending, "kept");
+            }
+        }
+        self.clearPendingMetadata();
         self.crashed = true;
 
         try self.world.recordFields("disk.crash", &.{
@@ -995,6 +1147,9 @@ pub const SimDisk = struct {
             traceField("landed", .{ .uint = landed }),
             traceField("lost", .{ .uint = lost }),
             traceField("torn", .{ .uint = torn }),
+            traceField("pending_metadata", .{ .uint = @intCast(pending_metadata_count) }),
+            traceField("metadata_kept", .{ .uint = metadata_kept }),
+            traceField("metadata_lost", .{ .uint = metadata_lost }),
         });
     }
 
@@ -1037,6 +1192,11 @@ pub const SimDisk = struct {
         if (offset % self.options.sector_size != 0) return error.InvalidAlignment;
         if (len_u64 % self.options.sector_size != 0) return error.InvalidAlignment;
         if (std.math.maxInt(u64) - offset < len_u64) return error.InvalidRange;
+    }
+
+    fn ownedParentDir(self: *Self, path: []const u8) DiskError![]u8 {
+        const parent = std.fs.path.dirname(path) orelse ".";
+        return try self.world.allocator.dupe(u8, parent);
     }
 
     fn consumeOpId(self: *Self) u64 {
@@ -1113,14 +1273,81 @@ pub const SimDisk = struct {
         return null;
     }
 
+    fn findFileById(self: *Self, id: FileId) ?*File {
+        for (self.files.items) |*file| {
+            if (file.id == id) return file;
+        }
+        return null;
+    }
+
+    fn findFileIndexById(self: *Self, id: FileId) ?usize {
+        for (self.files.items, 0..) |*file, index| {
+            if (file.id == id) return index;
+        }
+        return null;
+    }
+
     fn getOrCreateFile(self: *Self, path: []const u8) DiskError!*File {
         if (self.findFile(path)) |file| return file;
 
         const owned_path = try self.world.allocator.dupe(u8, path);
         errdefer self.world.allocator.free(owned_path);
 
-        try self.files.append(self.world.allocator, .{ .path = owned_path });
+        const id = self.next_file_id;
+        self.next_file_id += 1;
+        try self.files.append(self.world.allocator, .{
+            .id = id,
+            .path = owned_path,
+            .metadata_durable = false,
+        });
         return &self.files.items[self.files.items.len - 1];
+    }
+
+    fn ensurePendingCreate(self: *Self, op_id: u64, file: *const File) DiskError!void {
+        if (file.metadata_durable) return;
+        for (self.pending_metadata.items) |pending| switch (pending.kind) {
+            .create => |id| if (id == file.id) return,
+            .delete, .rename => {},
+        };
+
+        const dir = try self.ownedParentDir(file.path);
+        errdefer self.world.allocator.free(dir);
+        try self.pending_metadata.append(self.world.allocator, .{
+            .op_id = op_id,
+            .dir = dir,
+            .kind = .{ .create = file.id },
+        });
+    }
+
+    fn appendPendingDelete(self: *Self, op_id: u64, path: []const u8, deleted: File) DiskError!void {
+        const dir = try self.ownedParentDir(path);
+        errdefer self.world.allocator.free(dir);
+        try self.pending_metadata.append(self.world.allocator, .{
+            .op_id = op_id,
+            .dir = dir,
+            .kind = .{ .delete = deleted },
+        });
+    }
+
+    fn appendPendingRename(
+        self: *Self,
+        op_id: u64,
+        new_path: []const u8,
+        file_id: FileId,
+        owned_old_path: []u8,
+        replaced: ?File,
+    ) DiskError!void {
+        const dir = try self.ownedParentDir(new_path);
+        errdefer self.world.allocator.free(dir);
+        try self.pending_metadata.append(self.world.allocator, .{
+            .op_id = op_id,
+            .dir = dir,
+            .kind = .{ .rename = .{
+                .file_id = file_id,
+                .old_path = owned_old_path,
+                .replaced = replaced,
+            } },
+        });
     }
 
     fn appendPendingWrite(
@@ -1179,8 +1406,98 @@ pub const SimDisk = struct {
         self.pending_writes.clearRetainingCapacity();
     }
 
+    fn commitPendingMetadata(self: *Self, dir: []const u8) u64 {
+        var committed: u64 = 0;
+        var index: usize = 0;
+        while (index < self.pending_metadata.items.len) {
+            const pending = &self.pending_metadata.items[index];
+            if (!markPendingMetadataDirSynced(pending, dir)) {
+                index += 1;
+                continue;
+            }
+
+            if (!pendingMetadataSynced(pending)) {
+                index += 1;
+                continue;
+            }
+
+            self.markMetadataDurable(pending);
+            var removed = self.pending_metadata.orderedRemove(index);
+            removed.deinit(self.world.allocator);
+            committed += 1;
+        }
+        return committed;
+    }
+
+    fn markPendingMetadataDirSynced(pending: *PendingMetadata, dir: []const u8) bool {
+        var matched = false;
+        if (std.mem.eql(u8, pending.dir, dir)) {
+            pending.dir_synced = true;
+            matched = true;
+        }
+        if (pending.other_dir) |other_dir| {
+            if (std.mem.eql(u8, other_dir, dir)) {
+                pending.other_dir_synced = true;
+                matched = true;
+            }
+        }
+        return matched;
+    }
+
+    fn pendingMetadataSynced(pending: *const PendingMetadata) bool {
+        return pending.dir_synced and (pending.other_dir == null or pending.other_dir_synced);
+    }
+
+    fn clearPendingMetadata(self: *Self) void {
+        for (self.pending_metadata.items) |*pending| pending.deinit(self.world.allocator);
+        self.pending_metadata.clearRetainingCapacity();
+    }
+
+    fn markMetadataDurable(self: *Self, pending: *const PendingMetadata) void {
+        switch (pending.kind) {
+            .create => |id| {
+                if (self.findFileById(id)) |file| file.metadata_durable = true;
+            },
+            .delete => {},
+            .rename => |rename_undo| {
+                if (self.findFileById(rename_undo.file_id)) |file| file.metadata_durable = true;
+            },
+        }
+    }
+
+    fn rollbackPendingMetadata(self: *Self, pending: *PendingMetadata) DiskError!void {
+        switch (pending.kind) {
+            .create => |id| {
+                if (self.findFileIndexById(id)) |index| {
+                    var file = self.files.orderedRemove(index);
+                    file.deinit(self.world.allocator);
+                }
+            },
+            .delete => |*deleted| {
+                if (deleted.*) |file| {
+                    try self.files.append(self.world.allocator, file);
+                    deleted.* = null;
+                }
+            },
+            .rename => |*rename_undo| {
+                if (self.findFileById(rename_undo.file_id)) |file| {
+                    if (rename_undo.old_path) |old_path| {
+                        self.world.allocator.free(file.path);
+                        file.path = old_path;
+                        rename_undo.old_path = null;
+                    }
+                }
+                if (rename_undo.replaced) |file| {
+                    try self.files.append(self.world.allocator, file);
+                    rename_undo.replaced = null;
+                }
+            },
+        }
+    }
+
     fn applyFullWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
         const file = try self.getOrCreateFile(pending.path);
+        try self.ensurePendingCreate(pending.op_id, file);
         try self.writeSectors(file, pending.offset, pending.bytes);
         file.len = @max(file.len, try endOffset(pending.offset, pending.bytes.len));
     }
@@ -1190,6 +1507,7 @@ pub const SimDisk = struct {
         if (torn_len == 0) return;
 
         const file = try self.getOrCreateFile(pending.path);
+        try self.ensurePendingCreate(pending.op_id, file);
         try self.writeBytes(file, pending.offset, pending.bytes[0..torn_len]);
         file.len = @max(file.len, try endOffset(pending.offset, torn_len));
     }
@@ -1384,6 +1702,19 @@ pub const SimDisk = struct {
         });
     }
 
+    fn recordCrashMetadata(
+        self: *Self,
+        pending: *const PendingMetadata,
+        result: []const u8,
+    ) DiskError!void {
+        try self.world.recordFields("disk.crash_metadata", &.{
+            traceField("op", .{ .uint = pending.op_id }),
+            traceField("dir", .{ .text = pending.dir }),
+            traceField("kind", .{ .literal = @tagName(pending.kind) }),
+            traceField("result", .{ .literal = result }),
+        });
+    }
+
     fn recordPathOp(
         self: *Self,
         name: []const u8,
@@ -1474,6 +1805,7 @@ pub const SimDisk = struct {
         .read = diskRead,
         .write = diskWrite,
         .sync = diskSync,
+        .sync_dir = diskSyncDir,
         .stat = diskStat,
         .read_some = diskReadSome,
         .set_length = diskSetLength,
@@ -1503,6 +1835,10 @@ pub const SimDisk = struct {
 
     fn diskSync(ptr: *anyopaque, options: Disk.Sync) DiskError!void {
         try fromOpaque(ptr).sync(options);
+    }
+
+    fn diskSyncDir(ptr: *anyopaque, options: Disk.SyncDir) DiskError!void {
+        try fromOpaque(ptr).syncDir(options);
     }
 
     fn diskStat(ptr: *anyopaque, options: Disk.Stat) DiskError!Disk.StatResult {
@@ -1987,6 +2323,84 @@ test "disk: sync makes pending writes survive crash" {
     try std.testing.expectEqualStrings("abcd", &buffer);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.sync op=1 path=wal.log status=ok committed_writes=1 latency_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=0 landed=0 lost=0 torn=0") != null);
+}
+
+test "disk: crash can lose file metadata without directory sync" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.sync(.{ .path = "wal.log" });
+    try std.testing.expectEqual(@as(u64, 4), (try disk.stat(.{ .path = "wal.log" })).size);
+
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectError(error.FileNotFound, disk.stat(.{ .path = "wal.log" }));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=0 path=. kind=crash_lost_metadata rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_metadata op=0 dir=. kind=create result=lost") != null);
+}
+
+test "disk: directory sync makes file metadata survive crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.sync(.{ .path = "wal.log" });
+    try disk.syncDir(.{ .path = "." });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectEqual(@as(u64, 4), (try disk.stat(.{ .path = "wal.log" })).size);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.sync_dir op=2 path=. status=ok committed_metadata=1 latency_ns=10") != null);
+}
+
+test "disk: crash can roll back unsynced delete and rename metadata" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.sync(.{ .path = "wal.log" });
+    try disk.syncDir(.{ .path = "." });
+
+    try disk.rename(.{ .old_path = "wal.log", .new_path = "archive/wal.log" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectEqual(@as(u64, 4), (try disk.stat(.{ .path = "wal.log" })).size);
+    try std.testing.expectError(error.FileNotFound, disk.stat(.{ .path = "archive/wal.log" }));
+
+    try disk.control().setFaults(.{});
+    try disk.rename(.{ .old_path = "wal.log", .new_path = "archive/wal.log" });
+    try disk.syncDir(.{ .path = "." });
+    try disk.syncDir(.{ .path = "archive" });
+    try disk.delete(.{ .path = "archive/wal.log" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectEqual(@as(u64, 4), (try disk.stat(.{ .path = "archive/wal.log" })).size);
 }
 
 test "disk: crash can lose unflushed pending writes" {

@@ -305,11 +305,12 @@ const sim = try world.simulate(.{
 fn appendRecord(env: mar.Env, sector_bytes: []const u8) !void {
     try env.disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
     try env.disk.sync(.{ .path = "wal.log" });
+    try env.disk.syncDir(.{ .path = "." });
 }
 ```
 
-The `Env.disk` view exposes `read`, `write`, `sync`, `stat`, `readSome`,
-`setLength`, `delete`, and `rename`.
+The `Env.disk` view exposes `read`, `write`, `sync`, `syncDir`, `stat`,
+`readSome`, `setLength`, `delete`, and `rename`.
 Simulator-control operations such as `setFaults`, `crash`, `restart`, and
 `corruptSector` remain on `mar.DiskControl`, exposed through
 `sim.control.disk`, and are kept by the harness or scenario state.
@@ -325,18 +326,20 @@ past EOF. Logical paths are not host paths and are escaped through
 disk.write op=0 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.read op=1 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.sync op=2 path=wal.log status=ok committed_writes=1 latency_ns=1000000
-disk.stat op=3 path=wal.log status=ok size=4096 latency_ns=1000000
-disk.read_some op=4 path=wal.log offset=0 requested_len=32 read_len=32 status=ok latency_ns=1000000
-disk.set_length op=5 path=wal.log len=0 status=ok committed_writes=0 latency_ns=1000000
-disk.rename op=6 path=compact.tmp new_path=data.db status=ok committed_writes=0 latency_ns=1000000
-disk.delete op=7 path=wal.log status=ok committed_writes=0 latency_ns=1000000
+disk.sync_dir op=3 path=. status=ok committed_metadata=1 latency_ns=1000000
+disk.stat op=4 path=wal.log status=ok size=4096 latency_ns=1000000
+disk.read_some op=5 path=wal.log offset=0 requested_len=32 read_len=32 status=ok latency_ns=1000000
+disk.set_length op=6 path=wal.log len=0 status=ok committed_writes=0 latency_ns=1000000
+disk.rename op=7 path=compact.tmp new_path=data.db status=ok committed_writes=0 latency_ns=1000000
+disk.delete op=8 path=wal.log status=ok committed_writes=0 latency_ns=1000000
 ```
 
-The first file-lifecycle slice keeps metadata operations deterministic and
-trace-visible, but conservative: `setLength`, `delete`, and `rename` reject
-while crashed, and they commit pending writes for the affected path before
-mutating metadata. Richer crash-window modeling for directory entries and
-rename durability is deferred until an external storage-engine port needs it.
+File `sync` commits pending file contents. `syncDir` commits directory-entry
+metadata for creates, deletes, and renames in that logical directory. Without
+`syncDir`, a crash can keep file contents while losing the directory entry,
+matching the classic parent-directory-fsync storage bug class. Cross-directory
+renames require syncing both parent directories before the rename is fully
+durable.
 
 Faults are disabled by default. Enable them through `mar.DiskControl`:
 
@@ -348,6 +351,7 @@ try control.setFaults(.{
     .corrupt_read_rate = .oneIn(1_000),
     .crash_lost_write_rate = .oneIn(10),
     .crash_torn_write_rate = .oneIn(10),
+    .crash_lost_metadata_rate = .oneIn(10),
 });
 ```
 

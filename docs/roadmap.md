@@ -468,13 +468,12 @@ Zig storage engine. Add the smallest deterministic disk surface that can port
 `std.fs`.
 
 Current partial progress: `Disk` now exposes path-level `stat`, EOF-aware
-`readSome`, `setLength`, `delete`, and `rename`, backed by both `SimDisk` and
-`RealDisk`. Simulation `Env.io()` exposes the corresponding flat
+`readSome`, `setLength`, `delete`, `rename`, and `syncDir`, backed by both
+`SimDisk` and `RealDisk`. Simulation `Env.io()` exposes the corresponding flat
 `std.Io.File` subset over `SimDisk`: create/open, access/statFile, positional
 read/write, length/stat, setLength, sync, close, delete, and rename. This is
 still not a complete filesystem model: directory metadata/iteration,
-parent-directory sync semantics, and crash-window modeling for rename/delete
-remain deferred.
+full `std.Io.Dir` sync plumbing, and richer directory APIs remain deferred.
 
 Acceptance criteria:
 
@@ -486,16 +485,15 @@ Acceptance criteria:
 - Done: add `setLength` for WAL reset. The first slice rejects while crashed
   and commits pending writes for the affected path before mutating metadata.
 - Done: add `delete` for WAL cleanup and `rename` for compaction-style
-  replacement. The first slice is deterministic and trace-visible but does not
-  yet model parent-directory sync or crash windows for directory entries.
+  replacement. Directory-entry metadata is pending until `Disk.syncDir`, so
+  crashes can roll back unsynced create/delete/rename metadata.
 - Done: keep logical paths rooted in Marionette's disk namespace. No host
   absolute paths or current-working-directory behavior leaks into app code.
 - Done: update `RealDisk`, `SimDisk`, trace events, docs, and `std.Io` tests
   together.
-- Add explicit parent-directory durability modeling. Creates, deletes, and
-  renames need pending metadata state plus a directory sync boundary before
-  crash/restart can expose the real "file content fsynced but directory entry
-  lost" bug class.
+- Done: add explicit parent-directory durability modeling. Creates, deletes,
+  and renames have pending metadata state plus a directory sync boundary, which
+  exposes the real "file content fsynced but directory entry lost" bug class.
 - Add a small compatibility scenario that ports the storage-facing slice of
   `kvdb` or a local surrogate with the same operations: open database, append
   WAL records, commit, reopen/recover, compact via rename, and clear/delete the

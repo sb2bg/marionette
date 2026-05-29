@@ -64,7 +64,10 @@ error set has no `WouldBlock` variant. It also supports a flat file subset over
 `Dir.rename`. This subset gives
 byte-oriented `std.Io.File` behavior over the sector-oriented disk simulator
 without modeling a complete filesystem. File stats track `mtime` for successful
-content mutations; `atime` and `ctime` remain zero.
+content mutations; `atime` and `ctime` remain zero. `Dir.createFile` routes
+new empty files through the disk authority, but directory-entry durability is
+currently exposed as `Disk.syncDir` rather than a standard `std.Io.Dir` sync
+hook.
 `concurrent`, blocking queue waits, directory metadata and iteration,
 chmod/chown, symlinks, memory maps, process operations, datagrams, DNS, and real
 external network access fail closed until they are routed through

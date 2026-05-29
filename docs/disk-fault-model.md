@@ -226,14 +226,14 @@ hashes, the hash algorithm must be named and stable.
 - Default sector size: 4096 bytes.
 - Default minimum latency: omitted means "match the world's tick duration";
   explicit values are preserved and validated against the tick size.
-- Initial app operations: sector-oriented `read`, `write`, and `sync` are
-  implemented. Path-level `stat`, EOF-aware `readSome`, `setLength`, `delete`,
-  and `rename` are also implemented as the first real-storage compatibility
-  slice.
+- Initial app operations: sector-oriented `read`, `write`, `sync`, and
+  `syncDir` are implemented. Path-level `stat`, EOF-aware `readSome`,
+  `setLength`, `delete`, and `rename` are also implemented as the first
+  real-storage compatibility slice.
 - Initial harness-control operations: `setFaults`, `corruptSector`, `crash`,
   and `restart` are implemented. Read/write IO errors, corrupt reads, scripted
-  sector corruption, lost pending writes, and torn pending writes are
-  implemented.
+  sector corruption, lost pending writes, torn pending writes, and lost
+  unsynced directory metadata are implemented.
 - Initial example: append-only WAL recovery.
 - User data: store bytes in memory, trace lengths and outcomes by default.
 - Checksums: user code owns them.
@@ -243,16 +243,16 @@ hashes, the hash algorithm must be named and stable.
 - File lifecycle operations are intentionally narrow and operation-shaped, not
   a full `std.fs.File` clone. `setLength`, `delete`, and `rename` reject while
   crashed and commit pending writes for the affected path before mutating
-  metadata. Richer crash-window modeling for directory entries and rename
-  durability is deferred until an external storage-engine port needs it.
+  metadata. `syncDir` is the explicit durability boundary for creates, deletes,
+  and renames; cross-directory renames require syncing both parent directories.
 
 ## Open Questions
 
 - How closely should the production `Disk` adapter align with future `std.Io`
   file APIs?
 - Should `sync` be per-file only, or should there also be a whole-disk sync?
-- If `rename` is modeled, should directory sync be part of the first crash
-  semantics or an explicit later durability boundary?
+- Should `syncDir` stay on `Disk`, or should Marionette eventually expose a
+  standard `std.Io.Dir` bridge for directory fsync when Zig's API supports it?
 - What is the smallest explicit API for declaring recovery windows?
 - What is the first reusable shape for a VOPR-style fault atlas once
   Marionette has more than one storage example?

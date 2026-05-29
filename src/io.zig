@@ -420,8 +420,6 @@ fn simDirCreateFile(
     if (!isValidSimPath(sub_path)) return error.FileNotFound;
 
     const backend = backendFromUserdata(userdata);
-    // TODO(roadmap item 4): wire this through pending directory metadata once
-    // `Disk` exposes an explicit directory sync/durability boundary.
     const file_index = if (backend.findFileMetaIndex(sub_path)) |index| b: {
         if (options.exclusive) return error.PathAlreadyExists;
         if (options.truncate) {
@@ -434,7 +432,12 @@ fn simDirCreateFile(
             if (old_len != 0) backend.files.items[index].mtime = backend.nowTimestamp();
         }
         break :b index;
-    } else backend.createFileMeta(sub_path) catch return error.SystemResources;
+    } else b: {
+        backend.disk.write(.{ .path = sub_path, .offset = 0, .bytes = &.{} }) catch |err| {
+            return mapDiskOpenError(err);
+        };
+        break :b backend.createFileMeta(sub_path) catch return error.SystemResources;
+    };
 
     return backend.openFileHandle(file_index, options.read, true) catch return error.SystemResources;
 }
