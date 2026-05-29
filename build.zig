@@ -44,6 +44,25 @@ pub fn build(b: *std.Build) void {
     const run_examples_step = b.step("run-example", "Run a Marionette example by seed");
     run_examples_step.dependOn(&run_examples_cmd.step);
 
+    if (b.lazyDependency("xitdb", .{
+        .target = target,
+        .optimize = optimize,
+    })) |xitdb_dep| {
+        const validate_xitdb_mod = b.createModule(.{
+            .root_source_file = b.path("validation/xitdb_durability.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validate_xitdb_mod.addImport("marionette", mod);
+        validate_xitdb_mod.addImport("xitdb", xitdb_dep.module("xitdb"));
+
+        const validate_xitdb_tests = b.addTest(.{ .root_module = validate_xitdb_mod });
+        const run_validate_xitdb = b.addRunArtifact(validate_xitdb_tests);
+
+        const validate_xitdb_step = b.step("validate-xitdb", "Run xitdb under Marionette");
+        validate_xitdb_step.dependOn(&run_validate_xitdb.step);
+    }
+
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),
         .target = target,
@@ -56,7 +75,7 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
 
     const tidy = build_support.addTidyStep(b, .{
-        .paths = &.{ "src", "examples", "tests" },
+        .paths = &.{ "src", "examples", "tests", "validation" },
         .target = target,
         .optimize = optimize,
     });

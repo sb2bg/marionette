@@ -7,8 +7,9 @@ production libraries accept `std.Io`, and tests swap in Marionette's
 deterministic implementation. Today, Marionette ships the simulator, trace,
 fault, disk, and network primitives that make that direction concrete.
 
-Write your code against `env`. In tests, drive `control` to inject faults. The
-same code runs on the simulator and on real hardware.
+Write production-shaped code against `env` and `std.Io`. In tests, drive
+`control` to inject faults. For the modeled disk and local endpoint surfaces,
+the same application logic can run on the simulator and on production adapters.
 
 ```zig
 fn writeAndRecover(env: mar.Env) !KVStore {
@@ -29,8 +30,8 @@ var prod_store = try writeAndRecover(production.env());
 ```
 
 That parity is the point. You do not write a simulator version of your code.
-You write your code once, and Marionette gives you a deterministic environment
-to run it in.
+You write your code behind Marionette-owned authorities, and Marionette gives
+you a deterministic environment to run it in.
 
 ## Why
 
@@ -173,9 +174,19 @@ Passing runs return traces for persistence, diffing, or external tooling.
 
 ## Status
 
-Marionette is early. The API shape is converging but not yet stable; expect
-breaking changes between minor versions until 0.1. The simulator currently
-models disk, network, and clock; allocator simulation is planned.
+Marionette is early. This is a `0.x` release: there is no API stability
+guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
+`Control`, `runCase` / `expect*`, `Disk`, `SimDisk`, `RealDisk`, `Production`,
+`Recorder`, and the app-facing `Endpoint(Message)` shape. Everything else may
+change as the simulator grows.
+
+The simulator currently models clock, deterministic randomness, disk, a flat
+`std.Io.File` subset, and a typed endpoint network. It does not model
+`Mutex`, `Condition`, futex waits, or arbitrary OS thread scheduling; code that
+depends on memory-level concurrency needs separate testing. The production
+network path is partial: local same-process endpoints and experimental framed
+loopback paths exist, but cross-process production transport is still roadmap
+work. Allocator simulation is planned.
 
 The [`examples/`](../examples/) directory is the best place to start.
 

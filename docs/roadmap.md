@@ -458,9 +458,10 @@ Design notes:
 ### 4. Disk file lifecycle and EOF-aware reads for real storage engines
 
 The append-only WAL examples only needed sector-addressed `read`, `write`, and
-`sync`. A real embedded database such as `lispking/kvdb` needs a wider storage
-authority before it can run meaningfully under Marionette: file size metadata,
-EOF-aware reads, truncate/clear, delete, and atomic-ish rename for compaction.
+`sync`. Real embedded databases such as `xit-vcs/xitdb` and `lispking/kvdb`
+need a wider storage authority before they can run meaningfully under
+Marionette: file size metadata, EOF-aware reads, truncate/clear, delete, and
+atomic-ish rename for compaction.
 
 This is the first external-compatibility gap discovered by inspecting a real
 Zig storage engine. Add the smallest deterministic disk surface that can port
@@ -471,9 +472,12 @@ Current partial progress: `Disk` now exposes path-level `stat`, EOF-aware
 `readSome`, `setLength`, `delete`, `rename`, and `syncDir`, backed by both
 `SimDisk` and `RealDisk`. Simulation `Env.io()` exposes the corresponding flat
 `std.Io.File` subset over `SimDisk`: create/open, access/statFile, positional
-read/write, length/stat, setLength, sync, close, delete, and rename. This is
-still not a complete filesystem model: directory metadata/iteration,
-full `std.Io.Dir` sync plumbing, and richer directory APIs remain deferred.
+and streaming read/write, length/stat, setLength, sync, close, delete, and
+rename. A pinned external xitdb validation target now exercises a real
+`std.Io.File` database workload with `zig build validate-xitdb` without adding
+xitdb to the default test path. This is still not a complete filesystem model:
+directory metadata/iteration, full `std.Io.Dir` sync plumbing, and richer
+directory APIs remain deferred.
 
 Acceptance criteria:
 
@@ -494,6 +498,38 @@ Acceptance criteria:
 - Done: add explicit parent-directory durability modeling. Creates, deletes,
   and renames have pending metadata state plus a directory sync boundary, which
   exposes the real "file content fsynced but directory entry lost" bug class.
+- Done: add a pinned lazy external validation target for xitdb. It creates an
+  xitdb file database over `sim.env.io()`, performs modeled randomized
+  transactions against a fixed keyspace, verifies every recovered history moment
+  against the model, reopens after trailing junk so xitdb truncation runs, and
+  asserts same-seed Marionette traces are byte-identical.
+- Done: add a first xitdb crash-recovery check with `crash_lost_write_rate =
+  .always()`. Acknowledged transactions are modeled as durable and verified
+  after crash/restart, which exercises xitdb's sync-before-ack contract.
+- Done: add a small lost-write seed sweep for xitdb acknowledged transactions.
+  The pinned xitdb commit survived the sweep, which is positive evidence that
+  file-backed commits sync before returning an acknowledged transaction.
+- Done: add an xitdb immutability/MVCC-style check: hold a read-only cursor to
+  an old moment, commit later transactions, and verify the old cursor still
+  reads the old modeled snapshot.
+- Done: add a SimDisk-vs-host-`std.Io` parity check for the same modeled xitdb
+  workload.
+- Done: add a layout-sensitive torn-write probe for xitdb's committed-size
+  header. On the pinned xitdb commit and a deliberately non-realistic 7-byte
+  simulated sector, Marionette exposes a minimal recovery counterexample: after
+  one acknowledged transaction, a torn unacknowledged header write can make
+  recovered reads fail with `EndOfStream`. The same probe currently recovers
+  with 512- and 4096-byte simulated sectors. Since the committed-size field is
+  fixed at bytes 28-35, it cannot cross a 512- or 4096-byte sector boundary;
+  report this precisely as an atomicity-assumption counterexample, not a
+  hardware-realistic data-loss bug.
+- Add realistic torn-write sweeps for the append-only data that the committed
+  file size points at. Unlike the fixed header field, data blocks can span
+  512/4096-byte boundaries, so data-vs-size ordering is the next plausible
+  real-hardware recovery surface to probe.
+- Expand the xitdb crash-fault profile into a real fuzzer with shrinking. Vary
+  sector size, crash point, workload length, and one active fault class at a
+  time; reduce failures to a maintainer-readable operation sequence.
 - Add a small compatibility scenario that ports the storage-facing slice of
   `kvdb` or a local surrogate with the same operations: open database, append
   WAL records, commit, reopen/recover, compact via rename, and clear/delete the
