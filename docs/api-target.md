@@ -88,9 +88,10 @@ Marionette's current deterministic backend. That backend supports deterministic
 clock, sleep, random, `randomSecure`, synchronous `async`, immediate
 `Io.Queue` operations, and an in-memory TCP stream subset for
 `std.Io.net`. It also supports a flat file subset over `SimDisk`:
-`Dir.createFile`, `Dir.openFile`, `Dir.statFile`, `Dir.access`, positional
-file reads and writes, `File.length`, `File.stat`, `File.setLength`,
-`File.sync`, `File.close`, `Dir.deleteFile`, and `Dir.rename`.
+`Dir.createFile`, `Dir.openFile`, `Dir.statFile`, `Dir.access`, positional and
+streaming file reads and writes, `File.length`, `File.stat`, `File.setLength`,
+`File.sync`, `File.close`, `Dir.deleteFile`, and `Dir.rename`. Streaming cursor
+state is per open file handle and advances only by bytes actually transferred.
 Full directory/filesystem behavior, process operations, datagrams, DNS, and
 real external network access still fail closed. See
 [Marionette as Deterministic std.Io](std-io-direction.md).

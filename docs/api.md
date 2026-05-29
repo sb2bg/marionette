@@ -281,8 +281,10 @@ that same host `std.Io`. Simulation envs return Marionette's current
 deterministic `std.Io` backend; it supports deterministic clock/random
 operations, synchronous `async`, immediate `Io.Queue` operations, and an
 in-memory TCP stream subset today. It also supports a flat file subset over
-`SimDisk`: create/open, access/statFile, positional read/write,
-length/stat/setLength, sync, close, delete, and rename. Full
+`SimDisk`: create/open, access/statFile, positional and streaming read/write,
+length/stat/setLength, sync, close, delete, and rename. Streaming cursor state
+is per open file handle, advances only by bytes actually transferred, and is
+left unchanged by failed streaming operations. Full
 directory/filesystem behavior, process operations, datagrams, DNS, and real
 external network access still fail
 closed. See

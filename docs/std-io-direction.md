@@ -59,9 +59,12 @@ Empty accepts return `error.WouldBlock`; empty stream reads return
 `error.Timeout` while the peer remains open because Zig 0.16's stream reader
 error set has no `WouldBlock` variant. It also supports a flat file subset over
 `SimDisk`: `Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
-`Dir.access`, positional file read/write, `File.length`, `File.stat`,
-`File.setLength`, `File.sync`, `File.close`, `Dir.deleteFile`, and
-`Dir.rename`. This subset gives
+`Dir.access`, positional file read/write, streaming file read/write,
+`File.length`, `File.stat`, `File.setLength`, `File.sync`, `File.close`,
+`Dir.deleteFile`, and `Dir.rename`. Streaming files keep a cursor per open
+file handle; `seekTo`/`seekBy` update that cursor, successful operations advance
+only by bytes actually transferred, and failed streaming operations leave the
+cursor unchanged. This subset gives
 byte-oriented `std.Io.File` behavior over the sector-oriented disk simulator
 without modeling a complete filesystem. File stats track `mtime` for successful
 content mutations; `atime` and `ctime` remain zero. `Dir.createFile` routes

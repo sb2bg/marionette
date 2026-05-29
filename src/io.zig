@@ -1,8 +1,9 @@
 //! Minimal deterministic `std.Io` backend for simulation worlds.
 //!
 //! This is the Phase 0 backend: deterministic clock and randomness, synchronous
-//! `async`, a small in-memory TCP stream subset, and explicit failure for
-//! filesystem/process operations.
+//! `async`, a small in-memory TCP stream subset, a flat file subset over
+//! `SimDisk`, and explicit failure for unsupported filesystem/process
+//! operations.
 
 const std = @import("std");
 
@@ -1296,6 +1297,143 @@ test "io: simulation files support std.Io file readers and writers" {
     var final: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 8), try file.readPositionalAll(io, &final, 0));
     try std.testing.expectEqualStrings("abcdefXY", &final);
+}
+
+test "io: simulation streaming cursors are per open file handle" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var first = try Io.Dir.cwd().createFile(io, "handles.bin", .{ .read = true });
+    defer first.close(io);
+    try first.writePositionalAll(io, "abcdefgh", 0);
+
+    var second = try Io.Dir.cwd().openFile(io, "handles.bin", .{ .mode = .read_only });
+    defer second.close(io);
+
+    var first_reader_buffer: [0]u8 = .{};
+    var first_reader = first.readerStreaming(io, &first_reader_buffer);
+    try first_reader.seekTo(4);
+
+    var second_reader_buffer: [0]u8 = .{};
+    var second_reader = second.readerStreaming(io, &second_reader_buffer);
+
+    var read_out: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try second_reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqualStrings("ab", &read_out);
+
+    try std.testing.expectEqual(@as(usize, 2), try first_reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqualStrings("ef", &read_out);
+}
+
+test "io: simulation streaming reads advance only by bytes read" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "eof.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcdefgh", 0);
+
+    var reader_buffer: [0]u8 = .{};
+    var reader = file.readerStreaming(io, &reader_buffer);
+    try reader.seekTo(6);
+
+    var read_out: [4]u8 = @splat(0);
+    try std.testing.expectEqual(@as(usize, 2), try reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqualStrings("gh", read_out[0..2]);
+    try std.testing.expectEqual(@as(u64, 8), reader.logicalPos());
+
+    try std.testing.expectEqual(@as(usize, 0), try reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqual(@as(u64, 8), reader.logicalPos());
+
+    var writer_buffer: [0]u8 = .{};
+    var writer = file.writerStreaming(io, &writer_buffer);
+    try writer.seekTo(reader.logicalPos());
+    try writer.interface.writeAll("XY");
+    try writer.flush();
+
+    var final: [10]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 10), try file.readPositionalAll(io, &final, 0));
+    try std.testing.expectEqualStrings("abcdefghXY", &final);
+}
+
+test "io: simulation streaming seek rejects negative underflow" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "seek.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcd", 0);
+
+    var reader_buffer: [0]u8 = .{};
+    var reader = file.readerStreaming(io, &reader_buffer);
+    try std.testing.expectError(error.Unseekable, reader.seekBy(-1));
+
+    var read_out: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqualStrings("a", &read_out);
+}
+
+test "io: simulation streaming read faults leave cursor unchanged" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "read-fault.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcdefgh", 0);
+
+    var reader_buffer: [0]u8 = .{};
+    var reader = file.readerStreaming(io, &reader_buffer);
+    try reader.seekTo(2);
+
+    try sim.control.disk.setFaults(.{ .read_error_rate = .always() });
+    var read_out: [2]u8 = undefined;
+    try std.testing.expectError(error.ReadFailed, reader.interface.readSliceShort(&read_out));
+    try std.testing.expectEqual(@as(u64, 2), reader.logicalPos());
+
+    try sim.control.disk.setFaults(.{});
+    try std.testing.expectEqual(@as(usize, 2), try file.readStreaming(io, &.{&read_out}));
+    try std.testing.expectEqualStrings("cd", &read_out);
+}
+
+test "io: simulation streaming writes use disk pending-write crash semantics" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "pending.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcd", 0);
+    try file.sync(io);
+
+    var writer_buffer: [0]u8 = .{};
+    var writer = file.writerStreaming(io, &writer_buffer);
+    try writer.seekTo(0);
+    try writer.interface.writeAll("WXYZ");
+    try writer.flush();
+
+    try sim.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    var read_out: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try file.readPositionalAll(io, &read_out, 0));
+    try std.testing.expectEqualStrings("abcd", &read_out);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "result=lost") != null);
 }
 
 test "io: simulation files reopen tracked metadata" {
