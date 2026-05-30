@@ -6,11 +6,13 @@ const mar = @import("marionette");
 const xitdb = @import("xitdb");
 
 const HashInt = u160;
-const MaxReadBytes = 1024;
+const MaxReadBytes = 8 * 1024;
 const KeyCount = 8;
 const TransactionCount = 16;
 const MaxOpsPerTransaction = 4;
 const SweepSeeds = 64;
+const DataProbeSweepSeeds = 64;
+const DataProbeWarmupTransactions = 16;
 const DB = xitdb.Database(.file, HashInt);
 // xitdb writes the top-level committed file_size at
 // DATABASE_START + byteSizeOf(ArrayListHeader) = 12 + 16.
@@ -36,6 +38,8 @@ const byte_values = [_][]const u8{
     "replay",
     "model",
 };
+
+const data_probe_value: [4096]u8 = @splat('d');
 
 const Value = union(enum) {
     absent,
@@ -97,6 +101,14 @@ test "xitdb acknowledged transactions survive lost-write crash seed sweep" {
         const trace = try runTrace(allocator, seed, .lost_write_crash);
         allocator.free(trace);
     }
+}
+
+test "xitdb data-region torn writes preserve acknowledged history at realistic sectors" {
+    try runDataRegionCrashSweep(.torn);
+}
+
+test "xitdb data-region reordered writes preserve acknowledged history at realistic sectors" {
+    try runDataRegionCrashSweep(.reordered);
 }
 
 test "marionette detects xitdb torn header corruption at sub-field granularity" {
@@ -175,6 +187,159 @@ const TornResult = struct {
     result: TornOutcome,
     trace: []u8,
 };
+
+const DataRegionFault = enum {
+    torn,
+    reordered,
+
+    fn name(self: DataRegionFault) []const u8 {
+        return switch (self) {
+            .torn => "torn",
+            .reordered => "reordered",
+        };
+    }
+
+    fn traceResult(self: DataRegionFault) []const u8 {
+        return switch (self) {
+            .torn => "result=torn",
+            .reordered => "result=reordered",
+        };
+    }
+};
+
+const DataRegionProbe = struct {
+    trace: []u8,
+    unacknowledged_window: bool,
+    data_region_faulted: bool,
+};
+
+fn runDataRegionCrashSweep(comptime fault: DataRegionFault) !void {
+    const allocator = std.testing.allocator;
+    const sector_sizes = [_]u64{ 512, 4096 };
+
+    for (sector_sizes) |sector_size| {
+        var windows: usize = 0;
+        var data_faults: usize = 0;
+        for (0..DataProbeSweepSeeds) |i| {
+            const seed = 0xDA7A_0000 +
+                @as(u64, @intCast(@intFromEnum(fault))) * 0x10000 +
+                sector_size * 0x100 +
+                @as(u64, @intCast(i));
+            const outcome = runDataRegionCrashCase(
+                allocator,
+                seed,
+                sector_size,
+                fault,
+                DataProbeWarmupTransactions,
+            ) catch |err| {
+                std.debug.print(
+                    "xitdb data-region {s} failure seed=0x{x} sector_size={} warmup_transactions={}\n",
+                    .{ fault.name(), seed, sector_size, DataProbeWarmupTransactions },
+                );
+                return err;
+            };
+            if (outcome.unacknowledged_window) windows += 1;
+            if (outcome.data_region_faulted) data_faults += 1;
+            allocator.free(outcome.trace);
+        }
+
+        try std.testing.expect(windows > 0);
+        try std.testing.expect(data_faults > 0);
+    }
+}
+
+fn runDataRegionCrashCase(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    sector_size: u64,
+    comptime fault: DataRegionFault,
+    warmup_transactions: usize,
+) !DataRegionProbe {
+    var world = try mar.World.init(allocator, .{ .seed = seed });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = sector_size } });
+    const io = sim.env.io();
+
+    var file = try std.Io.Dir.cwd().createFile(io, "xit-data.db", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var db = try DB.init(.{ .io = io, .file = file });
+    var model = std.ArrayList(Snapshot).empty;
+    defer model.deinit(allocator);
+
+    try runRandomWorkload(allocator, &world, &db, &model, warmup_transactions);
+    const grow_ops = [_]Operation{
+        .{ .put_bytes = .{ .key_index = 0, .value = data_probe_value[0..] } },
+    };
+    try applyTransaction(&db, &grow_ops);
+    try appendModelTransaction(allocator, &model, &grow_ops);
+    try verifyHistory(allocator, &db, model.items);
+
+    try sim.control.disk.setFaults(.{ .write_error_rate = .oneIn(8) });
+    const failed = blk: {
+        const key_index = try world.randomIntLessThan(usize, KeyCount);
+        const unacknowledged_ops = [_]Operation{
+            .{ .put_bytes = .{ .key_index = key_index, .value = data_probe_value[0..] } },
+        };
+        applyTransaction(&db, &unacknowledged_ops) catch break :blk true;
+        break :blk false;
+    };
+
+    if (!failed) {
+        return .{
+            .trace = try allocator.dupe(u8, world.traceBytes()),
+            .unacknowledged_window = false,
+            .data_region_faulted = false,
+        };
+    }
+
+    switch (fault) {
+        .torn => try sim.control.disk.setFaults(.{ .crash_torn_write_rate = .always() }),
+        .reordered => try sim.control.disk.setFaults(.{ .crash_reordered_write_rate = .always() }),
+    }
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    var recovered = try DB.init(.{ .io = io, .file = file });
+    verifyHistory(allocator, &recovered, model.items) catch |err| {
+        std.debug.print(
+            "xitdb data-region {s} invariant violation seed=0x{x} sector_size={} trace:\n{s}\n",
+            .{ fault.name(), seed, sector_size, world.traceBytes() },
+        );
+        return err;
+    };
+
+    const trace = try allocator.dupe(u8, world.traceBytes());
+    return .{
+        .trace = trace,
+        .unacknowledged_window = true,
+        .data_region_faulted = traceHasDataRegionFault(trace, sector_size, fault),
+    };
+}
+
+fn traceHasDataRegionFault(trace: []const u8, sector_size: u64, comptime fault: DataRegionFault) bool {
+    var lines = std.mem.splitScalar(u8, trace, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "disk.crash_write") == null) continue;
+        if (std.mem.indexOf(u8, line, "path=xit-data.db") == null) continue;
+        if (std.mem.indexOf(u8, line, fault.traceResult()) == null) continue;
+        const offset = parseTraceUint(line, "offset=") orelse continue;
+        if (offset >= sector_size and offset != committed_size_header_offset) return true;
+    }
+    return false;
+}
+
+fn parseTraceUint(line: []const u8, key: []const u8) ?u64 {
+    const start = std.mem.indexOf(u8, line, key) orelse return null;
+    const value_start = start + key.len;
+    var value_end = value_start;
+    while (value_end < line.len and line[value_end] >= '0' and line[value_end] <= '9') {
+        value_end += 1;
+    }
+    if (value_end == value_start) return null;
+    return std.fmt.parseInt(u64, line[value_start..value_end], 10) catch null;
+}
 
 fn runTornHeaderRecoveryCase(allocator: std.mem.Allocator, seed: u64, sector_size: u64) !TornResult {
     var world = try mar.World.init(allocator, .{ .seed = seed });

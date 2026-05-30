@@ -35,6 +35,7 @@ pub const DiskFaultOptions = struct {
     corrupt_read_rate: env_module.BuggifyRate = .never(),
     crash_lost_write_rate: env_module.BuggifyRate = .never(),
     crash_torn_write_rate: env_module.BuggifyRate = .never(),
+    crash_reordered_write_rate: env_module.BuggifyRate = .never(),
     crash_lost_metadata_rate: env_module.BuggifyRate = .never(),
 };
 
@@ -748,6 +749,7 @@ pub const SimDisk = struct {
         try validateFaultRate(faults.corrupt_read_rate);
         try validateFaultRate(faults.crash_lost_write_rate);
         try validateFaultRate(faults.crash_torn_write_rate);
+        try validateFaultRate(faults.crash_reordered_write_rate);
         try validateFaultRate(faults.crash_lost_metadata_rate);
         self.faults = faults;
     }
@@ -1086,8 +1088,16 @@ pub const SimDisk = struct {
         var landed: u64 = 0;
         var lost: u64 = 0;
         var torn: u64 = 0;
+        var reordered: u64 = 0;
+        const CrashLanding = struct {
+            index: usize,
+            result: []const u8,
+        };
+        var landing = std.ArrayList(CrashLanding).empty;
+        defer landing.deinit(self.world.allocator);
+        var apply_reordered = false;
 
-        for (self.pending_writes.items) |*pending| {
+        for (self.pending_writes.items, 0..) |*pending, index| {
             if (try self.rollFault(
                 pending.op_id,
                 pending.path,
@@ -1111,9 +1121,37 @@ pub const SimDisk = struct {
                 continue;
             }
 
-            try self.applyFullWrite(pending);
+            if (try self.rollFault(
+                pending.op_id,
+                pending.path,
+                "crash_reordered_write",
+                self.faults.crash_reordered_write_rate,
+            )) {
+                try landing.append(self.world.allocator, .{ .index = index, .result = "reordered" });
+                reordered += 1;
+                apply_reordered = true;
+                continue;
+            }
+
+            try landing.append(self.world.allocator, .{ .index = index, .result = "landed" });
             landed += 1;
-            try self.recordCrashWrite(pending, "landed");
+        }
+
+        if (apply_reordered) {
+            var index = landing.items.len;
+            while (index > 0) {
+                index -= 1;
+                const item = landing.items[index];
+                const pending = &self.pending_writes.items[item.index];
+                try self.applyFullWrite(pending);
+                try self.recordCrashWrite(pending, item.result);
+            }
+        } else {
+            for (landing.items) |item| {
+                const pending = &self.pending_writes.items[item.index];
+                try self.applyFullWrite(pending);
+                try self.recordCrashWrite(pending, item.result);
+            }
         }
         self.clearPendingWrites();
 
@@ -1147,6 +1185,7 @@ pub const SimDisk = struct {
             traceField("landed", .{ .uint = landed }),
             traceField("lost", .{ .uint = lost }),
             traceField("torn", .{ .uint = torn }),
+            traceField("reordered", .{ .uint = reordered }),
             traceField("pending_metadata", .{ .uint = @intCast(pending_metadata_count) }),
             traceField("metadata_kept", .{ .uint = metadata_kept }),
             traceField("metadata_lost", .{ .uint = metadata_lost }),
@@ -2459,6 +2498,35 @@ test "disk: crash can tear unflushed pending writes" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=2 path=wal.log kind=crash_torn_write rate=1/1 roll=0 fired=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=2 path=wal.log offset=0 len=4 result=torn") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=1 landed=0 lost=0 torn=1") != null);
+}
+
+test "disk: crash can reorder unflushed pending writes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "1111" });
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = "2222" });
+    try disk.control().setFaults(.{ .crash_reordered_write_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    var buffer: [4]u8 = @splat(0);
+    try disk.read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualStrings("1111", &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=0 path=wal.log kind=crash_reordered_write rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=1 path=wal.log offset=0 len=4 result=reordered") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=2 landed=0 lost=0 torn=0 reordered=2") != null);
 }
 
 test "disk: crashed disk rejects operations until restart" {
