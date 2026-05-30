@@ -6,9 +6,10 @@ intentionally narrower than a full production networking stack; see
 
 ## Core Principles
 
-Application code receives `Env` and any typed handles it needs, such as
-`Endpoint(Message)`. Test harnesses receive `Control` and use it to inject
-faults.
+Production-shaped storage code should receive `std.Io`, a root `std.Io.Dir`,
+and any small Marionette handles it actually needs, such as `Recorder` or
+`Endpoint(Message)`. `Env` is the harness/composition-root bundle that supplies
+those handles. Test harnesses receive `Control` and use it to inject faults.
 
 Harnesses own simulator control. Production-shaped code does not import or hold
 `Control`, `World`, or packet-core types.
@@ -82,9 +83,9 @@ pub const Production = struct {
 non-world resources. The older positional `runWithState*` helpers are internal
 implementation details, not part of the public teaching surface.
 
-`Env.io()` is the forward-compatible `std.Io` accessor. Production envs return
-the host `std.Io` supplied to `Production.init`; simulation envs return
-Marionette's current deterministic backend. That backend supports deterministic
+`Env.io()` is the app-facing `std.Io` accessor. Production envs return the host
+`std.Io` supplied to `Production.init`; simulation envs return Marionette's
+current deterministic backend. That backend supports deterministic
 clock, sleep, random, `randomSecure`, synchronous `async`, immediate
 `Io.Queue` operations, and an in-memory TCP stream subset for
 `std.Io.net`. It also supports a flat file subset over `SimDisk`:
@@ -104,15 +105,16 @@ The current network endpoint is obtained from the composition root:
 
 ```zig
 const sim = try world.simulate(.{ .network = .{ .nodes = 4, .path_capacity = 64 } });
-var replica_0 = Replica.init(sim.env, try sim.endpoint(Message, 0));
+var replica_0 = Replica.init(sim.env.io(), sim.env.recorder(), try sim.endpoint(Message, 0));
 ```
 
 The design keeps `Env` non-generic and passes `Endpoint(Message)` as a sibling
-handle. `Production.endpoint(Message, opts)` currently provides a local
-in-process production-shaped endpoint with declared peer topology for
-same-process parity tests. `Production.byteEndpoint(opts)` uses that same local
-adapter unless `opts.listen` is set, in which case it uses the first
-socket-backed loopback transport slice.
+handle. Production-shaped code that does not need all of `Env` should take
+`std.Io` and `Recorder` directly. `Production.endpoint(Message, opts)`
+currently provides a local in-process production-shaped endpoint with declared
+peer topology for same-process parity tests. `Production.byteEndpoint(opts)`
+uses that same local adapter unless `opts.listen` is set, in which case it uses
+the first socket-backed loopback transport slice.
 
 `ByteEndpoint` is the byte-oriented sibling for libraries that want Marionette
 behind their own protocol API. `send(to, bytes)` copies borrowed bytes before

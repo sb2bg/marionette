@@ -1,7 +1,9 @@
 # Disk Fault Model
 
-This is the design note for Marionette's disk simulation work. `mar.Disk` is
-the app-facing disk capability. `mar.SimDisk` currently supports
+This is the design note for Marionette's disk simulation work. Production-shaped
+storage code should usually use `std.Io`; `mar.Disk` is the lower-level
+sector/file-lifecycle capability underneath that backend. `mar.SimDisk`
+currently supports
 deterministic logical files, latency, read/write IO errors, probabilistic
 corrupt reads, scripted sector corruption, and crash/restart simulation for
 pending writes. Generic recoverability budgets are still being built.
@@ -56,28 +58,29 @@ The current `mar.SimDisk` simulator is constructed from `World` by the
 simulation harness or scenario state. It produces two capabilities over the
 same backing state:
 
-- `mar.Disk`: app-facing sector `read`, `write`, and `sync`, plus file
+- `mar.Disk`: lower-level sector `read`, `write`, and `sync`, plus file
   metadata and lifecycle operations.
 - `mar.DiskControl`: harness-facing faults, crash/restart, and scripted
   corruption.
 
-Simulation application code receives an attached app-facing disk through
-`env.disk` instead of depending on `World` internals:
+Simulation application code that is intentionally testing the disk model can
+receive `env.disk` instead of depending on `World` internals. Ordinary storage
+code should prefer `env.io()` and `std.Io.File`:
 
 ```zig
-fn store(env: anytype, entry: []const u8) !void {
-    try env.disk.write(.{
+fn store(disk: mar.Disk, entry: []const u8) !void {
+    try disk.write(.{
         .path = "wal.log",
         .offset = 0,
         .bytes = entry,
     });
-    try env.disk.sync(.{ .path = "wal.log" });
+    try disk.sync(.{ .path = "wal.log" });
 }
 ```
 
 The test harness gets `DiskControl` from `world.simulate(...).control.disk` to
 inspect disk state, inject scripted faults, or crash/restart the simulated
-disk. Those operations must not leak into the app-facing disk API.
+disk. Those operations must not leak into the app-visible disk API.
 
 In later multi-node work, each simulated node should expose its own disk view:
 
@@ -217,10 +220,10 @@ hashes, the hash algorithm must be named and stable.
 
 ## Phase 1 Decisions
 
-- App-facing type: `Disk`.
+- Low-level disk type: `Disk`.
 - Simulator implementation type: `SimDisk`.
 - Harness-control type: `DiskControl`.
-- App-facing access: `env.disk`.
+- Low-level access: `env.disk`; preferred storage app access is `env.io()`.
 - File identity: logical path-like `[]const u8`, escaped in traces and never
   resolved against the host filesystem by the simulator.
 - Default sector size: 4096 bytes.

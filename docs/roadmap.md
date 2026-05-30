@@ -52,8 +52,8 @@ The current network surface is:
 
 The current disk surface is:
 
-- `mar.Disk`: app-facing capability exposing only `read`, `write`, and
-  `sync`.
+- `mar.Disk`: lower-level disk capability exposing sector/file-lifecycle
+  operations underneath the `std.Io` backend.
 - `mar.SimDisk`: in-memory disk simulator with logical paths, sector-aligned
   reads/writes, sparse sectors, deterministic latency, operation ids, trace
   events, read/write IO errors, corrupt reads, and crash/restart behavior for
@@ -70,8 +70,10 @@ The current disk surface is:
   delete and rename. It fails closed for full directory/filesystem behavior,
   process operations, datagrams, DNS, and real external network access not yet
   routed through the simulator.
-- `Env.disk`: app-facing simulation disk view exposing sector-oriented
-  `read`, `write`, and `sync`, plus file metadata and lifecycle operations.
+- `Env.disk`: low-level simulation disk view exposing sector-oriented `read`,
+  `write`, and `sync`, plus file metadata and lifecycle operations. New
+  storage examples should prefer `Env.io()` and `std.Io.File` unless they are
+  intentionally testing the sector API.
 - `examples/kv_store.zig`: disk-backed WAL recovery example with a passing
   checksum-validating mode and a deliberately buggy torn-record recovery mode.
 - `examples/durable_broadcast.zig`: first disk + network cross-product
@@ -98,12 +100,13 @@ linearizability checker, time-travel debugging.
 - `mar.tidy` linter for banned direct calls.
 - `BuggifyRate` + `env.buggify(hook, rate)` with enum-hook checks and
   runtime rate validation in simulation.
-- `mar.Disk`: concrete app-facing disk capability.
+- `mar.Disk`: concrete low-level disk capability.
 - `mar.SimDisk`: deterministic disk simulator with replayable faults and
   crash/restart simulation.
 - `mar.DiskControl`: simulator-control disk capability.
 - `World.simulate`: world-owned simulator construction.
-- `Env.disk`: app-facing simulation disk capability.
+- `Env.disk`: low-level simulation disk capability; `Env.io()` is the primary
+  storage application surface.
 - `mar.Endpoint(Message)`, `mar.NetworkControl`, `SimNetworkOptions`, and
   composition-root network accessors for simulation and production-shaped
   setup.
@@ -255,18 +258,19 @@ APIs.
 
 ---
 
-### Completed: App-facing simulation disk capability
+### Completed: Low-level simulation disk capability
 
-**Status:** Done. `World.simulate` exposes an app-facing disk capability
-through `Env.disk`.
+**Status:** Done. `World.simulate` exposes a low-level disk capability through
+`Env.disk`; the current teaching surface for storage-shaped application code is
+`Env.io()` and `std.Io.File`.
 
 **Scope:**
 
-- App code can depend on `env.disk` for sector `read`, `write`, and `sync`,
-  plus file metadata and lifecycle operations.
+- Disk-model code can depend on `env.disk` for sector `read`, `write`, and
+  `sync`, plus file metadata and lifecycle operations.
 - Tests and harnesses access simulator-control operations such as `setFaults`,
   `crash`, `restart`, and `corruptSector` through `mar.DiskControl`.
-- The KV example keeps app storage calls on `env.disk` and keeps simulator
+- Current storage examples keep ordinary file I/O on `std.Io` and simulator
   control on `Control`.
 - Disk lifecycle is owned by `World`.
 - `mar.RealDisk`: production disk adapter backed by a real root directory.

@@ -27,8 +27,8 @@ Phase 0 has:
 - `World`, which owns one simulated clock, one seeded PRNG, and one trace log
   as harness-owned simulation engine state.
 - `Clock(.production)` and `Clock(.simulation)`.
-- `Env`, one concrete app-facing bundle of disk, clock, random,
-  and tracer capabilities.
+- `Env`, one concrete harness-facing bundle that supplies `std.Io`, recorders,
+  disk, clock, random, and tracer capabilities.
 - `Control`, the harness-facing counterpart for simulator-only controls.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
@@ -51,7 +51,7 @@ Phase 0 has:
   `(deliver_at, packet_id)` delivery order.
 - `mar.Endpoint(Message)`, an app-facing typed process endpoint returned by
   simulation and production setup.
-- `mar.Disk`, an app-facing disk capability for sector-oriented
+- `mar.Disk`, a lower-level disk capability for sector-oriented
   `read`/`write`/`sync` plus path-level metadata and lifecycle operations.
 - `mar.SimDisk`, a deterministic disk simulator with logical paths,
   sector-aligned reads/writes, sparse in-memory sectors, deterministic
@@ -77,15 +77,19 @@ Phase 0 does not yet have:
 
 Marionette is a library-first simulator. User code should pass explicit
 authorities at the top of the program instead of reaching for host globals.
-The intended application shape is to construct an app-facing `Env` once at the
-composition root and pass that environment into the main loop.
+The intended storage application shape is to accept `std.Io`, a root
+`std.Io.Dir`, and optionally `mar.Recorder`. Code should accept all of
+`mar.Env` only when it genuinely needs Marionette-specific capabilities such as
+simulated random hooks or clock access.
 Marionette should not auto-detect the environment from globals, environment
 variables, thread-locals, or build flags.
 
-For Phase 0, Marionette owns small interfaces for time and randomness because
-they are needed now and they are not solved by `std.Io`. For disk and network,
-the long-term preference is to align with Zig's `std.Io` direction rather than
-inventing a permanent incompatible ecosystem. See
+For Phase 0, Marionette still owns small interfaces for time and randomness
+because they are needed now and they are not fully solved by `std.Io`. For disk
+files, the public teaching surface is now `std.Io`: `Env.io()` supplies a
+deterministic backend in simulation and the host backend in production. For
+networking, app code receives typed `Endpoint(Message)` handles while the
+`std.Io.net` subset continues to mature. See
 [std.Io Direction](std-io-direction.md) for the destination architecture. The
 migration plan is:
 

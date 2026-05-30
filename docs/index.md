@@ -7,13 +7,15 @@ production libraries accept `std.Io`, and tests swap in Marionette's
 deterministic implementation. Today, Marionette ships the simulator, trace,
 fault, disk, and network primitives that make that direction concrete.
 
-Write production-shaped code against `env` and `std.Io`. In tests, drive
-`control` to inject faults. For the modeled disk and local endpoint surfaces,
-the same application logic can run on the simulator and on production adapters.
+Write production-shaped code against `std.Io` plus any small Marionette handles
+it actually needs, such as `mar.Recorder` or `mar.Endpoint(Message)`. In tests,
+drive `control` to inject faults. For the modeled file and local endpoint
+surfaces, the same application logic can run on the simulator and on production
+adapters.
 
 ```zig
-fn writeAndRecover(env: mar.Env) !KVStore {
-    var store = KVStore.init(env);
+fn writeAndRecover(io: std.Io, root: std.Io.Dir, recorder: mar.Recorder) !KVStore {
+    var store = try KVStore.init(io, root, recorder);
     try store.put(1, 41, .sync);
     try store.put(2, 99, .no_sync);
     try store.recover(.strict);
@@ -22,11 +24,12 @@ fn writeAndRecover(env: mar.Env) !KVStore {
 
 // In simulation: deterministic, fault-injectable, replayable from a seed.
 const sim = try world.simulate(.{ .disk = .{ .sector_size = 16 } });
-var sim_store = try writeAndRecover(sim.env);
+var sim_store = try writeAndRecover(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder());
 
 // In production: real disk, same code path.
 var production = try mar.Production.init(.{ .root_dir = tmp.dir, .io = std.testing.io });
-var prod_store = try writeAndRecover(production.env());
+const prod_env = production.env();
+var prod_store = try writeAndRecover(prod_env.io(), tmp.dir, prod_env.recorder());
 ```
 
 That parity is the point. You do not write a simulator version of your code.
@@ -79,22 +82,23 @@ Three pieces show up in every test:
 
 - **`init`** sets up your harness: your code under test plus the `control`
   handle for fault injection.
-- **`scenario`** drives the action. It calls into your code through `env` and
-  into the simulator through `control`.
+- **`scenario`** drives the action. It calls into your code through the handles
+  created by `env`, and into the simulator through `control`.
 - **`checks`** assert invariants on the final state.
 
-## Env And Control
+## Io And Control
 
 Every Marionette test has two surfaces.
 
-**`env`** is what application code sees. It exposes non-generic capabilities
-such as `disk`, `clock`, randomness, and tracing. Typed capabilities such as
-`Endpoint(Message)` are passed alongside `env`, so `Env` stays one concrete
-type.
+**`io`** is what production-shaped storage code should usually see. In
+simulation, `sim.env.io()` returns Marionette's deterministic `std.Io` backend.
+In production, `production.env().io()` returns the host `std.Io` supplied at
+setup. Application code that wants trace events should accept a narrow
+`mar.Recorder`, not all of `mar.Env`.
 
 ```zig
-try env.disk.write(.{ .path = "kv.wal", .offset = 0, .bytes = &bytes });
-const now = env.clock.now();
+var store = try KVStore.init(io, root, recorder);
+try store.put(1, 41, .sync);
 ```
 
 **`control`** is what tests use to inject faults. It is only available in
@@ -107,6 +111,10 @@ try control.network.partition(&side_a, &side_b);
 try control.network.setLossiness(.{ .drop_rate = .percent(20) });
 try control.network.heal();
 ```
+
+`Env` is still the harness-owned bundle that supplies `io()`, `recorder()`,
+clock/random helpers, and remaining Marionette capabilities. Code that only
+needs file I/O should prefer `std.Io` so it stays ordinary Zig code.
 
 ## Distributed Simulation
 

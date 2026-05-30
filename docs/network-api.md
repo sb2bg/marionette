@@ -58,11 +58,13 @@ powers such as partitioning the network, stopping nodes, or changing drop rates.
 
 ## App-Facing Authority
 
-The app-facing authority is a typed sibling handle passed alongside `Env`:
+The app-facing authority is a typed sibling handle. Code that only needs a
+trace should take `mar.Recorder`; code that needs Marionette-specific clock or
+random capabilities can still take `Env`:
 
 ```zig
-fn write(env: mar.Env, endpoint: mar.Endpoint(Message), message: Message) !void {
-    try env.record("write.start", .{});
+fn write(recorder: mar.Recorder, endpoint: mar.Endpoint(Message), message: Message) !void {
+    try recorder.record("write.start", .{});
     try endpoint.send(1, message);
 }
 ```
@@ -79,7 +81,7 @@ fn init(world: *mar.World) !Harness {
 
     return .{
         .service = Service.init(
-            sim.env,
+            sim.env.recorder(),
             try sim.endpoint(Message, client_node_id),
             try sim.endpoints(Message, replica_count, 0),
         ),
@@ -88,8 +90,8 @@ fn init(world: *mar.World) !Harness {
 }
 ```
 
-The application-shaped code depends on `Env` plus typed endpoints, not on
-`control`, `World`, `std.net`, or `UnstableNetwork`.
+The application-shaped code depends on narrow handles such as `Recorder` plus
+typed endpoints, not on `control`, `World`, `std.net`, or `UnstableNetwork`.
 
 ## Simulator-Control Authority
 

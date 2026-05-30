@@ -40,8 +40,10 @@ pub const Duration = u64;
 
 ## `Env`
 
-Most application code should receive an environment from its caller instead of
-constructing individual authorities itself:
+Application code should receive explicit authorities from its caller instead of
+constructing them itself. Storage-oriented code should usually take `std.Io`,
+a root `std.Io.Dir`, and a narrow `mar.Recorder`; code that needs Marionette's
+clock, random hooks, or other simulator capabilities can take `mar.Env`:
 
 ```zig
 fn service(env: anytype) !void {
@@ -54,7 +56,7 @@ fn service(env: anytype) !void {
 }
 ```
 
-`mar.Env` is the concrete app-facing capability bundle. Its disk, clock,
+`mar.Env` is the concrete harness-facing capability bundle. Its disk, clock,
 random, and tracer authorities are fields, not lazy accessors. `env.io()`
 returns the backing `std.Io`: host I/O in production envs, and Marionette's
 current deterministic backend in simulation envs. `env.recorder()` returns a
@@ -81,11 +83,12 @@ fn scenario(world: *mar.World) !void {
 }
 ```
 
-`sim.env` is passed to application code. `sim.control` is kept by the harness
-for simulator-only actions such as advancing time or crashing disk.
+`sim.env` supplies the handles passed to application code. `sim.control` is
+kept by the harness for simulator-only actions such as advancing time or
+crashing disk.
 `env.buggify` draws through the env's random capability only when the env was
-built by simulation; production envs construct the same app-facing capability
-bundle with production adapters such as `mar.RealDisk`.
+built by simulation; production envs construct the same composition bundle with
+production adapters such as `mar.RealDisk`.
 
 ## `World`
 
@@ -95,7 +98,8 @@ bundle with production adapters such as `mar.RealDisk`.
 - One seeded `Random`.
 - One trace log.
 
-Application code should usually receive `Env`, not `World` directly.
+Application code should receive explicit handles from the composition root, not
+`World` directly.
 Scenarios and harnesses use `World` to construct simulations, drive time, and
 inspect trace bytes.
 
@@ -201,9 +205,10 @@ not pointer identity or hash-map iteration.
 
 ## Disk
 
-`mar.Disk` is the app-facing disk capability. It is a concrete, storable
-handle with sector-oriented `read`, `write`, and `sync`, plus path-level
-`stat`, EOF-aware `readSome`, `setLength`, `delete`, and `rename`.
+`mar.Disk` is the lower-level disk capability beneath Marionette's `std.Io`
+backend. It is a concrete, storable handle with sector-oriented `read`,
+`write`, and `sync`, plus path-level `stat`, EOF-aware `readSome`,
+`setLength`, `delete`, and `rename`.
 `mar.SimDisk` is the deterministic
 in-memory simulator behind that handle: logical files, sector-aligned
 reads/writes, sparse sectors, deterministic latency, operation ids, trace
@@ -212,8 +217,9 @@ for pending writes. `mar.RealDisk` is the production adapter backed by a real
 root directory. `mar.Disk.unavailable()` remains the honest null-object for
 envs without storage.
 
-Construct a world-owned simulator bundle, then hand app code only the disk
-capability:
+Construct a world-owned simulator bundle, then hand app code either `std.Io`
+for ordinary file code or the lower-level sector disk capability when a test
+needs that explicit surface:
 
 ```zig
 const sim = try world.simulate(.{ .disk = .{
@@ -222,7 +228,8 @@ const sim = try world.simulate(.{ .disk = .{
     .latency_jitter_ns = 2_000_000,
 } });
 
-const disk = sim.env.disk;
+const io = sim.env.io();
+const disk = sim.env.disk; // low-level sector API
 ```
 
 If `DiskOptions.min_latency_ns` is omitted, it defaults to the world's tick
@@ -292,11 +299,14 @@ closed. See
 Simulated file stats report deterministic size, kind, and mutation-time
 information. `mtime` updates on successful content mutations; access and change
 timestamps remain zero because Marionette does not yet model them.
-Simulated tests should use the `Disk` returned by
-`world.simulate(...).env.disk`; harness code keeps the matching `DiskControl`
-for faults, crash, restart, and corruption.
+Simulated storage tests should prefer `world.simulate(...).env.io()` for code
+that naturally uses `std.Io.File`. The `Disk` returned by
+`world.simulate(...).env.disk` remains the low-level sector/file-lifecycle
+surface for examples that intentionally test Marionette's disk model directly;
+harness code keeps the matching `DiskControl` for faults, crash, restart, and
+corruption.
 
-Application code receives `Env` with an attached `Disk` field and uses only the
+Low-level disk-shaped code uses the attached `Disk` field and only the
 app-facing operations:
 
 ```zig
@@ -304,14 +314,14 @@ const sim = try world.simulate(.{
     .disk = .{ .sector_size = 4096 },
 });
 
-fn appendRecord(env: mar.Env, sector_bytes: []const u8) !void {
-    try env.disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
-    try env.disk.sync(.{ .path = "wal.log" });
-    try env.disk.syncDir(.{ .path = "." });
+fn appendRecord(disk: mar.Disk, sector_bytes: []const u8) !void {
+    try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
+    try disk.sync(.{ .path = "wal.log" });
+    try disk.syncDir(.{ .path = "." });
 }
 ```
 
-The `Env.disk` view exposes `read`, `write`, `sync`, `syncDir`, `stat`,
+The `Disk` view exposes `read`, `write`, `sync`, `syncDir`, `stat`,
 `readSome`, `setLength`, `delete`, and `rename`.
 Simulator-control operations such as `setFaults`, `crash`, `restart`, and
 `corruptSector` remain on `mar.DiskControl`, exposed through

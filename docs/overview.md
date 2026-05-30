@@ -4,16 +4,17 @@ Marionette is a deterministic I/O and simulation testing library for Zig.
 The long-term target is to become the deterministic `std.Io` implementation
 for Zig.
 
-The core promise: write a service against a Marionette environment for time,
-randomness, disk, and network. In production, that environment routes to direct
-operations. In simulation, it routes through a controlled world that can replay
-the same execution from the same seed.
+The core promise: write production-shaped code against `std.Io` and narrow
+Marionette handles such as `Recorder` or `Endpoint(Message)`. In production,
+those handles route to direct operations. In simulation, they route through a
+controlled world that can replay the same execution from the same seed.
 
 Marionette is still experimental, but the core replay loop is real: seeded
 randomness, simulated time, trace logging, twice-and-compare replay, trace
-summaries, named post-scenario checks, and deterministic disk/network
-authorities with replayable faults. A deterministic `std.Io` implementation,
-real scheduler, and richer replay tooling are planned.
+summaries, named post-scenario checks, deterministic disk/network authorities
+with replayable faults, and a deterministic `std.Io` backend for the current
+file and network subset. A real scheduler and richer replay tooling are
+planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
 the replay artifact bytes, see [Trace Format](trace-format.md). For
@@ -48,12 +49,14 @@ Marionette is not:
 - A syscall interception layer.
 - A tool that makes arbitrary non-deterministic code deterministic.
 
-Users must route time, randomness, disk, and network through Marionette's
-interfaces. That discipline is the product.
+Users must route time, randomness, disk, and network through Marionette-owned
+authorities. For storage code, the preferred authority is `std.Io`; `Env` is
+the harness-owned bundle that supplies that I/O backend plus recorders and
+remaining Marionette capabilities. That discipline is the product.
 
 Marionette does not auto-detect whether code is running in production or
-simulation. The application receives an explicit `Env` from the composition
-root; simulation harnesses build one with `world.simulate`.
+simulation. The composition root passes explicit handles into the application;
+simulation harnesses build those handles with `world.simulate`.
 
 ## Why Zig
 
