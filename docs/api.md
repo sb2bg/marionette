@@ -363,6 +363,7 @@ try control.setFaults(.{
     .corrupt_read_rate = .oneIn(1_000),
     .crash_lost_write_rate = .oneIn(10),
     .crash_torn_write_rate = .oneIn(10),
+    .crash_reordered_write_rate = .oneIn(10),
     .crash_lost_metadata_rate = .oneIn(10),
 });
 ```
@@ -390,8 +391,8 @@ later reads covering that sector return `status=corrupt`.
 
 Writes are visible to later reads immediately, but they are pending until
 `sync`. A crash processes pending writes according to the crash fault profile:
-each pending write may land, be lost, or be torn. Synced writes are already
-committed and are not lost by crash.
+each pending write may land, be lost, be torn, or be applied out of issue
+order. Synced writes are already committed and are not lost by crash.
 
 ```zig
 try disk.write(.{ .path = "wal.log", .offset = 0, .bytes = sector_bytes });
@@ -406,7 +407,7 @@ trace-visible:
 disk.fault op=3 path=wal.log kind=crash_lost_write rate=1/10 roll=7 fired=false
 disk.fault op=3 path=wal.log kind=crash_torn_write rate=1/10 roll=0 fired=true
 disk.crash_write op=3 path=wal.log offset=0 len=4096 result=torn
-disk.crash pending_writes=1 landed=0 lost=0 torn=1
+disk.crash pending_writes=1 landed=0 lost=0 torn=1 reordered=0
 disk.restart status=ok
 ```
 

@@ -118,8 +118,8 @@ Implemented operation concepts:
 - Completed operation: result delivered to user code after deterministic
   synchronous latency.
 - Runtime fault profile: `DiskFaultOptions` controls read errors, write
-  errors, corrupt reads, lost pending writes, and torn pending writes with
-  validated `BuggifyRate` values.
+  errors, corrupt reads, lost pending writes, torn pending writes, and
+  reordered pending writes with validated `BuggifyRate` values.
 - Scripted sector corruption: harness code can mark one logical path/sector as
   corrupt with `corruptSector`.
 - Pending writes: successful writes are visible to later reads immediately,
@@ -192,12 +192,12 @@ are escaped consistently. Current events:
 - `disk.fault op=<u64> path=<escaped-text> kind=<literal> rate=<literal> roll=<u64> fired=<bool>`
 - `disk.fault path=<escaped-text> offset=<u64> kind=scripted_corruption`
 - `disk.crash_write op=<u64> path=<escaped-text> offset=<u64> len=<u64> result=<literal>`
-- `disk.crash pending_writes=<u64> landed=<u64> lost=<u64> torn=<u64>`
+- `disk.crash pending_writes=<u64> landed=<u64> lost=<u64> torn=<u64> reordered=<u64>`
 - `disk.restart status=ok`
 
 Use status values such as `ok`, `io_error`, `corrupt`, and `torn`. Use fault
 kinds such as `read_error`, `write_error`, `corrupt_read`,
-`crash_lost_write`, and `crash_torn_write`.
+`crash_lost_write`, `crash_torn_write`, and `crash_reordered_write`.
 
 Trace fields must be scalar, deterministic, and independent of pointer
 identity. User bytes should not be dumped into the default trace unless a
@@ -235,8 +235,8 @@ hashes, the hash algorithm must be named and stable.
   real-storage compatibility slice.
 - Initial harness-control operations: `setFaults`, `corruptSector`, `crash`,
   and `restart` are implemented. Read/write IO errors, corrupt reads, scripted
-  sector corruption, lost pending writes, torn pending writes, and lost
-  unsynced directory metadata are implemented.
+  sector corruption, lost pending writes, torn pending writes, reordered
+  pending writes, and lost unsynced directory metadata are implemented.
 - Initial example: append-only WAL recovery.
 - User data: store bytes in memory, trace lengths and outcomes by default.
 - Checksums: user code owns them.

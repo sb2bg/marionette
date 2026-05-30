@@ -226,8 +226,8 @@ simulator-control `crash` and `restart` through `mar.DiskControl`.
   until `sync`.
 - `sync(path)` commits pending writes for that logical path and traces how
   many writes became durable.
-- `crash` deterministically lands, loses, or tears pending writes according to
-  `DiskFaultOptions`.
+- `crash` deterministically lands, loses, tears, or reorders pending writes
+  according to `DiskFaultOptions`.
 - `restart` brings the disk back up; while crashed, `read`, `write`, and
   `sync` return `error.DiskCrashed`.
 - Crash decisions and resulting write outcomes are trace-visible.
@@ -527,10 +527,12 @@ Acceptance criteria:
   fixed at bytes 28-35, it cannot cross a 512- or 4096-byte sector boundary;
   report this precisely as an atomicity-assumption counterexample, not a
   hardware-realistic data-loss bug.
-- Add realistic torn-write sweeps for the append-only data that the committed
-  file size points at. Unlike the fixed header field, data blocks can span
-  512/4096-byte boundaries, so data-vs-size ordering is the next plausible
-  real-hardware recovery surface to probe.
+- Done: add realistic data-region crash sweeps for xitdb at 512- and
+  4096-byte sectors. The probe induces an unacknowledged xitdb write window,
+  then crashes with torn or reordered pending writes and verifies recovery
+  against the last acknowledged model state. The pinned xitdb commit survived
+  the sweep, including trace-verified faults on data-region sectors rather than
+  the committed-size header.
 - Expand the xitdb crash-fault profile into a real fuzzer with shrinking. Vary
   sector size, crash point, workload length, and one active fault class at a
   time; reduce failures to a maintainer-readable operation sequence.
