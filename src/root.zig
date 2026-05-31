@@ -5,6 +5,7 @@
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
+const fiber_module = @import("fiber.zig");
 const io_module = @import("io.zig");
 const codec_module = @import("codec.zig");
 const message_pool_module = @import("message_pool.zig");
@@ -12,6 +13,10 @@ const network_frame_module = @import("network_frame.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
 const trace_summary_module = @import("trace_summary.zig");
+
+test {
+    _ = fiber_module;
+}
 
 /// Return the clock implementation for a comptime mode.
 pub const Clock = clock_module.Clock;

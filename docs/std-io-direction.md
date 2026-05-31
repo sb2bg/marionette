@@ -104,7 +104,9 @@ implementation needs to stop a task at I/O points, run another task, then resume
 the first task later.
 
 Zig 0.16 exposes low-level fiber context switching on supported architectures
-and uses it inside `std.Io.Evented`. Marionette should not use
+and uses it inside `std.Io.Evented`. Marionette now has a small internal
+`src/fiber.zig` seam over that primitive, verified on `aarch64-macos` and
+`x86_64-macos` without using Evented. Marionette should not use
 `std.Io.Evented` as its simulator backend. Evented is built on kernel or OS
 event sources such as io_uring, kqueue, and platform dispatch mechanisms; their
 completion order is outside Marionette's control. That breaks the replay
@@ -115,13 +117,13 @@ deterministic backend should implement the `std.Io` vtable itself, schedule
 fibers with `World`'s seeded ordering, and route file/network operations through
 Marionette's simulated disk and network state.
 
-This means Phase 1 is not blocked on inventing coroutines from scratch. It is
-blocked on whether the current fiber stack and `std.Io` surface are acceptable
-for an experimental backend. The answer can be "yes" for small opt-in tests
-before it is "yes" for production-grade large simulations.
+This means Phase 1 is not blocked on inventing coroutines from scratch. The
+bare context-switch spike is green for the pinned compiler; the remaining risk
+is scheduler semantics: ready ordering, futex wait sets, timers, cancellation,
+and same-seed trace stability.
 
-Do not build a separate libucontext or assembly coroutine runtime. If Marionette
-experiments with fibers, it should use Zig's `std.Io.fiber` primitives directly
+Do not build a separate libucontext or assembly coroutine runtime. Marionette's
+fiber experiments should continue through the local seam over `std.Io.fiber`
 and keep the backend clearly marked experimental.
 
 ## Existing Primitives
@@ -205,8 +207,10 @@ Phase 0 is the current bridge:
 
 Phase 1 is experimental deterministic `std.Io`:
 
-- implement a Marionette `std.Io` vtable backed by Zig fiber primitives;
+- done: prove bare `std.Io.fiber` context switching through a local seam;
 - implement the deterministic scheduler for small opt-in simulations;
+- add deterministic futex wait/wake sets;
+- add deterministic sleep/deadline handling;
 - route sleep, queue, file, and network I/O through `World`;
 - expand simulation `Env.io()` from the Phase 0 backend into a suspending
   deterministic `std.Io`;

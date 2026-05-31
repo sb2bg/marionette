@@ -868,6 +868,11 @@ authority boundaries. It does not test kernel thread scheduling or CPU memory
 model behavior. That belongs to tools in the Shuttle/Loom family, not to
 Marionette's DST contract.
 
+Current status: the primitive spike is complete. `src/fiber.zig` wraps
+`std.Io.fiber` directly, without `std.Io.Evented`, and the same bare
+switch/resume test passes on `aarch64-macos` and `x86_64-macos` with Zig 0.16.
+The next work is scheduler policy, not stack switching.
+
 Before implementing this item, study:
 
 - [FoundationDB simulation testing](https://apple.github.io/foundationdb/testing.html):
@@ -903,6 +908,19 @@ Do not start API design until the notes above answer these questions:
   scheduling decision that led to a bug?
 
 This is Flow/madsim-inspired in goal.
+
+Implementation sequence:
+
+1. Done: prove the bare fiber primitive and keep it behind a local seam.
+2. Build a deterministic ready queue and run loop: current fiber, spawn, yield,
+   completion, seeded runnable selection, and trace records for every
+   scheduling decision.
+3. Add futex wait sets: `futexWait` parks the current fiber on a key;
+   `futexWake` wakes up to N fibers in seeded order.
+4. Add deterministic timers: sleep/deadline waiters wake when time advances and
+   compose with explicit wake/cancel.
+5. Re-validate existing `std.Io` users, especially xitdb and the storage
+   examples, for same-seed trace stability under the new backend.
 
 ---
 
