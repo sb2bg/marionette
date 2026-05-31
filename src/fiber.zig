@@ -11,6 +11,7 @@ const std_fiber = std.Io.fiber;
 
 pub const supported = std_fiber.supported;
 pub const Context = std_fiber.Context;
+pub const Switch = std_fiber.Switch;
 
 pub const default_stack_size = 64 * 1024;
 pub const stack_alignment = 16;
@@ -80,11 +81,22 @@ pub const Fiber = struct {
     }
 };
 
-pub fn switchTo(current: *Context, next: *Context) void {
-    _ = std_fiber.contextSwitch(&.{
+pub inline fn switchTo(current: *Context, next: *Context) void {
+    var message: Switch = .{
         .old = current,
         .new = next,
-    });
+    };
+    _ = contextSwitch(&message);
+}
+
+pub inline fn contextSwitch(message: *const Switch) *const Switch {
+    return std_fiber.contextSwitch(message);
+}
+
+/// Recovers the parent message sent by the resumed context. Use this only when
+/// that context will switch back with the same message envelope type.
+pub inline fn contextSwitchMessage(comptime Message: type, message: *const Message) *const Message {
+    return @fieldParentPtr("contexts", contextSwitch(&message.contexts));
 }
 
 const StartClosure = struct {
@@ -150,10 +162,16 @@ fn entryTrampoline() callconv(.naked) void {
     }
 }
 
-fn entryCall(closure: *StartClosure, _: *const std_fiber.Switch) callconv(.withStackAlign(.c, @alignOf(StartClosure))) noreturn {
-    closure.entry(closure.arg);
-    closure.finished.* = true;
-    switchTo(closure.self_context, closure.finish_context);
+fn entryCall(closure: *StartClosure, _: *const Switch) callconv(.withStackAlign(.c, @alignOf(StartClosure))) noreturn {
+    const entry = closure.entry;
+    const arg = closure.arg;
+    const finished = closure.finished;
+    const self_context = closure.self_context;
+    const finish_context = closure.finish_context;
+
+    entry(arg);
+    finished.* = true;
+    switchTo(self_context, finish_context);
     unreachable;
 }
 
@@ -214,4 +232,68 @@ test "fiber: rejects undersized stacks" {
         .entry = Noop.run,
         .arg = undefined,
     }));
+}
+
+test "fiber: custom switch messages survive optimized yields" {
+    if (!supported) return error.SkipZigTest;
+
+    const yielded: u8 = 1;
+
+    const Message = extern struct {
+        contexts: Switch,
+        task: *anyopaque,
+        reason: u8,
+    };
+
+    const Task = struct {
+        main: Context = undefined,
+        fiber: *Fiber = undefined,
+        yield_message: Message = undefined,
+        remaining: u8 = 4,
+        observed: u8 = 0,
+
+        fn run(arg: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(arg));
+            while (self.remaining > 0) {
+                self.remaining -= 1;
+                self.observed += 1;
+                self.yield_message = .{
+                    .contexts = .{
+                        .old = self.fiber.contextPtr(),
+                        .new = &self.main,
+                    },
+                    .task = self,
+                    .reason = yielded,
+                };
+                _ = contextSwitch(&self.yield_message.contexts);
+            }
+        }
+    };
+
+    const task = try std.testing.allocator.create(Task);
+    defer std.testing.allocator.destroy(task);
+    task.* = .{};
+
+    task.fiber = try Fiber.create(std.testing.allocator, .{
+        .finish_context = &task.main,
+        .entry = Task.run,
+        .arg = task,
+    });
+    defer task.fiber.destroy();
+
+    while (task.remaining > 0) {
+        var message: Message = .{
+            .contexts = .{
+                .old = &task.main,
+                .new = task.fiber.contextPtr(),
+            },
+            .task = task,
+            .reason = yielded,
+        };
+        const returned = contextSwitchMessage(Message, &message);
+        try std.testing.expectEqual(@as(*anyopaque, @ptrCast(task)), returned.task);
+        try std.testing.expectEqual(yielded, returned.reason);
+    }
+
+    try std.testing.expectEqual(@as(u8, 4), task.observed);
 }
