@@ -1,21 +1,20 @@
-<table>
-  <tr>
-    <td width="120" valign="middle">
-      <a href="https://sb2bg.github.io/marionette/"><img src="assets/transparent_logo.png" alt="Marionette" width="120"></a>
-    </td>
-    <td valign="middle">
-      <h1>Marionette</h1>
-      <p>Deterministic I/O and simulation testing for Zig. <a href="https://sb2bg.github.io/marionette/">Docs and blog</a>.</p>
-      <p>
-        <a href="https://sb2bg.github.io/marionette/"><img src="https://img.shields.io/badge/docs-blog-0a7ea4?style=flat-square&logo=readthedocs&logoColor=white" alt="Docs"></a>
-        <a href="https://github.com/sb2bg/marionette/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sb2bg/marionette/ci.yml?branch=main&style=flat-square&logo=github&logoColor=white&label=CI" alt="CI"></a>
-        <a href="#install"><img src="https://img.shields.io/badge/zig-0.16.x-f7a41d?style=flat-square&logo=zig&logoColor=white" alt="Zig version"></a>
-        <img src="https://img.shields.io/badge/status-alpha-ff7a00?style=flat-square" alt="Status">
-        <a href="#license"><img src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square" alt="License"></a>
-      </p>
-    </td>
-  </tr>
-</table>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/transparent_logo_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/transparent_logo.png">
+  <img src="assets/transparent_logo.png" alt="Marionette" width="126px" align="left">
+</picture>
+
+### Marionette
+
+Deterministic I/O and simulation testing for Zig.
+
+[![Docs](https://img.shields.io/badge/docs-blog-0a7ea4?style=for-the-badge&logo=readthedocs&logoColor=white)](https://sb2bg.github.io/marionette/)
+[![CI](https://img.shields.io/github/actions/workflow/status/sb2bg/marionette/ci.yml?branch=main&style=for-the-badge&logo=github&logoColor=white&label=CI)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+[![Zig version](https://img.shields.io/badge/zig_version-v0.16-%23F7A41D?style=for-the-badge&logo=zig&logoColor=white)](https://ziglang.org/download)
+[![Status](https://img.shields.io/badge/status-alpha-ff7a00?style=for-the-badge)](#status)
+[![License](https://img.shields.io/badge/license-MIT-3fb950?style=for-the-badge)](#license)
+
+<hr>
 
 Long term, Marionette is aiming to be the deterministic `std.Io` for Zig:
 production libraries accept `std.Io`, and tests swap in Marionette's
