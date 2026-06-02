@@ -13,17 +13,27 @@ const World = @import("world.zig").World;
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
 
+pub const FutexWaitResult = enum {
+    woken,
+    timed_out,
+};
+
 pub const FutexWaitSet = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
         block: *const fn (ptr: *anyopaque, key: usize) void,
+        block_until: *const fn (ptr: *anyopaque, key: usize, deadline_ns: ?u64) FutexWaitResult,
         wake: *const fn (ptr: *anyopaque, key: usize, max_count: usize) usize,
     };
 
     pub fn block(self: FutexWaitSet, key: usize) void {
         self.vtable.block(self.ptr, key);
+    }
+
+    pub fn blockUntil(self: FutexWaitSet, key: usize, deadline_ns: ?u64) FutexWaitResult {
+        return self.vtable.block_until(self.ptr, key, deadline_ns);
     }
 
     pub fn wake(self: FutexWaitSet, key: usize, max_count: usize) usize {
@@ -435,13 +445,36 @@ fn simFutexWait(
 ) Io.Cancelable!void {
     const backend = backendFromUserdata(userdata);
     if (@atomicLoad(u32, ptr, .monotonic) != expected) return;
-    if (timeout != .none) @panic("timed futex waits require the scheduler timer wheel");
+    const deadline_ns = simFutexDeadline(backend, timeout);
+    if (deadline_ns != null and deadline_ns.? <= backend.world.now()) return;
 
     // Cooperative atomicity: no task can run between this value check and the
     // park unless this function yields. Keep the check adjacent to `block` so
     // futex's check-and-sleep race stays closed in simulation.
     const wait_set = backend.futex_wait_set orelse @panic("sim futex wait requires an attached scheduler");
-    wait_set.block(backend.futexKey(ptr));
+    switch (wait_set.blockUntil(backend.futexKey(ptr), deadline_ns)) {
+        .woken => {},
+        .timed_out => {},
+    }
+}
+
+fn simFutexDeadline(backend: *Backend, timeout: Io.Timeout) ?u64 {
+    return switch (timeout) {
+        .none => null,
+        .duration => |duration| {
+            if (!supportsClock(duration.clock)) return null;
+            if (duration.raw.nanoseconds <= 0) return backend.world.now();
+
+            const now = backend.world.now();
+            const delta: u64 = std.math.cast(u64, duration.raw.nanoseconds) orelse return null;
+            if (std.math.maxInt(u64) - now < delta) return null;
+            return now + delta;
+        },
+        .deadline => |deadline| {
+            if (!supportsClock(deadline.clock)) return null;
+            return std.math.cast(u64, deadline.raw.nanoseconds) orelse backend.world.now();
+        },
+    };
 }
 
 fn simFutexWaitUncancelable(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {

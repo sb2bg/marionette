@@ -28,6 +28,7 @@ pub const default_task_stack_size = 256 * 1024;
 /// Errors returned by the experimental cooperative scheduler itself.
 pub const TaskSchedulerError = error{
     Deadlock,
+    InvalidDeadline,
     NoCurrentTask,
     TaskNotBlocked,
     TaskNotReady,
@@ -38,6 +39,12 @@ pub const TaskSchedulerError = error{
 /// Opaque wait-set key. Futexes will key this by address; timers and I/O can
 /// use scheduler-owned identifiers.
 pub const WaitKey = usize;
+
+/// Reason a blocked task resumed.
+pub const WaitResult = enum {
+    woken,
+    timed_out,
+};
 
 /// Experimental seeded cooperative scheduler.
 ///
@@ -82,6 +89,8 @@ pub const TaskScheduler = struct {
         task: *Task,
         reason: SwitchReason,
         key: WaitKey = 0,
+        deadline_ns: ?u64 = null,
+        wait_result: WaitResult = .woken,
     };
 
     const Task = struct {
@@ -92,6 +101,8 @@ pub const TaskScheduler = struct {
         fiber_instance: *fiber.Fiber,
         state: TaskState = .ready,
         blocked_key: ?WaitKey = null,
+        blocked_deadline_ns: ?u64 = null,
+        wait_result: WaitResult = .woken,
 
         fn run(arg: *anyopaque) void {
             const task: *Task = @ptrCast(@alignCast(arg));
@@ -171,6 +182,11 @@ pub const TaskScheduler = struct {
 
     // Same optimizer boundary rule as `yieldCurrent`.
     pub noinline fn blockCurrent(self: *Self, key: WaitKey) void {
+        _ = self.blockCurrentUntil(key, null);
+    }
+
+    // Same optimizer boundary rule as `yieldCurrent`.
+    pub noinline fn blockCurrentUntil(self: *Self, key: WaitKey, deadline_ns: ?u64) WaitResult {
         const task = self.current orelse @panic("block outside a scheduled task");
         if (task.state != .running) @panic("block from a non-running task");
 
@@ -183,8 +199,10 @@ pub const TaskScheduler = struct {
             .task = task,
             .reason = .blocked,
             .key = key,
+            .deadline_ns = deadline_ns,
         };
-        _ = fiber.contextSwitch(&message.contexts);
+        const resume_message = fiber.contextSwitchMessage(SwitchMessage, &message);
+        return resume_message.wait_result;
     }
 
     // Same optimizer boundary rule as `yieldCurrent`.
@@ -231,6 +249,8 @@ pub const TaskScheduler = struct {
             if (task.state != .blocked) return error.TaskNotBlocked;
             task.state = .ready;
             task.blocked_key = null;
+            task.blocked_deadline_ns = null;
+            task.wait_result = .woken;
             try self.ready.append(self.allocator, selected);
         }
 
@@ -240,7 +260,12 @@ pub const TaskScheduler = struct {
 
     pub fn runUntilIdle(self: *Self) !void {
         var scheduler = self;
-        while (scheduler.ready.items.len > 0) {
+        while (true) {
+            if (scheduler.ready.items.len == 0) {
+                if (try scheduler.advanceToNextTimer()) continue;
+                break;
+            }
+
             sortTaskIds(scheduler.ready.items);
 
             const selected = selected: {
@@ -266,6 +291,7 @@ pub const TaskScheduler = struct {
                 .scheduler = scheduler,
                 .task = task,
                 .reason = .yielded,
+                .wait_result = task.wait_result,
             };
             const returned_message = fiber.contextSwitchMessage(SwitchMessage, &message);
 
@@ -276,17 +302,23 @@ pub const TaskScheduler = struct {
                 .yielded => {
                     returned_task.state = .ready;
                     returned_task.blocked_key = null;
+                    returned_task.blocked_deadline_ns = null;
+                    returned_task.wait_result = .woken;
                     try scheduler.ready.append(scheduler.allocator, returned_task.id);
                     try scheduler.recordYield(returned_task.id);
                 },
                 .blocked => {
                     returned_task.state = .blocked;
                     returned_task.blocked_key = returned_message.key;
-                    try scheduler.recordBlock(returned_task.id, returned_message.key);
+                    returned_task.blocked_deadline_ns = returned_message.deadline_ns;
+                    returned_task.wait_result = .woken;
+                    try scheduler.recordBlock(returned_task.id, returned_message.key, returned_message.deadline_ns);
                 },
                 .completed => {
                     returned_task.state = .completed;
                     returned_task.blocked_key = null;
+                    returned_task.blocked_deadline_ns = null;
+                    returned_task.wait_result = .woken;
                     try scheduler.recordComplete(returned_task.id, "ok");
                 },
             }
@@ -314,6 +346,48 @@ pub const TaskScheduler = struct {
             if (task.state == .blocked) count += 1;
         }
         return count;
+    }
+
+    fn advanceToNextTimer(self: *Self) TaskSchedulerError!bool {
+        const deadline = self.nextDeadline() orelse return false;
+        const now = self.world.now();
+        if (deadline < now) return error.InvalidDeadline;
+        if (deadline > now) {
+            try self.world.runFor(deadline - now);
+        }
+
+        var due: std.ArrayList(TaskId) = .empty;
+        defer due.deinit(self.allocator);
+
+        for (self.tasks.items) |task| {
+            if (task.state == .blocked and task.blocked_deadline_ns != null and task.blocked_deadline_ns.? <= deadline) {
+                try due.append(self.allocator, task.id);
+            }
+        }
+        sortTaskIds(due.items);
+
+        for (due.items) |task_id| {
+            const task = self.findTask(task_id).?;
+            if (task.state != .blocked) return error.TaskNotBlocked;
+            task.state = .ready;
+            task.blocked_key = null;
+            task.blocked_deadline_ns = null;
+            task.wait_result = .timed_out;
+            try self.ready.append(self.allocator, task.id);
+            try self.recordTimeout(task.id, deadline);
+        }
+
+        return due.items.len > 0;
+    }
+
+    fn nextDeadline(self: *const Self) ?u64 {
+        var best: ?u64 = null;
+        for (self.tasks.items) |task| {
+            if (task.state != .blocked) continue;
+            const deadline = task.blocked_deadline_ns orelse continue;
+            if (best == null or deadline < best.?) best = deadline;
+        }
+        return best;
     }
 
     fn findTask(self: *const Self, task_id: TaskId) ?*Task {
@@ -369,11 +443,20 @@ pub const TaskScheduler = struct {
         self: *Self,
         task_id: TaskId,
         key: WaitKey,
+        deadline_ns: ?u64,
     ) (std.mem.Allocator.Error || world_module.TraceError)!void {
-        try self.world.recordFields("scheduler.block", &.{
-            traceField("task", .{ .uint = task_id }),
-            traceField("key", .{ .uint = key }),
-        });
+        if (deadline_ns) |deadline| {
+            try self.world.recordFields("scheduler.block", &.{
+                traceField("task", .{ .uint = task_id }),
+                traceField("key", .{ .uint = key }),
+                traceField("deadline_ns", .{ .uint = deadline }),
+            });
+        } else {
+            try self.world.recordFields("scheduler.block", &.{
+                traceField("task", .{ .uint = task_id }),
+                traceField("key", .{ .uint = key }),
+            });
+        }
     }
 
     fn recordWake(
@@ -415,6 +498,17 @@ pub const TaskScheduler = struct {
         });
     }
 
+    fn recordTimeout(
+        self: *Self,
+        task_id: TaskId,
+        deadline_ns: u64,
+    ) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.timeout", &.{
+            traceField("task", .{ .uint = task_id }),
+            traceField("deadline_ns", .{ .uint = deadline_ns }),
+        });
+    }
+
     fn recordIdle(self: *Self) (std.mem.Allocator.Error || world_module.TraceError)!void {
         try self.world.recordFields("scheduler.idle", &.{
             traceField("tasks", .{ .uint = @intCast(self.tasks.items.len) }),
@@ -452,6 +546,14 @@ fn waitSetBlock(ptr: *anyopaque, key: usize) void {
     scheduler.blockCurrent(key);
 }
 
+fn waitSetBlockUntil(ptr: *anyopaque, key: usize, deadline_ns: ?u64) io_module.FutexWaitResult {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return switch (scheduler.blockCurrentUntil(key, deadline_ns)) {
+        .woken => .woken,
+        .timed_out => .timed_out,
+    };
+}
+
 fn waitSetWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     return scheduler.wake(key, max_count) catch @panic("scheduler wake failed");
@@ -459,6 +561,7 @@ fn waitSetWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
 
 const futex_wait_set_vtable: io_module.FutexWaitSet.VTable = .{
     .block = waitSetBlock,
+    .block_until = waitSetBlockUntil,
     .wake = waitSetWake,
 };
 
@@ -756,6 +859,203 @@ test "TaskScheduler: blocked tasks without a wake report deadlock" {
     try scheduler.runUntilIdle();
     try std.testing.expectEqual(@as(usize, 1), scheduler.completedCount());
     try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
+}
+
+const TimeoutScenario = struct {
+    key: WaitKey = 0xC10C,
+    deadline_ns: u64 = 30,
+    waiting: u8 = 0,
+    timed_out: u8 = 0,
+    woken: u8 = 0,
+    waker_yields: u8 = 0,
+
+    fn timedWaiter(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        self.waiting += 1;
+        switch (scheduler.blockCurrentUntil(self.key, self.deadline_ns)) {
+            .woken => self.woken += 1,
+            .timed_out => self.timed_out += 1,
+        }
+    }
+
+    fn waker(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        while (self.waiting < 1) {
+            self.waker_yields += 1;
+            if (self.waker_yields > 32) @panic("waiter did not block");
+            scheduler.yieldCurrent();
+        }
+
+        const woken = scheduler.wake(self.key, 1) catch @panic("wake failed");
+        if (woken != 1) @panic("unexpected wake count");
+    }
+};
+
+fn runTimeoutTrace(allocator: std.mem.Allocator, seed: u64, spawn_waker: bool, waiter_count: usize) ![]u8 {
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    const scenario = try runtime_allocator.create(TimeoutScenario);
+    defer runtime_allocator.destroy(scenario);
+    scenario.* = .{};
+
+    for (0..waiter_count) |_| {
+        _ = try scheduler.spawn(.{
+            .entry = TimeoutScenario.timedWaiter,
+            .arg = scenario,
+        });
+    }
+    if (spawn_waker) {
+        _ = try scheduler.spawn(.{
+            .entry = TimeoutScenario.waker,
+            .arg = scenario,
+        });
+    }
+
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(waiter_count + @intFromBool(spawn_waker), scheduler.completedCount());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
+
+    if (spawn_waker) {
+        try std.testing.expectEqual(@as(u64, 0), world.now());
+        try std.testing.expectEqual(@as(u8, 1), scenario.woken);
+        try std.testing.expectEqual(@as(u8, 0), scenario.timed_out);
+    } else {
+        try std.testing.expectEqual(scenario.deadline_ns, world.now());
+        try std.testing.expectEqual(@as(u8, @intCast(waiter_count)), scenario.timed_out);
+        try std.testing.expectEqual(@as(u8, 0), scenario.woken);
+    }
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "TaskScheduler: timed wait advances to deadline and returns timeout" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runTimeoutTrace(std.testing.allocator, 0xD1A1, false, 1);
+    defer std.testing.allocator.free(first);
+    const second = try runTimeoutTrace(std.testing.allocator, 0xD1A1, false, 1);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "world.run_for start_ns=0 duration_ns=30 end_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=30") != null);
+}
+
+test "TaskScheduler: wake before deadline cancels timed wait" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runTimeoutTrace(std.testing.allocator, 0xD1A2, true, 1);
+    defer std.testing.allocator.free(first);
+    const second = try runTimeoutTrace(std.testing.allocator, 0xD1A2, true, 1);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.wake key=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout") == null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "world.run_for") == null);
+}
+
+test "TaskScheduler: same-deadline timeouts wake in task id order" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runTimeoutTrace(std.testing.allocator, 0xD1A3, false, 2);
+    defer std.testing.allocator.free(first);
+    const second = try runTimeoutTrace(std.testing.allocator, 0xD1A3, false, 2);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    const first_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=30").?;
+    const second_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=1 deadline_ns=30").?;
+    try std.testing.expect(first_timeout < second_timeout);
+}
+
+const TimedFutexScenario = struct {
+    io: Io,
+    value: u32 = 0,
+    returned: bool = false,
+
+    fn waiter(_: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        self.io.futexWaitTimeout(
+            u32,
+            &self.value,
+            0,
+            .{ .duration = .{
+                .raw = .fromNanoseconds(30),
+                .clock = .awake,
+            } },
+        ) catch unreachable;
+        self.returned = true;
+    }
+};
+
+fn runTimedFutexTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    defer backend.deinit();
+    backend.attachFutexWaitSet(futexWaitSet(scheduler));
+
+    const scenario = try runtime_allocator.create(TimedFutexScenario);
+    defer runtime_allocator.destroy(scenario);
+    scenario.* = .{
+        .io = backend.io(),
+    };
+
+    _ = try scheduler.spawn(.{
+        .entry = TimedFutexScenario.waiter,
+        .arg = scenario,
+    });
+
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expect(scenario.returned);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "TaskScheduler: std.Io timed futex wait resumes at deadline" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runTimedFutexTrace(std.testing.allocator, 0xF17E);
+    defer std.testing.allocator.free(first);
+    const second = try runTimedFutexTrace(std.testing.allocator, 0xF17E);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=30") != null);
 }
 
 const MutexConditionScenario = struct {
