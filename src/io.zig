@@ -13,11 +13,32 @@ const World = @import("world.zig").World;
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
 
+pub const FutexWaitSet = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        block: *const fn (ptr: *anyopaque, key: usize) void,
+        wake: *const fn (ptr: *anyopaque, key: usize, max_count: usize) usize,
+    };
+
+    pub fn block(self: FutexWaitSet, key: usize) void {
+        self.vtable.block(self.ptr, key);
+    }
+
+    pub fn wake(self: FutexWaitSet, key: usize, max_count: usize) usize {
+        return self.vtable.wake(self.ptr, key, max_count);
+    }
+};
+
 pub const Backend = struct {
     allocator: std.mem.Allocator,
     world: *World,
     disk: disk_module.Disk,
     sector_size: u64,
+    futex_wait_set: ?FutexWaitSet = null,
+    futex_keys: std.ArrayList(FutexKeyEntry) = .empty,
+    next_futex_key: usize = 1,
     files: std.ArrayList(FileMeta) = .empty,
     handles: std.ArrayList(HandleEntry) = .empty,
     next_handle: SocketHandle = 1000,
@@ -43,6 +64,11 @@ pub const Backend = struct {
             allocator.free(self.path);
             self.* = undefined;
         }
+    };
+
+    const FutexKeyEntry = struct {
+        address: usize,
+        key: usize,
     };
 
     const ListenerState = struct {
@@ -90,6 +116,7 @@ pub const Backend = struct {
             },
         };
         self.handles.deinit(self.allocator);
+        self.futex_keys.deinit(self.allocator);
         for (self.files.items) |*file_meta| file_meta.deinit(self.allocator);
         self.files.deinit(self.allocator);
         self.* = undefined;
@@ -100,6 +127,25 @@ pub const Backend = struct {
             .userdata = self,
             .vtable = &sim_vtable,
         };
+    }
+
+    pub fn attachFutexWaitSet(self: *Backend, wait_set: FutexWaitSet) void {
+        self.futex_wait_set = wait_set;
+    }
+
+    fn futexKey(self: *Backend, ptr: *const u32) usize {
+        const address = @intFromPtr(ptr);
+        for (self.futex_keys.items) |entry| {
+            if (entry.address == address) return entry.key;
+        }
+
+        const key = self.next_futex_key;
+        self.next_futex_key += 1;
+        self.futex_keys.append(self.allocator, .{
+            .address = address,
+            .key = key,
+        }) catch @panic("failed to allocate sim futex key");
+        return key;
     }
 
     fn createHandle(self: *Backend, state: HandleEntry.State) std.mem.Allocator.Error!SocketHandle {
@@ -236,9 +282,9 @@ const sim_vtable: Io.VTable = .{
     .swapCancelProtection = noSwapCancelProtection,
     .checkCancel = noCheckCancel,
 
-    .futexWait = Io.noFutexWait,
-    .futexWaitUncancelable = Io.noFutexWaitUncancelable,
-    .futexWake = Io.noFutexWake,
+    .futexWait = simFutexWait,
+    .futexWaitUncancelable = simFutexWaitUncancelable,
+    .futexWake = simFutexWake,
 
     .operate = simOperate,
     .batchAwaitAsync = Io.unreachableBatchAwaitAsync,
@@ -379,6 +425,36 @@ fn noSwapCancelProtection(userdata: ?*anyopaque, new: Io.CancelProtection) Io.Ca
 
 fn noCheckCancel(userdata: ?*anyopaque) Io.Cancelable!void {
     _ = userdata;
+}
+
+fn simFutexWait(
+    userdata: ?*anyopaque,
+    ptr: *const u32,
+    expected: u32,
+    timeout: Io.Timeout,
+) Io.Cancelable!void {
+    const backend = backendFromUserdata(userdata);
+    if (@atomicLoad(u32, ptr, .monotonic) != expected) return;
+    if (timeout != .none) @panic("timed futex waits require the scheduler timer wheel");
+
+    // Cooperative atomicity: no task can run between this value check and the
+    // park unless this function yields. Keep the check adjacent to `block` so
+    // futex's check-and-sleep race stays closed in simulation.
+    const wait_set = backend.futex_wait_set orelse @panic("sim futex wait requires an attached scheduler");
+    wait_set.block(backend.futexKey(ptr));
+}
+
+fn simFutexWaitUncancelable(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {
+    simFutexWait(userdata, ptr, expected, .none) catch |err| switch (err) {
+        error.Canceled => unreachable,
+    };
+}
+
+fn simFutexWake(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
+    if (max_waiters == 0) return;
+    const backend = backendFromUserdata(userdata);
+    const wait_set = backend.futex_wait_set orelse return;
+    _ = wait_set.wake(backend.futexKey(ptr), max_waiters);
 }
 
 fn simOperate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
@@ -1219,6 +1295,20 @@ test "io: simulation cancellation checks are inert before fibers" {
     try Io.checkCancel(io);
     try std.testing.expectEqual(Io.CancelProtection.unblocked, Io.swapCancelProtection(io, .blocked));
     Io.recancel(io);
+}
+
+test "io: simulation futex wait returns immediately when value changed" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var backend = testIo(&world);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var value: u32 = 1;
+    try io.futexWait(u32, &value, 0);
+    io.futexWaitUncancelable(u32, &value, 0);
+    io.futexWake(u32, &value, 1);
 }
 
 test "io: simulation queue works for immediately ready operations" {
