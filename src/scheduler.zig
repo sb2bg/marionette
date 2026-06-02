@@ -24,11 +24,17 @@ pub const default_task_stack_size = 256 * 1024;
 
 /// Errors returned by the experimental cooperative scheduler itself.
 pub const TaskSchedulerError = error{
+    Deadlock,
     NoCurrentTask,
+    TaskNotBlocked,
     TaskNotReady,
     TaskNotRunning,
     TaskSuspendedWithoutYield,
 } || fiber.Error || std.mem.Allocator.Error || world_module.TraceError;
+
+/// Opaque wait-set key. Futexes will key this by address; timers and I/O can
+/// use scheduler-owned identifiers.
+pub const WaitKey = usize;
 
 /// Experimental seeded cooperative scheduler.
 ///
@@ -57,11 +63,13 @@ pub const TaskScheduler = struct {
     const TaskState = enum {
         ready,
         running,
+        blocked,
         completed,
     };
 
     const SwitchReason = enum {
         yielded,
+        blocked,
         completed,
     };
 
@@ -70,6 +78,7 @@ pub const TaskScheduler = struct {
         scheduler: *Self,
         task: *Task,
         reason: SwitchReason,
+        key: WaitKey = 0,
     };
 
     const Task = struct {
@@ -79,6 +88,7 @@ pub const TaskScheduler = struct {
         arg: *anyopaque,
         fiber_instance: *fiber.Fiber,
         state: TaskState = .ready,
+        blocked_key: ?WaitKey = null,
 
         fn run(arg: *anyopaque) void {
             const task: *Task = @ptrCast(@alignCast(arg));
@@ -137,6 +147,9 @@ pub const TaskScheduler = struct {
         return task_id;
     }
 
+    // This boundary is load-bearing: ReleaseSafe corrupted task state when the
+    // optimizer inlined across the context switch. Keep suspension points
+    // opaque so the switch is treated as a real control-flow discontinuity.
     pub noinline fn yieldCurrent(self: *Self) void {
         const task = self.current orelse @panic("yield outside a scheduled task");
         if (task.state != .running) @panic("yield from a non-running task");
@@ -153,6 +166,25 @@ pub const TaskScheduler = struct {
         _ = fiber.contextSwitch(&message.contexts);
     }
 
+    // Same optimizer boundary rule as `yieldCurrent`.
+    pub noinline fn blockCurrent(self: *Self, key: WaitKey) void {
+        const task = self.current orelse @panic("block outside a scheduled task");
+        if (task.state != .running) @panic("block from a non-running task");
+
+        var message: SwitchMessage = .{
+            .contexts = .{
+                .old = task.fiber_instance.contextPtr(),
+                .new = &self.main_context,
+            },
+            .scheduler = self,
+            .task = task,
+            .reason = .blocked,
+            .key = key,
+        };
+        _ = fiber.contextSwitch(&message.contexts);
+    }
+
+    // Same optimizer boundary rule as `yieldCurrent`.
     noinline fn completeCurrent(self: *Self, task: *Task) void {
         var message: SwitchMessage = .{
             .contexts = .{
@@ -164,6 +196,43 @@ pub const TaskScheduler = struct {
             .reason = .completed,
         };
         _ = fiber.contextSwitch(&message.contexts);
+    }
+
+    pub fn wake(self: *Self, key: WaitKey, max_count: usize) TaskSchedulerError!usize {
+        if (max_count == 0) return 0;
+
+        var candidates: std.ArrayList(TaskId) = .empty;
+        defer candidates.deinit(self.allocator);
+
+        for (self.tasks.items) |task| {
+            if (task.state == .blocked and task.blocked_key != null and task.blocked_key.? == key) {
+                try candidates.append(self.allocator, task.id);
+            }
+        }
+        sortTaskIds(candidates.items);
+
+        var woken: usize = 0;
+        while (woken < max_count and candidates.items.len > 0) : (woken += 1) {
+            const selected = selected: {
+                var formatted = try self.formatTaskIds(candidates.items);
+                defer formatted.deinit(self.allocator);
+
+                const draw = try self.world.randomIntLessThan(usize, candidates.items.len);
+                const selected = candidates.items[draw];
+                try self.recordWake(key, formatted.items, candidates.items.len, draw, selected);
+                _ = candidates.orderedRemove(draw);
+                break :selected selected;
+            };
+
+            const task = self.findTask(selected).?;
+            if (task.state != .blocked) return error.TaskNotBlocked;
+            task.state = .ready;
+            task.blocked_key = null;
+            try self.ready.append(self.allocator, selected);
+        }
+
+        if (woken == 0) try self.recordWakeEmpty(key, max_count);
+        return woken;
     }
 
     pub fn runUntilIdle(self: *Self) !void {
@@ -203,14 +272,26 @@ pub const TaskScheduler = struct {
             switch (returned_message.reason) {
                 .yielded => {
                     returned_task.state = .ready;
+                    returned_task.blocked_key = null;
                     try scheduler.ready.append(scheduler.allocator, returned_task.id);
                     try scheduler.recordYield(returned_task.id);
                 },
+                .blocked => {
+                    returned_task.state = .blocked;
+                    returned_task.blocked_key = returned_message.key;
+                    try scheduler.recordBlock(returned_task.id, returned_message.key);
+                },
                 .completed => {
                     returned_task.state = .completed;
+                    returned_task.blocked_key = null;
                     try scheduler.recordComplete(returned_task.id, "ok");
                 },
             }
+        }
+
+        if (scheduler.blockedCount() > 0) {
+            try scheduler.recordDeadlock();
+            return error.Deadlock;
         }
 
         try scheduler.recordIdle();
@@ -224,6 +305,14 @@ pub const TaskScheduler = struct {
         return count;
     }
 
+    pub fn blockedCount(self: *const Self) usize {
+        var count: usize = 0;
+        for (self.tasks.items) |task| {
+            if (task.state == .blocked) count += 1;
+        }
+        return count;
+    }
+
     fn findTask(self: *const Self, task_id: TaskId) ?*Task {
         for (self.tasks.items) |task| {
             if (task.id == task_id) return task;
@@ -232,10 +321,14 @@ pub const TaskScheduler = struct {
     }
 
     fn formatReadySet(self: *Self) std.mem.Allocator.Error!std.ArrayList(u8) {
+        return self.formatTaskIds(self.ready.items);
+    }
+
+    fn formatTaskIds(self: *Self, task_ids: []const TaskId) std.mem.Allocator.Error!std.ArrayList(u8) {
         var candidates: std.ArrayList(u8) = .empty;
         errdefer candidates.deinit(self.allocator);
 
-        for (self.ready.items, 0..) |task_id, index| {
+        for (task_ids, 0..) |task_id, index| {
             if (index > 0) try candidates.append(self.allocator, ',');
             try candidates.print(self.allocator, "{}", .{task_id});
         }
@@ -269,6 +362,45 @@ pub const TaskScheduler = struct {
         });
     }
 
+    fn recordBlock(
+        self: *Self,
+        task_id: TaskId,
+        key: WaitKey,
+    ) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.block", &.{
+            traceField("task", .{ .uint = task_id }),
+            traceField("key", .{ .uint = key }),
+        });
+    }
+
+    fn recordWake(
+        self: *Self,
+        key: WaitKey,
+        candidates: []const u8,
+        candidate_count: usize,
+        draw: usize,
+        selected: TaskId,
+    ) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.wake", &.{
+            traceField("key", .{ .uint = key }),
+            traceField("candidates", .{ .text = candidates }),
+            traceField("blocked_count", .{ .uint = @intCast(candidate_count) }),
+            traceField("draw", .{ .uint = @intCast(draw) }),
+            traceField("selected", .{ .uint = selected }),
+        });
+    }
+
+    fn recordWakeEmpty(
+        self: *Self,
+        key: WaitKey,
+        max_count: usize,
+    ) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.wake_empty", &.{
+            traceField("key", .{ .uint = key }),
+            traceField("max", .{ .uint = @intCast(max_count) }),
+        });
+    }
+
     fn recordComplete(
         self: *Self,
         task_id: TaskId,
@@ -284,6 +416,15 @@ pub const TaskScheduler = struct {
         try self.world.recordFields("scheduler.idle", &.{
             traceField("tasks", .{ .uint = @intCast(self.tasks.items.len) }),
             traceField("completed", .{ .uint = @intCast(self.completedCount()) }),
+            traceField("blocked", .{ .uint = @intCast(self.blockedCount()) }),
+        });
+    }
+
+    fn recordDeadlock(self: *Self) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.deadlock", &.{
+            traceField("tasks", .{ .uint = @intCast(self.tasks.items.len) }),
+            traceField("completed", .{ .uint = @intCast(self.completedCount()) }),
+            traceField("blocked", .{ .uint = @intCast(self.blockedCount()) }),
         });
     }
 };
@@ -469,4 +610,125 @@ test "TaskScheduler: same seed produces byte-identical schedule trace" {
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.select candidates=0,1,2") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.yield task=") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.complete task=") != null);
+}
+
+const WakeSetScenario = struct {
+    key: WaitKey = 0xABCD,
+    waiting: u8 = 0,
+    resumed: u8 = 0,
+    waker_yields: u8 = 0,
+
+    fn waiter(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        self.waiting += 1;
+        scheduler.blockCurrent(self.key);
+        self.resumed += 1;
+    }
+
+    fn waker(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        while (self.waiting < 2) {
+            self.waker_yields += 1;
+            if (self.waker_yields > 32) @panic("waiters did not block");
+            scheduler.yieldCurrent();
+        }
+
+        const woken = scheduler.wake(self.key, 2) catch @panic("wake failed");
+        if (woken != 2) @panic("unexpected wake count");
+    }
+};
+
+fn runWakeSetSchedulerTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    const scenario = try runtime_allocator.create(WakeSetScenario);
+    defer runtime_allocator.destroy(scenario);
+    scenario.* = .{};
+
+    _ = try scheduler.spawn(.{
+        .entry = WakeSetScenario.waiter,
+        .arg = scenario,
+    });
+    _ = try scheduler.spawn(.{
+        .entry = WakeSetScenario.waiter,
+        .arg = scenario,
+    });
+    _ = try scheduler.spawn(.{
+        .entry = WakeSetScenario.waker,
+        .arg = scenario,
+    });
+
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(usize, 3), scheduler.completedCount());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
+    try std.testing.expectEqual(@as(u8, 2), scenario.resumed);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "TaskScheduler: wait-set wake order replays deterministically" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runWakeSetSchedulerTrace(std.testing.allocator, 0xB10C);
+    defer std.testing.allocator.free(first);
+    const second = try runWakeSetSchedulerTrace(std.testing.allocator, 0xB10C);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.block task=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.wake key=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.idle tasks=3 completed=3 blocked=0") != null);
+}
+
+test "TaskScheduler: blocked tasks without a wake report deadlock" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = 0xDEAD10CC, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    var scenario: WakeSetScenario = .{};
+    _ = try scheduler.spawn(.{
+        .entry = WakeSetScenario.waiter,
+        .arg = &scenario,
+    });
+
+    try std.testing.expectError(error.Deadlock, scheduler.runUntilIdle());
+    try std.testing.expectEqual(@as(usize, 1), scheduler.blockedCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.deadlock") != null);
+
+    try std.testing.expectEqual(@as(usize, 1), try scheduler.wake(scenario.key, 1));
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(usize, 1), scheduler.completedCount());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
 }
