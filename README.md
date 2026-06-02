@@ -12,7 +12,14 @@
   <a href="https://sb2bg.github.io/marionette/">Docs and blog</a>
 </p>
 
-[![CI](https://github.com/sb2bg/marionette/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://sb2bg.github.io/marionette/"><img src="https://img.shields.io/badge/docs-blog-0a7ea4?style=flat-square&logo=readthedocs&logoColor=white" alt="Docs"></a>
+  <a href="https://github.com/sb2bg/marionette/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sb2bg/marionette/ci.yml?branch=main&style=flat-square&logo=github&logoColor=white&label=CI" alt="CI"></a>
+  <a href="#install"><img src="https://img.shields.io/badge/zig-0.16.x-f7a41d?style=flat-square&logo=zig&logoColor=white" alt="Zig version"></a>
+  <img src="https://img.shields.io/badge/determinism-enforced-7d5fff?style=flat-square&logo=target&logoColor=white" alt="Determinism">
+  <img src="https://img.shields.io/badge/status-alpha-ff7a00?style=flat-square" alt="Status">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square" alt="License"></a>
+</p>
 
 Deterministic I/O and simulation testing for Zig.
 
@@ -207,12 +214,13 @@ change as the simulator grows.
 
 The simulator currently models clock, deterministic randomness, disk, a flat
 `std.Io.File` subset, typed endpoint networking, and experimental cooperative
-`std.Io` futex waits for `Mutex` / `Condition` code. It does not model
-arbitrary OS thread scheduling or memory-level concurrency; code that depends
-on those needs separate testing. The production network path is partial: local
-same-process endpoints and experimental framed loopback paths exist, but
-cross-process production transport is still roadmap work. Allocator simulation,
-async/cancel integration, and broader scheduler parity are planned.
+`std.Io` futex waits for `Mutex` / `Condition` code, validated against the
+pinned `g41797/mailbox` target. It does not model arbitrary OS thread
+scheduling or memory-level concurrency; code that depends on those needs
+separate testing. The production network path is partial: local same-process
+endpoints and experimental framed loopback paths exist, but cross-process
+production transport is still roadmap work. Allocator simulation, async/cancel
+integration, and broader scheduler parity are planned.
 
 If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 

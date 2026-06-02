@@ -190,12 +190,13 @@ change as the simulator grows.
 
 The simulator currently models clock, deterministic randomness, disk, a flat
 `std.Io.File` subset, typed endpoint networking, and experimental cooperative
-`std.Io` futex waits for `Mutex` / `Condition` code. It does not model
-arbitrary OS thread scheduling or memory-level concurrency; code that depends
-on those needs separate testing. The production network path is partial: local
-same-process endpoints and experimental framed loopback paths exist, but
-cross-process production transport is still roadmap work. Allocator simulation,
-async/cancel integration, and broader scheduler parity are planned.
+`std.Io` futex waits for `Mutex` / `Condition` code, validated against the
+pinned `g41797/mailbox` target. It does not model arbitrary OS thread
+scheduling or memory-level concurrency; code that depends on those needs
+separate testing. The production network path is partial: local same-process
+endpoints and experimental framed loopback paths exist, but cross-process
+production transport is still roadmap work. Allocator simulation, async/cancel
+integration, and broader scheduler parity are planned.
 
 The [`examples/`](../examples/) directory is the best place to start.
 

@@ -128,6 +128,32 @@ Do not build a separate libucontext or assembly coroutine runtime. Marionette's
 fiber experiments should continue through the local seam over `std.Io.fiber`
 and keep the backend clearly marked experimental.
 
+## Cooperative Concurrency Scope
+
+The current scheduler result is deliberately narrow but real: unmodified
+cooperative `Mutex` / `Condition` code can run deterministically under
+Marionette through `std.Io.fiber`-backed simulated futexes. The pinned lazy
+`g41797/mailbox` validation target exercises a real third-party library through
+that path, including timed `receive`, send/wake, and same-deadline timeout
+ordering. The validation asserts byte-identical same-seed traces and checks
+that Mailbox reached the deadline-carrying futex path.
+
+This does not mean Marionette models arbitrary concurrent Zig. The current
+claim is cooperative task scheduling inside Marionette's scheduler, not
+preemptive OS threads or memory-model interleavings. Atomics, lock-free
+algorithms, torn non-atomic reads, missed wakeups in host condition variables,
+and CPU reorderings remain outside this model and need different tools. The
+`std.Io` `async` / `await` / cancellation surface is also not complete yet.
+
+The scheduler work exposed two concrete determinism leaks that future backend
+work should keep in view:
+
+- raw futex pointer addresses never enter the trace; the sim backend maps them
+  to stable logical keys so ASLR and allocator placement do not affect replay;
+- fiber suspension and completion boundaries are intentionally opaque to the
+  optimizer. ReleaseSafe corrupted task state when the optimizer inlined across
+  a context-switch boundary, so those `noinline` boundaries are load-bearing.
+
 ## Existing Primitives
 
 The current Marionette network types are not wasted.
