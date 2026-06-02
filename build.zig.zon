@@ -18,6 +18,7 @@
     .paths = .{
         "README.md",
         "CHANGELOG.md",
+        "FOUND_BUGS.md",
         "LICENSE",
         "build.zig",
         "build.zig.zon",

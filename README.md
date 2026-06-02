@@ -198,6 +198,7 @@ have.
 - [Architecture](docs/architecture.md)
 - [Trace Format](docs/trace-format.md)
 - [Run](docs/run.md)
+- [Findings](FOUND_BUGS.md)
 - [API Target Spec](docs/api-target.md)
 - [BUGGIFY](docs/buggify.md)
 - [Network Model](docs/network.md)

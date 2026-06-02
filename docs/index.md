@@ -167,6 +167,7 @@ Passing runs return traces for persistence, diffing, or external tooling.
 - [Architecture](architecture.md)
 - [Trace Format](trace-format.md)
 - [Run](run.md)
+- [Findings](findings.md)
 - [API Target Spec](api-target.md)
 - [BUGGIFY](buggify.md)
 - [Network Model](network.md)
