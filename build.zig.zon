@@ -1,6 +1,6 @@
 .{
     .name = .marionette,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .fingerprint = 0x8afb77b114c43a8d, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

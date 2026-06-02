@@ -1,16 +1,23 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 - 2026-06-02
 
-- Added experimental scheduler-backed `std.Io` futex waits, including timed
-  waits, so cooperative `Mutex` / `Condition` code can run deterministically
-  under Marionette.
-- Added a pinned lazy Mailbox validation target:
-  `zig build validate-mailbox` runs `g41797/mailbox` unmodified through
-  Marionette's scheduler-backed `std.Io` and verifies same-seed replay for
-  timeout, same-deadline timeout ordering, and send/wake paths.
-- Arbitrary OS thread scheduling, async/cancel integration, allocator
-  simulation, and production scheduler parity remain roadmap work.
+Marionette's second tagged release adds the cooperative-concurrency tier:
+
+- Adds the `std.Io.fiber`-backed scheduler stack: deterministic task spawning,
+  seeded runnable selection, blocking wait sets, futex wakeups, and timed futex
+  waits.
+- Runs a real Zig cooperative-concurrency library, `g41797/mailbox` pinned at
+  `d30ff69f1fa0288e1a8cb96b24ae3b552739f490`, unmodified through Marionette's
+  scheduler-backed `std.Io`.
+- Verifies same-seed replay for Mailbox timeout, same-deadline timeout
+  ordering, and send/wake paths through `zig build validate-mailbox`.
+- Keeps the concurrency claim deliberately scoped: cooperative `Mutex` /
+  `Condition` code is modeled; arbitrary OS thread scheduling, memory-model
+  interleavings, `async` / `await`, cancellation, allocator simulation, and
+  production scheduler parity remain roadmap work.
+- Keeps the v0.1 storage story intact: `zig build validate-xitdb` still runs
+  the pinned xitdb validation target against the deterministic file backend.
 
 ## v0.1.0 - 2026-05-29
 
