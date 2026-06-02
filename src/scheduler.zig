@@ -2,9 +2,12 @@
 
 const std = @import("std");
 
+const disk_module = @import("disk.zig");
 const fiber = @import("fiber.zig");
+const io_module = @import("io.zig");
 const world_module = @import("world.zig");
 
+const Io = std.Io;
 const World = world_module.World;
 const traceField = world_module.traceField;
 
@@ -437,6 +440,28 @@ fn sortTaskIds(task_ids: []TaskId) void {
     }.lessThan);
 }
 
+pub fn futexWaitSet(self: *TaskScheduler) io_module.FutexWaitSet {
+    return .{
+        .ptr = self,
+        .vtable = &futex_wait_set_vtable,
+    };
+}
+
+fn waitSetBlock(ptr: *anyopaque, key: usize) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.blockCurrent(key);
+}
+
+fn waitSetWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.wake(key, max_count) catch @panic("scheduler wake failed");
+}
+
+const futex_wait_set_vtable: io_module.FutexWaitSet.VTable = .{
+    .block = waitSetBlock,
+    .wake = waitSetWake,
+};
+
 /// Fixed-capacity deterministic event queue.
 ///
 /// This is not the final Marionette scheduler. It is a small shared primitive
@@ -731,4 +756,102 @@ test "TaskScheduler: blocked tasks without a wake report deadlock" {
     try scheduler.runUntilIdle();
     try std.testing.expectEqual(@as(usize, 1), scheduler.completedCount());
     try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
+}
+
+const MutexConditionScenario = struct {
+    io: Io,
+    scheduler: *TaskScheduler,
+    mutex: Io.Mutex = .init,
+    condition: Io.Condition = .init,
+    waiter_ready: bool = false,
+    condition_met: bool = false,
+    waiter_observed: bool = false,
+    signaler_yields: u8 = 0,
+
+    fn waiter(_: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        self.waiter_ready = true;
+        while (!self.condition_met) {
+            self.condition.waitUncancelable(self.io, &self.mutex);
+        }
+        self.waiter_observed = true;
+    }
+
+    fn signaler(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        while (!self.waiter_ready) {
+            self.signaler_yields += 1;
+            if (self.signaler_yields > 32) @panic("waiter did not start");
+            scheduler.yieldCurrent();
+        }
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.condition_met = true;
+        self.condition.signal(self.io);
+    }
+};
+
+fn runMutexConditionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    defer backend.deinit();
+    backend.attachFutexWaitSet(futexWaitSet(scheduler));
+
+    const scenario = try runtime_allocator.create(MutexConditionScenario);
+    defer runtime_allocator.destroy(scenario);
+    scenario.* = .{
+        .io = backend.io(),
+        .scheduler = scheduler,
+    };
+
+    _ = try scheduler.spawn(.{
+        .entry = MutexConditionScenario.waiter,
+        .arg = scenario,
+    });
+    _ = try scheduler.spawn(.{
+        .entry = MutexConditionScenario.signaler,
+        .arg = scenario,
+    });
+
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(usize, 2), scheduler.completedCount());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
+    try std.testing.expect(scenario.waiter_observed);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "TaskScheduler: std.Io Mutex and Condition replay through sim futexes" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runMutexConditionTrace(std.testing.allocator, 0xF00D);
+    defer std.testing.allocator.free(first);
+    const second = try runMutexConditionTrace(std.testing.allocator, 0xF00D);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.block task=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.wake key=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.idle tasks=2 completed=2 blocked=0") != null);
 }
