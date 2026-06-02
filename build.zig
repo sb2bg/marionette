@@ -63,6 +63,25 @@ pub fn build(b: *std.Build) void {
         validate_xitdb_step.dependOn(&run_validate_xitdb.step);
     }
 
+    if (b.lazyDependency("mailbox", .{
+        .target = target,
+        .optimize = optimize,
+    })) |mailbox_dep| {
+        const validate_mailbox_mod = b.createModule(.{
+            .root_source_file = b.path("validation/mailbox_concurrency.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validate_mailbox_mod.addImport("marionette", mod);
+        validate_mailbox_mod.addImport("mailbox", mailbox_dep.module("mailbox"));
+
+        const validate_mailbox_tests = b.addTest(.{ .root_module = validate_mailbox_mod });
+        const run_validate_mailbox = b.addRunArtifact(validate_mailbox_tests);
+
+        const validate_mailbox_step = b.step("validate-mailbox", "Run Mailbox under Marionette");
+        validate_mailbox_step.dependOn(&run_validate_mailbox.step);
+    }
+
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),
         .target = target,

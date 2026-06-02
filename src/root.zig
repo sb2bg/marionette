@@ -128,6 +128,12 @@ pub const UnstableEventQueue = @import("scheduler.zig").EventQueue;
 /// Errors returned by unstable fixed-capacity event queues.
 pub const UnstableEventQueueError = @import("scheduler.zig").EventQueueError;
 
+/// Unstable seeded cooperative scheduler for early `std.Io` concurrency validation.
+pub const UnstableTaskScheduler = @import("scheduler.zig").TaskScheduler;
+
+/// Build a `std.Io` futex wait-set view over an unstable task scheduler.
+pub const unstableTaskSchedulerFutexWaitSet = @import("scheduler.zig").futexWaitSet;
+
 /// Unstable deterministic network primitive for examples and early scheduler work.
 pub const UnstableNetwork = @import("network.zig").UnstableNetwork;
 

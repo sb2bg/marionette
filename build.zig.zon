@@ -9,6 +9,11 @@
             .hash = "xitdb-0.0.0-EEFkxpHJBABxnXvbX5oyeUufyiwNgOwkH03bayvWeYxw",
             .lazy = true,
         },
+        .mailbox = .{
+            .url = "git+https://github.com/g41797/mailbox#d30ff69f1fa0288e1a8cb96b24ae3b552739f490",
+            .hash = "mailbox-0.0.15-8ABL0kt8AADKxnp3BayHaNX3niZ0mR3lsHc1R4x6npnn",
+            .lazy = true,
+        },
     },
     .paths = .{
         "README.md",
