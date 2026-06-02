@@ -8,9 +8,9 @@
 
 Deterministic I/O and simulation testing for Zig.
 
-[![Docs](https://img.shields.io/badge/docs-blog-0a7ea4?style=for-the-badge&logo=readthedocs&logoColor=white)](https://sb2bg.github.io/marionette/)
-[![CI](https://img.shields.io/github/actions/workflow/status/sb2bg/marionette/ci.yml?branch=main&style=for-the-badge&logo=github&logoColor=white&label=CI)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
-[![Zig version](https://img.shields.io/badge/zig_version-v0.16-%23F7A41D?style=for-the-badge&logo=zig&logoColor=white)](https://ziglang.org/download)
+[![Docs](https://img.shields.io/badge/docs-0a7ea4?style=for-the-badge&logo=readthedocs&logoColor=white)](https://sb2bg.github.io/marionette/)
+[![CI](https://img.shields.io/github/actions/workflow/status/sb2bg/marionette/ci.yml?branch=main&style=for-the-badge&logo=github&logoColor=white&label=ci)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+[![Zig](https://img.shields.io/badge/zig-0.16-%23F7A41D?style=for-the-badge&logo=zig&logoColor=white)](https://ziglang.org/download)
 [![Status](https://img.shields.io/badge/status-alpha-ff7a00?style=for-the-badge)](#status)
 [![License](https://img.shields.io/badge/license-MIT-3fb950?style=for-the-badge)](#license)
 
