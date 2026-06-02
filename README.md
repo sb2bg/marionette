@@ -16,30 +16,16 @@ Deterministic I/O and simulation testing for Zig.
 
 <hr>
 
-Marionette is a deterministic `std.Io` simulator for Zig. Production libraries
-accept ordinary `std.Io`; tests swap in Marionette's seeded, fault-injectable
-implementation and get replayable traces.
-
-This is already demonstrated on real Zig code:
-
-- `xit-vcs/xitdb`, a file-backed storage engine, runs unmodified on
-  Marionette's deterministic file backend and is checked against a modeled
-  randomized workload under crash faults.
-- `g41797/mailbox`, a cooperative `Mutex` / `Condition` library, runs
-  unmodified on Marionette's scheduler-backed futex backend with byte-identical
-  same-seed replay.
-
-The current scope is deterministic simulation for storage, local endpoint
-protocols, and cooperative `std.Io` concurrency. It is not a model of
-preemptive OS threads, memory-model interleavings, or production-grade
-cross-process networking. See [Std.Io Direction](docs/std-io-direction.md) for
-the precise concurrency boundary.
+Long term, Marionette is aiming to be the deterministic `std.Io` for Zig:
+production libraries accept `std.Io`, and tests swap in Marionette's
+deterministic implementation. Today, Marionette ships the simulator, trace,
+fault, disk, and network primitives that make that direction concrete.
 
 Write production-shaped code against `std.Io` plus any small Marionette handles
 it actually needs, such as `mar.Recorder` or `mar.Endpoint(Message)`. In tests,
-drive `control` to inject faults. For the modeled file, cooperative futex, and
-local endpoint surfaces, the same application logic can run on the simulator
-and on production adapters.
+drive `control` to inject faults. For the modeled file and local endpoint
+surfaces, the same application logic can run on the simulator and on production
+adapters.
 
 ```zig
 fn writeAndRecover(io: std.Io, root: std.Io.Dir, recorder: mar.Recorder) !KVStore {
