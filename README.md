@@ -21,6 +21,11 @@ production libraries accept `std.Io`, and tests swap in Marionette's
 deterministic implementation. Today, Marionette ships the simulator, trace,
 fault, disk, and network primitives that make that direction concrete.
 
+Marionette already runs real, unmodified Zig code under deterministic
+simulation: a storage engine (`xit-vcs/xitdb`) and a cooperative-concurrency
+library (`g41797/mailbox`), both with seed-reproducible replay, and has
+surfaced reproducible recovery and correctness counterexamples in the process.
+
 Write production-shaped code against `std.Io` plus any small Marionette handles
 it actually needs, such as `mar.Recorder` or `mar.Endpoint(Message)`. In tests,
 drive `control` to inject faults. For the modeled file and local endpoint
@@ -46,9 +51,9 @@ const prod_env = production.env();
 var prod_store = try writeAndRecover(prod_env.io(), tmp.dir, prod_env.recorder());
 ```
 
-That parity is the point. You don't write a "simulator version" of your code.
-You write your code behind Marionette-owned authorities, and Marionette gives
-you a deterministic environment to run it in.
+For file-backed code like this, that parity is the point. You don't write a
+"simulator version" of your code. You write your code behind Marionette-owned
+authorities, and Marionette gives you a deterministic environment to run it in.
 
 ## Why
 
@@ -157,6 +162,15 @@ fn partitionScenario(harness: *Harness) !void {
 ```
 
 Messages have configurable loss, latency, clogs, and partition dynamics through focused `control.network` calls such as `setLossiness(...)`, `setLatency(...)`, and `setPartitionDynamics(...)`. Application code sends through a node-scoped endpoint with `endpoint.send(to, message)` and receives with `while (try endpoint.receive()) |envelope|`.
+
+## Cooperative concurrency
+
+Marionette also has an experimental scheduler-backed `std.Io` futex path for
+cooperative `Mutex` / `Condition` code. The pinned `g41797/mailbox` validation
+target runs unmodified and exercises timed receive, send/wake, same-deadline
+timeout ordering, and byte-identical same-seed replay. This is cooperative
+`std.Io` concurrency, not preemptive OS thread or memory-model testing; see
+[Std.Io Direction](docs/std-io-direction.md) for the exact boundary.
 
 ## Traces
 
