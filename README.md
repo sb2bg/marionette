@@ -206,12 +206,13 @@ guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
 change as the simulator grows.
 
 The simulator currently models clock, deterministic randomness, disk, a flat
-`std.Io.File` subset, and a typed endpoint network. It does not model
-`Mutex`, `Condition`, futex waits, or arbitrary OS thread scheduling; code that
-depends on memory-level concurrency needs separate testing. The production
-network path is partial: local same-process endpoints and experimental framed
-loopback paths exist, but cross-process production transport is still roadmap
-work. Allocator simulation is planned.
+`std.Io.File` subset, typed endpoint networking, and experimental cooperative
+`std.Io` futex waits for `Mutex` / `Condition` code. It does not model
+arbitrary OS thread scheduling or memory-level concurrency; code that depends
+on those needs separate testing. The production network path is partial: local
+same-process endpoints and experimental framed loopback paths exist, but
+cross-process production transport is still roadmap work. Allocator simulation,
+async/cancel integration, and broader scheduler parity are planned.
 
 If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 

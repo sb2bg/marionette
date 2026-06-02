@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Added experimental scheduler-backed `std.Io` futex waits, including timed
+  waits, so cooperative `Mutex` / `Condition` code can run deterministically
+  under Marionette.
+- Added a pinned lazy Mailbox validation target:
+  `zig build validate-mailbox` runs `g41797/mailbox` unmodified through
+  Marionette's scheduler-backed `std.Io` and verifies same-seed replay for
+  timeout and send/wake paths.
+- Arbitrary OS thread scheduling, async/cancel integration, allocator
+  simulation, and production scheduler parity remain roadmap work.
+
 ## v0.1.0 - 2026-05-29
 
 Marionette's first tagged release demonstrates the core thesis:

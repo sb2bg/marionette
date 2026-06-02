@@ -912,14 +912,21 @@ This is Flow/madsim-inspired in goal.
 Implementation sequence:
 
 1. Done: prove the bare fiber primitive and keep it behind a local seam.
-2. Build a deterministic ready queue and run loop: current fiber, spawn, yield,
-   completion, seeded runnable selection, and trace records for every
+2. Done: build a deterministic ready queue and run loop: current fiber, spawn,
+   yield, completion, seeded runnable selection, and trace records for every
    scheduling decision.
-3. Add futex wait sets: `futexWait` parks the current fiber on a key;
-   `futexWake` wakes up to N fibers in seeded order.
-4. Add deterministic timers: sleep/deadline waiters wake when time advances and
-   compose with explicit wake/cancel.
-5. Re-validate existing `std.Io` users, especially xitdb and the storage
+3. Done: add futex wait sets: `futexWait` parks the current fiber on a key;
+   `futexWake` wakes up to N fibers in seeded order. Raw futex addresses are
+   mapped to stable logical keys before they enter the trace.
+4. Done: add deterministic timed futex waits. A timed waiter wakes on either an
+   explicit futex wake or its deadline; the losing path is cancelled by clearing
+   the task's blocked key/deadline state. Equal-deadline timeouts wake in task-id
+   order.
+5. Done: add a pinned lazy Mailbox validation target. `zig build
+   validate-mailbox` runs `g41797/mailbox` unmodified through Marionette's
+   scheduler-backed `std.Io` and checks same-seed replay for timeout and
+   send/wake paths.
+6. Re-validate existing `std.Io` users, especially xitdb and the storage
    examples, for same-seed trace stability under the new backend.
 
 ---

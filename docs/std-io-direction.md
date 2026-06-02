@@ -113,14 +113,16 @@ completion order is outside Marionette's control. That breaks the replay
 guarantee.
 
 Marionette wants the lower-level fiber machinery, not the OS event loop. The
-deterministic backend should implement the `std.Io` vtable itself, schedule
-fibers with `World`'s seeded ordering, and route file/network operations through
+deterministic backend implements the `std.Io` vtable itself, schedules fibers
+with `World`'s seeded ordering, and routes file/network operations through
 Marionette's simulated disk and network state.
 
-This means Phase 1 is not blocked on inventing coroutines from scratch. The
-bare context-switch spike is green for the pinned compiler; the remaining risk
-is scheduler semantics: ready ordering, futex wait sets, timers, cancellation,
-and same-seed trace stability.
+This means Phase 1 was not blocked on inventing coroutines from scratch. The
+bare context-switch spike is green for the pinned compiler, and the first
+scheduler layers now cover ready ordering, futex wait sets, and timed futex
+waits. Remaining scheduler risk is cancellation, async integration, broader
+I/O suspension, and same-seed trace stability as more real SUTs move onto the
+backend.
 
 Do not build a separate libucontext or assembly coroutine runtime. Marionette's
 fiber experiments should continue through the local seam over `std.Io.fiber`
@@ -208,9 +210,11 @@ Phase 0 is the current bridge:
 Phase 1 is experimental deterministic `std.Io`:
 
 - done: prove bare `std.Io.fiber` context switching through a local seam;
-- implement the deterministic scheduler for small opt-in simulations;
-- add deterministic futex wait/wake sets;
-- add deterministic sleep/deadline handling;
+- done: implement the deterministic scheduler for small opt-in simulations;
+- done: add deterministic futex wait/wake sets;
+- done: add deterministic timed futex waits, validated with the pinned lazy
+  `g41797/mailbox` target via `zig build validate-mailbox`;
+- add deterministic sleep/deadline handling outside futex waits;
 - route sleep, queue, file, and network I/O through `World`;
 - expand simulation `Env.io()` from the Phase 0 backend into a suspending
   deterministic `std.Io`;
