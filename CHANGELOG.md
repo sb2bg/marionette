@@ -8,7 +8,7 @@
 - Added a pinned lazy Mailbox validation target:
   `zig build validate-mailbox` runs `g41797/mailbox` unmodified through
   Marionette's scheduler-backed `std.Io` and verifies same-seed replay for
-  timeout and send/wake paths.
+  timeout, same-deadline timeout ordering, and send/wake paths.
 - Arbitrary OS thread scheduling, async/cancel integration, allocator
   simulation, and production scheduler parity remain roadmap work.
 

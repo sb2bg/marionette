@@ -10,6 +10,7 @@ const Mbx = mailbox.MailBox(Letter);
 
 const ScenarioKind = enum {
     timeout,
+    timeout_pair,
     exchange,
 };
 
@@ -17,8 +18,8 @@ const MailboxScenario = struct {
     io: std.Io,
     mailbox: Mbx,
     envelope: Mbx.Envelope = .{ .letter = 42 },
-    receiver_started: bool = false,
-    receiver_timed_out: bool = false,
+    receivers_started: u8 = 0,
+    receiver_timed_out_count: u8 = 0,
     receiver_got_letter: bool = false,
     sender_yields: u8 = 0,
 
@@ -31,10 +32,10 @@ const MailboxScenario = struct {
 
     fn timeoutReceiver(_: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        self.receiver_started = true;
+        self.receivers_started += 1;
         _ = self.mailbox.receive(30) catch |err| switch (err) {
             error.Timeout => {
-                self.receiver_timed_out = true;
+                self.receiver_timed_out_count += 1;
                 return;
             },
             error.Closed, error.Interrupted => @panic("unexpected mailbox receive error"),
@@ -44,7 +45,7 @@ const MailboxScenario = struct {
 
     fn exchangeReceiver(_: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        self.receiver_started = true;
+        self.receivers_started += 1;
         const envelope = self.mailbox.receive(1000) catch |err| switch (err) {
             error.Timeout, error.Closed, error.Interrupted => @panic("unexpected mailbox receive error"),
         };
@@ -54,7 +55,7 @@ const MailboxScenario = struct {
 
     fn sender(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        while (!self.receiver_started) {
+        while (self.receivers_started < 1) {
             self.sender_yields += 1;
             if (self.sender_yields > 32) @panic("receiver did not start");
             scheduler.yieldCurrent();
@@ -97,6 +98,16 @@ fn runMailboxTrace(allocator: std.mem.Allocator, seed: u64, kind: ScenarioKind) 
                 .arg = scenario,
             });
         },
+        .timeout_pair => {
+            _ = try scheduler.spawn(.{
+                .entry = MailboxScenario.timeoutReceiver,
+                .arg = scenario,
+            });
+            _ = try scheduler.spawn(.{
+                .entry = MailboxScenario.timeoutReceiver,
+                .arg = scenario,
+            });
+        },
         .exchange => {
             _ = try scheduler.spawn(.{
                 .entry = MailboxScenario.exchangeReceiver,
@@ -114,7 +125,11 @@ fn runMailboxTrace(allocator: std.mem.Allocator, seed: u64, kind: ScenarioKind) 
 
     switch (kind) {
         .timeout => {
-            try std.testing.expect(scenario.receiver_timed_out);
+            try std.testing.expectEqual(@as(u8, 1), scenario.receiver_timed_out_count);
+            try std.testing.expectEqual(@as(u64, 30), world.now());
+        },
+        .timeout_pair => {
+            try std.testing.expectEqual(@as(u8, 2), scenario.receiver_timed_out_count);
             try std.testing.expectEqual(@as(u64, 30), world.now());
         },
         .exchange => {
@@ -132,7 +147,21 @@ test "mailbox receive timeout replays deterministically on Marionette futex time
     defer std.testing.allocator.free(second);
 
     try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.block task=0 key=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "deadline_ns=30") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=30") != null);
+}
+
+test "mailbox same-deadline receive timeouts replay in task id order" {
+    const first = try runMailboxTrace(std.testing.allocator, 0xA11B2, .timeout_pair);
+    defer std.testing.allocator.free(first);
+    const second = try runMailboxTrace(std.testing.allocator, 0xA11B2, .timeout_pair);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    const first_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=30").?;
+    const second_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=1 deadline_ns=30").?;
+    try std.testing.expect(first_timeout < second_timeout);
 }
 
 test "mailbox send wakes blocked receiver deterministically on Marionette futexes" {
@@ -142,5 +171,8 @@ test "mailbox send wakes blocked receiver deterministically on Marionette futexe
     defer std.testing.allocator.free(second);
 
     try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.block task=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "deadline_ns=1000") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.wake key=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout") == null);
 }
