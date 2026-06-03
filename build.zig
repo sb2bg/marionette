@@ -82,6 +82,22 @@ pub fn build(b: *std.Build) void {
         validate_mailbox_step.dependOn(&run_validate_mailbox.step);
     }
 
+    const validate_bounded_queue_mod = b.createModule(.{
+        .root_source_file = b.path("validation/bounded_queue_concurrency.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validate_bounded_queue_mod.addImport("marionette", mod);
+
+    const validate_bounded_queue_tests = b.addTest(.{ .root_module = validate_bounded_queue_mod });
+    const run_validate_bounded_queue = b.addRunArtifact(validate_bounded_queue_tests);
+
+    const validate_bounded_queue_step = b.step(
+        "validate-bounded-queue",
+        "Run the cooperative bounded-queue capability validation",
+    );
+    validate_bounded_queue_step.dependOn(&run_validate_bounded_queue.step);
+
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),
         .target = target,

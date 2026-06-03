@@ -168,8 +168,11 @@ Messages have configurable loss, latency, clogs, and partition dynamics through 
 Marionette also has an experimental scheduler-backed `std.Io` futex path for
 cooperative `Mutex` / `Condition` code. The pinned `g41797/mailbox` validation
 target runs unmodified and exercises timed receive, send/wake, same-deadline
-timeout ordering, and byte-identical same-seed replay. This is cooperative
-`std.Io` concurrency, not preemptive OS thread or memory-model testing; see
+timeout ordering, and byte-identical same-seed replay. The internal
+`validate-bounded-queue` target adds a canonical FIFO oracle and a planted
+lost-wakeup deadlock to demonstrate concurrency bug detection without counting
+it as an external SUT finding. This is cooperative `std.Io` concurrency, not
+preemptive OS thread or memory-model testing; see
 [Std.Io Direction](docs/std-io-direction.md) for the exact boundary.
 
 ## Traces
@@ -223,12 +226,12 @@ change as the simulator grows.
 The simulator currently models clock, deterministic randomness, disk, a flat
 `std.Io.File` subset, typed endpoint networking, and experimental cooperative
 `std.Io` futex waits for `Mutex` / `Condition` code, validated against the
-pinned `g41797/mailbox` target. It does not model arbitrary OS thread
-scheduling or memory-level concurrency; code that depends on those needs
-separate testing. The production network path is partial: local same-process
-endpoints and experimental framed loopback paths exist, but cross-process
-production transport is still roadmap work. Allocator simulation, async/cancel
-integration, and broader scheduler parity are planned.
+pinned `g41797/mailbox` target and the internal bounded-queue capability demo.
+It does not model arbitrary OS thread scheduling or memory-level concurrency;
+code that depends on those needs separate testing. The production network path
+is partial: local same-process endpoints and experimental framed loopback paths
+exist, but cross-process production transport is still roadmap work. Allocator
+simulation, async/cancel integration, and broader scheduler parity are planned.
 
 If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 

@@ -926,7 +926,12 @@ Implementation sequence:
    validate-mailbox` runs `g41797/mailbox` unmodified through Marionette's
    scheduler-backed `std.Io` and checks same-seed replay for timeout and
    send/wake paths.
-6. Re-validate existing `std.Io` users, especially xitdb and the storage
+6. Done: add an internal bounded-queue capability target. `zig build
+   validate-bounded-queue` checks a FIFO/no-loss oracle across a seed sweep and
+   keeps a planted close-path lost-wakeup bug that Marionette reports as a
+   deterministic deadlock. This is a concurrency capability demonstration, not
+   an external SUT finding.
+7. Re-validate existing `std.Io` users, especially xitdb and the storage
    examples, for same-seed trace stability under the new backend.
 
 ---

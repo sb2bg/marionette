@@ -138,6 +138,13 @@ that path, including timed `receive`, send/wake, and same-deadline timeout
 ordering. The validation asserts byte-identical same-seed traces and checks
 that Mailbox reached the deadline-carrying futex path.
 
+The internal `validate-bounded-queue` target exercises the same tier with a
+canonical producer-consumer oracle: every pushed item must be popped exactly
+once, in FIFO order, across a seed sweep. It also keeps one deliberately buggy
+close path where `signal` replaces the required `broadcast`; Marionette reports
+the resulting lost-wakeup deadlock deterministically. This is a capability
+demonstration, not an external SUT bug.
+
 This does not mean Marionette models arbitrary concurrent Zig. The current
 claim is cooperative task scheduling inside Marionette's scheduler, not
 preemptive OS threads or memory-model interleavings. Atomics, lock-free
@@ -240,6 +247,9 @@ Phase 1 is experimental deterministic `std.Io`:
 - done: add deterministic futex wait/wake sets;
 - done: add deterministic timed futex waits, validated with the pinned lazy
   `g41797/mailbox` target via `zig build validate-mailbox`;
+- done: add `zig build validate-bounded-queue`, an internal FIFO oracle and
+  planted lost-wakeup/deadlock demonstration for cooperative
+  `Mutex` / `Condition` code;
 - add deterministic sleep/deadline handling outside futex waits;
 - route sleep, queue, file, and network I/O through `World`;
 - expand simulation `Env.io()` from the Phase 0 backend into a suspending
