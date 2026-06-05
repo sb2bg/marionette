@@ -1198,6 +1198,7 @@ const NetScenario = struct {
         const stream = self.server.accept(self.io) catch @panic("accept failed");
         defer stream.close(self.io);
         self.accepted = true;
+        self.world.record("io.net.accepted", .{}) catch @panic("record failed");
 
         self.reader_started = true;
         var buffers: [1][]u8 = .{&self.read_bytes};
@@ -1302,6 +1303,19 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
     return try allocator.dupe(u8, world.traceBytes());
 }
 
+fn expectTraceOrder(trace: []const u8, before: []const u8, after: []const u8) !void {
+    const before_index = std.mem.indexOf(u8, trace, before) orelse return error.TestExpectedEqual;
+    const after_index = std.mem.indexOf(u8, trace, after) orelse return error.TestExpectedEqual;
+    try std.testing.expect(before_index < after_index);
+}
+
+fn expectTraceOrderAfter(trace: []const u8, start: usize, before: []const u8, after: []const u8) !usize {
+    const before_index = std.mem.indexOfPos(u8, trace, start, before) orelse return error.TestExpectedEqual;
+    const after_index = std.mem.indexOfPos(u8, trace, before_index + before.len, after) orelse return error.TestExpectedEqual;
+    try std.testing.expect(before_index < after_index);
+    return after_index;
+}
+
 test "TaskScheduler: std.Io.net accept suspends and replays" {
     if (!fiber.supported) return error.SkipZigTest;
 
@@ -1314,6 +1328,9 @@ test "TaskScheduler: std.Io.net accept suspends and replays" {
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.block task=") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.wake key=") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.accepted") != null);
+    try expectTraceOrder(first, "scheduler.block task=", "scheduler.wake key=");
+    try expectTraceOrder(first, "scheduler.wake key=", "io.net.connected");
+    try expectTraceOrder(first, "io.net.connected", "io.net.accepted");
 }
 
 test "TaskScheduler: std.Io.net read suspends and replays" {
@@ -1329,4 +1346,8 @@ test "TaskScheduler: std.Io.net read suspends and replays" {
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.wake key=") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read len=4") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.idle tasks=2 completed=2 blocked=0") != null);
+    const accepted_index = std.mem.indexOf(u8, first, "io.net.accepted").?;
+    const read_block_wake = try expectTraceOrderAfter(first, accepted_index, "scheduler.block task=", "scheduler.wake key=");
+    const wrote_index = try expectTraceOrderAfter(first, read_block_wake, "io.net.wrote len=4", "io.net.read len=4");
+    try std.testing.expect(wrote_index > read_block_wake);
 }
