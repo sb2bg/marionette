@@ -1156,6 +1156,9 @@ fn simNetAccept(
     const backend = backendFromUserdata(userdata);
     const state = backend.listener(server) orelse return error.SocketNotListening;
     if (state.closed) return error.SocketNotListening;
+    // TODO(roadmap item 19): park on a stable listener wait key and wake when
+    // a simulated connect queues a connection. Until the scheduler-backed net
+    // path lands, this immediate subset reports the nonblocking error.
     if (state.pending.items.len == 0) return error.WouldBlock;
 
     const handle = state.pending.orderedRemove(0);
@@ -1175,10 +1178,10 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
         else
             true;
         if (peer_closed) return 0;
-        // FIXME(roadmap item 18): `Io.net.Stream.Reader.Error` has no WouldBlock
-        // variant in Zig 0.16. Until Marionette has a scheduler that can park
-        // this task, Timeout is the least-wrong way to report "peer open, no
-        // bytes available yet."
+        // TODO(roadmap item 19): park on a stable connection wait key and wake
+        // when bytes arrive, the peer closes, or a modeled network deadline
+        // fires. Zig 0.16's stream reader error set has no WouldBlock variant,
+        // so Timeout remains the least-wrong immediate-subset stand-in.
         return error.Timeout;
     }
 
