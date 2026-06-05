@@ -128,9 +128,10 @@ any real SUT is involved.
 The next slice routes stream writes through the shared byte-message runtime when
 network control is attached. Stream payloads are framed with the destination
 socket handle, delivered through the existing loss/latency/link/clog machinery,
-and demultiplexed back into socket inboxes. Delayed stream bytes wake readers by
-using the scheduler's timed wait path; dropped bytes remain absent and EOF is
-observed when the peer closes. Richer stream error mapping, external host
+and demultiplexed back into socket inboxes. Delayed stream bytes wake readers
+through the scheduler's timed wait path. Send-time dropped stream bytes wake the
+peer and surface as `error.Timeout` on the next empty read. Delivery-time
+link/partition drops, reordering, richer reset behavior, external host
 networking, DNS, datagrams, and production transport remain future work.
 
 `Endpoint(Message)` and `std.Io.net` must stay as sibling surfaces over

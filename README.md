@@ -232,7 +232,8 @@ change as the simulator grows.
 
 The simulator currently models clock, deterministic randomness, disk, a flat
 `std.Io.File` subset, typed endpoint networking, a narrow scheduler-backed
-`std.Io.net` stream subset, and experimental cooperative `std.Io` futex waits
+`std.Io.net` stream subset with accept/read suspension plus latency and
+send-time loss, and experimental cooperative `std.Io` futex waits
 for `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
 target and the internal bounded-queue capability demo. It does not model
 arbitrary OS thread scheduling or memory-level concurrency; code that depends on

@@ -961,9 +961,11 @@ Implementation sequence:
    simulator-owned network authority. Do not build sockets on top of typed
    endpoints and do not force typed endpoints through sockets.
 4. Done for the first stream slice: route writes through the shared byte
-   runtime so latency schedules delivery at a simulated timestamp and loss,
-   manual partitions, and clogs use the same deterministic fault core. Fuller
-   stream-appropriate timeout/reset behavior remains future work.
+   runtime so latency schedules delivery at a simulated timestamp and send-time
+   loss wakes the peer with `error.Timeout` on the next empty read. Manual
+   partitions and clogs already share the byte runtime at the packet level, but
+   stream-level partition/drop reset behavior and explicit stream reordering
+   remain future work.
 5. Done: add toy two-fiber server/client tests with connect/accept/read/write,
    latency, drop, and same-seed trace identity before looking for real
    networked SUTs.
