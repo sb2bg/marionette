@@ -955,17 +955,18 @@ Implementation sequence:
 1. Done: replace `simNetAccept`'s empty-queue `error.WouldBlock` with parking on a
    stable listener wait key, woken by `simNetConnectIp`.
 2. Done: replace `simNetRead`'s open-peer `error.Timeout` stand-in with parking on a
-   stable connection wait key, woken by `simNetWrite` or peer close. Modeled
-   deadlines remain future work.
+   stable connection wait key, woken by `simNetWrite`, peer close, or a
+   network delivery deadline.
 3. Keep `Endpoint(Message)` and `std.Io.net` as sibling surfaces over
    simulator-owned network authority. Do not build sockets on top of typed
    endpoints and do not force typed endpoints through sockets.
-4. Add deterministic delivery events for stream bytes: latency schedules a
-   wake at a simulated timestamp; drops or partitions suppress delivery or
-   produce stream-appropriate timeout/reset behavior.
-5. Add a toy two-fiber server/client test with connect/accept/read/write,
-   latency, and same-seed trace identity before looking for real networked
-   SUTs.
+4. Done for the first stream slice: route writes through the shared byte
+   runtime so latency schedules delivery at a simulated timestamp and loss,
+   manual partitions, and clogs use the same deterministic fault core. Fuller
+   stream-appropriate timeout/reset behavior remains future work.
+5. Done: add toy two-fiber server/client tests with connect/accept/read/write,
+   latency, drop, and same-seed trace identity before looking for real
+   networked SUTs.
 
 This is a capability investment. The third-party `std.Io.net` ecosystem is
 still thin, so the first proof is likely a canonical internal request/response

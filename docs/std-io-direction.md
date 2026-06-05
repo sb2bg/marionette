@@ -60,9 +60,11 @@ current fiber until a connection is queued and open-peer empty reads park until
 bytes arrive or the peer closes. Without a scheduler wait set, empty accepts
 return `error.WouldBlock`; empty stream reads return `error.Timeout` while the
 peer remains open because Zig 0.16's stream reader error set has no
-`WouldBlock` variant. This TCP subset is still loopback plumbing: socket bytes
-do not currently route through `NetworkControl` loss, latency, partition, or
-clog state. It also supports a
+`WouldBlock` variant. This TCP subset is still intentionally narrow, but socket
+bytes can route through the shared `NetworkControl` byte runtime when
+simulation network control is attached, so loss, latency, manual partitions,
+and clogs use the same deterministic fault core as `Endpoint(Message)`.
+Stream-level reset/timeout mapping remains intentionally narrow. It also supports a
 flat file subset over
 `SimDisk`: `Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
 `Dir.access`, positional file read/write, streaming file read/write,
@@ -121,8 +123,15 @@ on a stable listener wait key and wakes when `netConnectIp` queues a connection.
 `netRead` parks on a stable socket wait key and wakes when bytes arrive or the
 peer closes. The current tests use two fibers, one server and one client,
 asserting byte-identical same-seed traces for connect/accept/read/write before
-any real SUT is involved. Modeled network deadlines and fault-model delivery are
-still future work.
+any real SUT is involved.
+
+The next slice routes stream writes through the shared byte-message runtime when
+network control is attached. Stream payloads are framed with the destination
+socket handle, delivered through the existing loss/latency/link/clog machinery,
+and demultiplexed back into socket inboxes. Delayed stream bytes wake readers by
+using the scheduler's timed wait path; dropped bytes remain absent and EOF is
+observed when the peer closes. Richer stream error mapping, external host
+networking, DNS, datagrams, and production transport remain future work.
 
 `Endpoint(Message)` and `std.Io.net` must stay as sibling surfaces over
 simulator-owned network state. Do not implement `std.Io.net` on top of
@@ -292,6 +301,9 @@ Phase 1 is experimental deterministic `std.Io`:
 - done: add scheduler-backed `std.Io.net` stream suspension for accept/read
   when a scheduler wait set is attached, while keeping it as a sibling surface
   to `Endpoint(Message)`;
+- done: route the narrow `std.Io.net` stream byte path through the shared
+  network loss/latency delivery core when simulation network control is
+  attached;
 - route sleep, queue, file, and network I/O through `World`;
 - expand simulation `Env.io()` from the Phase 0 backend into a suspending
   deterministic `std.Io`;
