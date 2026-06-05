@@ -7,7 +7,7 @@ const std = @import("std");
 
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
-const network_io_module = @import("network_io.zig");
+const network_io_module = @import("network/io.zig");
 const network_module = @import("network.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;

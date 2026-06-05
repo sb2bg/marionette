@@ -12,8 +12,8 @@ const clock_module = @import("clock.zig");
 const disk_module = @import("disk.zig");
 const env_module = @import("env.zig");
 const message_pool_module = @import("message_pool.zig");
-const network_io_module = @import("network_io.zig");
-const network_transport_module = @import("network_transport.zig");
+const network_io_module = @import("network/io.zig");
+const network_transport_module = @import("network/transport.zig");
 const scheduler = @import("scheduler.zig");
 const World = @import("world.zig").World;
 
