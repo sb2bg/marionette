@@ -771,7 +771,7 @@ parity is the done-signal.
 
 **15a. Wire format and framing primitive.** Started. Encode and decode helpers,
 header and body checksums, roundtrip and corruption tests. No sockets. Lives in
-`src/network_frame.zig`.
+`src/network/frame.zig`.
 
 **15b. Buffer pool primitive.** Started. Refcounted preallocated message pool. Pool
 exhaustion returns a hard error. Used by both sim and prod once integrated.
@@ -791,7 +791,7 @@ network/RPC libraries that want Marionette as a backend without adopting typed
 `Endpoint(Message)` directly. Keep `Endpoint(Message)` for value-message
 examples; do not make borrowed slice payloads magically deep-copy.
 
-**15e. Internal network IO seam.** Started. `src/network_io.zig` defines the
+**15e. Internal network IO seam.** Started. `src/network/io.zig` defines the
 smallest backend shape the production bus needs so far: listen, connect, accept,
 read, write, close, monotonic time, and sleep. Exact read/write helpers and a
 fake backend cover short reads/writes and closed-peer behavior. Keep

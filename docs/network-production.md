@@ -326,7 +326,7 @@ reasoning.
 Each item ships on its own. Cross-process parity is the done-signal.
 
 1. **Wire format and framing primitive.** Encode/decode helpers, checksum,
-   roundtrip tests. No sockets yet. Lives in `src/network_frame.zig`.
+   roundtrip tests. No sockets yet. Lives in `src/network/frame.zig`.
 2. **Buffer pool primitive.** Refcounted, preallocated pool. Pool exhaustion
    returns hard error. Lives in `src/message_pool.zig`. Used by both sim and
    prod once integrated.
@@ -341,7 +341,7 @@ Each item ships on its own. Cross-process parity is the done-signal.
    send/receive values with codec-declared receive lifetimes. This gives future
    Zig network/RPC libraries a Marionette backend target without forcing them
    to use typed value-message endpoints directly.
-5. **Internal network IO seam.** Started. `src/network_io.zig` defines the
+5. **Internal network IO seam.** Started. `src/network/io.zig` defines the
    internal listen/connect/read/write/close/time seam plus exact read/write
    helpers and a fake backend that forces short reads/writes and close behavior.
    Keep it internal; `Endpoint(Message)` signatures do not mention it. A host
