@@ -103,6 +103,7 @@ pub const Backend = struct {
         address: Io.net.IpAddress,
         node: ?network_module.NodeId = null,
         inbox: std.ArrayList(u8) = .empty,
+        read_error: ?Io.net.Stream.Reader.Error = null,
         peer: ?SocketHandle = null,
         closed: bool = false,
     };
@@ -1303,6 +1304,10 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
     if (connection.closed) return error.SocketUnconnected;
     if (connection.node) |node| try drainNetworkReady(backend, node);
     while (connection.inbox.items.len == 0) {
+        if (connection.read_error) |err| {
+            connection.read_error = null;
+            return err;
+        }
         const peer_closed = if (connection.peer) |peer_handle|
             if (backend.connection(peer_handle)) |peer| peer.closed else true
         else
@@ -1366,7 +1371,12 @@ fn simNetWrite(
                         _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
                     }
                 },
-                .dropped => {},
+                .dropped => {
+                    if (peer.read_error == null) peer.read_error = error.Timeout;
+                    if (backend.futex_wait_set) |wait_set| {
+                        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
+                    }
+                },
             }
             return payload_len;
         }
