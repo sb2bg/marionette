@@ -238,7 +238,7 @@ If you're building something where determinism matters and you want to try it, t
 ## Install
 
 ```
-zig fetch --save https://github.com/sb2bg/marionette/archive/<commit>.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.2.0.tar.gz
 ```
 
 Requires Zig 0.16.x.
