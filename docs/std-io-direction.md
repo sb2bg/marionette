@@ -55,12 +55,14 @@ The simulation backend supports deterministic clock, sleep, random, and
 `Group.async` for functions that complete immediately, inert cancellation checks,
 `Io.Queue` operations that can complete without parking, and a small in-memory
 TCP stream subset for `std.Io.net` listen/connect/accept/read/write/close.
-Empty accepts return `error.WouldBlock`; empty stream reads return
-`error.Timeout` while the peer remains open because Zig 0.16's stream reader
-error set has no `WouldBlock` variant. This TCP subset is immediate loopback
-plumbing, not scheduler-backed network simulation yet: accepts and reads do not
-park the current fiber, and socket bytes do not currently route through
-`NetworkControl` loss, latency, partition, or clog state. It also supports a
+When the backend is attached to a scheduler wait set, empty accepts park the
+current fiber until a connection is queued and open-peer empty reads park until
+bytes arrive or the peer closes. Without a scheduler wait set, empty accepts
+return `error.WouldBlock`; empty stream reads return `error.Timeout` while the
+peer remains open because Zig 0.16's stream reader error set has no
+`WouldBlock` variant. This TCP subset is still loopback plumbing: socket bytes
+do not currently route through `NetworkControl` loss, latency, partition, or
+clog state. It also supports a
 flat file subset over
 `SimDisk`: `Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
 `Dir.access`, positional file read/write, streaming file read/write,
@@ -113,13 +115,14 @@ a narrow deterministic stream backend:
 - currently unsupported or out of scope: DNS lookup, Unix sockets, datagrams,
   socket pairs, `sendmsg`/`recvmsg`, `writeFile`, and interface-name queries.
 
-The next useful slice is to replace the current `WouldBlock` / `Timeout`
-stand-ins with scheduler-backed suspension. `netAccept` should park on a stable
-listener wait key and wake when `netConnectIp` queues a connection. `netRead`
-should park on a stable socket wait key and wake when bytes arrive, the peer
-closes, or a modeled network deadline fires. The first tests should be two
-fibers, one server and one client, asserting byte-identical same-seed traces for
-connect/accept/read/write before any real SUT is involved.
+The first useful slice replaces the current `WouldBlock` / `Timeout` stand-ins
+with scheduler-backed suspension when a wait set is attached. `netAccept` parks
+on a stable listener wait key and wakes when `netConnectIp` queues a connection.
+`netRead` parks on a stable socket wait key and wakes when bytes arrive or the
+peer closes. The current tests use two fibers, one server and one client,
+asserting byte-identical same-seed traces for connect/accept/read/write before
+any real SUT is involved. Modeled network deadlines and fault-model delivery are
+still future work.
 
 `Endpoint(Message)` and `std.Io.net` must stay as sibling surfaces over
 simulator-owned network state. Do not implement `std.Io.net` on top of
@@ -286,8 +289,9 @@ Phase 1 is experimental deterministic `std.Io`:
   planted lost-wakeup/deadlock demonstration for cooperative
   `Mutex` / `Condition` code;
 - add deterministic sleep/deadline handling outside futex waits;
-- add scheduler-backed `std.Io.net` stream suspension for accept/read and keep
-  it as a sibling surface to `Endpoint(Message)`;
+- done: add scheduler-backed `std.Io.net` stream suspension for accept/read
+  when a scheduler wait set is attached, while keeping it as a sibling surface
+  to `Endpoint(Message)`;
 - route sleep, queue, file, and network I/O through `World`;
 - expand simulation `Env.io()` from the Phase 0 backend into a suspending
   deterministic `std.Io`;

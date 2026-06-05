@@ -952,11 +952,11 @@ The initial target is intentionally narrow and based on Zig 0.16's actual
 
 Implementation sequence:
 
-1. Replace `simNetAccept`'s empty-queue `error.WouldBlock` with parking on a
+1. Done: replace `simNetAccept`'s empty-queue `error.WouldBlock` with parking on a
    stable listener wait key, woken by `simNetConnectIp`.
-2. Replace `simNetRead`'s open-peer `error.Timeout` stand-in with parking on a
-   stable connection wait key, woken by `simNetWrite`, peer close, or modeled
-   deadline.
+2. Done: replace `simNetRead`'s open-peer `error.Timeout` stand-in with parking on a
+   stable connection wait key, woken by `simNetWrite` or peer close. Modeled
+   deadlines remain future work.
 3. Keep `Endpoint(Message)` and `std.Io.net` as sibling surfaces over
    simulator-owned network authority. Do not build sockets on top of typed
    endpoints and do not force typed endpoints through sockets.
