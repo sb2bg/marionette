@@ -390,7 +390,10 @@ they do not get rediscussed.
 - General-purpose RPC: no request/response correlation, no service discovery,
   no client libraries.
 - TLS, real DNS, arbitrary `std.net` compatibility.
-- Stream or datagram primitives outside the `Endpoint(Message)` shape.
+- Stream or datagram primitives as part of this production endpoint transport.
+  A separate deterministic `std.Io.net` stream subset is tracked in
+  `docs/std-io-direction.md` and the roadmap; it is a simulator surface, not
+  the production `Endpoint(Message)` transport described here.
 - A drop-in replacement for Tokio, libuv, or any general-purpose async
   runtime.
 

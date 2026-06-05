@@ -934,6 +934,43 @@ Implementation sequence:
 7. Re-validate existing `std.Io` users, especially xitdb and the storage
    examples, for same-seed trace stability under the new backend.
 
+### 19. Scheduler-backed std.Io.net simulation
+
+The scheduler/futex/timer work makes the first useful `std.Io.net` simulation
+slice possible. This is distinct from roadmap item 15: item 15 is production
+transport behind `Endpoint(Message)`, while this item is deterministic
+simulation of ordinary `std.Io.net` stream code.
+
+The initial target is intentionally narrow and based on Zig 0.16's actual
+`std.Io` vtable:
+
+- immediate: `netListenIp`, `netConnectIp`, `netClose`, `netShutdown`;
+- suspending: `netAccept` when no connection is pending, and `netRead` when
+  the peer remains open but no bytes are buffered;
+- fail closed: DNS, Unix sockets, datagrams, socket pairs, `netSend`,
+  `netWriteFile`, interface-name calls, and external host network access.
+
+Implementation sequence:
+
+1. Replace `simNetAccept`'s empty-queue `error.WouldBlock` with parking on a
+   stable listener wait key, woken by `simNetConnectIp`.
+2. Replace `simNetRead`'s open-peer `error.Timeout` stand-in with parking on a
+   stable connection wait key, woken by `simNetWrite`, peer close, or modeled
+   deadline.
+3. Keep `Endpoint(Message)` and `std.Io.net` as sibling surfaces over
+   simulator-owned network authority. Do not build sockets on top of typed
+   endpoints and do not force typed endpoints through sockets.
+4. Add deterministic delivery events for stream bytes: latency schedules a
+   wake at a simulated timestamp; drops or partitions suppress delivery or
+   produce stream-appropriate timeout/reset behavior.
+5. Add a toy two-fiber server/client test with connect/accept/read/write,
+   latency, and same-seed trace identity before looking for real networked
+   SUTs.
+
+This is a capability investment. The third-party `std.Io.net` ecosystem is
+still thin, so the first proof is likely a canonical internal request/response
+demo rather than an external SUT finding.
+
 ---
 
 ## Phase 3: Production-Grade
@@ -1084,13 +1121,12 @@ so they don't get rediscussed.
   but it will not introduce a new language or require users to rewrite services
   in a Marionette-specific actor DSL.
 - **Cross-process simulation.** In-process only.
-- **TLS, real DNS, arbitrary `std.net` compatibility.** The app-facing
-  network is narrower than `std.net`: it carries typed `Endpoint(Message)`
-  traffic and nothing else. The production transport (roadmap item 15)
-  uses real sockets internally, but it is not a general socket library
-  and will not expose stream or datagram primitives outside the
-  `Endpoint(Message)` shape. Users who want raw sockets should reach for
-  `std.net` directly.
+- **TLS, real DNS, arbitrary `std.net` compatibility.** The stable
+  app-facing network remains narrower than `std.net`: it carries typed
+  `Endpoint(Message)` traffic. Roadmap item 19 allows a narrow deterministic
+  `std.Io.net` stream subset for simulation, but that is not a promise to
+  model every host socket feature, protocol, resolver, or external network.
+  Users who want raw production sockets should reach for `std.net` directly.
 - **Unconstrained "chaos" disk faults.** All disk faults pass through a
   recoverability-aware fault model.
 - **External dependencies.** Marionette depends only on Zig's standard

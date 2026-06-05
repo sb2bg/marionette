@@ -235,7 +235,9 @@ network API. These are intentionally unresolved:
 - Backpressure semantics.
 - TLS.
 - Real DNS.
-- Arbitrary `std.net` compatibility.
+- Arbitrary `std.net` compatibility. A narrow deterministic `std.Io.net`
+  stream subset is tracked separately as a simulator capability; it is not the
+  first stable typed endpoint API.
 - Cross-process simulation.
 
 The first stable app-facing network is narrow enough to test a small multi-node

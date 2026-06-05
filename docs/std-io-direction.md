@@ -57,7 +57,11 @@ The simulation backend supports deterministic clock, sleep, random, and
 TCP stream subset for `std.Io.net` listen/connect/accept/read/write/close.
 Empty accepts return `error.WouldBlock`; empty stream reads return
 `error.Timeout` while the peer remains open because Zig 0.16's stream reader
-error set has no `WouldBlock` variant. It also supports a flat file subset over
+error set has no `WouldBlock` variant. This TCP subset is immediate loopback
+plumbing, not scheduler-backed network simulation yet: accepts and reads do not
+park the current fiber, and socket bytes do not currently route through
+`NetworkControl` loss, latency, partition, or clog state. It also supports a
+flat file subset over
 `SimDisk`: `Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
 `Dir.access`, positional file read/write, streaming file read/write,
 `File.length`, `File.stat`, `File.setLength`, `File.sync`, `File.close`,
@@ -96,6 +100,37 @@ Marionette simulator state.
 
 All decisions that can vary between runnable tasks must be seed-determined and
 trace-visible enough to replay failures.
+
+## std.Io.net Suspension Plan
+
+Zig 0.16's `std.Io.net` vtable already gives Marionette the seam it needs for
+a narrow deterministic stream backend:
+
+- immediate operations: `netListenIp`, `netConnectIp`, `netClose`,
+  `netShutdown`;
+- suspending operations: `netAccept` when no connection is queued, and
+  `netRead` when the peer is open but no bytes are buffered;
+- currently unsupported or out of scope: DNS lookup, Unix sockets, datagrams,
+  socket pairs, `sendmsg`/`recvmsg`, `writeFile`, and interface-name queries.
+
+The next useful slice is to replace the current `WouldBlock` / `Timeout`
+stand-ins with scheduler-backed suspension. `netAccept` should park on a stable
+listener wait key and wake when `netConnectIp` queues a connection. `netRead`
+should park on a stable socket wait key and wake when bytes arrive, the peer
+closes, or a modeled network deadline fires. The first tests should be two
+fibers, one server and one client, asserting byte-identical same-seed traces for
+connect/accept/read/write before any real SUT is involved.
+
+`Endpoint(Message)` and `std.Io.net` must stay as sibling surfaces over
+simulator-owned network state. Do not implement `std.Io.net` on top of
+`Endpoint(Message)`, and do not force endpoint messages through a fake socket
+stack. The typed endpoint remains the message-altitude API: faults appear as
+dropped, delayed, clogged, partitioned, or reordered messages. The
+`std.Io.net` backend is the byte-stream altitude: the same simulator authority
+must translate faults into stream vocabulary such as blocked reads, timeouts,
+EOF, connection reset, or network-down errors. Keeping those translations
+separate preserves Marionette's existing message model while making ordinary
+`std.Io.net` code testable.
 
 ## Fiber and Evented Boundary
 
@@ -251,6 +286,8 @@ Phase 1 is experimental deterministic `std.Io`:
   planted lost-wakeup/deadlock demonstration for cooperative
   `Mutex` / `Condition` code;
 - add deterministic sleep/deadline handling outside futex waits;
+- add scheduler-backed `std.Io.net` stream suspension for accept/read and keep
+  it as a sibling surface to `Endpoint(Message)`;
 - route sleep, queue, file, and network I/O through `World`;
 - expand simulation `Env.io()` from the Phase 0 backend into a suspending
   deterministic `std.Io`;
