@@ -26,6 +26,13 @@ simulation: a storage engine (`xit-vcs/xitdb`) and a cooperative-concurrency
 library (`g41797/mailbox`), both with seed-reproducible replay, and has
 surfaced reproducible recovery and correctness counterexamples in the process.
 
+Today the demonstrated tiers are:
+
+- deterministic `std.Io.File` storage simulation with crash/torn-write faults;
+- cooperative `std.Io` task scheduling for `Mutex` / `Condition` code;
+- typed endpoint message passing with deterministic loss, latency, and
+  partitions.
+
 Write production-shaped code against `std.Io` plus any small Marionette handles
 it actually needs, such as `mar.Recorder` or `mar.Endpoint(Message)`. In tests,
 drive `control` to inject faults. For the modeled file and local endpoint
