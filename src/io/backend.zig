@@ -12,6 +12,13 @@ const World = @import("../world.zig").World;
 
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
+const wait_key_tag_bits = 2;
+
+const WaitKeyTag = enum(usize) {
+    futex = 0,
+    listener = 1,
+    connection = 2,
+};
 
 pub const FutexWaitResult = enum {
     woken,
@@ -146,7 +153,7 @@ pub const Backend = struct {
     fn futexKey(self: *Backend, ptr: *const u32) usize {
         const address = @intFromPtr(ptr);
         for (self.futex_keys.items) |entry| {
-            if (entry.address == address) return entry.key;
+            if (entry.address == address) return waitKey(.futex, entry.key);
         }
 
         const key = self.next_futex_key;
@@ -155,7 +162,15 @@ pub const Backend = struct {
             .address = address,
             .key = key,
         }) catch @panic("failed to allocate sim futex key");
-        return key;
+        return waitKey(.futex, key);
+    }
+
+    fn listenerWaitKey(_: *Backend, handle: SocketHandle) usize {
+        return waitKey(.listener, @intCast(handle));
+    }
+
+    fn connectionWaitKey(_: *Backend, handle: SocketHandle) usize {
+        return waitKey(.connection, @intCast(handle));
     }
 
     fn createHandle(self: *Backend, state: HandleEntry.State) std.mem.Allocator.Error!SocketHandle {
@@ -268,6 +283,10 @@ pub const Backend = struct {
         };
     }
 };
+
+fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
+    return (id << wait_key_tag_bits) | @intFromEnum(tag);
+}
 
 pub fn deinitBackendOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
     const backend: *Backend = @ptrCast(@alignCast(ptr));
@@ -1140,6 +1159,9 @@ fn simNetConnectIp(
     server.peer = client_handle;
 
     listener.pending.append(backend.allocator, server_handle) catch return error.SystemResources;
+    if (backend.futex_wait_set) |wait_set| {
+        _ = wait_set.wake(backend.listenerWaitKey(listener_entry.handle), 1);
+    }
     return .{
         .handle = client_handle,
         .address = address.*,
@@ -1156,10 +1178,14 @@ fn simNetAccept(
     const backend = backendFromUserdata(userdata);
     const state = backend.listener(server) orelse return error.SocketNotListening;
     if (state.closed) return error.SocketNotListening;
-    // TODO(roadmap item 19): park on a stable listener wait key and wake when
-    // a simulated connect queues a connection. Until the scheduler-backed net
-    // path lands, this immediate subset reports the nonblocking error.
-    if (state.pending.items.len == 0) return error.WouldBlock;
+    while (state.pending.items.len == 0) {
+        const wait_set = backend.futex_wait_set orelse return error.WouldBlock;
+        switch (wait_set.blockUntil(backend.listenerWaitKey(server), null)) {
+            .woken => {},
+            .timed_out => unreachable,
+        }
+        if (state.closed) return error.SocketNotListening;
+    }
 
     const handle = state.pending.orderedRemove(0);
     return .{
@@ -1172,17 +1198,18 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
     const backend = backendFromUserdata(userdata);
     const connection = backend.connection(src) orelse return error.SocketUnconnected;
     if (connection.closed) return error.SocketUnconnected;
-    if (connection.inbox.items.len == 0) {
+    while (connection.inbox.items.len == 0) {
         const peer_closed = if (connection.peer) |peer_handle|
             if (backend.connection(peer_handle)) |peer| peer.closed else true
         else
             true;
         if (peer_closed) return 0;
-        // TODO(roadmap item 19): park on a stable connection wait key and wake
-        // when bytes arrive, the peer closes, or a modeled network deadline
-        // fires. Zig 0.16's stream reader error set has no WouldBlock variant,
-        // so Timeout remains the least-wrong immediate-subset stand-in.
-        return error.Timeout;
+        const wait_set = backend.futex_wait_set orelse return error.Timeout;
+        switch (wait_set.blockUntil(backend.connectionWaitKey(src), null)) {
+            .woken => {},
+            .timed_out => unreachable,
+        }
+        if (connection.closed) return error.SocketUnconnected;
     }
 
     var total_read: usize = 0;
@@ -1225,6 +1252,9 @@ fn simNetWrite(
             peer.inbox.appendSlice(backend.allocator, pattern) catch return error.SystemResources;
         }
     }
+    if (backend.futex_wait_set) |wait_set| {
+        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
+    }
     return peer.inbox.items.len - start_len;
 }
 
@@ -1233,8 +1263,21 @@ fn simNetClose(userdata: ?*anyopaque, handles: []const SocketHandle) void {
     for (handles) |handle| {
         const entry = backend.findEntry(handle) orelse continue;
         switch (entry.state) {
-            .listener => |listener| listener.closed = true,
-            .connection => |connection| connection.closed = true,
+            .listener => |listener| {
+                listener.closed = true;
+                if (backend.futex_wait_set) |wait_set| {
+                    _ = wait_set.wake(backend.listenerWaitKey(handle), std.math.maxInt(usize));
+                }
+            },
+            .connection => |connection| {
+                connection.closed = true;
+                if (backend.futex_wait_set) |wait_set| {
+                    _ = wait_set.wake(backend.connectionWaitKey(handle), std.math.maxInt(usize));
+                    if (connection.peer) |peer_handle| {
+                        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), std.math.maxInt(usize));
+                    }
+                }
+            },
             .file => |file| file.closed = true,
         }
     }
