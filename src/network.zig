@@ -139,6 +139,11 @@ pub const default_codec_encode_buffer_size = default_byte_pool_options.buffer_si
 
 pub const ProductionByteEndpointError = ProductionNetworkError || message_pool_module.PoolError || network_io_module.NetworkIoError;
 
+pub const SimByteSendResult = union(enum) {
+    dropped,
+    queued: clock_module.Timestamp,
+};
+
 /// Type-erased simulator-control view for network fault orchestration.
 pub const AnyNetworkControl = struct {
     ptr: *anyopaque,
@@ -1098,6 +1103,34 @@ pub fn byteEndpointFromControl(control: AnyNetworkControl, node: NodeId) !ByteEn
     return try SimByteRuntime.endpoint(shared, node);
 }
 
+pub fn processCountFromControl(control: AnyNetworkControl) ?usize {
+    const shared = control.vtable.shared(control.ptr) orelse return null;
+    return shared.process_count;
+}
+
+pub fn sendStreamBytesFromControl(
+    control: AnyNetworkControl,
+    from: NodeId,
+    to: NodeId,
+    bytes: []const u8,
+) !SimByteSendResult {
+    const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    return try runtime.sendBytes(from, to, bytes);
+}
+
+pub fn receiveReadyStreamBytesFromControl(control: AnyNetworkControl, node: NodeId) !?ByteEndpoint.Envelope {
+    const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    return try runtime.receiveReady(node);
+}
+
+pub fn nextStreamDeliveryAtForControl(control: AnyNetworkControl, node: NodeId) !?clock_module.Timestamp {
+    const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    return try runtime.nextDeliveryAtFor(node);
+}
+
 pub const ProductionNetworkTeardown = struct {
     ptr: *anyopaque,
     deinit: *const fn (*anyopaque, std.mem.Allocator) void,
@@ -1475,17 +1508,18 @@ const SimByteRuntime = struct {
         return try self.pool.acquire(len);
     }
 
-    fn sendBytes(self: *Self, from: NodeId, to: NodeId, bytes: []const u8) !void {
+    fn sendBytes(self: *Self, from: NodeId, to: NodeId, bytes: []const u8) !SimByteSendResult {
         const message = try self.acquire(bytes.len);
         var sent = false;
         defer if (!sent) message.release();
 
         @memcpy(message.bytes(), bytes);
-        try self.sendMessage(from, to, message);
+        const result = try self.sendMessage(from, to, message);
         sent = true;
+        return result;
     }
 
-    fn sendMessage(self: *Self, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !void {
+    fn sendMessage(self: *Self, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !SimByteSendResult {
         const shared = self.shared;
         try shared.validateNode(from);
         try shared.validateNode(to);
@@ -1498,7 +1532,7 @@ const SimByteRuntime = struct {
         if (shared.down_nodes[@intCast(from)]) {
             try shared.world.record("network.drop id={} from={} to={} reason=source_down", .{ packet_id, from, to });
             message.release();
-            return;
+            return .dropped;
         }
 
         const drop_roll = try shared.world.randomIntLessThan(u32, shared.faults.drop_rate.denominator);
@@ -1508,7 +1542,7 @@ const SimByteRuntime = struct {
                 .{ packet_id, from, to, shared.faults.drop_rate.numerator, shared.faults.drop_rate.denominator, drop_roll },
             );
             message.release();
-            return;
+            return .dropped;
         }
 
         const latency_ns = try self.latency();
@@ -1516,11 +1550,12 @@ const SimByteRuntime = struct {
             return error.InvalidDuration;
         }
 
+        const deliver_at = shared.world.now() + latency_ns;
         const packet: Packet = .{
             .id = packet_id,
             .from = from,
             .to = to,
-            .deliver_at = shared.world.now() + latency_ns,
+            .deliver_at = deliver_at,
             .payload = message,
         };
 
@@ -1536,6 +1571,7 @@ const SimByteRuntime = struct {
             "network.send id={} from={} to={} deliver_at={} latency_ns={}",
             .{ packet.id, packet.from, packet.to, packet.deliver_at, latency_ns },
         );
+        return .{ .queued = deliver_at };
     }
 
     fn receive(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {
@@ -1555,6 +1591,31 @@ const SimByteRuntime = struct {
             if (deliver_at <= now_ns) return null;
             try self.runForDeterministicFaults(deliver_at - now_ns);
         }
+    }
+
+    fn receiveReady(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {
+        try self.shared.validateNode(node);
+        try self.shared.expireDeterministicFaults();
+        if (try self.popReadyFor(node)) |packet| {
+            return .{
+                .from = packet.from,
+                .message = packet.payload,
+            };
+        }
+        return null;
+    }
+
+    fn nextDeliveryAtFor(self: *const Self, node: NodeId) !?clock_module.Timestamp {
+        try self.shared.validateNode(node);
+
+        var best: ?clock_module.Timestamp = null;
+        for (self.queues, 0..) |queue, index| {
+            const packet = if (queue.items.len == 0) continue else queue.items[0];
+            if (packet.to != node) continue;
+            const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
+            if (best == null or ready_at < best.?) best = ready_at;
+        }
+        return best;
     }
 
     fn popReadyFor(self: *Self, node: NodeId) !?Packet {
@@ -1658,11 +1719,11 @@ const SimByteRuntime = struct {
     }
 
     fn vtableSendBytes(ptr: *anyopaque, from: NodeId, to: NodeId, bytes: []const u8) anyerror!void {
-        try fromOpaque(ptr).sendBytes(from, to, bytes);
+        _ = try fromOpaque(ptr).sendBytes(from, to, bytes);
     }
 
     fn vtableSendMessage(ptr: *anyopaque, from: NodeId, to: NodeId, message: ByteEndpoint.Message) anyerror!void {
-        try fromOpaque(ptr).sendMessage(from, to, message);
+        _ = try fromOpaque(ptr).sendMessage(from, to, message);
     }
 
     fn vtableReceive(ptr: *anyopaque, node: NodeId) anyerror!?ByteEndpoint.Envelope {

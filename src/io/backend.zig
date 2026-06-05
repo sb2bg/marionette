@@ -8,11 +8,13 @@
 const std = @import("std");
 
 const disk_module = @import("../disk.zig");
+const network_module = @import("../network.zig");
 const World = @import("../world.zig").World;
 
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
 const wait_key_tag_bits = 2;
+const stream_frame_handle_size = @sizeOf(u64);
 
 const WaitKeyTag = enum(usize) {
     futex = 0,
@@ -53,6 +55,8 @@ pub const Backend = struct {
     world: *World,
     disk: disk_module.Disk,
     sector_size: u64,
+    network_control: network_module.AnyNetworkControl = network_module.AnyNetworkControl.unavailable(),
+    next_network_node: network_module.NodeId = 0,
     futex_wait_set: ?FutexWaitSet = null,
     futex_keys: std.ArrayList(FutexKeyEntry) = .empty,
     next_futex_key: usize = 1,
@@ -90,12 +94,14 @@ pub const Backend = struct {
 
     const ListenerState = struct {
         address: Io.net.IpAddress,
+        node: ?network_module.NodeId = null,
         pending: std.ArrayList(SocketHandle) = .empty,
         closed: bool = false,
     };
 
     const ConnectionState = struct {
         address: Io.net.IpAddress,
+        node: ?network_module.NodeId = null,
         inbox: std.ArrayList(u8) = .empty,
         peer: ?SocketHandle = null,
         closed: bool = false,
@@ -150,6 +156,10 @@ pub const Backend = struct {
         self.futex_wait_set = wait_set;
     }
 
+    pub fn attachNetworkControl(self: *Backend, control: network_module.AnyNetworkControl) void {
+        self.network_control = control;
+    }
+
     fn futexKey(self: *Backend, ptr: *const u32) usize {
         const address = @intFromPtr(ptr);
         for (self.futex_keys.items) |entry| {
@@ -171,6 +181,14 @@ pub const Backend = struct {
 
     fn connectionWaitKey(_: *Backend, handle: SocketHandle) usize {
         return waitKey(.connection, @intCast(handle));
+    }
+
+    fn allocateNetworkNode(self: *Backend) error{NetworkDown}!?network_module.NodeId {
+        const process_count = network_module.processCountFromControl(self.network_control) orelse return null;
+        if (@as(usize, self.next_network_node) >= process_count) return error.NetworkDown;
+        const node = self.next_network_node;
+        self.next_network_node += 1;
+        return node;
     }
 
     fn createHandle(self: *Backend, state: HandleEntry.State) std.mem.Allocator.Error!SocketHandle {
@@ -286,6 +304,89 @@ pub const Backend = struct {
 
 fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
     return (id << wait_key_tag_bits) | @intFromEnum(tag);
+}
+
+fn mapNetworkReadError(err: anyerror) Io.net.Stream.Reader.Error {
+    return switch (err) {
+        error.OutOfMemory => error.SystemResources,
+        error.NetworkUnavailable,
+        error.InvalidNode,
+        error.InvalidDuration,
+        error.InvalidRate,
+        => error.NetworkDown,
+        else => error.NetworkDown,
+    };
+}
+
+fn mapNetworkWriteError(err: anyerror) Io.net.Stream.Writer.Error {
+    return switch (err) {
+        error.OutOfMemory,
+        error.EventQueueFull,
+        => error.SystemResources,
+        error.InvalidNode => error.NetworkUnreachable,
+        error.NetworkUnavailable,
+        error.InvalidDuration,
+        error.InvalidRate,
+        => error.NetworkDown,
+        else => error.NetworkDown,
+    };
+}
+
+fn appendStreamFrame(
+    backend: *Backend,
+    frame: *std.ArrayList(u8),
+    target: SocketHandle,
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+) Io.net.Stream.Writer.Error!usize {
+    frame.appendNTimes(backend.allocator, 0, stream_frame_handle_size) catch return error.SystemResources;
+    std.mem.writeInt(u64, frame.items[0..stream_frame_handle_size], @intCast(target), .little);
+
+    frame.appendSlice(backend.allocator, header) catch return error.SystemResources;
+    if (data.len > 0) {
+        for (data[0 .. data.len - 1]) |bytes| {
+            frame.appendSlice(backend.allocator, bytes) catch return error.SystemResources;
+        }
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| {
+            frame.appendSlice(backend.allocator, pattern) catch return error.SystemResources;
+        }
+    }
+    return frame.items.len - stream_frame_handle_size;
+}
+
+fn drainNetworkReady(backend: *Backend, node: network_module.NodeId) Io.net.Stream.Reader.Error!void {
+    while (true) {
+        var envelope = network_module.receiveReadyStreamBytesFromControl(backend.network_control, node) catch |err| {
+            return mapNetworkReadError(err);
+        } orelse return;
+        defer envelope.message.release();
+
+        const bytes = envelope.message.bytes();
+        if (bytes.len < stream_frame_handle_size) continue;
+
+        const target_raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
+        const target_handle = std.math.cast(SocketHandle, target_raw) orelse continue;
+        const target = backend.connection(target_handle) orelse continue;
+        if (target.closed) continue;
+
+        target.inbox.appendSlice(backend.allocator, bytes[stream_frame_handle_size..]) catch return error.SystemResources;
+        backend.world.record(
+            "io.net.deliver from={} to={} handle={} len={}",
+            .{ envelope.from, node, target_handle, bytes.len - stream_frame_handle_size },
+        ) catch return error.SystemResources;
+
+        if (backend.futex_wait_set) |wait_set| {
+            _ = wait_set.wake(backend.connectionWaitKey(target_handle), 1);
+        }
+    }
+}
+
+fn nextNetworkDeliveryAt(backend: *Backend, node: network_module.NodeId) Io.net.Stream.Reader.Error!?u64 {
+    return network_module.nextStreamDeliveryAtForControl(backend.network_control, node) catch |err| {
+        return mapNetworkReadError(err);
+    };
 }
 
 pub fn deinitBackendOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
@@ -1114,9 +1215,10 @@ fn simNetListenIp(
     const backend = backendFromUserdata(userdata);
     if (backend.findOpenListener(address) != null) return error.AddressInUse;
 
+    const node = backend.allocateNetworkNode() catch return error.NetworkDown;
     const listener = backend.allocator.create(Backend.ListenerState) catch return error.SystemResources;
     errdefer backend.allocator.destroy(listener);
-    listener.* = .{ .address = address.* };
+    listener.* = .{ .address = address.*, .node = node };
     errdefer listener.pending.deinit(backend.allocator);
 
     const handle = backend.createHandle(.{ .listener = listener }) catch return error.SystemResources;
@@ -1139,15 +1241,16 @@ fn simNetConnectIp(
     const backend = backendFromUserdata(userdata);
     const listener_entry = backend.findOpenListener(address) orelse return error.ConnectionRefused;
     const listener = listener_entry.state.listener;
+    const client_node = backend.allocateNetworkNode() catch return error.NetworkDown;
 
     const client = backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
     errdefer backend.allocator.destroy(client);
-    client.* = .{ .address = address.* };
+    client.* = .{ .address = address.*, .node = client_node };
     errdefer client.inbox.deinit(backend.allocator);
 
     const server = backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
     errdefer backend.allocator.destroy(server);
-    server.* = .{ .address = listener.address };
+    server.* = .{ .address = listener.address, .node = listener.node };
     errdefer server.inbox.deinit(backend.allocator);
 
     const client_handle = backend.createHandle(.{ .connection = client }) catch return error.SystemResources;
@@ -1198,6 +1301,7 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
     const backend = backendFromUserdata(userdata);
     const connection = backend.connection(src) orelse return error.SocketUnconnected;
     if (connection.closed) return error.SocketUnconnected;
+    if (connection.node) |node| try drainNetworkReady(backend, node);
     while (connection.inbox.items.len == 0) {
         const peer_closed = if (connection.peer) |peer_handle|
             if (backend.connection(peer_handle)) |peer| peer.closed else true
@@ -1205,11 +1309,13 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
             true;
         if (peer_closed) return 0;
         const wait_set = backend.futex_wait_set orelse return error.Timeout;
-        switch (wait_set.blockUntil(backend.connectionWaitKey(src), null)) {
+        const deadline_ns = if (connection.node) |node| try nextNetworkDeliveryAt(backend, node) else null;
+        switch (wait_set.blockUntil(backend.connectionWaitKey(src), deadline_ns)) {
             .woken => {},
-            .timed_out => unreachable,
+            .timed_out => {},
         }
         if (connection.closed) return error.SocketUnconnected;
+        if (connection.node) |node| try drainNetworkReady(backend, node);
     }
 
     var total_read: usize = 0;
@@ -1238,6 +1344,33 @@ fn simNetWrite(
     const peer_handle = connection.peer orelse return error.SocketUnconnected;
     const peer = backend.connection(peer_handle) orelse return error.ConnectionResetByPeer;
     if (peer.closed) return error.ConnectionResetByPeer;
+
+    if (connection.node) |from_node| {
+        if (peer.node) |to_node| {
+            var frame: std.ArrayList(u8) = .empty;
+            defer frame.deinit(backend.allocator);
+
+            const payload_len = try appendStreamFrame(backend, &frame, peer_handle, header, data, splat);
+            if (payload_len == 0) return 0;
+
+            const send_result = network_module.sendStreamBytesFromControl(
+                backend.network_control,
+                from_node,
+                to_node,
+                frame.items,
+            ) catch |err| return mapNetworkWriteError(err);
+
+            switch (send_result) {
+                .queued => {
+                    if (backend.futex_wait_set) |wait_set| {
+                        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
+                    }
+                },
+                .dropped => {},
+            }
+            return payload_len;
+        }
+    }
 
     const start_len = peer.inbox.items.len;
     errdefer peer.inbox.shrinkRetainingCapacity(start_len);

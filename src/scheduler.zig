@@ -5,6 +5,7 @@ const std = @import("std");
 const disk_module = @import("disk.zig");
 const fiber = @import("fiber.zig");
 const io_module = @import("io.zig");
+const network_module = @import("network.zig");
 const world_module = @import("world.zig");
 
 const Io = std.Io;
@@ -1159,6 +1160,8 @@ test "TaskScheduler: std.Io Mutex and Condition replay through sim futexes" {
 const NetScenarioKind = enum {
     accept,
     exchange,
+    latency,
+    drop,
 };
 
 const NetScenario = struct {
@@ -1168,6 +1171,7 @@ const NetScenario = struct {
     server: Io.net.Server,
     accepted: bool = false,
     reader_started: bool = false,
+    close_client: bool = true,
     client_yields: u8 = 0,
     read_bytes: [4]u8 = undefined,
     read_len: usize = 0,
@@ -1215,7 +1219,9 @@ const NetScenario = struct {
         }
 
         const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
-        defer stream.close(self.io);
+        defer {
+            if (self.close_client) stream.close(self.io);
+        }
 
         while (!self.reader_started or scheduler.blockedCount() < 1) {
             self.client_yields += 1;
@@ -1288,6 +1294,7 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
                 .arg = scenario,
             });
         },
+        .latency, .drop => unreachable,
     }
 
     try scheduler.runUntilIdle();
@@ -1295,9 +1302,90 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
     try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
     try std.testing.expect(scenario.accepted);
 
-    if (kind == .exchange) {
-        try std.testing.expectEqual(@as(usize, 4), scenario.read_len);
-        try std.testing.expectEqualStrings("ping", &scenario.read_bytes);
+    switch (kind) {
+        .accept => {},
+        .exchange, .latency => {
+            try std.testing.expectEqual(@as(usize, 4), scenario.read_len);
+            try std.testing.expectEqualStrings("ping", &scenario.read_bytes);
+        },
+        .drop => {
+            try std.testing.expectEqual(@as(usize, 0), scenario.read_len);
+        },
+    }
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) ![]u8 {
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    const network_control = try network_module.initSimControl(world, .{ .nodes = 2 });
+    switch (kind) {
+        .latency => try network_control.setLatency(.{ .min_latency_ns = 30 }),
+        .drop => try network_control.setLossiness(.{ .drop_rate = .always() }),
+        .accept, .exchange => {},
+    }
+
+    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    defer backend.deinit();
+    backend.attachFutexWaitSet(futexWaitSet(scheduler));
+    backend.attachNetworkControl(network_control);
+
+    const io = backend.io();
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4568) catch unreachable;
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+
+    const scenario = try runtime_allocator.create(NetScenario);
+    defer runtime_allocator.destroy(scenario);
+    scenario.* = .{
+        .io = io,
+        .world = world,
+        .address = address,
+        .server = server,
+        .close_client = kind != .latency,
+    };
+
+    _ = try scheduler.spawn(.{
+        .entry = NetScenario.exchangeServer,
+        .arg = scenario,
+    });
+    _ = try scheduler.spawn(.{
+        .entry = NetScenario.exchangeClient,
+        .arg = scenario,
+    });
+
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(usize, 2), scheduler.completedCount());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
+    try std.testing.expect(scenario.accepted);
+
+    switch (kind) {
+        .latency => {
+            try std.testing.expectEqual(@as(usize, 4), scenario.read_len);
+            try std.testing.expectEqualStrings("ping", &scenario.read_bytes);
+            try std.testing.expectEqual(@as(u64, 30), world.now());
+        },
+        .drop => {
+            try std.testing.expectEqual(@as(usize, 0), scenario.read_len);
+        },
+        .accept, .exchange => unreachable,
     }
 
     return try allocator.dupe(u8, world.traceBytes());
@@ -1350,4 +1438,35 @@ test "TaskScheduler: std.Io.net read suspends and replays" {
     const read_block_wake = try expectTraceOrderAfter(first, accepted_index, "scheduler.block task=", "scheduler.wake key=");
     const wrote_index = try expectTraceOrderAfter(first, read_block_wake, "io.net.wrote len=4", "io.net.read len=4");
     try std.testing.expect(wrote_index > read_block_wake);
+}
+
+test "TaskScheduler: std.Io.net latency uses network delivery deadline" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runNetworkFaultTrace(std.testing.allocator, 0xAACE99, .latency);
+    defer std.testing.allocator.free(first);
+    const second = try runNetworkFaultTrace(std.testing.allocator, 0xAACE99, .latency);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=0 from=1 to=0 deliver_at=30 latency_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver from=1 to=0") != null);
+    try expectTraceOrder(first, "network.send id=0 from=1 to=0", "scheduler.timeout task=");
+    try expectTraceOrder(first, "scheduler.timeout task=", "io.net.deliver from=1 to=0");
+    try expectTraceOrder(first, "io.net.deliver from=1 to=0", "io.net.read len=4");
+}
+
+test "TaskScheduler: std.Io.net dropped write replays and reads EOF after peer close" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runNetworkFaultTrace(std.testing.allocator, 0xAACE9A, .drop);
+    defer std.testing.allocator.free(first);
+    const second = try runNetworkFaultTrace(std.testing.allocator, 0xAACE9A, .drop);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=0 from=1 to=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver") == null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read len=0") != null);
 }

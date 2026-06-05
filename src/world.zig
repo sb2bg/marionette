@@ -228,6 +228,7 @@ pub const World = struct {
             try network_module.initSimControl(self, network_options)
         else
             network_module.AnyNetworkControl.unavailable();
+        sim_io.attachNetworkControl(network_control);
 
         return .{
             .env = .{
