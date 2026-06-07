@@ -105,6 +105,7 @@ pub const Backend = struct {
         inbox: std.ArrayList(u8) = .empty,
         read_error: ?Io.net.Stream.Reader.Error = null,
         peer: ?SocketHandle = null,
+        delivery_floor_ns: u64 = 0,
         closed: bool = false,
     };
 
@@ -359,27 +360,57 @@ fn appendStreamFrame(
 
 fn drainNetworkReady(backend: *Backend, node: network_module.NodeId) Io.net.Stream.Reader.Error!void {
     while (true) {
-        var envelope = network_module.receiveReadyStreamBytesFromControl(backend.network_control, node) catch |err| {
+        const event = network_module.receiveReadyStreamEventFromControl(backend.network_control, node) catch |err| {
             return mapNetworkReadError(err);
         } orelse return;
-        defer envelope.message.release();
 
-        const bytes = envelope.message.bytes();
-        if (bytes.len < stream_frame_handle_size) continue;
+        switch (event) {
+            .delivered => |envelope| {
+                defer envelope.message.release();
 
-        const target_raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
-        const target_handle = std.math.cast(SocketHandle, target_raw) orelse continue;
-        const target = backend.connection(target_handle) orelse continue;
-        if (target.closed) continue;
+                const bytes = envelope.message.bytes();
+                if (bytes.len < stream_frame_handle_size) continue;
 
-        target.inbox.appendSlice(backend.allocator, bytes[stream_frame_handle_size..]) catch return error.SystemResources;
-        backend.world.record(
-            "io.net.deliver from={} to={} handle={} len={}",
-            .{ envelope.from, node, target_handle, bytes.len - stream_frame_handle_size },
-        ) catch return error.SystemResources;
+                const target_raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
+                const target_handle = std.math.cast(SocketHandle, target_raw) orelse continue;
+                const target = backend.connection(target_handle) orelse continue;
+                if (target.closed) continue;
 
-        if (backend.futex_wait_set) |wait_set| {
-            _ = wait_set.wake(backend.connectionWaitKey(target_handle), 1);
+                target.inbox.appendSlice(backend.allocator, bytes[stream_frame_handle_size..]) catch return error.SystemResources;
+                backend.world.record(
+                    "io.net.deliver from={} to={} handle={} len={}",
+                    .{ envelope.from, node, target_handle, bytes.len - stream_frame_handle_size },
+                ) catch return error.SystemResources;
+
+                if (backend.futex_wait_set) |wait_set| {
+                    _ = wait_set.wake(backend.connectionWaitKey(target_handle), 1);
+                }
+            },
+            .dropped => |dropped| {
+                defer dropped.message.release();
+
+                const bytes = dropped.message.bytes();
+                if (bytes.len < stream_frame_handle_size) continue;
+
+                const target_raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
+                const target_handle = std.math.cast(SocketHandle, target_raw) orelse continue;
+                const target = backend.connection(target_handle) orelse continue;
+                if (target.closed) continue;
+
+                const read_error: Io.net.Stream.Reader.Error = switch (dropped.reason) {
+                    .destination_down => error.NetworkDown,
+                    .link_disabled => error.Timeout,
+                };
+                if (target.read_error == null) target.read_error = read_error;
+                backend.world.record(
+                    "io.net.delivery_error from={} to={} handle={} reason={s} error={s}",
+                    .{ dropped.from, dropped.to, target_handle, @tagName(dropped.reason), @errorName(read_error) },
+                ) catch return error.SystemResources;
+
+                if (backend.futex_wait_set) |wait_set| {
+                    _ = wait_set.wake(backend.connectionWaitKey(target_handle), 1);
+                }
+            },
         }
     }
 }
@@ -1363,10 +1394,12 @@ fn simNetWrite(
                 from_node,
                 to_node,
                 frame.items,
+                connection.delivery_floor_ns,
             ) catch |err| return mapNetworkWriteError(err);
 
             switch (send_result) {
-                .queued => {
+                .queued => |deliver_at| {
+                    connection.delivery_floor_ns = deliver_at;
                     if (backend.futex_wait_set) |wait_set| {
                         _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
                     }

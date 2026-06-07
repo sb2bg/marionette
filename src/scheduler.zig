@@ -1241,6 +1241,103 @@ const NetScenario = struct {
     }
 };
 
+const partition_retry_key: WaitKey = 900_001;
+const partition_done_key: WaitKey = 900_002;
+
+const NetPartitionScenario = struct {
+    io: Io,
+    world: *World,
+    network_control: network_module.AnyNetworkControl,
+    address: Io.net.IpAddress,
+    server: Io.net.Server,
+    reader_started: bool = false,
+    client_yields: u8 = 0,
+    first_read_error: ?Io.net.Stream.Reader.Error = null,
+    second_read_bytes: [4]u8 = undefined,
+    second_read_len: usize = 0,
+
+    fn serverTask(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        const stream = self.server.accept(self.io) catch @panic("accept failed");
+        defer stream.close(self.io);
+        self.world.record("io.net.partition.accepted", .{}) catch @panic("record failed");
+
+        self.reader_started = true;
+        var first_read_bytes: [4]u8 = undefined;
+        var first_buffers: [1][]u8 = .{&first_read_bytes};
+        const first_read_len = self.io.vtable.netRead(
+            self.io.userdata,
+            stream.socket.handle,
+            &first_buffers,
+        ) catch |err| read_error: {
+            self.first_read_error = err;
+            self.world.record("io.net.partition.read_error error={s}", .{@errorName(err)}) catch @panic("record failed");
+            break :read_error 0;
+        };
+        if (self.first_read_error == null) {
+            _ = first_read_len;
+            @panic("partitioned read unexpectedly succeeded");
+        }
+
+        _ = scheduler.wake(partition_retry_key, 1) catch @panic("retry wake failed");
+
+        var second_buffers: [1][]u8 = .{&self.second_read_bytes};
+        self.second_read_len = self.io.vtable.netRead(
+            self.io.userdata,
+            stream.socket.handle,
+            &second_buffers,
+        ) catch @panic("read after heal failed");
+        self.world.record("io.net.partition.read_after_heal len={}", .{self.second_read_len}) catch @panic("record failed");
+
+        _ = scheduler.wake(partition_done_key, 1) catch @panic("done wake failed");
+    }
+
+    fn clientTask(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        while (scheduler.blockedCount() < 1) {
+            self.client_yields += 1;
+            if (self.client_yields > 32) @panic("server did not block on accept");
+            scheduler.yieldCurrent();
+        }
+
+        const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
+        defer stream.close(self.io);
+
+        while (!self.reader_started or scheduler.blockedCount() < 1) {
+            self.client_yields += 1;
+            if (self.client_yields > 64) @panic("server did not block on read");
+            scheduler.yieldCurrent();
+        }
+
+        const first_chunks: [1][]const u8 = .{"ping"};
+        const first_written = self.io.vtable.netWrite(
+            self.io.userdata,
+            stream.socket.handle,
+            "",
+            &first_chunks,
+            1,
+        ) catch @panic("partition probe write failed");
+        if (first_written != 4) @panic("short partition probe write");
+
+        const server_side = [_]network_module.NodeId{0};
+        const client_side = [_]network_module.NodeId{1};
+        self.network_control.partition(&server_side, &client_side) catch @panic("partition failed");
+        scheduler.blockCurrent(partition_retry_key);
+
+        self.network_control.heal() catch @panic("heal failed");
+        const retry_chunks: [1][]const u8 = .{"pong"};
+        const retry_written = self.io.vtable.netWrite(
+            self.io.userdata,
+            stream.socket.handle,
+            "",
+            &retry_chunks,
+            1,
+        ) catch @panic("retry write failed");
+        if (retry_written != 4) @panic("short retry write");
+        scheduler.blockCurrent(partition_done_key);
+    }
+};
+
 fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) ![]u8 {
     const runtime_allocator = std.heap.page_allocator;
 
@@ -1399,6 +1496,68 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
     return try allocator.dupe(u8, world.traceBytes());
 }
 
+fn runNetworkPartitionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    const network_control = try network_module.initSimControl(world, .{ .nodes = 2 });
+    try network_control.setLatency(.{ .min_latency_ns = 30 });
+
+    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    defer backend.deinit();
+    backend.attachFutexWaitSet(futexWaitSet(scheduler));
+    backend.attachNetworkControl(network_control);
+
+    const io = backend.io();
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4569) catch unreachable;
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+
+    const scenario = try runtime_allocator.create(NetPartitionScenario);
+    defer runtime_allocator.destroy(scenario);
+    scenario.* = .{
+        .io = io,
+        .world = world,
+        .network_control = network_control,
+        .address = address,
+        .server = server,
+    };
+
+    _ = try scheduler.spawn(.{
+        .entry = NetPartitionScenario.serverTask,
+        .arg = scenario,
+    });
+    _ = try scheduler.spawn(.{
+        .entry = NetPartitionScenario.clientTask,
+        .arg = scenario,
+    });
+
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(usize, 2), scheduler.completedCount());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
+    try std.testing.expectEqual(error.Timeout, scenario.first_read_error.?);
+    try std.testing.expectEqual(@as(usize, 4), scenario.second_read_len);
+    try std.testing.expectEqualStrings("pong", &scenario.second_read_bytes);
+    try std.testing.expectEqual(@as(u64, 60), world.now());
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
 fn expectTraceOrder(trace: []const u8, before: []const u8, after: []const u8) !void {
     const before_index = std.mem.indexOf(u8, trace, before) orelse return error.TestExpectedEqual;
     const after_index = std.mem.indexOf(u8, trace, after) orelse return error.TestExpectedEqual;
@@ -1477,4 +1636,27 @@ test "TaskScheduler: std.Io.net dropped write replays and surfaces read timeout"
     try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=0 from=1 to=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver") == null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read_error error=Timeout") != null);
+}
+
+test "TaskScheduler: std.Io.net partition drops in-flight bytes and heal permits retry" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runNetworkPartitionTrace(std.testing.allocator, 0xAACE9B);
+    defer std.testing.allocator.free(first);
+    const second = try runNetworkPartitionTrace(std.testing.allocator, 0xAACE9B);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.partition left_count=1 right_count=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=0 from=1 to=0 reason=link_disabled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.delivery_error from=1 to=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.partition.read_error error=Timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.heal disabled_count=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.deliver id=1 from=1 to=0 now_ns=60") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.partition.read_after_heal len=4") != null);
+    try expectTraceOrder(first, "network.send id=0 from=1 to=0", "network.partition left_count=1 right_count=1");
+    try expectTraceOrder(first, "network.partition left_count=1 right_count=1", "network.drop id=0 from=1 to=0 reason=link_disabled");
+    try expectTraceOrder(first, "network.drop id=0 from=1 to=0 reason=link_disabled", "io.net.partition.read_error error=Timeout");
+    try expectTraceOrder(first, "io.net.partition.read_error error=Timeout", "network.heal disabled_count=2");
+    try expectTraceOrder(first, "network.heal disabled_count=2", "network.deliver id=1 from=1 to=0 now_ns=60");
 }

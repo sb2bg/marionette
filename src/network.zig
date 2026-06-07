@@ -144,6 +144,23 @@ pub const SimByteSendResult = union(enum) {
     queued: clock_module.Timestamp,
 };
 
+pub const SimByteDropReason = enum {
+    destination_down,
+    link_disabled,
+};
+
+pub const SimByteDroppedEnvelope = struct {
+    from: NodeId,
+    to: NodeId,
+    reason: SimByteDropReason,
+    message: ByteEndpoint.Message,
+};
+
+pub const SimByteReceiveResult = union(enum) {
+    delivered: ByteEndpoint.Envelope,
+    dropped: SimByteDroppedEnvelope,
+};
+
 /// Type-erased simulator-control view for network fault orchestration.
 pub const AnyNetworkControl = struct {
     ptr: *anyopaque,
@@ -1113,16 +1130,17 @@ pub fn sendStreamBytesFromControl(
     from: NodeId,
     to: NodeId,
     bytes: []const u8,
+    minimum_delivery_at: clock_module.Timestamp,
 ) !SimByteSendResult {
     const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
     const runtime = try SimByteRuntime.getOrInit(shared);
-    return try runtime.sendBytes(from, to, bytes);
+    return try runtime.sendBytesAtOrAfter(from, to, bytes, minimum_delivery_at);
 }
 
-pub fn receiveReadyStreamBytesFromControl(control: AnyNetworkControl, node: NodeId) !?ByteEndpoint.Envelope {
+pub fn receiveReadyStreamEventFromControl(control: AnyNetworkControl, node: NodeId) !?SimByteReceiveResult {
     const shared = control.vtable.shared(control.ptr) orelse return error.NetworkUnavailable;
     const runtime = try SimByteRuntime.getOrInit(shared);
-    return try runtime.receiveReady(node);
+    return try runtime.receiveReadyEvent(node);
 }
 
 pub fn nextStreamDeliveryAtForControl(control: AnyNetworkControl, node: NodeId) !?clock_module.Timestamp {
@@ -1455,6 +1473,16 @@ const SimByteRuntime = struct {
         payload: ByteEndpoint.Message,
     };
 
+    const DroppedPacket = struct {
+        packet: Packet,
+        reason: SimByteDropReason,
+    };
+
+    const ReadyEvent = union(enum) {
+        delivered: Packet,
+        dropped: DroppedPacket,
+    };
+
     shared: *SharedRuntime,
     pool: message_pool_module.Pool,
     queues: []std.ArrayList(Packet),
@@ -1509,17 +1537,37 @@ const SimByteRuntime = struct {
     }
 
     fn sendBytes(self: *Self, from: NodeId, to: NodeId, bytes: []const u8) !SimByteSendResult {
+        return try self.sendBytesAtOrAfter(from, to, bytes, 0);
+    }
+
+    fn sendBytesAtOrAfter(
+        self: *Self,
+        from: NodeId,
+        to: NodeId,
+        bytes: []const u8,
+        minimum_delivery_at: clock_module.Timestamp,
+    ) !SimByteSendResult {
         const message = try self.acquire(bytes.len);
         var sent = false;
         defer if (!sent) message.release();
 
         @memcpy(message.bytes(), bytes);
-        const result = try self.sendMessage(from, to, message);
+        const result = try self.sendMessageAtOrAfter(from, to, message, minimum_delivery_at);
         sent = true;
         return result;
     }
 
     fn sendMessage(self: *Self, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !SimByteSendResult {
+        return try self.sendMessageAtOrAfter(from, to, message, 0);
+    }
+
+    fn sendMessageAtOrAfter(
+        self: *Self,
+        from: NodeId,
+        to: NodeId,
+        message: ByteEndpoint.Message,
+        minimum_delivery_at: clock_module.Timestamp,
+    ) !SimByteSendResult {
         const shared = self.shared;
         try shared.validateNode(from);
         try shared.validateNode(to);
@@ -1550,7 +1598,7 @@ const SimByteRuntime = struct {
             return error.InvalidDuration;
         }
 
-        const deliver_at = shared.world.now() + latency_ns;
+        const deliver_at = @max(shared.world.now() + latency_ns, minimum_delivery_at);
         const packet: Packet = .{
             .id = packet_id,
             .from = from,
@@ -1593,16 +1641,22 @@ const SimByteRuntime = struct {
         }
     }
 
-    fn receiveReady(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {
+    fn receiveReadyEvent(self: *Self, node: NodeId) !?SimByteReceiveResult {
         try self.shared.validateNode(node);
         try self.shared.expireDeterministicFaults();
-        if (try self.popReadyFor(node)) |packet| {
-            return .{
+        const event = try self.popReadyEventFor(node) orelse return null;
+        return switch (event) {
+            .delivered => |packet| .{ .delivered = .{
                 .from = packet.from,
                 .message = packet.payload,
-            };
-        }
-        return null;
+            } },
+            .dropped => |dropped| .{ .dropped = .{
+                .from = dropped.packet.from,
+                .to = dropped.packet.to,
+                .reason = dropped.reason,
+                .message = dropped.packet.payload,
+            } },
+        };
     }
 
     fn nextDeliveryAtFor(self: *const Self, node: NodeId) !?clock_module.Timestamp {
@@ -1620,25 +1674,37 @@ const SimByteRuntime = struct {
 
     fn popReadyFor(self: *Self, node: NodeId) !?Packet {
         while (true) {
-            const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
-            const ready = self.queues[link_index].orderedRemove(0);
-
-            if (self.shared.down_nodes[@intCast(ready.to)]) {
-                ready.payload.release();
-                try self.shared.world.record("network.drop id={} from={} to={} reason=destination_down", .{ ready.id, ready.from, ready.to });
-                continue;
+            const event = try self.popReadyEventFor(node) orelse return null;
+            switch (event) {
+                .delivered => |packet| return packet,
+                .dropped => |dropped| dropped.packet.payload.release(),
             }
-
-            const link = self.shared.links[try self.shared.pathIndex(ready.from, ready.to)];
-            if (!link.enabled()) {
-                ready.payload.release();
-                try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
-                continue;
-            }
-
-            try self.shared.world.record("network.deliver id={} from={} to={} now_ns={}", .{ ready.id, ready.from, ready.to, self.shared.world.now() });
-            return ready;
         }
+    }
+
+    fn popReadyEventFor(self: *Self, node: NodeId) !?ReadyEvent {
+        const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
+        const ready = self.queues[link_index].orderedRemove(0);
+
+        if (self.shared.down_nodes[@intCast(ready.to)]) {
+            try self.shared.world.record("network.drop id={} from={} to={} reason=destination_down", .{ ready.id, ready.from, ready.to });
+            return .{ .dropped = .{
+                .packet = ready,
+                .reason = .destination_down,
+            } };
+        }
+
+        const link = self.shared.links[try self.shared.pathIndex(ready.from, ready.to)];
+        if (!link.enabled()) {
+            try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
+            return .{ .dropped = .{
+                .packet = ready,
+                .reason = .link_disabled,
+            } };
+        }
+
+        try self.shared.world.record("network.deliver id={} from={} to={} now_ns={}", .{ ready.id, ready.from, ready.to, self.shared.world.now() });
+        return .{ .delivered = ready };
     }
 
     fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
@@ -3305,6 +3371,34 @@ test "composition byte endpoint: send acquired message transfers ownership" {
 
     try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
     try std.testing.expectEqualStrings("pong", envelope.message.bytes());
+}
+
+test "stream byte sends preserve delivery order under jitter" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x51EA, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 64 } });
+    try sim.control.network.setLatency(.{
+        .min_latency_ns = 10,
+        .latency_jitter_ns = 100,
+    });
+
+    var delivery_floor: clock_module.Timestamp = 0;
+    for (0..32) |_| {
+        const result = try sendStreamBytesFromControl(
+            sim.control.network,
+            0,
+            1,
+            "frame",
+            delivery_floor,
+        );
+        const deliver_at = switch (result) {
+            .queued => |timestamp| timestamp,
+            .dropped => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(deliver_at >= delivery_floor);
+        delivery_floor = deliver_at;
+    }
 }
 
 test "byte transport: builder sends pooled bytes" {
