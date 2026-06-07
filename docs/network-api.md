@@ -236,8 +236,11 @@ network API. These are intentionally unresolved:
 - TLS.
 - Real DNS.
 - Arbitrary `std.net` compatibility. A narrow deterministic `std.Io.net`
-  stream subset is tracked separately as a simulator capability; it is not the
-  first stable typed endpoint API.
+  TCP stream subset is tracked separately as a simulator capability; it
+  currently covers scheduler-backed accept/read suspension, latency,
+  send-time loss, and delivery-time partition/heal behavior. It preserves
+  in-order bytes within a connection and is not the first stable typed endpoint
+  API.
 - Cross-process simulation.
 
 The first stable app-facing network is narrow enough to test a small multi-node

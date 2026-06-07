@@ -962,13 +962,16 @@ Implementation sequence:
    endpoints and do not force typed endpoints through sockets.
 4. Done for the first stream slice: route writes through the shared byte
    runtime so latency schedules delivery at a simulated timestamp and send-time
-   loss wakes the peer with `error.Timeout` on the next empty read. Manual
-   partitions and clogs already share the byte runtime at the packet level, but
-   stream-level partition/drop reset behavior and explicit stream reordering
-   remain future work.
+   loss wakes the peer with `error.Timeout` on the next empty read. Delivery-time
+   manual-partition drops now wake the affected reader with `error.Timeout`, and
+   healing permits deterministic retry on the same connection. Richer
+   connection-reset and node-lifecycle behavior remains future work.
 5. Done: add toy two-fiber server/client tests with connect/accept/read/write,
-   latency, drop, and same-seed trace identity before looking for real
-   networked SUTs.
+   latency, drop, partition/heal, and same-seed trace identity before looking
+   for real networked SUTs.
+6. Decided: do not inject byte reordering within one `std.Io.net` stream.
+   The modeled stream is TCP and must preserve its byte-order contract.
+   Reordering remains a message-altitude fault for `Endpoint(Message)`.
 
 This is a capability investment. The third-party `std.Io.net` ecosystem is
 still thin, so the first proof is likely a canonical internal request/response

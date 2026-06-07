@@ -66,6 +66,9 @@ Rules:
   `network.heal`. Link-only healing uses `network.heal_links`.
 - Path-clog changes use `network.clog`, `network.unclog`, and
   `network.unclog_all`.
+- The scheduler-backed stream adapter records `io.net.deliver` for delivered
+  framed bytes and `io.net.delivery_error` when a delivery-time topology fault
+  is translated into a stream error.
 
 ## What Goes In
 

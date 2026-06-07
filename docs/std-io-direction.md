@@ -62,10 +62,19 @@ return `error.WouldBlock`; empty stream reads return `error.Timeout` while the
 peer remains open because Zig 0.16's stream reader error set has no
 `WouldBlock` variant. This TCP subset is still intentionally narrow, but socket
 bytes can route through the shared `NetworkControl` byte runtime when
-simulation network control is attached, so loss, latency, manual partitions,
-and clogs use the same deterministic fault core as `Endpoint(Message)`.
-Stream-level reset/timeout mapping remains intentionally narrow. It also supports a
-flat file subset over
+simulation network control is attached. Latency and send-time loss use that
+shared fault core directly. If a queued stream frame reaches its delivery time
+while its directed link is partitioned, the frame is dropped and the affected
+empty read observes `error.Timeout`; after `heal()`, a retry on the same
+connection can flow normally. Clogs also share the packet runtime, but richer
+connection-reset and node-down behavior remains intentionally narrow.
+
+The stream adapter preserves byte order within each connection. It does not
+inject byte-stream reordering because the modeled transport is TCP; message
+reordering remains an `Endpoint(Message)`-altitude fault where message
+boundaries exist.
+
+The backend also supports a flat file subset over
 `SimDisk`: `Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
 `Dir.access`, positional file read/write, streaming file read/write,
 `File.length`, `File.stat`, `File.setLength`, `File.sync`, `File.close`,
@@ -131,8 +140,16 @@ socket handle, delivered through the existing loss/latency/link/clog machinery,
 and demultiplexed back into socket inboxes. Delayed stream bytes wake readers
 through the scheduler's timed wait path. Send-time dropped stream bytes wake the
 peer and surface as `error.Timeout` on the next empty read. Delivery-time
-link/partition drops, reordering, richer reset behavior, external host
-networking, DNS, datagrams, and production transport remain future work.
+link/partition drops preserve enough frame metadata to wake the affected
+connection with `error.Timeout`; healing permits deterministic retries on the
+same stream. Destination-down delivery maps to `error.NetworkDown`; richer
+connection-reset behavior, external host networking, DNS, datagrams, and
+production transport remain future work.
+
+TCP stream bytes remain ordered within a connection. Marionette does not inject
+intra-stream reorder because that would violate the transport contract;
+reordering belongs on `Endpoint(Message)`, where independently delivered
+messages can legitimately arrive in a different order.
 
 `Endpoint(Message)` and `std.Io.net` must stay as sibling surfaces over
 simulator-owned network state. Do not implement `std.Io.net` on top of
@@ -305,6 +322,10 @@ Phase 1 is experimental deterministic `std.Io`:
 - done: route the narrow `std.Io.net` stream byte path through the shared
   network loss/latency delivery core when simulation network control is
   attached;
+- done: map delivery-time manual partition drops to `error.Timeout`, preserve
+  the connection across `heal()`, and verify deterministic retry;
+- decided: preserve TCP byte order within each stream; message reordering stays
+  on `Endpoint(Message)` rather than becoming an unphysical socket fault;
 - route sleep, queue, file, and network I/O through `World`;
 - expand simulation `Env.io()` from the Phase 0 backend into a suspending
   deterministic `std.Io`;
