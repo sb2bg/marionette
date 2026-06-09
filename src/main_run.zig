@@ -3,6 +3,7 @@
 const std = @import("std");
 const examples = @import("examples");
 const mar = @import("marionette");
+const std_io_net_kv_validation = @import("std_io_net_kv_validation");
 
 const default_seed: u64 = 0xC0FFEE;
 
@@ -94,9 +95,35 @@ fn runScenario(
         try printReport(try runKvStoreReport(allocator, seed, examples.kv_store.buggyScenario), expect_failure);
     } else if (std.mem.eql(u8, scenario, "idempotency-bug")) {
         try printSeedSensitiveReport(allocator, try runIdempotencyBugReport(allocator, seed), mode, expect_failure);
+    } else if (std.mem.eql(u8, scenario, "std-io-net-kv")) {
+        try runStdIoNetKv(allocator, seed, mode, expect_failure, .retry_safe);
+    } else if (std.mem.eql(u8, scenario, "std-io-net-kv-bug")) {
+        try runStdIoNetKv(allocator, seed, mode, expect_failure, .retry_buggy);
     } else {
         std.debug.print("unknown scenario: {s}\n", .{scenario});
         std.process.exit(2);
+    }
+}
+
+fn runStdIoNetKv(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    mode: Mode,
+    expect_failure: bool,
+    scenario_mode: std_io_net_kv_validation.ScenarioMode,
+) !void {
+    var outcome = try std_io_net_kv_validation.runScenario(
+        allocator,
+        seed,
+        scenario_mode,
+    );
+    defer outcome.deinit();
+
+    try printTraceOrSummary(allocator, outcome.trace, mode);
+    if (outcome.invariant_violated) {
+        if (!expect_failure) std.process.exit(1);
+    } else if (expect_failure) {
+        return expectedFailureDidNotHappen();
     }
 }
 
@@ -237,6 +264,8 @@ fn usage(exe_name: []const u8) noreturn {
         \\  kv-store
         \\  kv-store-bug
         \\  idempotency-bug
+        \\  std-io-net-kv
+        \\  std-io-net-kv-bug
         \\
     ,
         .{exe_name},
