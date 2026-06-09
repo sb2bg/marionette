@@ -7,6 +7,11 @@ production libraries accept `std.Io`, and tests swap in Marionette's
 deterministic implementation. Today, Marionette ships the simulator, trace,
 fault, disk, and network primitives that make that direction concrete.
 
+The current validation targets include an unmodified storage engine
+(`xit-vcs/xitdb`), an unmodified cooperative-concurrency library
+(`g41797/mailbox`), and an external-style client/server KV service whose SUT
+imports only `std.Io.net`.
+
 Write production-shaped code against `std.Io` plus any small Marionette handles
 it actually needs, such as `mar.Recorder` or `mar.Endpoint(Message)`. In tests,
 drive `control` to inject faults. For the modeled file and local endpoint
@@ -143,6 +148,17 @@ through focused `control.network` calls such as `setLossiness(...)`,
 through a node-scoped endpoint with `endpoint.send(to, message)` and receives
 with `while (try endpoint.receive()) |envelope|`.
 
+## std.Io.net Client/Server Validation
+
+The [`std_io_net_kv`](https://github.com/sb2bg/marionette/blob/main/examples/std_io_net_kv.zig)
+SUT is ordinary `std.Io.net` code. Its harness injects latency and a
+delivery-time partition, observes `error.Timeout`, heals the link, retries the
+same PUT, and checks that the mutation was applied exactly once. A planted
+buggy mode deterministically violates that oracle.
+
+See [Testing std.Io.net Code Deterministically](std-io-net-example.md) for the
+runnable commands, trace, and unsupported boundary.
+
 ## Traces
 
 Every run produces a structured trace. When a check fails, the trace shows the
@@ -172,6 +188,7 @@ Passing runs return traces for persistence, diffing, or external tooling.
 - [BUGGIFY](buggify.md)
 - [Network Model](network.md)
 - [Network API Direction](network-api.md)
+- [std.Io.net Client/Server Example](std-io-net-example.md)
 - [Disk Fault Model](disk-fault-model.md)
 - [API](api.md)
 - [Determinism](determinism.md)
@@ -190,9 +207,11 @@ guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
 change as the simulator grows.
 
 The simulator currently models clock, deterministic randomness, disk, a flat
-`std.Io.File` subset, typed endpoint networking, and experimental cooperative
-`std.Io` futex waits for `Mutex` / `Condition` code, validated against the
-pinned `g41797/mailbox` target and the internal bounded-queue capability demo.
+`std.Io.File` subset, typed endpoint networking, a narrow scheduler-backed
+`std.Io.net` stream subset with deterministic latency, timeout, partition, and
+healing behavior, and experimental cooperative `std.Io` futex waits for
+`Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
+target and the internal bounded-queue capability demo.
 It does not model arbitrary OS thread scheduling or memory-level concurrency;
 code that depends on those needs separate testing. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths

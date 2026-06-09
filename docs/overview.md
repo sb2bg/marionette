@@ -13,14 +13,17 @@ Marionette is still experimental, but the core replay loop is real: seeded
 randomness, simulated time, trace logging, twice-and-compare replay, trace
 summaries, named post-scenario checks, deterministic disk/network authorities
 with replayable faults, and a deterministic `std.Io` backend for the current
-file and network subset. A real scheduler and richer replay tooling are
-planned.
+file and network subset. The cooperative scheduler, timed futex waits, and
+narrow blocking `std.Io.net` stream path are implemented; async/cancel
+integration and richer replay tooling remain planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
 the replay artifact bytes, see [Trace Format](trace-format.md). For
 simulation-only fault hooks, see [BUGGIFY](buggify.md). For storage faults,
 see [Disk Fault Model](disk-fault-model.md). For the long-term `std.Io`
 direction, see [std.Io Direction](std-io-direction.md).
+For a runnable client/server fault example, see
+[Testing std.Io.net Code Deterministically](std-io-net-example.md).
 
 ## What This Solves
 

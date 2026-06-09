@@ -30,6 +30,8 @@ Today the demonstrated tiers are:
 
 - deterministic `std.Io.File` storage simulation with crash/torn-write faults;
 - cooperative `std.Io` task scheduling for `Mutex` / `Condition` code;
+- scheduler-backed `std.Io.net` streams with deterministic latency,
+  partitions, timeouts, healing, and retry;
 - typed endpoint message passing with deterministic loss, latency, and
   partitions.
 
@@ -170,6 +172,26 @@ fn partitionScenario(harness: *Harness) !void {
 
 Messages have configurable loss, latency, clogs, and partition dynamics through focused `control.network` calls such as `setLossiness(...)`, `setLatency(...)`, and `setPartitionDynamics(...)`. Application code sends through a node-scoped endpoint with `endpoint.send(to, message)` and receives with `while (try endpoint.receive()) |envelope|`.
 
+## std.Io.net client/server validation
+
+The external-style [`std_io_net_kv`](examples/std_io_net_kv.zig) example
+imports only `std` and implements a fixed-frame PUT/GET service over
+`std.Io.net`. Its Marionette harness partitions the client from a queued
+response, surfaces the dropped delivery as `error.Timeout`, heals the link, and
+retries the request. A correct server deduplicates the retry; a planted buggy
+mode applies it twice and violates an exact revision oracle.
+
+```sh
+zig build validate-std-io-net-kv
+zig build run-example -- std-io-net-kv --seed 12648430 --trace
+zig build run-example -- std-io-net-kv-bug \
+  --seed 12648430 --trace --expect-failure
+```
+
+See [Testing std.Io.net Code Deterministically](docs/std-io-net-example.md) for
+the trace and exact supported boundary. This is an external-style capability
+demonstration, not a third-party SUT finding.
+
 ## Cooperative concurrency
 
 Marionette also has an experimental scheduler-backed `std.Io` futex path for
@@ -213,6 +235,7 @@ have.
 - [BUGGIFY](docs/buggify.md)
 - [Network Model](docs/network.md)
 - [Network API Direction](docs/network-api.md)
+- [std.Io.net Client/Server Example](docs/std-io-net-example.md)
 - [Disk Fault Model](docs/disk-fault-model.md)
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
