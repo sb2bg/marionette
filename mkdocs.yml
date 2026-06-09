@@ -39,6 +39,7 @@ nav:
       - Network Model: network.md
       - Network API Direction: network-api.md
       - std.Io Direction: std-io-direction.md
+      - std.Io.net Client/Server Example: std-io-net-example.md
       - Disk Fault Model: disk-fault-model.md
       - API: api.md
       - Determinism: determinism.md

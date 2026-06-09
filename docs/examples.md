@@ -186,6 +186,38 @@ This is intentionally tiny. Its job is to make the future scheduler, network,
 and invariant APIs concrete enough to critique before they become core library
 surface.
 
+## std.Io.net KV
+
+SUT source:
+[`examples/std_io_net_kv.zig`](https://github.com/sb2bg/marionette/blob/main/examples/std_io_net_kv.zig)
+
+Harness source:
+[`validation/std_io_net_kv.zig`](https://github.com/sb2bg/marionette/blob/main/validation/std_io_net_kv.zig)
+
+This external-style validation keeps Marionette out of the application module.
+The SUT uses only `std.Io.net` to implement a fixed-frame PUT/GET protocol. The
+harness owns cooperative tasks, network latency, partition/heal control, the
+trace, and an exact retry-idempotency oracle.
+
+The correct server caches responses by request ID. The harness partitions the
+link after the first PUT response is queued, observes `error.Timeout`, heals,
+and retries the same request. The server returns the cached response and keeps
+`revision == 1`.
+
+The planted buggy server reapplies the retry. The value remains 41, but the
+revision and application count become 2, so the checker catches the duplicate
+mutation.
+
+```sh
+zig build validate-std-io-net-kv
+zig build run-example -- std-io-net-kv --seed 12648430 --trace
+zig build run-example -- std-io-net-kv-bug \
+  --seed 12648430 --trace --expect-failure
+```
+
+See [Testing std.Io.net Code Deterministically](std-io-net-example.md) for the
+trace and supported stream boundary.
+
 ## Toy DB
 
 Source: [`examples/toy_sql_db.zig`](https://github.com/sb2bg/marionette/blob/main/examples/toy_sql_db.zig)
