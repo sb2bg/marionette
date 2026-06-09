@@ -111,6 +111,25 @@ pub const TaskScheduler = struct {
             task.scheduler.completeCurrent(task);
             unreachable;
         }
+
+        /// Move the task out of the blocked state into `state`, clearing the
+        /// block bookkeeping. `blocked_key`/`blocked_deadline_ns` are only
+        /// meaningful while blocked, so every non-blocked transition must
+        /// clear them; centralizing that keeps the invariant in one place.
+        fn clearBlock(self: *Task, state: TaskState, result: WaitResult) void {
+            self.state = state;
+            self.blocked_key = null;
+            self.blocked_deadline_ns = null;
+            self.wait_result = result;
+        }
+
+        /// Park the task on `key`, optionally with a timeout deadline.
+        fn block(self: *Task, key: WaitKey, deadline_ns: ?u64) void {
+            self.state = .blocked;
+            self.blocked_key = key;
+            self.blocked_deadline_ns = deadline_ns;
+            self.wait_result = .woken;
+        }
     };
 
     pub fn init(allocator: std.mem.Allocator, world: *World) Self {
@@ -248,10 +267,7 @@ pub const TaskScheduler = struct {
 
             const task = self.findTask(selected).?;
             if (task.state != .blocked) return error.TaskNotBlocked;
-            task.state = .ready;
-            task.blocked_key = null;
-            task.blocked_deadline_ns = null;
-            task.wait_result = .woken;
+            task.clearBlock(.ready, .woken);
             try self.ready.append(self.allocator, selected);
         }
 
@@ -304,52 +320,43 @@ pub const TaskScheduler = struct {
             scheduler.current = null;
             switch (returned_message.reason) {
                 .yielded => {
-                    returned_task.state = .ready;
-                    returned_task.blocked_key = null;
-                    returned_task.blocked_deadline_ns = null;
-                    returned_task.wait_result = .woken;
+                    returned_task.clearBlock(.ready, .woken);
                     try scheduler.ready.append(scheduler.allocator, returned_task.id);
                     try scheduler.recordYield(returned_task.id);
                 },
                 .blocked => {
-                    returned_task.state = .blocked;
-                    returned_task.blocked_key = returned_message.key;
-                    returned_task.blocked_deadline_ns = returned_message.deadline_ns;
-                    returned_task.wait_result = .woken;
+                    returned_task.block(returned_message.key, returned_message.deadline_ns);
                     try scheduler.recordBlock(returned_task.id, returned_message.key, returned_message.deadline_ns);
                 },
                 .completed => {
-                    returned_task.state = .completed;
-                    returned_task.blocked_key = null;
-                    returned_task.blocked_deadline_ns = null;
-                    returned_task.wait_result = .woken;
+                    returned_task.clearBlock(.completed, .woken);
                     try scheduler.recordComplete(returned_task.id, "ok");
                 },
             }
         }
 
         if (scheduler.blockedCount() > 0) {
-            try scheduler.recordDeadlock();
+            try scheduler.recordCensus("scheduler.deadlock");
             return error.Deadlock;
         }
 
-        try scheduler.recordIdle();
+        try scheduler.recordCensus("scheduler.idle");
+    }
+
+    fn countState(self: *const Self, state: TaskState) usize {
+        var count: usize = 0;
+        for (self.tasks.items) |task| {
+            if (task.state == state) count += 1;
+        }
+        return count;
     }
 
     pub fn completedCount(self: *const Self) usize {
-        var count: usize = 0;
-        for (self.tasks.items) |task| {
-            if (task.state == .completed) count += 1;
-        }
-        return count;
+        return self.countState(.completed);
     }
 
     pub fn blockedCount(self: *const Self) usize {
-        var count: usize = 0;
-        for (self.tasks.items) |task| {
-            if (task.state == .blocked) count += 1;
-        }
-        return count;
+        return self.countState(.blocked);
     }
 
     fn advanceToNextTimer(self: *Self) TaskSchedulerError!bool {
@@ -373,10 +380,7 @@ pub const TaskScheduler = struct {
         for (due.items) |task_id| {
             const task = self.findTask(task_id).?;
             if (task.state != .blocked) return error.TaskNotBlocked;
-            task.state = .ready;
-            task.blocked_key = null;
-            task.blocked_deadline_ns = null;
-            task.wait_result = .timed_out;
+            task.clearBlock(.ready, .timed_out);
             try self.ready.append(self.allocator, task.id);
             try self.recordTimeout(task.id, deadline);
         }
@@ -449,18 +453,13 @@ pub const TaskScheduler = struct {
         key: WaitKey,
         deadline_ns: ?u64,
     ) (std.mem.Allocator.Error || world_module.TraceError)!void {
-        if (deadline_ns) |deadline| {
-            try self.world.recordFields("scheduler.block", &.{
-                traceField("task", .{ .uint = task_id }),
-                traceField("key", .{ .uint = key }),
-                traceField("deadline_ns", .{ .uint = deadline }),
-            });
-        } else {
-            try self.world.recordFields("scheduler.block", &.{
-                traceField("task", .{ .uint = task_id }),
-                traceField("key", .{ .uint = key }),
-            });
-        }
+        const fields = [_]world_module.TraceField{
+            traceField("task", .{ .uint = task_id }),
+            traceField("key", .{ .uint = key }),
+            traceField("deadline_ns", .{ .uint = deadline_ns orelse 0 }),
+        };
+        const count: usize = if (deadline_ns != null) 3 else 2;
+        try self.world.recordFields("scheduler.block", fields[0..count]);
     }
 
     fn recordWake(
@@ -513,16 +512,8 @@ pub const TaskScheduler = struct {
         });
     }
 
-    fn recordIdle(self: *Self) (std.mem.Allocator.Error || world_module.TraceError)!void {
-        try self.world.recordFields("scheduler.idle", &.{
-            traceField("tasks", .{ .uint = @intCast(self.tasks.items.len) }),
-            traceField("completed", .{ .uint = @intCast(self.completedCount()) }),
-            traceField("blocked", .{ .uint = @intCast(self.blockedCount()) }),
-        });
-    }
-
-    fn recordDeadlock(self: *Self) (std.mem.Allocator.Error || world_module.TraceError)!void {
-        try self.world.recordFields("scheduler.deadlock", &.{
+    fn recordCensus(self: *Self, event: []const u8) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields(event, &.{
             traceField("tasks", .{ .uint = @intCast(self.tasks.items.len) }),
             traceField("completed", .{ .uint = @intCast(self.completedCount()) }),
             traceField("blocked", .{ .uint = @intCast(self.blockedCount()) }),
@@ -531,11 +522,7 @@ pub const TaskScheduler = struct {
 };
 
 fn sortTaskIds(task_ids: []TaskId) void {
-    std.mem.sort(TaskId, task_ids, {}, struct {
-        fn lessThan(_: void, a: TaskId, b: TaskId) bool {
-            return a < b;
-        }
-    }.lessThan);
+    std.mem.sort(TaskId, task_ids, {}, std.sort.asc(TaskId));
 }
 
 pub fn futexWaitSet(self: *TaskScheduler) io_module.FutexWaitSet {
