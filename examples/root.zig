@@ -9,6 +9,7 @@ pub const durable_broadcast = @import("durable_broadcast.zig");
 pub const kv_store = @import("kv_store.zig");
 pub const idempotency_bug = @import("idempotency_bug.zig");
 pub const toy_sql_db = @import("toy_sql_db.zig");
+pub const std_io_net_kv = @import("std_io_net_kv.zig");
 
 test "examples: retry queue scenario is replayable" {
     const a = try retry_queue.runScenario(std.testing.allocator, 0xC0FFEE);
