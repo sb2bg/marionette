@@ -134,6 +134,14 @@ peer closes. The current tests use two fibers, one server and one client,
 asserting byte-identical same-seed traces for connect/accept/read/write before
 any real SUT is involved.
 
+The next validation layer is implemented as an external-style fixed-frame KV
+client/server. The SUT imports only `std`, while the harness owns Marionette's
+scheduler, latency, partition/heal sequence, trace, and retry-idempotency
+oracle. It demonstrates a stream-visible timeout followed by a deterministic
+retry and keeps a planted duplicate-apply mode as a replayable failure. This is
+ordinary production-shaped code, but it is maintained in this repository and
+is not counted as a third-party SUT finding.
+
 The next slice routes stream writes through the shared byte-message runtime when
 network control is attached. Stream payloads are framed with the destination
 socket handle, delivered through the existing loss/latency/link/clog machinery,
@@ -145,6 +153,9 @@ connection with `error.Timeout`; healing permits deterministic retries on the
 same stream. Destination-down delivery maps to `error.NetworkDown`; richer
 connection-reset behavior, external host networking, DNS, datagrams, and
 production transport remain future work.
+
+Graceful close does not discard delayed bytes already accepted by the shared
+network runtime. A reader drains pending deliveries before observing EOF.
 
 TCP stream bytes remain ordered within a connection. Marionette does not inject
 intra-stream reorder because that would violate the transport contract;
@@ -222,9 +233,10 @@ work should keep in view:
 
 - raw futex pointer addresses never enter the trace; the sim backend maps them
   to stable logical keys so ASLR and allocator placement do not affect replay;
-- fiber suspension and completion boundaries are intentionally opaque to the
-  optimizer. ReleaseSafe corrupted task state when the optimizer inlined across
-  a context-switch boundary, so those `noinline` boundaries are load-bearing.
+- scheduler-side dispatch plus fiber suspension and completion boundaries are
+  intentionally opaque to the optimizer. ReleaseSafe corrupted task state when
+  the optimizer inlined across a context-switch boundary, so those `noinline`
+  boundaries are load-bearing.
 
 ## Existing Primitives
 
@@ -324,6 +336,10 @@ Phase 1 is experimental deterministic `std.Io`:
   attached;
 - done: map delivery-time manual partition drops to `error.Timeout`, preserve
   the connection across `heal()`, and verify deterministic retry;
+- done: validate an external-style fixed-frame KV client/server with
+  happy-path replay, partition/timeout/heal retry, an exact idempotency oracle,
+  and a planted duplicate-apply failure;
+- done: drain queued delayed stream bytes before EOF after graceful peer close;
 - decided: preserve TCP byte order within each stream; message reordering stays
   on `Endpoint(Message)` rather than becoming an unphysical socket fault;
 - route sleep, queue, file, and network I/O through `World`;

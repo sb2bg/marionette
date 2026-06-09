@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Adds an external-style fixed-frame KV client/server written only against
+  `std.Io.net`, with deterministic happy-path replay and a
+  partition/timeout/heal retry scenario.
+- Adds `zig build validate-std-io-net-kv` plus runnable correct and planted-bug
+  scenarios. The exact oracle catches duplicate mutation application even when
+  the final value is unchanged.
+- Fixes simulated graceful close so delayed bytes already accepted by the
+  network runtime are delivered before the reader observes EOF.
+- Keeps the scheduler-side run loop optimizer-opaque across fiber stack
+  switches, fixing a ReleaseSafe crash exposed by the client/server workload.
+- Documents the current TCP-like stream contract and unsupported network
+  boundary.
+
 ## v0.2.0 - 2026-06-02
 
 Marionette's second tagged release adds the cooperative-concurrency tier:

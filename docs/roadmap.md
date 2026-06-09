@@ -972,10 +972,18 @@ Implementation sequence:
 6. Decided: do not inject byte reordering within one `std.Io.net` stream.
    The modeled stream is TCP and must preserve its byte-order contract.
    Reordering remains a message-altitude fault for `Endpoint(Message)`.
+7. Done: add an external-style fixed-frame KV client/server validation whose
+   SUT imports only `std`. The harness injects latency and a delivery-time
+   partition, observes `error.Timeout`, heals the connection, retries the PUT,
+   and checks exact-once application. A planted non-idempotent retry mode
+   provides a seeded, byte-identical failure demonstration.
+8. Done: preserve queued delayed bytes across graceful peer close so a reader
+   drains accepted stream data before observing EOF.
 
 This is a capability investment. The third-party `std.Io.net` ecosystem is
-still thin, so the first proof is likely a canonical internal request/response
-demo rather than an external SUT finding.
+still thin. The first application-level proof is therefore external-style
+ordinary Zig code rather than a third-party SUT finding. Keep the distinction
+explicit until a compatible external target is validated.
 
 ---
 
