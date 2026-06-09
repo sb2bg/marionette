@@ -98,6 +98,26 @@ pub fn build(b: *std.Build) void {
     );
     validate_bounded_queue_step.dependOn(&run_validate_bounded_queue.step);
 
+    const validate_std_io_net_kv_mod = b.createModule(.{
+        .root_source_file = b.path("validation/std_io_net_kv.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validate_std_io_net_kv_mod.addImport("marionette", mod);
+    validate_std_io_net_kv_mod.addImport("examples", examples_mod);
+    run_examples_mod.addImport("std_io_net_kv_validation", validate_std_io_net_kv_mod);
+
+    const validate_std_io_net_kv_tests = b.addTest(.{
+        .root_module = validate_std_io_net_kv_mod,
+    });
+    const run_validate_std_io_net_kv = b.addRunArtifact(validate_std_io_net_kv_tests);
+
+    const validate_std_io_net_kv_step = b.step(
+        "validate-std-io-net-kv",
+        "Run the std.Io.net KV capability validation",
+    );
+    validate_std_io_net_kv_step.dependOn(&run_validate_std_io_net_kv.step);
+
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),
         .target = target,
@@ -119,5 +139,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_example_tests.step);
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_validate_std_io_net_kv.step);
     test_step.dependOn(&tidy.step);
 }
