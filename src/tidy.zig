@@ -52,7 +52,7 @@ pub const default_patterns = [_]Pattern{
     .{ .needle = "std.fs.createFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.fs.copyFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.fs.deleteFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
-    .{ .needle = "std.net", .reason = "route network access through Marionette Endpoint handles", .match = .prefix },
+    .{ .needle = "std.net", .reason = "use caller-provided std.Io.net or Marionette Endpoint handles", .match = .prefix },
 };
 
 pub const default_allowed = [_]Allow{
