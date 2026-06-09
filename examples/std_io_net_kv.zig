@@ -55,8 +55,6 @@ pub const Server = struct {
     cached: [max_cached_requests]CachedResponse = undefined,
     cached_count: usize = 0,
     revision: u64 = 0,
-    request_count: usize = 0,
-    response_count: usize = 0,
     applied_puts: usize = 0,
 
     pub fn init(mode: ServerMode) Server {
@@ -67,13 +65,11 @@ pub const Server = struct {
         var request_bytes: [request_size]u8 = undefined;
         try readExact(io, stream, &request_bytes);
         const request = try decodeRequest(&request_bytes);
-        self.request_count += 1;
 
         const response = try self.handle(request);
         var response_bytes: [response_size]u8 = undefined;
         encodeResponse(&response_bytes, response);
         try writeAll(io, stream, &response_bytes);
-        self.response_count += 1;
     }
 
     pub fn get(self: *const Server, key: u64) ?i64 {
@@ -248,12 +244,16 @@ fn decodeResponse(bytes: *const [response_size]u8) !Response {
     if (std.mem.readInt(u32, bytes[0..4], .little) != response_magic) {
         return error.InvalidResponseMagic;
     }
-    if (bytes[4] > 1) return error.InvalidDuplicateFlag;
+    const duplicate = switch (bytes[4]) {
+        0 => false,
+        1 => true,
+        else => return error.InvalidDuplicateFlag,
+    };
     return .{
         .request_id = std.mem.readInt(u64, bytes[8..16], .little),
         .value = std.mem.readInt(i64, bytes[16..24], .little),
         .revision = std.mem.readInt(u64, bytes[24..32], .little),
-        .duplicate = bytes[4] == 1,
+        .duplicate = duplicate,
     };
 }
 

@@ -43,19 +43,17 @@ const Scenario = struct {
     server: sut.Server,
     controller_waiting: bool = false,
     first_response_timed_out: bool = false,
-    retry_response: ?sut.Response = null,
-    get_response: ?sut.Response = null,
     client_yields: u8 = 0,
+
+    fn faulted(self: *const Scenario) bool {
+        return self.mode != .happy;
+    }
 
     fn requestLimit(self: *const Scenario) usize {
         return switch (self.mode) {
             .happy => 2,
             .retry_safe, .retry_buggy => 3,
         };
-    }
-
-    fn faulted(self: *const Scenario) bool {
-        return self.mode != .happy;
     }
 
     fn serverTask(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
@@ -110,18 +108,18 @@ const Scenario = struct {
                 };
                 if (!self.first_response_timed_out) @panic("faulted PUT unexpectedly returned");
 
-                self.retry_response = client.put(7, 11, 41) catch @panic("retry PUT failed");
+                const retry_response = client.put(7, 11, 41) catch @panic("retry PUT failed");
                 self.record(
                     "std_io_net_kv.client.retry request_id=7 revision={} duplicate={}",
-                    .{ self.retry_response.?.revision, self.retry_response.?.duplicate },
+                    .{ retry_response.revision, retry_response.duplicate },
                 );
             },
         }
 
-        self.get_response = client.get(8, 11) catch @panic("GET failed");
+        const get_response = client.get(8, 11) catch @panic("GET failed");
         self.record(
             "std_io_net_kv.client.get key=11 value={} revision={}",
-            .{ self.get_response.?.value, self.get_response.?.revision },
+            .{ get_response.value, get_response.revision },
         );
     }
 
@@ -244,18 +242,14 @@ pub fn runScenario(
     }
 
     const trace = try allocator.dupe(u8, world.traceBytes());
-    errdefer allocator.free(trace);
-    const first_response_timed_out = scenario.first_response_timed_out;
-    const revision = scenario.server.revision;
-    const applied_puts = scenario.server.applied_puts;
 
     return .{
         .allocator = allocator,
         .trace = trace,
-        .first_response_timed_out = first_response_timed_out,
+        .first_response_timed_out = scenario.first_response_timed_out,
         .final_value = final_value,
-        .revision = revision,
-        .applied_puts = applied_puts,
+        .revision = scenario.server.revision,
+        .applied_puts = scenario.server.applied_puts,
         .invariant_violated = invariant_violated,
     };
 }
