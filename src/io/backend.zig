@@ -1335,6 +1335,7 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
     if (connection.closed) return error.SocketUnconnected;
     if (connection.node) |node| try drainNetworkReady(backend, node);
     while (connection.inbox.items.len == 0) {
+        const deadline_ns = if (connection.node) |node| try nextNetworkDeliveryAt(backend, node) else null;
         if (connection.read_error) |err| {
             connection.read_error = null;
             return err;
@@ -1343,9 +1344,8 @@ fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Str
             if (backend.connection(peer_handle)) |peer| peer.closed else true
         else
             true;
-        if (peer_closed) return 0;
+        if (peer_closed and deadline_ns == null) return 0;
         const wait_set = backend.futex_wait_set orelse return error.Timeout;
-        const deadline_ns = if (connection.node) |node| try nextNetworkDeliveryAt(backend, node) else null;
         switch (wait_set.blockUntil(backend.connectionWaitKey(src), deadline_ns)) {
             .woken => {},
             .timed_out => {},

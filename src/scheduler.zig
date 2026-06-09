@@ -259,7 +259,10 @@ pub const TaskScheduler = struct {
         return woken;
     }
 
-    pub fn runUntilIdle(self: *Self) !void {
+    // This loop switches between the scheduler stack and task stacks. Keep it
+    // opaque for the same reason as task-side yield/block boundaries: optimized
+    // callers must treat the switch as a control-flow discontinuity.
+    pub noinline fn runUntilIdle(self: *Self) !void {
         var scheduler = self;
         while (true) {
             if (scheduler.ready.items.len == 0) {
@@ -1161,6 +1164,7 @@ const NetScenarioKind = enum {
     accept,
     exchange,
     latency,
+    latency_close,
     drop,
 };
 
@@ -1396,7 +1400,7 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
                 .arg = scenario,
             });
         },
-        .latency, .drop => unreachable,
+        .latency, .latency_close, .drop => unreachable,
     }
 
     try scheduler.runUntilIdle();
@@ -1406,7 +1410,7 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
 
     switch (kind) {
         .accept => {},
-        .exchange, .latency => {
+        .exchange, .latency, .latency_close => {
             try std.testing.expect(scenario.read_error == null);
             try std.testing.expectEqual(@as(usize, 4), scenario.read_len);
             try std.testing.expectEqualStrings("ping", &scenario.read_bytes);
@@ -1440,7 +1444,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
 
     const network_control = try network_module.initSimControl(world, .{ .nodes = 2 });
     switch (kind) {
-        .latency => try network_control.setLatency(.{ .min_latency_ns = 30 }),
+        .latency, .latency_close => try network_control.setLatency(.{ .min_latency_ns = 30 }),
         .drop => try network_control.setLossiness(.{ .drop_rate = .always() }),
         .accept, .exchange => {},
     }
@@ -1462,7 +1466,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
         .world = world,
         .address = address,
         .server = server,
-        .close_client = false,
+        .close_client = kind == .latency_close,
     };
 
     _ = try scheduler.spawn(.{
@@ -1480,7 +1484,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
     try std.testing.expect(scenario.accepted);
 
     switch (kind) {
-        .latency => {
+        .latency, .latency_close => {
             try std.testing.expect(scenario.read_error == null);
             try std.testing.expectEqual(@as(usize, 4), scenario.read_len);
             try std.testing.expectEqualStrings("ping", &scenario.read_bytes);
@@ -1622,6 +1626,20 @@ test "TaskScheduler: std.Io.net latency uses network delivery deadline" {
     try expectTraceOrder(first, "network.send id=0 from=1 to=0", "scheduler.timeout task=");
     try expectTraceOrder(first, "scheduler.timeout task=", "io.net.deliver from=1 to=0");
     try expectTraceOrder(first, "io.net.deliver from=1 to=0", "io.net.read len=4");
+}
+
+test "TaskScheduler: std.Io.net graceful close drains delayed bytes before EOF" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runNetworkFaultTrace(std.testing.allocator, 0xAACE9C, .latency_close);
+    defer std.testing.allocator.free(first);
+    const second = try runNetworkFaultTrace(std.testing.allocator, 0xAACE9C, .latency_close);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=0 from=1 to=0 deliver_at=30 latency_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver from=1 to=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read len=4") != null);
 }
 
 test "TaskScheduler: std.Io.net dropped write replays and surfaces read timeout" {
