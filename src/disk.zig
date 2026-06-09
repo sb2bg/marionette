@@ -744,13 +744,13 @@ pub const SimDisk = struct {
     }
 
     fn setFaults(self: *Self, faults: DiskFaultOptions) DiskError!void {
-        try validateFaultRate(faults.read_error_rate);
-        try validateFaultRate(faults.write_error_rate);
-        try validateFaultRate(faults.corrupt_read_rate);
-        try validateFaultRate(faults.crash_lost_write_rate);
-        try validateFaultRate(faults.crash_torn_write_rate);
-        try validateFaultRate(faults.crash_reordered_write_rate);
-        try validateFaultRate(faults.crash_lost_metadata_rate);
+        try faults.read_error_rate.validate();
+        try faults.write_error_rate.validate();
+        try faults.corrupt_read_rate.validate();
+        try faults.crash_lost_write_rate.validate();
+        try faults.crash_torn_write_rate.validate();
+        try faults.crash_reordered_write_rate.validate();
+        try faults.crash_lost_metadata_rate.validate();
         self.faults = faults;
     }
 
@@ -1213,11 +1213,6 @@ pub const SimDisk = struct {
         };
     }
 
-    fn validateFaultRate(rate: env_module.BuggifyRate) DiskError!void {
-        if (rate.denominator == 0) return error.InvalidRate;
-        if (rate.numerator > rate.denominator) return error.InvalidRate;
-    }
-
     fn validatePath(_: *const Self, path: []const u8) DiskError!void {
         if (path.len == 0) return error.InvalidPath;
     }
@@ -1273,7 +1268,7 @@ pub const SimDisk = struct {
         kind: []const u8,
         rate: env_module.BuggifyRate,
     ) DiskError!bool {
-        try validateFaultRate(rate);
+        try rate.validate();
         if (rate.numerator == 0) return false;
 
         const roll = try self.world.randomIntLessThan(u32, rate.denominator);
@@ -1355,37 +1350,6 @@ pub const SimDisk = struct {
             .op_id = op_id,
             .dir = dir,
             .kind = .{ .create = file.id },
-        });
-    }
-
-    fn appendPendingDelete(self: *Self, op_id: u64, path: []const u8, deleted: File) DiskError!void {
-        const dir = try self.ownedParentDir(path);
-        errdefer self.world.allocator.free(dir);
-        try self.pending_metadata.append(self.world.allocator, .{
-            .op_id = op_id,
-            .dir = dir,
-            .kind = .{ .delete = deleted },
-        });
-    }
-
-    fn appendPendingRename(
-        self: *Self,
-        op_id: u64,
-        new_path: []const u8,
-        file_id: FileId,
-        owned_old_path: []u8,
-        replaced: ?File,
-    ) DiskError!void {
-        const dir = try self.ownedParentDir(new_path);
-        errdefer self.world.allocator.free(dir);
-        try self.pending_metadata.append(self.world.allocator, .{
-            .op_id = op_id,
-            .dir = dir,
-            .kind = .{ .rename = .{
-                .file_id = file_id,
-                .old_path = owned_old_path,
-                .replaced = replaced,
-            } },
         });
     }
 
@@ -1537,7 +1501,7 @@ pub const SimDisk = struct {
     fn applyFullWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
         const file = try self.getOrCreateFile(pending.path);
         try self.ensurePendingCreate(pending.op_id, file);
-        try self.writeSectors(file, pending.offset, pending.bytes);
+        try self.writeBytes(file, pending.offset, pending.bytes);
         file.len = @max(file.len, try endOffset(pending.offset, pending.bytes.len));
     }
 
@@ -1676,10 +1640,6 @@ pub const SimDisk = struct {
                 pending.bytes[src_start..][0..overlap_len],
             );
         }
-    }
-
-    fn writeSectors(self: *Self, file: *File, offset: u64, bytes: []const u8) DiskError!void {
-        try self.writeBytes(file, offset, bytes);
     }
 
     fn writeBytes(self: *Self, file: *File, offset: u64, bytes: []const u8) DiskError!void {

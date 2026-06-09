@@ -185,6 +185,22 @@ pub const Backend = struct {
         return waitKey(.connection, @intCast(handle));
     }
 
+    /// Wake tasks blocked on a connection handle becoming ready, if a
+    /// scheduler is attached. No-op in the bare-backend case.
+    fn wakeConnection(self: *Backend, handle: SocketHandle, count: usize) void {
+        if (self.futex_wait_set) |wait_set| {
+            _ = wait_set.wake(self.connectionWaitKey(handle), count);
+        }
+    }
+
+    /// Wake tasks blocked on a listener handle becoming ready, if a
+    /// scheduler is attached. No-op in the bare-backend case.
+    fn wakeListener(self: *Backend, handle: SocketHandle, count: usize) void {
+        if (self.futex_wait_set) |wait_set| {
+            _ = wait_set.wake(self.listenerWaitKey(handle), count);
+        }
+    }
+
     fn allocateNetworkNode(self: *Backend) error{NetworkDown}!?network_module.NodeId {
         const process_count = network_module.processCountFromControl(self.network_control) orelse return null;
         if (@as(usize, self.next_network_node) >= process_count) return error.NetworkDown;
@@ -311,11 +327,6 @@ fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
 fn mapNetworkReadError(err: anyerror) Io.net.Stream.Reader.Error {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,
-        error.NetworkUnavailable,
-        error.InvalidNode,
-        error.InvalidDuration,
-        error.InvalidRate,
-        => error.NetworkDown,
         else => error.NetworkDown,
     };
 }
@@ -334,6 +345,28 @@ fn mapNetworkWriteError(err: anyerror) Io.net.Stream.Writer.Error {
     };
 }
 
+/// Append a writev-style payload to `list`: the header, then each data
+/// slice, then `splat` repetitions of the final slice. Mirrors std.Io's
+/// scatter/splat write encoding.
+fn appendWritevPayload(
+    backend: *Backend,
+    list: *std.ArrayList(u8),
+    header: []const u8,
+    data: []const []const u8,
+    splat: usize,
+) error{SystemResources}!void {
+    list.appendSlice(backend.allocator, header) catch return error.SystemResources;
+    if (data.len > 0) {
+        for (data[0 .. data.len - 1]) |bytes| {
+            list.appendSlice(backend.allocator, bytes) catch return error.SystemResources;
+        }
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| {
+            list.appendSlice(backend.allocator, pattern) catch return error.SystemResources;
+        }
+    }
+}
+
 fn appendStreamFrame(
     backend: *Backend,
     frame: *std.ArrayList(u8),
@@ -345,16 +378,7 @@ fn appendStreamFrame(
     frame.appendNTimes(backend.allocator, 0, stream_frame_handle_size) catch return error.SystemResources;
     std.mem.writeInt(u64, frame.items[0..stream_frame_handle_size], @intCast(target), .little);
 
-    frame.appendSlice(backend.allocator, header) catch return error.SystemResources;
-    if (data.len > 0) {
-        for (data[0 .. data.len - 1]) |bytes| {
-            frame.appendSlice(backend.allocator, bytes) catch return error.SystemResources;
-        }
-        const pattern = data[data.len - 1];
-        for (0..splat) |_| {
-            frame.appendSlice(backend.allocator, pattern) catch return error.SystemResources;
-        }
-    }
+    try appendWritevPayload(backend, frame, header, data, splat);
     return frame.items.len - stream_frame_handle_size;
 }
 
@@ -382,9 +406,7 @@ fn drainNetworkReady(backend: *Backend, node: network_module.NodeId) Io.net.Stre
                     .{ envelope.from, node, target_handle, bytes.len - stream_frame_handle_size },
                 ) catch return error.SystemResources;
 
-                if (backend.futex_wait_set) |wait_set| {
-                    _ = wait_set.wake(backend.connectionWaitKey(target_handle), 1);
-                }
+                backend.wakeConnection(target_handle, 1);
             },
             .dropped => |dropped| {
                 defer dropped.message.release();
@@ -407,9 +429,7 @@ fn drainNetworkReady(backend: *Backend, node: network_module.NodeId) Io.net.Stre
                     .{ dropped.from, dropped.to, target_handle, @tagName(dropped.reason), @errorName(read_error) },
                 ) catch return error.SystemResources;
 
-                if (backend.futex_wait_set) |wait_set| {
-                    _ = wait_set.wake(backend.connectionWaitKey(target_handle), 1);
-                }
+                backend.wakeConnection(target_handle, 1);
             },
         }
     }
@@ -1294,9 +1314,7 @@ fn simNetConnectIp(
     server.peer = client_handle;
 
     listener.pending.append(backend.allocator, server_handle) catch return error.SystemResources;
-    if (backend.futex_wait_set) |wait_set| {
-        _ = wait_set.wake(backend.listenerWaitKey(listener_entry.handle), 1);
-    }
+    backend.wakeListener(listener_entry.handle, 1);
     return .{
         .handle = client_handle,
         .address = address.*,
@@ -1400,15 +1418,11 @@ fn simNetWrite(
             switch (send_result) {
                 .queued => |deliver_at| {
                     connection.delivery_floor_ns = deliver_at;
-                    if (backend.futex_wait_set) |wait_set| {
-                        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
-                    }
+                    backend.wakeConnection(peer_handle, 1);
                 },
                 .dropped => {
                     if (peer.read_error == null) peer.read_error = error.Timeout;
-                    if (backend.futex_wait_set) |wait_set| {
-                        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
-                    }
+                    backend.wakeConnection(peer_handle, 1);
                 },
             }
             return payload_len;
@@ -1418,19 +1432,8 @@ fn simNetWrite(
     const start_len = peer.inbox.items.len;
     errdefer peer.inbox.shrinkRetainingCapacity(start_len);
 
-    peer.inbox.appendSlice(backend.allocator, header) catch return error.SystemResources;
-    if (data.len > 0) {
-        for (data[0 .. data.len - 1]) |bytes| {
-            peer.inbox.appendSlice(backend.allocator, bytes) catch return error.SystemResources;
-        }
-        const pattern = data[data.len - 1];
-        for (0..splat) |_| {
-            peer.inbox.appendSlice(backend.allocator, pattern) catch return error.SystemResources;
-        }
-    }
-    if (backend.futex_wait_set) |wait_set| {
-        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), 1);
-    }
+    try appendWritevPayload(backend, &peer.inbox, header, data, splat);
+    backend.wakeConnection(peer_handle, 1);
     return peer.inbox.items.len - start_len;
 }
 
@@ -1441,17 +1444,13 @@ fn simNetClose(userdata: ?*anyopaque, handles: []const SocketHandle) void {
         switch (entry.state) {
             .listener => |listener| {
                 listener.closed = true;
-                if (backend.futex_wait_set) |wait_set| {
-                    _ = wait_set.wake(backend.listenerWaitKey(handle), std.math.maxInt(usize));
-                }
+                backend.wakeListener(handle, std.math.maxInt(usize));
             },
             .connection => |connection| {
                 connection.closed = true;
-                if (backend.futex_wait_set) |wait_set| {
-                    _ = wait_set.wake(backend.connectionWaitKey(handle), std.math.maxInt(usize));
-                    if (connection.peer) |peer_handle| {
-                        _ = wait_set.wake(backend.connectionWaitKey(peer_handle), std.math.maxInt(usize));
-                    }
+                backend.wakeConnection(handle, std.math.maxInt(usize));
+                if (connection.peer) |peer_handle| {
+                    backend.wakeConnection(peer_handle, std.math.maxInt(usize));
                 }
             },
             .file => |file| file.closed = true,
