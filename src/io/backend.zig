@@ -154,6 +154,10 @@ pub const Backend = struct {
         return futex_module.waitKey(.connection, @intCast(handle));
     }
 
+    pub fn sleepWaitKey(_: *Backend) usize {
+        return futex_module.waitKey(.sleep, 0);
+    }
+
     /// Wake tasks blocked on a connection handle becoming ready, if a
     /// scheduler is attached. No-op in the bare-backend case.
     pub fn wakeConnection(self: *Backend, handle: SocketHandle, count: usize) void {
@@ -486,20 +490,31 @@ fn simClockResolution(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.Resolutio
 }
 
 fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
-    const world = worldFromUserdata(userdata);
-    const duration = switch (timeout) {
+    const backend = backendFromUserdata(userdata);
+    const world = backend.world;
+    const deadline_ns = switch (timeout) {
         .none => return,
         .duration => |duration| b: {
             if (!supportsClock(duration.clock)) return;
-            break :b duration.raw;
+            if (duration.raw.nanoseconds <= 0) return;
+            const delta = std.math.cast(u64, duration.raw.nanoseconds) orelse
+                @panic("simulated sleep duration exceeds clock range");
+            break :b std.math.add(u64, world.now(), delta) catch
+                @panic("simulated sleep deadline exceeds clock range");
         },
         .deadline => |deadline| b: {
             if (!supportsClock(deadline.clock)) return;
-            const now = world.now();
-            if (deadline.raw.nanoseconds <= now) return;
-            break :b Io.Duration.fromNanoseconds(deadline.raw.nanoseconds - now);
+            const deadline_ns = std.math.cast(u64, deadline.raw.nanoseconds) orelse return;
+            if (deadline_ns <= world.now()) return;
+            break :b deadline_ns;
         },
     };
-    if (duration.nanoseconds <= 0) return;
-    world.clock().runFor(@intCast(duration.nanoseconds));
+
+    if (backend.futex_wait_set) |wait_set| {
+        _ = wait_set.blockUntil(backend.sleepWaitKey(), deadline_ns);
+        return;
+    }
+
+    const duration_ns = world.clock().ceilDuration(deadline_ns - world.now());
+    world.runFor(duration_ns) catch @panic("failed to record simulated sleep");
 }

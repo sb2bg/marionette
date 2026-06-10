@@ -29,7 +29,6 @@ pub const default_task_stack_size = 256 * 1024;
 /// Errors returned by the experimental cooperative scheduler itself.
 pub const TaskSchedulerError = error{
     Deadlock,
-    InvalidDeadline,
     NoCurrentTask,
     TaskNotBlocked,
     TaskNotReady,
@@ -209,6 +208,13 @@ pub const TaskScheduler = struct {
     pub noinline fn blockCurrentUntil(self: *Self, key: WaitKey, deadline_ns: ?u64) WaitResult {
         const task = self.current orelse @panic("block outside a scheduled task");
         if (task.state != .running) @panic("block from a non-running task");
+        const effective_deadline_ns = if (deadline_ns) |deadline| b: {
+            const now = self.world.now();
+            if (deadline <= now) return .timed_out;
+            const duration = self.world.clock().ceilDuration(deadline - now);
+            break :b std.math.add(u64, now, duration) catch
+                @panic("scheduled deadline exceeds clock range");
+        } else null;
 
         var message: SwitchMessage = .{
             .contexts = .{
@@ -219,7 +225,7 @@ pub const TaskScheduler = struct {
             .task = task,
             .reason = .blocked,
             .key = key,
-            .deadline_ns = deadline_ns,
+            .deadline_ns = effective_deadline_ns,
         };
         const resume_message = fiber.contextSwitchMessage(SwitchMessage, &message);
         return resume_message.wait_result;
@@ -362,16 +368,16 @@ pub const TaskScheduler = struct {
     fn advanceToNextTimer(self: *Self) TaskSchedulerError!bool {
         const deadline = self.nextDeadline() orelse return false;
         const now = self.world.now();
-        if (deadline < now) return error.InvalidDeadline;
         if (deadline > now) {
-            try self.world.runFor(deadline - now);
+            try self.world.runFor(self.world.clock().ceilDuration(deadline - now));
         }
+        const wake_at = self.world.now();
 
         var due: std.ArrayList(TaskId) = .empty;
         defer due.deinit(self.allocator);
 
         for (self.tasks.items) |task| {
-            if (task.state == .blocked and task.blocked_deadline_ns != null and task.blocked_deadline_ns.? <= deadline) {
+            if (task.state == .blocked and task.blocked_deadline_ns != null and task.blocked_deadline_ns.? <= wake_at) {
                 try due.append(self.allocator, task.id);
             }
         }
@@ -380,9 +386,10 @@ pub const TaskScheduler = struct {
         for (due.items) |task_id| {
             const task = self.findTask(task_id).?;
             if (task.state != .blocked) return error.TaskNotBlocked;
+            const task_deadline = task.blocked_deadline_ns.?;
             task.clearBlock(.ready, .timed_out);
             try self.ready.append(self.allocator, task.id);
-            try self.recordTimeout(task.id, deadline);
+            try self.recordTimeout(task.id, task_deadline);
         }
 
         return due.items.len > 0;
@@ -988,7 +995,7 @@ const TimedFutexScenario = struct {
             &self.value,
             0,
             .{ .duration = .{
-                .raw = .fromNanoseconds(30),
+                .raw = .fromNanoseconds(15),
                 .clock = .awake,
             } },
         ) catch unreachable;
@@ -1031,13 +1038,13 @@ fn runTimedFutexTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     });
 
     try scheduler.runUntilIdle();
-    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expectEqual(@as(u64, 20), world.now());
     try std.testing.expect(scenario.returned);
 
     return try allocator.dupe(u8, world.traceBytes());
 }
 
-test "TaskScheduler: std.Io timed futex wait resumes at deadline" {
+test "TaskScheduler: std.Io timed futex wait rounds to clock resolution" {
     if (!fiber.supported) return error.SkipZigTest;
 
     const first = try runTimedFutexTrace(std.testing.allocator, 0xF17E);
@@ -1046,7 +1053,92 @@ test "TaskScheduler: std.Io timed futex wait resumes at deadline" {
     defer std.testing.allocator.free(second);
 
     try std.testing.expectEqualStrings(first, second);
-    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "world.run_for start_ns=0 duration_ns=20 end_ns=20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=20") != null);
+}
+
+const SleepOrderingScenario = struct {
+    io: Io,
+    timer_value: u32 = 0,
+    timer_wake_at: ?u64 = null,
+    sleep_wake_at: ?u64 = null,
+
+    fn sleeper(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        Io.sleep(self.io, .fromNanoseconds(100), .awake) catch unreachable;
+        self.sleep_wake_at = scheduler.world.now();
+    }
+
+    fn earlierTimer(scheduler: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        self.io.futexWaitTimeout(
+            u32,
+            &self.timer_value,
+            0,
+            .{ .duration = .{
+                .raw = .fromNanoseconds(50),
+                .clock = .awake,
+            } },
+        ) catch unreachable;
+        self.timer_wake_at = scheduler.world.now();
+    }
+};
+
+fn runSleepOrderingTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    defer backend.deinit();
+    backend.attachFutexWaitSet(futexWaitSet(scheduler));
+
+    const scenario = try runtime_allocator.create(SleepOrderingScenario);
+    defer runtime_allocator.destroy(scenario);
+    scenario.* = .{ .io = backend.io() };
+
+    _ = try scheduler.spawn(.{
+        .entry = SleepOrderingScenario.sleeper,
+        .arg = scenario,
+    });
+    _ = try scheduler.spawn(.{
+        .entry = SleepOrderingScenario.earlierTimer,
+        .arg = scenario,
+    });
+
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(?u64, 50), scenario.timer_wake_at);
+    try std.testing.expectEqual(@as(?u64, 100), scenario.sleep_wake_at);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "TaskScheduler: std.Io sleep parks behind an earlier deadline" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runSleepOrderingTrace(std.testing.allocator, 0x51EE);
+    defer std.testing.allocator.free(first);
+    const second = try runSleepOrderingTrace(std.testing.allocator, 0x51EE);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    const earlier_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=1 deadline_ns=50").?;
+    const sleep_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=100").?;
+    try std.testing.expect(earlier_timeout < sleep_timeout);
 }
 
 const MutexConditionScenario = struct {

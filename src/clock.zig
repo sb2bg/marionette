@@ -127,6 +127,14 @@ pub const SimClock = struct {
         }
     }
 
+    /// Round a duration up to the next representable simulation tick.
+    pub fn ceilDuration(self: *const SimClock, duration_ns: Duration) Duration {
+        const remainder = duration_ns % self.tick_ns;
+        if (remainder == 0) return duration_ns;
+        return std.math.add(Duration, duration_ns, self.tick_ns - remainder) catch
+            @panic("simulated duration exceeds clock range");
+    }
+
     fn advanceBy(self: *SimClock, duration_ns: Duration) void {
         std.debug.assert(std.math.maxInt(Timestamp) - self.now_ns >= duration_ns);
         self.now_ns += duration_ns;
@@ -141,6 +149,13 @@ test "clock: comptime selector chooses implementation" {
 test "clock: sim clock starts at configured time" {
     var clock: SimClock = .init(.{ .start_ns = 42, .tick_ns = 5 });
     try std.testing.expectEqual(@as(Timestamp, 42), clock.now());
+}
+
+test "clock: duration ceiling follows tick resolution" {
+    const clock: SimClock = .init(.{ .tick_ns = 10 });
+    try std.testing.expectEqual(@as(Duration, 0), clock.ceilDuration(0));
+    try std.testing.expectEqual(@as(Duration, 10), clock.ceilDuration(10));
+    try std.testing.expectEqual(@as(Duration, 20), clock.ceilDuration(15));
 }
 
 test "clock: sim clock advances by ticks" {

@@ -9,6 +9,7 @@ pub const WaitKeyTag = enum(usize) {
     futex = 0,
     listener = 1,
     connection = 2,
+    sleep = 3,
 };
 
 pub const FutexWaitResult = enum {

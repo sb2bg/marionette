@@ -9,18 +9,23 @@ fn testIo(world: *World) Backend {
     return .init(std.testing.allocator, world, disk_module.Disk.unavailable(), 4096);
 }
 
-test "io: simulation clock and sleep use world time" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 5 });
+test "io: simulation sleep rounds to clock resolution and records time movement" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
     var backend = testIo(&world);
     defer backend.deinit();
     const io = backend.io();
     try std.testing.expectEqual(@as(i96, 0), Io.Clock.awake.now(io).nanoseconds);
-    try std.testing.expectEqual(@as(i96, 5), (try Io.Clock.awake.resolution(io)).nanoseconds);
+    try std.testing.expectEqual(@as(i96, 10), (try Io.Clock.awake.resolution(io)).nanoseconds);
 
-    try Io.sleep(io, .fromNanoseconds(10), .awake);
-    try std.testing.expectEqual(@as(i96, 10), Io.Clock.awake.now(io).nanoseconds);
+    try Io.sleep(io, .fromNanoseconds(15), .awake);
+    try std.testing.expectEqual(@as(i96, 20), Io.Clock.awake.now(io).nanoseconds);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "world.run_for start_ns=0 duration_ns=20 end_ns=20",
+    ) != null);
 }
 
 test "io: simulation random is deterministic" {
