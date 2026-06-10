@@ -55,19 +55,22 @@ The simulation backend supports deterministic clock, sleep, random, and
 `Group.async` for functions that complete immediately, inert cancellation checks,
 `Io.Queue` operations that can complete without parking, and a small in-memory
 TCP stream subset for `std.Io.net` listen/connect/accept/read/write/close.
-When the backend is attached to a scheduler wait set, empty accepts park the
-current fiber until a connection is queued and open-peer empty reads park until
-bytes arrive or the peer closes. Without a scheduler wait set, empty accepts
-return `error.WouldBlock`; empty stream reads return `error.Timeout` while the
-peer remains open because Zig 0.16's stream reader error set has no
-`WouldBlock` variant. This TCP subset is still intentionally narrow, but socket
-bytes can route through the shared `NetworkControl` byte runtime when
-simulation network control is attached. Latency and send-time loss use that
-shared fault core directly. If a queued stream frame reaches its delivery time
-while its directed link is partitioned, the frame is dropped and the affected
-empty read observes `error.Timeout`; after `heal()`, a retry on the same
-connection can flow normally. Clogs also share the packet runtime, but richer
-connection-reset and node-down behavior remains intentionally narrow.
+When the backend is attached to a scheduler wait set, `Io.sleep` parks the
+current fiber until its deadline, empty accepts park until a connection is
+queued, and open-peer empty reads park until bytes arrive or the peer closes.
+Sleep and timed-wait deadlines round up to the simulation clock resolution.
+Without a scheduler wait set, sleep advances through `World.runFor` and records
+the time movement; empty accepts return `error.WouldBlock`, and empty stream
+reads return `error.Timeout` while the peer remains open because Zig 0.16's
+stream reader error set has no `WouldBlock` variant. This TCP subset is still
+intentionally narrow, but socket bytes can route through the shared
+`NetworkControl` byte runtime when simulation network control is attached.
+Latency and send-time loss use that shared fault core directly. If a queued
+stream frame reaches its delivery time while its directed link is partitioned,
+the frame is dropped and the affected empty read observes `error.Timeout`;
+after `heal()`, a retry on the same connection can flow normally. Clogs also
+share the packet runtime, but richer connection-reset and node-down behavior
+remains intentionally narrow.
 
 The stream adapter preserves byte order within each connection. It does not
 inject byte-stream reordering because the modeled transport is TCP; message
@@ -314,6 +317,8 @@ The experimental deterministic `std.Io` foundation is implemented:
 - `Env.io()` supplies deterministic clock, random, file, futex, and narrow
   stream-network behavior in simulation.
 - A local `std.Io.fiber` seam supports the seeded cooperative scheduler.
+- Scheduler-backed `Io.sleep` parks tasks, preserves earlier deadlines, and
+  quantizes arbitrary durations to the simulation clock resolution.
 - Futex wait/wake and timed waits are validated with the pinned
   `g41797/mailbox` target and the internal bounded-queue oracle.
 - Scheduler-backed `std.Io.net` accept/read suspension routes stream bytes
@@ -323,9 +328,9 @@ The experimental deterministic `std.Io` foundation is implemented:
 - TCP byte order is preserved within each stream; message reordering remains
   an `Endpoint(Message)`-altitude fault.
 
-Remaining deterministic `std.Io` work includes broader sleep and queue
-suspension, async/cancel integration, richer stream reset/node-down behavior,
-and continued validation against real `std.Io`-native libraries.
+Remaining deterministic `std.Io` work includes queue suspension, async/cancel
+integration, richer stream reset/node-down behavior, and continued validation
+against real `std.Io`-native libraries.
 
 The next maturity phase is production readiness and ecosystem leverage:
 

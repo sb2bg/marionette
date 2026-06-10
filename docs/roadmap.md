@@ -64,8 +64,9 @@ The current disk surface is:
   returns `{ env: Env, control: Control }`.
 - `Env.io()`: returns the host `std.Io` in production envs and Marionette's
   current deterministic `std.Io` backend in simulation envs. The simulation
-  backend supports clock/sleep/random, synchronous `async`, and immediate
-  `Io.Queue` operations today, plus an in-memory TCP stream subset for
+  backend supports clock/random, scheduler-backed and trace-visible sleep,
+  synchronous `async`, and immediate `Io.Queue` operations today, plus an
+  in-memory TCP stream subset for
   `std.Io.net` and a flat `std.Io.File` subset over `SimDisk`, including
   delete and rename. It fails closed for full directory/filesystem behavior,
   process operations, datagrams, DNS, and real external network access not yet
