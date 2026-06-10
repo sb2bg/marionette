@@ -92,7 +92,7 @@ production adapters such as `mar.RealDisk`.
 
 ## `World`
 
-`mar.World` owns Phase 0 simulation engine state:
+`mar.World` owns deterministic simulation engine state:
 
 - One `SimClock`.
 - One seeded `Random`.

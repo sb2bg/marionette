@@ -125,14 +125,14 @@ The topology is fixed when simulation is created:
 
 All node-shaped APIs reject ids outside `0..nodes`.
 That gives the simulator a known universe for partitions, per-link queues,
-node state, and future liveness cores. It also makes invalid topology use
+node state, and future liveness checks. It also makes invalid topology use
 return `InvalidNode` instead of silently creating new processes by accident.
 
 Each directed path owns its own queue and enabled/disabled state. The packet
 core scans path queue heads and picks the ready packet with the lowest
 `(deliver_at, packet_id)` for the receiving endpoint. The scan is acceptable
-for Phase 0 capacities; a later scheduler can add an index over active paths
-without changing the per-link model needed for clogging and path-local
+for current topology sizes; a future optimization can add an index over active
+paths without changing the per-link model needed for clogging and path-local
 capacity.
 
 ## Node State
@@ -261,7 +261,7 @@ map iteration order, and wall-clock time must never decide delivery order.
 ## Time
 
 Network latency is measured in nanoseconds, but it must align with the
-world's tick size. Phase 0 simulated time advances in whole ticks, so
+world's tick size. Explicit network-control time advances in whole ticks, so
 `UnstableNetwork` rejects `min_latency_ns` and `latency_jitter_ns` values that
 are not whole multiples of the world's tick.
 

@@ -71,8 +71,8 @@ pub const ProductionClock = struct {
 /// Deterministic clock for simulation tests.
 ///
 /// Time starts at `Options.start_ns` and only advances when the caller
-/// invokes `tick()`, `runFor()`, or `sleep()`. Phase 0 has no scheduler,
-/// so simulated sleep is an immediate time advance rather than a yield.
+/// invokes `tick()`, `runFor()`, or `sleep()`. This low-level clock does not
+/// suspend tasks; scheduler-backed `std.Io` waits park through the scheduler.
 pub const SimClock = struct {
     /// Current simulated timestamp in nanoseconds.
     now_ns: Timestamp,
@@ -108,9 +108,9 @@ pub const SimClock = struct {
 
     /// Advance simulated time by `duration_ns`.
     ///
-    /// Phase 0 has no scheduler, so sleeping simply moves simulated time
-    /// forward. Requiring whole ticks keeps all time movement observable
-    /// through the same tick semantics.
+    /// Sleeping directly on `SimClock` moves simulated time forward.
+    /// Requiring whole ticks keeps all time movement observable through the
+    /// same tick semantics.
     pub fn sleep(self: *SimClock, duration_ns: Duration) void {
         self.runFor(duration_ns);
     }

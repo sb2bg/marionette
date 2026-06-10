@@ -67,7 +67,8 @@ into application code. The same `Endpoint(Message)` type is
 satisfied by two impls: a simulation impl backed by the deterministic
 packet bus, and a production impl backed by sockets. Production transport
 work goes behind the existing endpoint vtable in
-`src/network.zig`. No type signatures change in user-facing code.
+`src/network/endpoint.zig`, with the runtime in
+`src/network/production.zig`. No type signatures change in user-facing code.
 
 **Implementer-internal seam (deferred, not foreclosed).** Whether the
 production-side bus implementation is itself parametric on an internal IO

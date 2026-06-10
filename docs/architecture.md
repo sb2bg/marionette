@@ -22,7 +22,7 @@ simulator. A nondeterminism leak is a correctness bug, not a flaky test.
 
 ## Current State
 
-Phase 0 has:
+Marionette currently has:
 
 - `World`, which owns one simulated clock, one seeded PRNG, and one trace log
   as harness-owned simulation engine state.
@@ -40,17 +40,26 @@ Phase 0 has:
   types. `runAttribute` is the preferred direct constructor; `runAttributesFrom`
   remains available for scalar-only config structs whose field names are stable
   exported metadata keys.
-- `mar.Check`, a named post-scenario check hook for Phase 0 invariants.
+- `mar.Check`, a named post-scenario check hook.
 - `mar.runCase` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.
 - `mar.UnstableEventQueue`, a fixed-capacity deterministic event queue sketch for
   stable `(ready_at, event_id)`-style ordering.
+- A seeded cooperative task scheduler with stable task ids, replay-visible
+  selection, blocked wait sets, timed waits, deterministic wake ordering, and
+  deadlock detection.
+- A scheduler-backed `std.Io` futex path used by cooperative
+  `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
+  target.
 - `mar.UnstableNetwork`, a fixed-topology deterministic network sketch with
   per-link queues, seeded packet loss, tick-aligned latency, process up/down
   state, directed link filters, simple partitions, and stable
   `(deliver_at, packet_id)` delivery order.
 - `mar.Endpoint(Message)`, an app-facing typed process endpoint returned by
   simulation and production setup.
+- A narrow scheduler-backed `std.Io.net` TCP-stream subset whose empty
+  `accept` and `read` operations suspend, and whose bytes can traverse the
+  shared network latency, loss, clog, and partition model.
 - `mar.Disk`, a lower-level disk capability for sector-oriented
   `read`/`write`/`sync` plus path-level metadata and lifecycle operations.
 - `mar.SimDisk`, a deterministic disk simulator with logical paths,
@@ -65,13 +74,56 @@ Phase 0 has:
 - An AST-based tidy linter for obvious nondeterministic calls, including
   simple const aliases such as `const time = std.time;`.
 
-Phase 0 does not yet have:
+Marionette does not yet have:
 
-- A scheduler.
 - Event-by-event invariant checking.
-- Liveness checking.
 - Seed shrinking.
 - Syscall interception.
+- General async/cancel integration.
+- Preemptive OS-thread or memory-model exploration.
+
+## Source Layout
+
+The top-level `src/` directory contains project-wide composition and runtime
+modules. Subsystem implementation ownership is isolated under three directory
+roots:
+
+```text
+src/
+  disk/
+    root.zig
+    control.zig
+    model.zig
+    sim.zig
+    real.zig
+    tests.zig
+  io/
+    root.zig
+    backend.zig
+    file.zig
+    net.zig
+    futex.zig
+    errors.zig
+    tests.zig
+  network/
+    root.zig
+    control.zig
+    endpoint.zig
+    byte_transport.zig
+    codec_transport.zig
+    sim.zig
+    production.zig
+    packet_core.zig
+    frame.zig
+    io.zig
+    transport.zig
+    types.zig
+    tests.zig
+```
+
+Each subsystem `root.zig` is an internal aggregation boundary. The package's
+only public entry point remains `src/root.zig`; application code imports the
+`marionette` module rather than source files by path.
 
 ## IO Strategy
 
@@ -84,12 +136,12 @@ simulated random hooks or clock access.
 Marionette should not auto-detect the environment from globals, environment
 variables, thread-locals, or build flags.
 
-For Phase 0, Marionette still owns small interfaces for time and randomness
+Marionette still owns small interfaces for time and randomness
 because they are needed now and they are not fully solved by `std.Io`. For disk
 files, the public teaching surface is now `std.Io`: `Env.io()` supplies a
 deterministic backend in simulation and the host backend in production. For
-networking, app code receives typed `Endpoint(Message)` handles while the
-`std.Io.net` subset continues to mature. See
+networking, app code can receive typed `Endpoint(Message)` handles or use the
+narrow scheduler-backed `std.Io.net` stream subset. See
 [std.Io Direction](std-io-direction.md) for the destination architecture. The
 migration plan is:
 
@@ -105,7 +157,7 @@ make every user rewrite their simulation tests.
 
 ## Time Model
 
-Phase 0 time is an integer nanosecond virtual clock. There is exactly one
+Simulation time is an integer nanosecond virtual clock. There is exactly one
 clock authority per `World`, and simulated code should receive that authority
 instead of calling `std.time`.
 
@@ -114,13 +166,11 @@ Current behavior:
 - `now()` reads the world's current simulated timestamp.
 - `tick()` advances by the world's configured tick duration.
 - `runFor(duration)` advances by whole ticks.
-- `sleep(duration)` on `SimClock` is currently an immediate deterministic
-  advance because there is no scheduler yet.
+- Scheduler timers, timed futex waits, and delayed network delivery advance
+  time only when no task is runnable, jumping to the next deterministic event.
 
-Future scheduler behavior must preserve the same authority: sleeps,
-deadlines, timers, retries, network latency, and disk latency all route
-through the world's clock. A scheduler may advance time to the next event, but
-it must not introduce a second clock.
+Sleeps, deadlines, timers, retries, network latency, and disk latency all route
+through the world's clock. No subsystem may introduce a second clock.
 
 ## Randomness Model
 
@@ -217,9 +267,10 @@ command once the command-line surface exists.
 
 ## Exploration Strategy
 
-Marionette will not claim to solve state-space exploration. Phase 0 and early
-Phase 1 use uniform seeded random exploration. That is good enough to prove the
-replay contract, not good enough to claim deep distributed-systems coverage.
+Marionette will not claim to solve state-space exploration. Current scheduling
+and fault choices use seeded random exploration. That is enough to enforce the
+replay contract and find useful counterexamples, not enough to claim exhaustive
+distributed-systems coverage.
 
 Planned strategy layers:
 
@@ -233,10 +284,10 @@ Branch coverage alone is a weak signal for distributed simulation quality.
 
 ## Event Ordering
 
-`World` event indexes are global and deterministic. In Phase 0, events are
-emitted directly by the single-threaded scenario. In the future multi-node
-scheduler, the simulator must pick one runnable event at a time from a stable
-ordering, likely `(simulated_time, priority, deterministic_tiebreaker)`.
+`World` event indexes are global and deterministic. Scenario events and
+scheduler choices are emitted from one single-threaded simulation authority.
+The cooperative scheduler selects from a stable task-id-ordered runnable set
+using the world's seeded randomness and records each selection.
 
 The tiebreaker must not depend on pointer addresses, hash map iteration, or OS
 scheduling. A scheduler that cannot explain its next-event choice in the trace
@@ -282,15 +333,15 @@ Planned API direction:
 - Allow expensive invariants every N events and on quiescence.
 - Include invariant name and event index in failure reports.
 
-Current Phase 0 support is deliberately smaller: `RunOptions.checks` accepts
+Current support is deliberately smaller: `RunOptions.checks` accepts
 named `mar.Check` functions that run after the scenario body, and `mar.runCase`
 accepts named `mar.StateCheck(State)` functions that inspect structured
 scenario state. This proves the failure-report shape, but it is not enough for
 serious multi-event DST yet.
 
-Liveness is harder. Marionette should eventually detect stuck systems, unmet
-deadlines, and lack of progress under fair scheduling assumptions. This is not
-in v0.1, but it is a real requirement for a serious multi-node simulator.
+Liveness is harder. The scheduler detects the concrete case where unfinished
+tasks are blocked with no runnable task or pending timer. Broader progress and
+fairness properties still require explicit scenario checks.
 
 ## Testing Marionette
 
@@ -305,21 +356,22 @@ Required test classes:
 - Debug and ReleaseSafe builds both pass.
 - CI should run twice-and-compare on every example.
 
-## Showcase Example
+## Validation Targets
 
-The first showcase is `examples/replicated_register.zig`, a tiny
-VOPR-inspired cluster model with deterministic message drops, latency,
-delivery ordering, same-version conflict rejection, and stateful committed
-state checkers. It is useful because it makes the future scheduler, network,
-and checker APIs concrete, but it is not a proof that Marionette can test real
-distributed systems.
+Marionette keeps several kinds of evidence deliberately separate:
 
-The stronger proof example should be a small replicated protocol, not only the
-current register showcase. A 500-line Raft, VSR, or primary-backup KV store
-that Marionette can break and replay would prove the library much better than
-toy examples.
+- `xitdb` and the maintained `kvdb` validation exercise real storage code
+  through the deterministic `std.Io.File` subset and model oracles.
+- The pinned `g41797/mailbox` validation exercises unmodified cooperative
+  `Mutex` / `Condition` code through scheduler-backed futex waits.
+- `examples/std_io_net_kv.zig` exercises production-shaped client/server code
+  through the deterministic `std.Io.net` subset, including latency, loss,
+  partitions, timeout, healing, and retry.
+- Internal examples such as the bounded queue and replicated register are
+  capability demonstrations and regression targets, not external findings.
 
-Until that exists, Marionette is promising infrastructure, not proven DST.
+See [Findings](../FOUND_BUGS.md) for the classification rules and current
+results.
 
 ## Non-Goals
 

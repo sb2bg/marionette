@@ -337,7 +337,8 @@ advances simulated time through the simulation wrapper.
 
 **Files likely to change:**
 
-- `src/network.zig`.
+- `src/network/sim.zig`.
+- `src/network/tests.zig`.
 
 **Size:** ~30 lines.
 
@@ -389,10 +390,11 @@ and the first disk-backed recovery example is now in place.
 
 **Files likely to change:**
 
-- `src/network.zig` (rolls inside `evolveFaults`, new runtime fault options).
+- `src/network/sim.zig` (rolls inside `evolveTickFaults`).
+- `src/network/types.zig` and `src/network/control.zig` (runtime fault options and control surface).
 - `examples/replicated_register.zig` (new swarm scenario).
 - `docs/network.md`.
-- New test cases in `src/network.zig` and a fuzz test variant.
+- New test cases in `src/network/tests.zig` and a fuzz test variant.
 
 **Size:** ~400 lines including docs and tests.
 

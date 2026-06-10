@@ -8,7 +8,7 @@ const World = world_module.World;
 
 /// Named scenario check run by `mar.run`.
 ///
-/// Checks are the Phase 0 invariant hook. They should return an error when a
+/// Checks are the post-scenario invariant hook. They should return an error when a
 /// property is violated so the runner can preserve the partial trace.
 pub const Check = struct {
     /// Stable name included in failure reports.

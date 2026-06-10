@@ -144,7 +144,7 @@ addresses, unordered dumps, or machine-local paths in run metadata.
 
 ## Checks
 
-Checks are the Phase 0 invariant hook. A world check is a named function that
+Checks are the post-scenario invariant hook. A world check is a named function that
 runs after the scenario body and returns an error when a property is violated:
 
 ```zig

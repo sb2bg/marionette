@@ -40,10 +40,9 @@ queue.complete job=7 worker=2 accepted=true reason=current_lease completions=2
 queue.invariant_violation job=7 completions=2
 ```
 
-This example does not require disk or a real scheduler. It shows the smaller
-Phase 0 loop Marionette is proving first: seeded choices, simulated time,
-trace-visible behavior, and a named checker that preserves the failure
-context.
+This example does not require disk or cooperative tasks. It shows the smaller
+simulation loop directly: seeded choices, simulated time, trace-visible
+behavior, and a named checker that preserves the failure context.
 
 ## KV Store
 
@@ -182,9 +181,8 @@ defer allocator.free(trace);
 There is also a same-version conflict scenario used by tests to prove the
 register rejects conflicting values instead of overwriting accepted state.
 
-This is intentionally tiny. Its job is to make the future scheduler, network,
-and invariant APIs concrete enough to critique before they become core library
-surface.
+This is intentionally tiny. Its job is to keep the endpoint network and
+invariant APIs concrete and regression-tested.
 
 ## std.Io.net KV
 

@@ -14,7 +14,7 @@ interfaces:
 - Randomness through an environment, seeded `Random`, or `World`.
 - Disk through Marionette's `Disk` capability.
 - Network through Marionette `Endpoint` handles.
-- Scheduling through the future scheduler.
+- Cooperative scheduling through Marionette's task scheduler.
 
 Do not call host sources directly from simulated code.
 
@@ -31,7 +31,7 @@ These are banned in simulated code:
 - Pointer identity as a source of ordering or hashing.
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.
 
-Phase 0 ships an AST-based `tidy` linter for the obvious direct-call cases.
+Marionette ships an AST-based `tidy` linter for the obvious direct-call cases.
 It ignores comments and string literals, and it catches simple const aliases
 such as `const time = std.time;`. It does not yet perform full semantic import
 resolution.

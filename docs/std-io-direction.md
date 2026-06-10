@@ -307,47 +307,27 @@ be opt-in, visible in the trace, and documented as breaking deterministic replay
 This is useful for smoke tests and integration suites, but those runs are not
 DST runs in the strict sense.
 
-## Phases
+## Implementation Status
 
-Phase 0 is the current bridge:
+The experimental deterministic `std.Io` foundation is implemented:
 
-- expose `Env.io()` with deterministic clock/random support in simulation;
-- keep building explicit-control primitives;
-- document the deterministic `std.Io` destination;
-- add small non-coroutine pieces where they help users migrate to `io`-shaped
-  code.
+- `Env.io()` supplies deterministic clock, random, file, futex, and narrow
+  stream-network behavior in simulation.
+- A local `std.Io.fiber` seam supports the seeded cooperative scheduler.
+- Futex wait/wake and timed waits are validated with the pinned
+  `g41797/mailbox` target and the internal bounded-queue oracle.
+- Scheduler-backed `std.Io.net` accept/read suspension routes stream bytes
+  through the shared network loss, latency, clog, and partition runtime.
+- The fixed-frame KV validation covers replay, timeout, heal/retry,
+  idempotency, and graceful-close delivery.
+- TCP byte order is preserved within each stream; message reordering remains
+  an `Endpoint(Message)`-altitude fault.
 
-Phase 1 is experimental deterministic `std.Io`:
+Remaining deterministic `std.Io` work includes broader sleep and queue
+suspension, async/cancel integration, richer stream reset/node-down behavior,
+and continued validation against real `std.Io`-native libraries.
 
-- done: prove bare `std.Io.fiber` context switching through a local seam;
-- done: implement the deterministic scheduler for small opt-in simulations;
-- done: add deterministic futex wait/wake sets;
-- done: add deterministic timed futex waits, validated with the pinned lazy
-  `g41797/mailbox` target via `zig build validate-mailbox`;
-- done: add `zig build validate-bounded-queue`, an internal FIFO oracle and
-  planted lost-wakeup/deadlock demonstration for cooperative
-  `Mutex` / `Condition` code;
-- add deterministic sleep/deadline handling outside futex waits;
-- done: add scheduler-backed `std.Io.net` stream suspension for accept/read
-  when a scheduler wait set is attached, while keeping it as a sibling surface
-  to `Endpoint(Message)`;
-- done: route the narrow `std.Io.net` stream byte path through the shared
-  network loss/latency delivery core when simulation network control is
-  attached;
-- done: map delivery-time manual partition drops to `error.Timeout`, preserve
-  the connection across `heal()`, and verify deterministic retry;
-- done: validate an external-style fixed-frame KV client/server with
-  happy-path replay, partition/timeout/heal retry, an exact idempotency oracle,
-  and a planted duplicate-apply failure;
-- done: drain queued delayed stream bytes before EOF after graceful peer close;
-- decided: preserve TCP byte order within each stream; message reordering stays
-  on `Endpoint(Message)` rather than becoming an unphysical socket fault;
-- route sleep, queue, file, and network I/O through `World`;
-- expand simulation `Env.io()` from the Phase 0 backend into a suspending
-  deterministic `std.Io`;
-- document memory and platform caveats clearly.
-
-Phase 2 is production readiness and ecosystem leverage:
+The next maturity phase is production readiness and ecosystem leverage:
 
 - shrink or eliminate the fiber-stack caveats as Zig's coroutine work matures;
 - standard and third-party libraries accept `std.Io`;
@@ -357,7 +337,7 @@ Phase 2 is production readiness and ecosystem leverage:
 
 ## Guarantees
 
-The future deterministic `std.Io` must provide:
+The deterministic `std.Io` backend must preserve:
 
 - byte-for-byte replay for a seed and program;
 - seed-determined scheduling ties;
@@ -370,13 +350,9 @@ outside the simulator.
 
 ## Open Questions
 
-- How much of the `std.Io` vtable should the Phase 0 backend support before
-  fiber scheduling begins?
-- Should Marionette introduce `mar.Recorder` before or after the deterministic
-  `std.Io` implementation?
 - What exact API registers external network mocks, and how much should it model
   before users ask for more?
 - Should `Endpoint(Message)` be renamed or documented as `MessageBus(Message)`
   before public users depend on it?
-- How much of `std.Io` should Phase 1 implement before the project claims
-  "deterministic std.Io" publicly?
+- Which additional `std.Io` operations should be implemented only when a real
+  validation target requires them?
