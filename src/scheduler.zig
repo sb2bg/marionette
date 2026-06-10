@@ -2,10 +2,10 @@
 
 const std = @import("std");
 
-const disk_module = @import("disk.zig");
+const disk_module = @import("disk/root.zig");
 const fiber = @import("fiber.zig");
-const io_module = @import("io.zig");
-const network_module = @import("network.zig");
+const io_module = @import("io/root.zig");
+const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
 
 const Io = std.Io;

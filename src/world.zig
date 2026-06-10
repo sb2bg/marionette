@@ -1,16 +1,15 @@
 //! Deterministic simulation engine state.
 //!
-//! A `World` owns the Phase 0 simulation state: one fake clock, one
-//! seeded PRNG, and a trace log. Later phases will add schedulers, disk,
-//! and network here.
+//! A `World` owns one fake clock, one seeded PRNG, one trace log, and the
+//! registered disk, network, I/O, and scheduler resources for a simulation.
 
 const std = @import("std");
 
 const clock_module = @import("clock.zig");
-const disk_module = @import("disk.zig");
+const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
-const io_module = @import("io.zig");
-const network_module = @import("network.zig");
+const io_module = @import("io/root.zig");
+const network_module = @import("network/root.zig");
 const random_module = @import("random.zig");
 
 /// Errors returned while writing deterministic trace records.

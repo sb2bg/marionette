@@ -3,13 +3,14 @@
 //! Public API entry point.
 
 const clock_module = @import("clock.zig");
-const disk_module = @import("disk.zig");
+const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
 const fiber_module = @import("fiber.zig");
-const io_module = @import("io.zig");
+const io_module = @import("io/root.zig");
 const codec_module = @import("codec.zig");
 const message_pool_module = @import("message_pool.zig");
 const network_frame_module = @import("network/frame.zig");
+const network_module = @import("network/root.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
 const trace_summary_module = @import("trace_summary.zig");
@@ -37,13 +38,13 @@ pub const SimClock = clock_module.SimClock;
 pub const Timestamp = clock_module.Timestamp;
 
 /// Stable simulated node/process identifier.
-pub const NodeId = @import("network.zig").NodeId;
+pub const NodeId = network_module.NodeId;
 
 /// Errors returned by unstable network runtime validation.
-pub const UnstableNetworkError = @import("network.zig").NetworkError;
+pub const UnstableNetworkError = network_module.NetworkError;
 
 /// Errors returned by deterministic network runtime validation.
-pub const NetworkError = @import("network.zig").NetworkError;
+pub const NetworkError = network_module.NetworkError;
 
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
@@ -117,12 +118,12 @@ pub const BuggifyError = env_module.BuggifyError;
 /// Seeded deterministic random number generator.
 pub const Random = @import("random.zig").Random;
 
-/// Deterministic simulation state for Phase 0 tests.
+/// Deterministic simulation engine state.
 pub const World = @import("world.zig").World;
 
 /// Unstable fixed-capacity deterministic event queue for examples.
 ///
-/// This is a Phase 0 scheduler sketch, not a stable public scheduler API.
+/// This is a low-level event queue, not the cooperative task scheduler.
 pub const UnstableEventQueue = @import("scheduler.zig").EventQueue;
 
 /// Errors returned by unstable fixed-capacity event queues.
@@ -135,55 +136,55 @@ pub const UnstableTaskScheduler = @import("scheduler.zig").TaskScheduler;
 pub const unstableTaskSchedulerFutexWaitSet = @import("scheduler.zig").futexWaitSet;
 
 /// Unstable deterministic network primitive for examples and early scheduler work.
-pub const UnstableNetwork = @import("network.zig").UnstableNetwork;
+pub const UnstableNetwork = network_module.UnstableNetwork;
 
 /// Fixed topology and per-path capacity for one unstable network instance.
-pub const UnstableNetworkOptions = @import("network.zig").NetworkOptions;
+pub const UnstableNetworkOptions = network_module.NetworkOptions;
 
 /// Fixed topology and per-path capacity for one network simulation.
-pub const NetworkOptions = @import("network.zig").NetworkOptions;
+pub const NetworkOptions = network_module.NetworkOptions;
 
 /// Runtime network loss configuration.
-pub const NetworkLossOptions = @import("network.zig").NetworkLossOptions;
+pub const NetworkLossOptions = network_module.NetworkLossOptions;
 
 /// Runtime network latency configuration.
-pub const NetworkLatencyOptions = @import("network.zig").NetworkLatencyOptions;
+pub const NetworkLatencyOptions = network_module.NetworkLatencyOptions;
 
 /// Runtime network path-clog configuration.
-pub const NetworkClogOptions = @import("network.zig").NetworkClogOptions;
+pub const NetworkClogOptions = network_module.NetworkClogOptions;
 
 /// Runtime automatic partition and heal dynamics.
-pub const NetworkPartitionDynamicsOptions = @import("network.zig").NetworkPartitionDynamicsOptions;
+pub const NetworkPartitionDynamicsOptions = network_module.NetworkPartitionDynamicsOptions;
 
 /// Runtime topology for a composition-root network simulation.
-pub const SimNetworkOptions = @import("network.zig").SimNetworkOptions;
+pub const SimNetworkOptions = network_module.SimNetworkOptions;
 
 /// One peer in a production network topology.
-pub const ProductionPeer = @import("network.zig").ProductionPeer;
+pub const ProductionPeer = network_module.ProductionPeer;
 
 /// Production endpoint construction options.
-pub const ProductionEndpointOptions = @import("network.zig").ProductionEndpointOptions;
+pub const ProductionEndpointOptions = network_module.ProductionEndpointOptions;
 
 /// Bulk helper options for same-process production parity tests.
-pub const ProductionEndpointsOptions = @import("network.zig").ProductionEndpointsOptions;
+pub const ProductionEndpointsOptions = network_module.ProductionEndpointsOptions;
 
 /// Errors returned while constructing production endpoints.
-pub const ProductionNetworkError = @import("network.zig").ProductionNetworkError;
+pub const ProductionNetworkError = network_module.ProductionNetworkError;
 
 /// Errors returned while constructing production byte endpoints.
-pub const ProductionByteEndpointError = @import("network.zig").ProductionByteEndpointError;
+pub const ProductionByteEndpointError = network_module.ProductionByteEndpointError;
 
 /// Typed app-facing process endpoint.
-pub const Endpoint = @import("network.zig").Endpoint;
+pub const Endpoint = network_module.Endpoint;
 
 /// App-facing byte endpoint with explicit message ownership.
-pub const ByteEndpoint = @import("network.zig").ByteEndpoint;
+pub const ByteEndpoint = network_module.ByteEndpoint;
 
 /// Small facade for protocol adapters built on byte endpoints.
-pub const ByteTransport = @import("network.zig").ByteTransport;
+pub const ByteTransport = network_module.ByteTransport;
 
 /// Typed facade for protocol codecs built on byte transports.
-pub const CodecTransport = @import("network.zig").CodecTransport;
+pub const CodecTransport = network_module.CodecTransport;
 
 /// Built-in codecs for `CodecTransport`.
 pub const codec = codec_module;
@@ -192,10 +193,10 @@ pub const codec = codec_module;
 pub const CodecRecvLifetime = codec_module.RecvLifetime;
 
 /// Default byte endpoint pool sizing.
-pub const default_byte_pool_options = @import("network.zig").default_byte_pool_options;
+pub const default_byte_pool_options = network_module.default_byte_pool_options;
 
 /// Simulator-control network capability.
-pub const NetworkControl = @import("network.zig").AnyNetworkControl;
+pub const NetworkControl = network_module.AnyNetworkControl;
 
 /// Production network frame encoding helpers.
 pub const NetworkFrame = network_frame_module;
@@ -285,10 +286,10 @@ pub const TraceSummaryError = trace_summary_module.TraceSummaryError;
 pub const summarize = trace_summary_module.summarize;
 
 test {
-    _ = @import("disk.zig");
+    _ = @import("disk/root.zig");
     _ = @import("env.zig");
     _ = @import("message_pool.zig");
-    _ = @import("network.zig");
+    _ = @import("network/root.zig");
     _ = @import("network/frame.zig");
     _ = @import("network/io.zig");
     _ = @import("network/transport.zig");
