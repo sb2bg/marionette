@@ -4,16 +4,17 @@ Status: Phase 1 build log. A debugging story.
 
 Marionette's whole pitch is that one seed produces one execution, forever.
 This week I found a bug class that the entire architecture is blind to: the
-compiler miscompiling the simulator itself. Both runs of the
-twice-and-compare loop execute the same wrong binary, the traces match
-byte for byte, and the determinism checker smiles while the scheduler
-spins forever.
+compiler toolchain generating wrong code for the simulator itself. Both runs
+of the twice-and-compare loop execute the same binary, so deterministic wrong
+behavior is outside that backstop. In this case the scheduler spun forever
+before the comparison could even complete.
 
 This is the story of finding it, being wrong about it twice, and proving
 the real cause with a six-line reproducer. The bug is not in Marionette.
-It is in the inline assembly constraints of Zig's fiber context switch,
-and at the time of writing it is still present on Zig master, where it
-sits under the event loops that power `std.Io`'s green threads.
+One defect is in the inline assembly constraints of Zig's standard-library
+fiber context switch; another is the optimizer-visible returns-twice shape
+of that switch. At the time of writing, both remain present in the
+canonical Zig master branch on Codeberg.
 
 ## It started as "the tests are slow"
 
@@ -21,6 +22,9 @@ I was finishing a round of fixes and kicked off the usual verification
 sweep: Debug tests, ReleaseSafe tests, validation suites. The ReleaseSafe
 job didn't come back. When I looked, two test binaries had been burning
 100% CPU for forty minutes on a suite that takes seconds.
+
+The investigation below used Zig 0.16.0 on AArch64 macOS. The failing
+full-suite command was `zig build test -Doptimize=ReleaseSafe`.
 
 A `sample` of the stuck process showed it spinning inside the
 deterministic scheduler's `runUntilIdle`, in the very first scheduler
@@ -32,7 +36,7 @@ Debug mode passed. ReleaseSafe hung. Every time.
 The test passed in isolation and hung in the full suite, so I assumed
 some earlier test was corrupting state. That theory fell apart on a
 detail worth remembering: `--test-filter` in Zig changes what gets
-*compiled*, not just what runs. The isolated binary and the full binary
+_compiled_, not just what runs. The isolated binary and the full binary
 are different programs. The hang wasn't order-dependent. It was
 **binary-dependent**: a given compilation either always hung or never
 did, deterministically.
@@ -79,7 +83,13 @@ code bytes dereferenced as a pointer.
 I'm including the failed theories on purpose. Both were plausible, both
 were falsifiable, and falsifying them is what kept the investigation
 honest. The `nzcv` asymmetry is still a real latent hazard worth fixing
-upstream. It just wasn't *this* bug.
+upstream. It just wasn't _this_ bug.
+
+zio avoids the exact constraint failure eventually found below because it
+has no register output competing with its fixed register inputs and
+clobbers. It does, however, still inline a switch that resumes through a
+local assembly label. That makes it a useful reference, not proof that the
+broader returns-twice optimizer hazard is absent.
 
 ## The break: a function small enough to read
 
@@ -108,11 +118,13 @@ Why? Look at the constraints on `std.Io.fiber.contextSwitch`:
 ```
 
 The message register is declared as the input, the output, **and a
-clobber**. Declaring an input or output register as a clobber is
-ill-formed inline assembly. LLVM doesn't reject it; under register
-pressure it silently resolves the conflict by dropping the copy of the
-input into the clobbered register. The switch then dereferences whatever
-the caller happened to leave in `x1`.
+clobber**. Giving the same fixed register all three roles creates a
+conflicting constraint set. The generated code does not reject the
+conflict; under register pressure it drops the copy of the input into the
+message register. The switch then dereferences whatever the caller happened
+to leave in `x1`. Whether the missing diagnostic or bad lowering belongs to
+Zig's frontend or the LLVM backend is an upstream triage question; the
+defective constraint set is in Zig's standard library.
 
 Everything snapped into focus:
 
@@ -151,8 +163,8 @@ pub fn main() !void {
 }
 ```
 
-No fibers, no scheduler, no Marionette. Input register in the clobber
-list, copy silently dropped.
+No fibers, no scheduler, no Marionette. The same register is input, output,
+and clobber; the required input copy disappears.
 
 ## The second bug underneath
 
@@ -167,14 +179,14 @@ arm of the scheduler's exit decision and merged the control flow around
 it.
 
 This is the deeper issue with the std switch shape: the asm resumes at
-a local label that *other executions of the same code* re-enter. That is
+a local label that _other executions of the same code_ re-enter. That is
 setjmp-like, returns-twice control flow, and nothing in the asm's
 constraints tells LLVM about it. Inlined into a hot loop, the optimizer
 is entitled to assumptions that the label breaks.
 
 The mitigation is structural: keep the resume label inside a dedicated
 `noinline` function, so every switch is a plain call from the caller's
-point of view. Marionette's scheduler already kept its *own* suspension
+point of view. Marionette's scheduler already kept its _own_ suspension
 points opaque for exactly this reason, after an earlier ReleaseSafe
 incident. The lesson just had to be pushed one level deeper, into the
 switch primitive itself.
@@ -219,14 +231,9 @@ Three process lessons came out of this:
 
 ## Upstream
 
-The standalone `fiber.zig` this code came from no longer exists on Zig
-master, but the pattern does: the same constraints, input and output
-register also listed as a clobber, no `nzcv`, live today in
-`lib/std/Io/Kqueue.zig` and `lib/std/Io/IoUring.zig`. Those are the
-event loops underneath `std.Io`'s green threads, which makes the blast
-radius considerably larger than one simulation library's fiber seam.
-We're filing upstream with the reproducer; Marionette's local copy
-carries a removal note for the day the fix lands.
+We're filing upstream against the Codeberg source with the
+standalone reproducer. Marionette's local copy carries a removal note for
+the day the fix lands.
 
 Diagnosis credit where due: comparing against zio's implementation is
 what narrowed the search, even though its two most visible differences
