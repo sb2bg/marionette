@@ -320,11 +320,94 @@ test "io: simulation streaming writes use disk pending-write crash semantics" {
     try sim.control.disk.crash();
     try sim.control.disk.restart();
 
+    // The crash killed the simulated process: the old handle is dead and the
+    // file must be reopened, like a real restart.
     var read_out: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 4), try file.readPositionalAll(io, &read_out, 0));
+    try std.testing.expectError(error.NotOpenForReading, file.readPositionalAll(io, &read_out, 0));
+
+    var reopened = try Io.Dir.cwd().openFile(io, "pending.bin", .{ .mode = .read_only });
+    defer reopened.close(io);
+    try std.testing.expectEqual(@as(usize, 4), try reopened.readPositionalAll(io, &read_out, 0));
     try std.testing.expectEqualStrings("abcd", &read_out);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "result=lost") != null);
+}
+
+test "io: file lengths re-derive from disk truth after a crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "length.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcd", 0);
+    try file.sync(io);
+
+    // Extend the file with an unsynced write: the file layer's cached
+    // length becomes 8 while only 4 bytes are durable.
+    try file.writePositionalAll(io, "WXYZ", 4);
+    try std.testing.expectEqual(@as(u64, 8), try file.length(io));
+    const mtime_before_crash = (try Io.Dir.cwd().statFile(io, "length.bin", .{})).mtime;
+    try std.testing.expect(mtime_before_crash.nanoseconds > 0);
+
+    try sim.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    // Before the crash-observer fix, the stale cached length (8) survived
+    // the crash and reads exposed zero-filled phantom bytes.
+    var reopened = try Io.Dir.cwd().openFile(io, "length.bin", .{ .mode = .read_only });
+    defer reopened.close(io);
+    try std.testing.expectEqual(@as(u64, 4), try reopened.length(io));
+    const stat_after_crash = try Io.Dir.cwd().statFile(io, "length.bin", .{});
+    try std.testing.expectEqual(@as(u64, 4), stat_after_crash.size);
+    // Filesystem timestamps survive a machine crash; only lengths refresh.
+    try std.testing.expectEqual(mtime_before_crash, stat_after_crash.mtime);
+
+    var read_out: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try reopened.readPositionalAll(io, &read_out, 0));
+    try std.testing.expectEqualStrings("abcd", read_out[0..4]);
+}
+
+test "io: crash rolls back unsynced deletion and preserves timestamps" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    {
+        var file = try Io.Dir.cwd().createFile(io, "undelete.bin", .{});
+        defer file.close(io);
+        try file.writePositionalAll(io, "abcd", 0);
+        try file.sync(io);
+    }
+    // Make the creation metadata durable so the crash only rolls back the
+    // deletion below, not the file's existence.
+    try sim.env.disk.syncDir(.{ .path = "." });
+    const mtime_before = (try Io.Dir.cwd().statFile(io, "undelete.bin", .{})).mtime;
+    try std.testing.expect(mtime_before.nanoseconds > 0);
+
+    try Io.Dir.cwd().deleteFile(io, "undelete.bin");
+    try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().statFile(io, "undelete.bin", .{}));
+
+    try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    // The unsynced deletion was rolled back: the file is resurrected with
+    // its durable contents and its pre-crash timestamp, not mtime zero.
+    const stat = try Io.Dir.cwd().statFile(io, "undelete.bin", .{});
+    try std.testing.expectEqual(@as(u64, 4), stat.size);
+    try std.testing.expectEqual(mtime_before, stat.mtime);
+
+    var reopened = try Io.Dir.cwd().openFile(io, "undelete.bin", .{ .mode = .read_only });
+    defer reopened.close(io);
+    var buffer: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try reopened.readPositionalAll(io, &buffer, 0));
+    try std.testing.expectEqualStrings("abcd", &buffer);
 }
 
 test "io: simulation files reopen tracked metadata" {

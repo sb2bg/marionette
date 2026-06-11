@@ -49,6 +49,10 @@ pub const Backend = struct {
         len: u64 = 0,
         mtime: Io.Timestamp = .zero,
         deleted: bool = false,
+        /// Set when a disk crash invalidates cached state. The length is
+        /// re-derived from disk truth on next touch; the timestamp is kept,
+        /// since filesystem timestamps survive a real machine crash.
+        stale: bool = false,
 
         fn deinit(self: *FileMeta, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
@@ -243,6 +247,18 @@ pub const Backend = struct {
         return null;
     }
 
+    /// Find a tombstoned entry whose deletion may have been rolled back by
+    /// a disk crash. Only stale tombstones qualify: a live tombstone is an
+    /// authoritative deletion, but after a crash the disk may have
+    /// resurrected the file.
+    pub fn findStaleDeletedFileMetaIndex(self: *Backend, path: []const u8) ?usize {
+        for (self.files.items, 0..) |file_meta, index| {
+            if (!file_meta.deleted or !file_meta.stale) continue;
+            if (std.mem.eql(u8, file_meta.path, path)) return index;
+        }
+        return null;
+    }
+
     pub fn createFileMeta(self: *Backend, path: []const u8) std.mem.Allocator.Error!usize {
         const owned_path = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned_path);
@@ -260,6 +276,26 @@ pub const Backend = struct {
 
     pub fn nowTimestamp(self: *const Backend) Io.Timestamp {
         return Io.Timestamp.fromNanoseconds(@intCast(self.world.now()));
+    }
+
+    /// Invalidate all file-layer state after a disk crash.
+    ///
+    /// A disk crash models a machine crash, which also kills the process:
+    /// every open file handle dies with it, and cached lengths must not
+    /// survive into the "restarted" process. Metadata is marked stale and
+    /// re-derived from disk truth on first touch; timestamps are kept,
+    /// since filesystem timestamps survive a real machine crash.
+    pub fn onDiskCrash(self: *Backend) void {
+        for (self.handles.items) |*entry| switch (entry.state) {
+            .file => |file_state| file_state.closed = true,
+            .listener, .connection => {},
+        };
+        // Tombstones go stale too: a crash can roll back an unsynced
+        // deletion, in which case the tombstoned entry must be revivable
+        // with its timestamps intact.
+        for (self.files.items) |*file_meta| {
+            file_meta.stale = true;
+        }
     }
 
     pub fn closeFileHandlesForIndex(self: *Backend, file_index: usize) void {
@@ -301,6 +337,11 @@ pub fn deinitBackendOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
     const backend: *Backend = @ptrCast(@alignCast(ptr));
     backend.deinit();
     allocator.destroy(backend);
+}
+
+pub fn onDiskCrashOpaque(ptr: *anyopaque) void {
+    const backend: *Backend = @ptrCast(@alignCast(ptr));
+    backend.onDiskCrash();
 }
 
 const sim_vtable: Io.VTable = .{

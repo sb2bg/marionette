@@ -28,6 +28,7 @@ pub fn scenario(harness: *Harness) !void {
     try harness.store.put(volatile_key, volatile_value, .no_sync);
     try harness.control.disk.crash();
     try harness.control.disk.restart();
+    try harness.store.reopen();
     try harness.control.disk.corruptSector(wal_path, record_size);
     try harness.store.recover(.strict);
 }
@@ -38,6 +39,7 @@ pub fn buggyScenario(harness: *Harness) !void {
     try harness.store.put(volatile_key, volatile_value, .no_sync);
     try harness.control.disk.crash();
     try harness.control.disk.restart();
+    try harness.store.reopen();
     try harness.store.recover(.buggy_accept_magic_only);
 }
 
@@ -114,6 +116,7 @@ pub const Harness = struct {
 
 const KVStore = struct {
     io: std.Io,
+    root: std.Io.Dir,
     recorder: mar.Recorder,
     wal: std.Io.File,
     next_offset: u64 = 0,
@@ -123,6 +126,7 @@ const KVStore = struct {
     fn init(io: std.Io, root: std.Io.Dir, recorder: mar.Recorder) !KVStore {
         return .{
             .io = io,
+            .root = root,
             .recorder = recorder,
             .wal = try root.createFile(io, wal_path, .{ .read = true }),
         };
@@ -130,6 +134,17 @@ const KVStore = struct {
 
     fn deinit(self: *KVStore) void {
         self.wal.close(self.io);
+    }
+
+    /// Reacquire the WAL handle after a simulated restart.
+    ///
+    /// A disk crash kills the simulated process, so open handles die with
+    /// it; recovery code must reopen its files like a freshly started
+    /// process would.
+    fn reopen(self: *KVStore) !void {
+        self.wal.close(self.io);
+        self.wal = try self.root.openFile(self.io, wal_path, .{ .mode = .read_write });
+        try self.recorder.record("kv.reopen path={s}", .{wal_path});
     }
 
     fn put(self: *KVStore, key: u32, value: u32, sync_mode: SyncMode) !void {

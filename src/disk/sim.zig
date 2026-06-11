@@ -115,6 +115,15 @@ pub const SimDisk = struct {
         }
     };
 
+    /// Hook invoked after a crash lands. A disk crash models a machine
+    /// crash, which also kills the process; layers caching disk-derived
+    /// state (such as the `std.Io` file backend) register here so a crash
+    /// invalidates their caches and open handles.
+    pub const CrashObserver = struct {
+        ptr: *anyopaque,
+        on_crash: *const fn (*anyopaque) void,
+    };
+
     world: *World,
     options: ResolvedOptions,
     faults: DiskFaultOptions = .{},
@@ -124,6 +133,7 @@ pub const SimDisk = struct {
     next_op_id: u64 = 0,
     next_file_id: FileId = 1,
     crashed: bool = false,
+    crash_observer: ?CrashObserver = null,
 
     pub fn init(world: *World, options: DiskOptions) DiskError!Self {
         const resolved_options = try resolveOptions(world, options);
@@ -143,6 +153,11 @@ pub const SimDisk = struct {
 
     pub fn sectorSize(self: *const Self) u64 {
         return self.options.sector_size;
+    }
+
+    /// Register the single observer notified after each crash lands.
+    pub fn setCrashObserver(self: *Self, observer: CrashObserver) void {
+        self.crash_observer = observer;
     }
 
     pub fn deinit(self: *Self) void {
@@ -602,6 +617,8 @@ pub const SimDisk = struct {
             traceField("metadata_kept", .{ .uint = metadata_kept }),
             traceField("metadata_lost", .{ .uint = metadata_lost }),
         });
+
+        if (self.crash_observer) |observer| observer.on_crash(observer.ptr);
     }
 
     fn restart(self: *Self, _: Restart) DiskError!void {

@@ -301,7 +301,11 @@ fn runDataRegionCrashCase(
     try sim.control.disk.crash();
     try sim.control.disk.restart();
 
-    var recovered = try DB.init(.{ .io = io, .file = file });
+    // The crash killed the simulated process; reopen the database file
+    // like a restarted process before recovering.
+    var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit-data.db", .{ .mode = .read_write });
+    defer recovered_file.close(io);
+    var recovered = try DB.init(.{ .io = io, .file = recovered_file });
     verifyHistory(allocator, &recovered, model.items) catch |err| {
         std.debug.print(
             "xitdb data-region {s} invariant violation seed=0x{x} sector_size={} trace:\n{s}\n",
@@ -371,7 +375,11 @@ fn runTornHeaderRecoveryCase(allocator: std.mem.Allocator, seed: u64, sector_siz
     try sim.control.disk.crash();
     try sim.control.disk.restart();
 
-    var recovered = try DB.init(.{ .io = io, .file = file });
+    // The crash killed the simulated process; reopen the database file
+    // like a restarted process before recovering.
+    var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit-torn.db", .{ .mode = .read_write });
+    defer recovered_file.close(io);
+    var recovered = try DB.init(.{ .io = io, .file = recovered_file });
     const result: TornOutcome = if (verifyHistory(allocator, &recovered, model.items)) |_| .recovered else |err| switch (err) {
         error.EndOfStream => .recovery_corrupted,
         else => |e| return e,
@@ -462,7 +470,11 @@ fn runTrace(allocator: std.mem.Allocator, seed: u64, fault_mode: FaultMode) ![]u
             try sim.control.disk.crash();
             try sim.control.disk.restart();
 
-            var recovered = try DB.init(.{ .io = io, .file = file });
+            // The crash killed the simulated process; reopen the database
+            // file like a restarted process before recovering.
+            var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit.db", .{ .mode = .read_write });
+            defer recovered_file.close(io);
+            var recovered = try DB.init(.{ .io = io, .file = recovered_file });
             try verifyHistory(allocator, &recovered, model.items);
         },
     }

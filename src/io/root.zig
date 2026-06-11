@@ -7,6 +7,7 @@ pub const FutexWaitSet = backend.FutexWaitSet;
 pub const Backend = backend.Backend;
 
 pub const deinitBackendOpaque = backend.deinitBackendOpaque;
+pub const onDiskCrashOpaque = backend.onDiskCrashOpaque;
 
 test {
     _ = backend;

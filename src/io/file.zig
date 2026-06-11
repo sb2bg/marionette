@@ -23,7 +23,10 @@ pub fn Ops(comptime Backend: type) type {
             if (!isValidSimPath(sub_path)) return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
-            const file_index = if (backend.findFileMetaIndex(sub_path)) |index| b: {
+            const existing_index = findOrDiscoverFileMeta(backend, sub_path) catch |err| {
+                return errors.mapDiskOpenError(err);
+            };
+            const file_index = if (existing_index) |index| b: {
                 if (options.exclusive) return error.PathAlreadyExists;
                 if (options.truncate) {
                     const old_len = backend.files.items[index].len;
@@ -58,7 +61,9 @@ pub fn Ops(comptime Backend: type) type {
             if (!isValidSimPath(sub_path)) return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
-            const file_index = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+            const file_index = (findOrDiscoverFileMeta(backend, sub_path) catch |err| {
+                return errors.mapDiskOpenError(err);
+            }) orelse return error.FileNotFound;
             return backend.openFileHandle(file_index, options.isRead(), options.isWrite()) catch return error.SystemResources;
         }
 
@@ -78,7 +83,12 @@ pub fn Ops(comptime Backend: type) type {
             if (!isValidSimPath(sub_path)) return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
-            const file_index = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+            // Discovery failures other than not-found collapse to
+            // FileNotFound here: StatFileError has no closer member for a
+            // crashed or unavailable disk.
+            const file_index = (findOrDiscoverFileMeta(backend, sub_path) catch {
+                return error.FileNotFound;
+            }) orelse return error.FileNotFound;
             return buildFileStat(backend, file_index);
         }
 
@@ -93,7 +103,9 @@ pub fn Ops(comptime Backend: type) type {
             if (!isValidSimPath(sub_path)) return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
-            _ = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+            _ = (findOrDiscoverFileMeta(backend, sub_path) catch {
+                return error.FileNotFound;
+            }) orelse return error.FileNotFound;
         }
 
         pub fn simDirDeleteFile(
@@ -105,7 +117,9 @@ pub fn Ops(comptime Backend: type) type {
             if (!isValidSimPath(sub_path)) return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
-            const file_index = backend.findFileMetaIndex(sub_path) orelse return error.FileNotFound;
+            const file_index = (findOrDiscoverFileMeta(backend, sub_path) catch |err| {
+                return errors.mapDiskDeleteError(err);
+            }) orelse return error.FileNotFound;
             backend.disk.delete(.{ .path = sub_path }) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return errors.mapDiskDeleteError(err),
@@ -129,7 +143,9 @@ pub fn Ops(comptime Backend: type) type {
             if (!isValidSimPath(new_sub_path)) return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
-            const old_index = backend.findFileMetaIndex(old_sub_path) orelse return error.FileNotFound;
+            const old_index = (findOrDiscoverFileMeta(backend, old_sub_path) catch |err| {
+                return errors.mapDiskRenameError(err);
+            }) orelse return error.FileNotFound;
             if (std.mem.eql(u8, old_sub_path, new_sub_path)) return;
 
             const new_index = backend.findFileMetaIndex(new_sub_path);
@@ -350,6 +366,61 @@ pub fn Ops(comptime Backend: type) type {
             };
             meta.len = new_length;
             if (new_length != old_len) meta.mtime = backend.nowTimestamp();
+        }
+
+        /// Find the cached metadata for `path`, refreshing or rediscovering
+        /// it from the disk authority when needed. A disk crash (modeling a
+        /// machine crash that kills the process) marks cached metadata
+        /// stale, so surviving files land here on first touch after restart
+        /// and have their length re-derived from disk truth. Timestamps are
+        /// kept across the refresh, matching real filesystems.
+        fn findOrDiscoverFileMeta(
+            backend: *Backend,
+            path: []const u8,
+        ) disk_module.DiskError!?usize {
+            if (backend.findFileMetaIndex(path)) |index| {
+                const meta = &backend.files.items[index];
+                if (!meta.stale) return index;
+
+                const stat_result = backend.disk.stat(.{ .path = path }) catch |err| switch (err) {
+                    error.FileNotFound, error.DiskUnavailable => {
+                        meta.deleted = true;
+                        meta.len = 0;
+                        meta.stale = false;
+                        return null;
+                    },
+                    else => return err,
+                };
+                meta.len = stat_result.size;
+                meta.stale = false;
+                return index;
+            }
+
+            // A crash can roll back an unsynced deletion; if the disk still
+            // has the file, revive the tombstone so the resurrected file
+            // keeps its pre-crash timestamps.
+            if (backend.findStaleDeletedFileMetaIndex(path)) |index| {
+                const meta = &backend.files.items[index];
+                const stat_result = backend.disk.stat(.{ .path = path }) catch |err| switch (err) {
+                    error.FileNotFound, error.DiskUnavailable => {
+                        meta.stale = false;
+                        return null;
+                    },
+                    else => return err,
+                };
+                meta.deleted = false;
+                meta.stale = false;
+                meta.len = stat_result.size;
+                return index;
+            }
+
+            const stat_result = backend.disk.stat(.{ .path = path }) catch |err| switch (err) {
+                error.FileNotFound, error.DiskUnavailable => return null,
+                else => return err,
+            };
+            const index = try backend.createFileMeta(path);
+            backend.files.items[index].len = stat_result.size;
+            return index;
         }
 
         fn isValidSimPath(path: []const u8) bool {

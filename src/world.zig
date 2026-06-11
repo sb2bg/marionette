@@ -223,6 +223,11 @@ pub const World = struct {
         try self.registerTeardown(sim_io, io_module.deinitBackendOpaque);
         sim_io_registered = true;
 
+        sim_disk.setCrashObserver(.{
+            .ptr = sim_io,
+            .on_crash = io_module.onDiskCrashOpaque,
+        });
+
         const network_control = if (options.network) |network_options|
             try network_module.initSimControl(self, network_options)
         else
