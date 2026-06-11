@@ -11,6 +11,7 @@ const env_module = @import("env.zig");
 const io_module = @import("io/root.zig");
 const network_module = @import("network/root.zig");
 const random_module = @import("random.zig");
+const scheduler_module = @import("scheduler.zig");
 
 /// Errors returned while writing deterministic trace records.
 pub const TraceError = error{
@@ -233,6 +234,22 @@ pub const World = struct {
         else
             network_module.AnyNetworkControl.unavailable();
         sim_io.attachNetworkControl(network_control);
+
+        // The world owns a cooperative scheduler so `Io.async`,
+        // `Io.concurrent`, and scheduler-backed waits (futex, net, sleep)
+        // work out of the box, without callers constructing one.
+        const scheduler = try self.allocator.create(scheduler_module.TaskScheduler);
+        var scheduler_registered = false;
+        errdefer if (!scheduler_registered) self.allocator.destroy(scheduler);
+
+        scheduler.* = scheduler_module.TaskScheduler.init(self.allocator, self);
+        errdefer if (!scheduler_registered) scheduler.deinit();
+
+        try self.registerTeardown(scheduler, scheduler_module.deinitTaskSchedulerOpaque);
+        scheduler_registered = true;
+
+        sim_io.attachFutexWaitSet(scheduler_module.futexWaitSet(scheduler));
+        sim_io.attachTaskRuntime(scheduler_module.taskRuntime(scheduler));
 
         return .{
             .env = .{

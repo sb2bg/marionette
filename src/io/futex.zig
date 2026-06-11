@@ -3,13 +3,15 @@
 const std = @import("std");
 const Io = std.Io;
 
-const wait_key_tag_bits = 2;
+const wait_key_tag_bits = 3;
 
 pub const WaitKeyTag = enum(usize) {
     futex = 0,
     listener = 1,
     connection = 2,
     sleep = 3,
+    /// Async task completion, keyed by scheduler task id.
+    task = 4,
 };
 
 pub const FutexWaitResult = enum {

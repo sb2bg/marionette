@@ -59,8 +59,17 @@ pub const TaskScheduler = struct {
     main_context: fiber.Context = undefined,
     tasks: std.ArrayList(*Task) = .empty,
     ready: std.ArrayList(TaskId) = .empty,
+    opaque_entries: std.ArrayList(*OpaqueEntry) = .empty,
     current: ?*Task = null,
+    /// Active main-context wait, if the harness/scenario itself is blocked
+    /// inside a wait-set call and driving the scheduler. See `driveMainUntil`.
+    main_wait: ?MainWait = null,
     next_task_id: TaskId = 0,
+
+    const MainWait = struct {
+        key: WaitKey,
+        woken: bool = false,
+    };
 
     pub const Entry = *const fn (scheduler: *Self, arg: *anyopaque) void;
 
@@ -98,7 +107,10 @@ pub const TaskScheduler = struct {
         scheduler: *Self,
         entry: Entry,
         arg: *anyopaque,
-        fiber_instance: *fiber.Fiber,
+        /// Null once the task has completed: the fiber (and its stack) is
+        /// reclaimed eagerly so long-lived worlds spawning many tasks do not
+        /// accumulate dead stacks until teardown.
+        fiber_instance: ?*fiber.Fiber,
         state: TaskState = .ready,
         blocked_key: ?WaitKey = null,
         blocked_deadline_ns: ?u64 = null,
@@ -140,13 +152,59 @@ pub const TaskScheduler = struct {
 
     pub fn deinit(self: *Self) void {
         for (self.tasks.items) |task| {
-            task.fiber_instance.destroy();
+            if (task.fiber_instance) |fiber_instance| fiber_instance.destroy();
             self.allocator.destroy(task);
         }
         self.tasks.deinit(self.allocator);
         self.ready.deinit(self.allocator);
+        for (self.opaque_entries.items) |adapter| self.allocator.destroy(adapter);
+        self.opaque_entries.deinit(self.allocator);
         self.* = undefined;
     }
+
+    /// Spawn a task from a bare function pointer and context pointer.
+    ///
+    /// This is the type-erased entry used by the `std.Io` backend; the
+    /// scheduler parameter of `Entry` is dropped because opaque callers
+    /// hold capabilities through their own context instead.
+    pub fn spawnOpaque(
+        self: *Self,
+        entry: *const fn (*anyopaque) void,
+        arg: *anyopaque,
+    ) TaskSchedulerError!TaskId {
+        const adapter = try self.allocator.create(OpaqueEntry);
+        errdefer self.allocator.destroy(adapter);
+        adapter.* = .{ .entry = entry, .arg = arg };
+        try self.opaque_entries.append(self.allocator, adapter);
+        errdefer _ = self.opaque_entries.pop();
+
+        return try self.spawn(.{
+            .entry = OpaqueEntry.run,
+            .arg = adapter,
+        });
+    }
+
+    const OpaqueEntry = struct {
+        entry: *const fn (*anyopaque) void,
+        arg: *anyopaque,
+
+        fn run(scheduler: *Self, raw: *anyopaque) void {
+            const adapter: *OpaqueEntry = @ptrCast(@alignCast(raw));
+            const entry = adapter.entry;
+            const arg = adapter.arg;
+            // The adapter only exists to ferry the entry across `spawn`;
+            // release it as soon as the task is running so only never-run
+            // adapters remain for `deinit` to sweep.
+            for (scheduler.opaque_entries.items, 0..) |candidate, index| {
+                if (candidate == adapter) {
+                    _ = scheduler.opaque_entries.swapRemove(index);
+                    break;
+                }
+            }
+            scheduler.allocator.destroy(adapter);
+            entry(arg);
+        }
+    };
 
     pub fn spawn(self: *Self, options: SpawnOptions) TaskSchedulerError!TaskId {
         const task = try self.allocator.create(Task);
@@ -158,16 +216,17 @@ pub const TaskScheduler = struct {
             .scheduler = self,
             .entry = options.entry,
             .arg = options.arg,
-            .fiber_instance = undefined,
+            .fiber_instance = null,
         };
 
-        task.fiber_instance = try fiber.Fiber.create(self.allocator, .{
+        const fiber_instance = try fiber.Fiber.create(self.allocator, .{
             .stack_size = options.stack_size,
             .finish_context = &self.main_context,
             .entry = Task.run,
             .arg = task,
         });
-        errdefer task.fiber_instance.destroy();
+        errdefer fiber_instance.destroy();
+        task.fiber_instance = fiber_instance;
 
         try self.tasks.append(self.allocator, task);
         errdefer _ = self.tasks.pop();
@@ -189,7 +248,7 @@ pub const TaskScheduler = struct {
 
         var message: SwitchMessage = .{
             .contexts = .{
-                .old = task.fiber_instance.contextPtr(),
+                .old = task.fiber_instance.?.contextPtr(),
                 .new = &self.main_context,
             },
             .scheduler = self,
@@ -206,7 +265,7 @@ pub const TaskScheduler = struct {
 
     // Same optimizer boundary rule as `yieldCurrent`.
     pub noinline fn blockCurrentUntil(self: *Self, key: WaitKey, deadline_ns: ?u64) WaitResult {
-        const task = self.current orelse @panic("block outside a scheduled task");
+        const task = self.current orelse return self.driveMainUntil(key, deadline_ns);
         if (task.state != .running) @panic("block from a non-running task");
         const effective_deadline_ns = if (deadline_ns) |deadline| b: {
             const now = self.world.now();
@@ -218,7 +277,7 @@ pub const TaskScheduler = struct {
 
         var message: SwitchMessage = .{
             .contexts = .{
-                .old = task.fiber_instance.contextPtr(),
+                .old = task.fiber_instance.?.contextPtr(),
                 .new = &self.main_context,
             },
             .scheduler = self,
@@ -231,11 +290,84 @@ pub const TaskScheduler = struct {
         return resume_message.wait_result;
     }
 
+    /// Service a wait-set block issued from the main (non-task) context by
+    /// driving the scheduler: ready tasks run, time advances to the next
+    /// deadline, and the wait ends when a `wake` hits `key` or the caller's
+    /// own deadline is reached. The main context blocking forever with no
+    /// runnable work and no pending deadline is a deterministic deadlock and
+    /// fails loudly.
+    fn driveMainUntil(self: *Self, key: WaitKey, deadline_ns: ?u64) WaitResult {
+        std.debug.assert(self.main_wait == null); // main-context waits cannot nest
+
+        const effective_deadline_ns = if (deadline_ns) |deadline| b: {
+            const now = self.world.now();
+            if (deadline <= now) return .timed_out;
+            const duration = self.world.clock().ceilDuration(deadline - now);
+            break :b std.math.add(u64, now, duration) catch
+                @panic("scheduled deadline exceeds clock range");
+        } else null;
+
+        self.main_wait = .{ .key = key };
+        defer self.main_wait = null;
+
+        while (true) {
+            if (self.main_wait.?.woken) return .woken;
+
+            switch (self.stepOnce() catch @panic("scheduler failed during main-context wait")) {
+                .ran => continue,
+                .idle => {},
+            }
+            if (self.main_wait.?.woken) return .woken;
+
+            // Nothing is runnable: advance time to the nearest deadline,
+            // capped by the caller's own.
+            const task_deadline = self.nextDeadline();
+            const target = if (task_deadline) |task_ns|
+                if (effective_deadline_ns) |main_ns| @min(task_ns, main_ns) else task_ns
+            else
+                effective_deadline_ns orelse
+                    @panic("deterministic deadlock: main-context wait can never be satisfied");
+
+            const now = self.world.now();
+            if (target > now) {
+                self.world.runFor(target - now) catch @panic("failed to advance to main wait deadline");
+            }
+            self.wakeDueTasks() catch @panic("failed to wake due tasks during main-context wait");
+
+            if (effective_deadline_ns) |main_ns| {
+                if (self.world.now() >= main_ns) return .timed_out;
+            }
+        }
+    }
+
+    /// Move every blocked task whose deadline has passed into the ready set.
+    fn wakeDueTasks(self: *Self) TaskSchedulerError!void {
+        var due: std.ArrayList(TaskId) = .empty;
+        defer due.deinit(self.allocator);
+
+        const now = self.world.now();
+        for (self.tasks.items) |task| {
+            if (task.state == .blocked and task.blocked_deadline_ns != null and task.blocked_deadline_ns.? <= now) {
+                try due.append(self.allocator, task.id);
+            }
+        }
+        sortTaskIds(due.items);
+
+        for (due.items) |task_id| {
+            const task = self.findTask(task_id).?;
+            if (task.state != .blocked) return error.TaskNotBlocked;
+            const task_deadline = task.blocked_deadline_ns.?;
+            task.clearBlock(.ready, .timed_out);
+            try self.ready.append(self.allocator, task.id);
+            try self.recordTimeout(task.id, task_deadline);
+        }
+    }
+
     // Same optimizer boundary rule as `yieldCurrent`.
     noinline fn completeCurrent(self: *Self, task: *Task) void {
         var message: SwitchMessage = .{
             .contexts = .{
-                .old = task.fiber_instance.contextPtr(),
+                .old = task.fiber_instance.?.contextPtr(),
                 .new = &self.main_context,
             },
             .scheduler = self,
@@ -247,6 +379,21 @@ pub const TaskScheduler = struct {
 
     pub fn wake(self: *Self, key: WaitKey, max_count: usize) TaskSchedulerError!usize {
         if (max_count == 0) return 0;
+        var remaining = max_count;
+
+        // A main-context waiter is woken before task waiters; it is the
+        // caller that everything else is ultimately making progress for, and
+        // the fixed priority keeps wake order deterministic.
+        var main_woken: usize = 0;
+        if (self.main_wait) |*waiting| {
+            if (!waiting.woken and waiting.key == key) {
+                waiting.woken = true;
+                try self.recordWakeMain(key);
+                main_woken = 1;
+                remaining -= 1;
+                if (remaining == 0) return main_woken;
+            }
+        }
 
         var candidates: std.ArrayList(TaskId) = .empty;
         defer candidates.deinit(self.allocator);
@@ -259,7 +406,7 @@ pub const TaskScheduler = struct {
         sortTaskIds(candidates.items);
 
         var woken: usize = 0;
-        while (woken < max_count and candidates.items.len > 0) : (woken += 1) {
+        while (woken < remaining and candidates.items.len > 0) : (woken += 1) {
             const selected = selected: {
                 var formatted = try self.formatTaskIds(candidates.items);
                 defer formatted.deinit(self.allocator);
@@ -277,79 +424,118 @@ pub const TaskScheduler = struct {
             try self.ready.append(self.allocator, selected);
         }
 
-        if (woken == 0) try self.recordWakeEmpty(key, max_count);
-        return woken;
+        if (woken == 0 and main_woken == 0) try self.recordWakeEmpty(key, max_count);
+        return woken + main_woken;
     }
 
-    // This loop switches between the scheduler stack and task stacks. Keep it
-    // opaque for the same reason as task-side yield/block boundaries: optimized
-    // callers must treat the switch as a control-flow discontinuity.
-    pub noinline fn runUntilIdle(self: *Self) !void {
+    const StepOutcome = enum {
+        /// One task was selected, run to its next suspension, and accounted.
+        ran,
+        /// No task is ready (timers may still be pending).
+        idle,
+    };
+
+    // This function switches between the scheduler stack and task stacks.
+    // Keep it opaque for the same reason as task-side yield/block boundaries:
+    // optimized callers must treat the switch as a control-flow discontinuity.
+    noinline fn stepOnce(self: *Self) TaskSchedulerError!StepOutcome {
         var scheduler = self;
+        if (scheduler.ready.items.len == 0) return .idle;
+
+        sortTaskIds(scheduler.ready.items);
+
+        const selected = selected: {
+            var candidates = try scheduler.formatReadySet();
+            defer candidates.deinit(scheduler.allocator);
+
+            const draw = try scheduler.world.randomIntLessThan(usize, scheduler.ready.items.len);
+            const selected = scheduler.ready.items[draw];
+            try scheduler.recordSelect(candidates.items, draw, selected);
+            _ = scheduler.ready.orderedRemove(draw);
+            break :selected selected;
+        };
+
+        const task = scheduler.findTask(selected).?;
+        if (task.state != .ready) return error.TaskNotReady;
+        task.state = .running;
+        scheduler.current = task;
+        var message: SwitchMessage = .{
+            .contexts = .{
+                .old = &scheduler.main_context,
+                .new = task.fiber_instance.?.contextPtr(),
+            },
+            .scheduler = scheduler,
+            .task = task,
+            .reason = .yielded,
+            .wait_result = task.wait_result,
+        };
+        const returned_message = fiber.contextSwitchMessage(SwitchMessage, &message);
+
+        scheduler = returned_message.scheduler;
+        const returned_task = returned_message.task;
+        scheduler.current = null;
+        if (!returned_task.fiber_instance.?.canaryIntact()) {
+            @panic("fiber stack overflow: task smashed its stack canary");
+        }
+        switch (returned_message.reason) {
+            .yielded => {
+                returned_task.clearBlock(.ready, .woken);
+                try scheduler.ready.append(scheduler.allocator, returned_task.id);
+                try scheduler.recordYield(returned_task.id);
+            },
+            .blocked => {
+                returned_task.block(returned_message.key, returned_message.deadline_ns);
+                try scheduler.recordBlock(returned_task.id, returned_message.key, returned_message.deadline_ns);
+            },
+            .completed => {
+                returned_task.clearBlock(.completed, .woken);
+                try scheduler.recordComplete(returned_task.id, "ok");
+                // The fiber finished and we are back on the scheduler stack:
+                // its stack can never run again, so reclaim it now instead of
+                // holding every dead stack until world teardown.
+                returned_task.fiber_instance.?.destroy();
+                returned_task.fiber_instance = null;
+            },
+        }
+        return .ran;
+    }
+
+    pub fn runUntilIdle(self: *Self) !void {
         while (true) {
-            if (scheduler.ready.items.len == 0) {
-                if (try scheduler.advanceToNextTimer()) continue;
-                break;
-            }
-
-            sortTaskIds(scheduler.ready.items);
-
-            const selected = selected: {
-                var candidates = try scheduler.formatReadySet();
-                defer candidates.deinit(scheduler.allocator);
-
-                const draw = try scheduler.world.randomIntLessThan(usize, scheduler.ready.items.len);
-                const selected = scheduler.ready.items[draw];
-                try scheduler.recordSelect(candidates.items, draw, selected);
-                _ = scheduler.ready.orderedRemove(draw);
-                break :selected selected;
-            };
-
-            const task = scheduler.findTask(selected).?;
-            if (task.state != .ready) return error.TaskNotReady;
-            task.state = .running;
-            scheduler.current = task;
-            var message: SwitchMessage = .{
-                .contexts = .{
-                    .old = &scheduler.main_context,
-                    .new = task.fiber_instance.contextPtr(),
-                },
-                .scheduler = scheduler,
-                .task = task,
-                .reason = .yielded,
-                .wait_result = task.wait_result,
-            };
-            const returned_message = fiber.contextSwitchMessage(SwitchMessage, &message);
-
-            scheduler = returned_message.scheduler;
-            const returned_task = returned_message.task;
-            scheduler.current = null;
-            if (!returned_task.fiber_instance.canaryIntact()) {
-                @panic("fiber stack overflow: task smashed its stack canary");
-            }
-            switch (returned_message.reason) {
-                .yielded => {
-                    returned_task.clearBlock(.ready, .woken);
-                    try scheduler.ready.append(scheduler.allocator, returned_task.id);
-                    try scheduler.recordYield(returned_task.id);
-                },
-                .blocked => {
-                    returned_task.block(returned_message.key, returned_message.deadline_ns);
-                    try scheduler.recordBlock(returned_task.id, returned_message.key, returned_message.deadline_ns);
-                },
-                .completed => {
-                    returned_task.clearBlock(.completed, .woken);
-                    try scheduler.recordComplete(returned_task.id, "ok");
+            switch (try self.stepOnce()) {
+                .ran => {},
+                .idle => {
+                    if (try self.advanceToNextTimer()) continue;
+                    break;
                 },
             }
         }
 
-        if (scheduler.blockedCount() > 0) {
-            try scheduler.recordCensus("scheduler.deadlock");
+        if (self.blockedCount() > 0) {
+            try self.recordCensus("scheduler.deadlock");
             return error.Deadlock;
         }
 
-        try scheduler.recordCensus("scheduler.idle");
+        try self.recordCensus("scheduler.idle");
+    }
+
+    /// Drive the scheduler from the main (non-task) context until `done.*`.
+    ///
+    /// Used by `Io.await` when the awaiting caller is the scenario itself
+    /// rather than a scheduled task. Panics on deterministic deadlock: if no
+    /// task is runnable, no timer is pending, and the flag is still unset,
+    /// the awaited work can never complete.
+    pub fn runUntilDone(self: *Self, done: *const bool) TaskSchedulerError!void {
+        while (!done.*) {
+            switch (try self.stepOnce()) {
+                .ran => {},
+                .idle => {
+                    if (try self.advanceToNextTimer()) continue;
+                    try self.recordCensus("scheduler.deadlock");
+                    return error.Deadlock;
+                },
+            }
+        }
     }
 
     fn countState(self: *const Self, state: TaskState) usize {
@@ -505,6 +691,12 @@ pub const TaskScheduler = struct {
         });
     }
 
+    fn recordWakeMain(self: *Self, key: WaitKey) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.wake_main", &.{
+            traceField("key", .{ .uint = key }),
+        });
+    }
+
     fn recordWakeEmpty(
         self: *Self,
         key: WaitKey,
@@ -583,6 +775,61 @@ const futex_wait_set_vtable: io_module.FutexWaitSet.VTable = .{
     .block = waitSetBlock,
     .block_until = waitSetBlockUntil,
     .wake = waitSetWake,
+};
+
+/// Tear down a world-owned scheduler registered via `World.registerTeardown`.
+pub fn deinitTaskSchedulerOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.deinit();
+    allocator.destroy(scheduler);
+}
+
+/// Build the `std.Io` task runtime view over a scheduler.
+pub fn taskRuntime(self: *TaskScheduler) io_module.TaskRuntime {
+    return .{
+        .ptr = self,
+        .vtable = &task_runtime_vtable,
+    };
+}
+
+fn taskRuntimeSpawn(
+    ptr: *anyopaque,
+    entry: *const fn (*anyopaque) void,
+    arg: *anyopaque,
+) io_module.TaskRuntime.SpawnError!u64 {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.spawnOpaque(entry, arg) catch return error.ConcurrencyUnavailable;
+}
+
+fn taskRuntimeInTask(ptr: *anyopaque) bool {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.current != null;
+}
+
+fn taskRuntimeBlock(ptr: *anyopaque, key: usize) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.blockCurrent(key);
+}
+
+fn taskRuntimeWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.wake(key, max_count) catch @panic("scheduler wake failed");
+}
+
+fn taskRuntimeRunUntilDone(ptr: *anyopaque, done: *const bool) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.runUntilDone(done) catch |err| switch (err) {
+        error.Deadlock => @panic("await deadlock: awaited async task can never complete"),
+        else => @panic("scheduler failed while driving awaited task"),
+    };
+}
+
+const task_runtime_vtable: io_module.TaskRuntime.VTable = .{
+    .spawn = taskRuntimeSpawn,
+    .in_task = taskRuntimeInTask,
+    .block = taskRuntimeBlock,
+    .wake = taskRuntimeWake,
+    .run_until_done = taskRuntimeRunUntilDone,
 };
 
 /// Fixed-capacity deterministic event queue.
@@ -744,6 +991,86 @@ fn runToySchedulerTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     try scheduler.runUntilIdle();
     try std.testing.expectEqual(@as(usize, tasks.len), scheduler.completedCount());
     return try allocator.dupe(u8, world.traceBytes());
+}
+
+const UnwindScenario = struct {
+    allocations: u8 = 0,
+
+    fn run(_: *TaskScheduler, arg: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(arg));
+        // The testing allocator captures a stack trace on every alloc and
+        // free; capturing from a fiber stack requires the sentinel root
+        // frame at fiber entry to terminate unwinding. This crashed inside
+        // the unwinder before that frame existed.
+        const buffer = std.testing.allocator.alloc(u8, 64) catch @panic("alloc failed");
+        std.testing.allocator.free(buffer);
+        self.allocations += 1;
+    }
+};
+
+test "TaskScheduler: fiber stacks are unwind-safe for stack-tracing allocators" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = 0x1B4D, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    var scenario: UnwindScenario = .{};
+    _ = try scheduler.spawn(.{ .entry = UnwindScenario.run, .arg = &scenario });
+    try scheduler.runUntilIdle();
+    try std.testing.expectEqual(@as(u8, 1), scenario.allocations);
+}
+
+test "TaskScheduler: completed tasks release their fibers eagerly" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const runtime_allocator = std.heap.page_allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = 0xF1BE, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    var tasks: [3]ToyTask = .{
+        .{ .remaining = 1 },
+        .{ .remaining = 2 },
+        .{ .remaining = 1 },
+    };
+    for (&tasks) |*task| {
+        _ = try scheduler.spawn(.{ .entry = ToyTask.run, .arg = task });
+    }
+    try scheduler.runUntilIdle();
+
+    try std.testing.expectEqual(@as(usize, 3), scheduler.completedCount());
+    for (scheduler.tasks.items) |task| {
+        try std.testing.expectEqual(@as(?*fiber.Fiber, null), task.fiber_instance);
+    }
+    try std.testing.expectEqual(@as(usize, 0), scheduler.opaque_entries.items.len);
 }
 
 test "TaskScheduler: same seed produces byte-identical schedule trace" {

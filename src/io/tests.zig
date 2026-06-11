@@ -86,6 +86,246 @@ test "io: simulation async completes synchronously" {
     try std.testing.expectError(error.ConcurrencyUnavailable, Io.concurrent(io, Helper.addOne, .{41}));
 }
 
+const fiber_supported = @import("../fiber.zig").supported;
+
+/// Fiber stacks carry a zeroed sentinel root frame, so stack-tracing
+/// allocators (std.testing.allocator captures a trace on every alloc and
+/// free) work from inside scheduler tasks and leak checking stays on.
+const task_world_allocator = std.testing.allocator;
+
+test "io: world simulation runs async tasks deterministically" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn addOne(value: u32) u32 {
+            return value + 1;
+        }
+    };
+
+    var first_trace: []u8 = undefined;
+    var second_trace: []u8 = undefined;
+    for ([2]*[]u8{ &first_trace, &second_trace }) |trace_out| {
+        var world = try World.init(task_world_allocator, .{ .seed = 0xA51, .tick_ns = 10 });
+        defer world.deinit();
+
+        const sim = try world.simulate(.{});
+        const io = sim.env.io();
+
+        var future = Io.async(io, Helper.addOne, .{41});
+        try std.testing.expectEqual(@as(u32, 42), future.await(io));
+
+        var concurrent_future = try Io.concurrent(io, Helper.addOne, .{8});
+        try std.testing.expectEqual(@as(u32, 9), concurrent_future.await(io));
+
+        try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.spawn task=0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.complete task=1") != null);
+        trace_out.* = try std.testing.allocator.dupe(u8, world.traceBytes());
+    }
+    defer std.testing.allocator.free(first_trace);
+    defer std.testing.allocator.free(second_trace);
+
+    try std.testing.expectEqualStrings(first_trace, second_trace);
+}
+
+test "io: async tasks can await other async tasks" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn inner(value: u32) u32 {
+            return value * 2;
+        }
+
+        fn outer(io: Io, value: u32) u32 {
+            var future = Io.async(io, inner, .{value});
+            return future.await(io) + 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA52, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var future = Io.async(io, Helper.outer, .{ io, 20 });
+    try std.testing.expectEqual(@as(u32, 41), future.await(io));
+    // The outer task parked on the inner task's completion key.
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.block task=0") != null);
+}
+
+test "io: async tasks interleave through sleeps and replay byte-identically" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn slowDouble(io: Io, value: u32) u32 {
+            Io.sleep(io, .fromNanoseconds(30), .awake) catch unreachable;
+            return value * 2;
+        }
+
+        fn fastTriple(io: Io, value: u32) u32 {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            return value * 3;
+        }
+    };
+
+    var first_trace: []u8 = undefined;
+    var second_trace: []u8 = undefined;
+    for ([2]*[]u8{ &first_trace, &second_trace }) |trace_out| {
+        var world = try World.init(task_world_allocator, .{ .seed = 0xA53, .tick_ns = 10 });
+        defer world.deinit();
+
+        const sim = try world.simulate(.{});
+        const io = sim.env.io();
+
+        var slow = Io.async(io, Helper.slowDouble, .{ io, 5 });
+        var fast = Io.async(io, Helper.fastTriple, .{ io, 5 });
+        try std.testing.expectEqual(@as(u32, 10), slow.await(io));
+        try std.testing.expectEqual(@as(u32, 15), fast.await(io));
+        try std.testing.expectEqual(@as(u64, 30), world.now());
+
+        try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.timeout task=1 deadline_ns=10") != null);
+        try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.timeout task=0 deadline_ns=30") != null);
+        trace_out.* = try std.testing.allocator.dupe(u8, world.traceBytes());
+    }
+    defer std.testing.allocator.free(first_trace);
+    defer std.testing.allocator.free(second_trace);
+
+    try std.testing.expectEqualStrings(first_trace, second_trace);
+}
+
+test "io: main-context sleep through simulate env advances time" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    // Regression: attaching the world-owned scheduler must not turn
+    // main-context blocking into a "block outside a scheduled task" panic.
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA55, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    try Io.sleep(io, .fromNanoseconds(30), .awake);
+    try std.testing.expectEqual(@as(u64, 30), world.now());
+}
+
+test "io: main-context sleep runs background tasks to their deadlines" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn napTen(io: Io) u64 {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            return 7;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA56, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var future = Io.async(io, Helper.napTen, .{io});
+    // Main sleeps past the task's deadline: the task must wake at 10, not
+    // be skipped over while main-context time advances.
+    try Io.sleep(io, .fromNanoseconds(40), .awake);
+    try std.testing.expectEqual(@as(u64, 40), world.now());
+    try std.testing.expectEqual(@as(u64, 7), future.await(io));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.timeout task=0 deadline_ns=10") != null);
+}
+
+test "io: main-context futex wait times out through simulate env" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA57, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var value: u32 = 0;
+    try io.futexWaitTimeout(u32, &value, 0, .{ .duration = .{
+        .raw = .fromNanoseconds(20),
+        .clock = .awake,
+    } });
+    try std.testing.expectEqual(@as(u64, 20), world.now());
+}
+
+test "io: main-context net accept is woken by a connecting task" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn connector(io: Io, address: Io.net.IpAddress) void {
+            Io.sleep(io, .fromNanoseconds(20), .awake) catch unreachable;
+            const stream = address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch
+                @panic("connect failed");
+            stream.close(io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA58, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4571) catch unreachable;
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+
+    var future = Io.async(io, Helper.connector, .{ io, address });
+    // Main blocks in accept; the scheduler runs the connector task, which
+    // wakes the listener key.
+    const accepted = try server.accept(io);
+    accepted.close(io);
+    future.await(io);
+    try std.testing.expectEqual(@as(u64, 20), world.now());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.wake_main key=") != null);
+}
+
+test "io: completed async tasks release their fiber stacks" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn noop() void {}
+    };
+
+    var counting = std.testing.allocator_instance;
+    _ = &counting;
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA59, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    // Many sequential spawn/await cycles: with eager fiber reclamation the
+    // resident cost per completed task is one small Task record, not a
+    // 256 KiB stack. (Stacks are mmap'd, so the testing allocator cannot
+    // observe them; this exercises the loop and the scheduler invariants.)
+    for (0..64) |_| {
+        var future = Io.async(io, Helper.noop, .{});
+        future.await(io);
+    }
+}
+
+test "io: unawaited async tasks are reclaimed at world teardown" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn noop() void {}
+    };
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xA54, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    // Spawn without awaiting: the closure must be freed by backend deinit
+    // (the testing allocator fails this test on a leak).
+    _ = try Io.concurrent(io, Helper.noop, .{});
+}
+
 test "io: simulation cancellation checks are inert before fibers" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();

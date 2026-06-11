@@ -18,6 +18,7 @@ const SocketHandle = Io.net.Socket.Handle;
 
 pub const FutexWaitResult = futex_module.FutexWaitResult;
 pub const FutexWaitSet = futex_module.FutexWaitSet;
+pub const TaskRuntime = @import("task.zig").TaskRuntime;
 
 pub const Backend = struct {
     allocator: std.mem.Allocator,
@@ -27,6 +28,8 @@ pub const Backend = struct {
     network_control: network_module.AnyNetworkControl = network_module.AnyNetworkControl.unavailable(),
     next_network_node: network_module.NodeId = 0,
     futex_wait_set: ?FutexWaitSet = null,
+    task_runtime: ?TaskRuntime = null,
+    async_closures: std.ArrayList(*AsyncClosure) = .empty,
     futex_keys: std.ArrayList(FutexKeyEntry) = .empty,
     next_futex_key: usize = 1,
     files: std.ArrayList(FileMeta) = .empty,
@@ -115,6 +118,8 @@ pub const Backend = struct {
         };
         self.handles.deinit(self.allocator);
         self.futex_keys.deinit(self.allocator);
+        for (self.async_closures.items) |closure| closure.destroy(self.allocator);
+        self.async_closures.deinit(self.allocator);
         for (self.files.items) |*file_meta| file_meta.deinit(self.allocator);
         self.files.deinit(self.allocator);
         self.* = undefined;
@@ -129,6 +134,12 @@ pub const Backend = struct {
 
     pub fn attachFutexWaitSet(self: *Backend, wait_set: FutexWaitSet) void {
         self.futex_wait_set = wait_set;
+    }
+
+    /// Attach a cooperative task runtime, enabling `Io.async` and
+    /// `Io.concurrent` to spawn deterministic scheduler tasks.
+    pub fn attachTaskRuntime(self: *Backend, runtime: TaskRuntime) void {
+        self.task_runtime = runtime;
     }
 
     pub fn attachNetworkControl(self: *Backend, control: network_module.AnyNetworkControl) void {
@@ -347,10 +358,10 @@ pub fn onDiskCrashOpaque(ptr: *anyopaque) void {
 const sim_vtable: Io.VTable = .{
     .crashHandler = Io.noCrashHandler,
 
-    .async = Io.noAsync,
-    .concurrent = Io.failingConcurrent,
-    .await = Io.unreachableAwait,
-    .cancel = Io.unreachableCancel,
+    .async = simAsync,
+    .concurrent = simConcurrent,
+    .await = simAwait,
+    .cancel = simCancel,
 
     .groupAsync = Io.noGroupAsync,
     .groupConcurrent = Io.failingGroupConcurrent,
@@ -482,6 +493,165 @@ fn supportsClock(clock: Io.Clock) bool {
         .real, .awake, .boot => true,
         .cpu_process, .cpu_thread => false,
     };
+}
+
+/// Heap record backing one spawned `Io.async`/`Io.concurrent` task.
+///
+/// Context and result are stored out-of-line because the caller's context
+/// buffer expires when the vtable call returns, while the result must
+/// survive until `await`/`cancel` collects it.
+const AsyncClosure = struct {
+    backend: *Backend,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    task_id: u64 = 0,
+    done: bool = false,
+    context: []align(max_async_alignment) u8,
+    result: []align(max_async_alignment) u8,
+
+    /// Upper bound for context/result alignment, matching std's own
+    /// fiber-backed backends. Asserted at spawn.
+    const max_async_alignment = 16;
+
+    fn create(
+        backend: *Backend,
+        result_len: usize,
+        result_alignment: std.mem.Alignment,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    ) error{OutOfMemory}!*AsyncClosure {
+        std.debug.assert(result_alignment.toByteUnits() <= max_async_alignment);
+        std.debug.assert(context_alignment.toByteUnits() <= max_async_alignment);
+
+        const closure = try backend.allocator.create(AsyncClosure);
+        errdefer backend.allocator.destroy(closure);
+        const context_copy = try backend.allocator.alignedAlloc(u8, .fromByteUnits(max_async_alignment), context.len);
+        errdefer backend.allocator.free(context_copy);
+        const result = try backend.allocator.alignedAlloc(u8, .fromByteUnits(max_async_alignment), result_len);
+        errdefer backend.allocator.free(result);
+
+        @memcpy(context_copy, context);
+        closure.* = .{
+            .backend = backend,
+            .start = start,
+            .context = context_copy,
+            .result = result,
+        };
+        return closure;
+    }
+
+    fn destroy(self: *AsyncClosure, allocator: std.mem.Allocator) void {
+        allocator.free(self.context);
+        allocator.free(self.result);
+        allocator.destroy(self);
+    }
+
+    fn completionKey(self: *const AsyncClosure) usize {
+        return futex_module.waitKey(.task, @intCast(self.task_id));
+    }
+
+    /// Task entry: run the user function, then publish completion.
+    fn run(raw: *anyopaque) void {
+        const closure: *AsyncClosure = @ptrCast(@alignCast(raw));
+        closure.start(closure.context.ptr, closure.result.ptr);
+        closure.done = true;
+        const runtime = closure.backend.task_runtime orelse unreachable;
+        _ = runtime.wake(closure.completionKey(), std.math.maxInt(usize));
+    }
+};
+
+fn simAsync(
+    userdata: ?*anyopaque,
+    result: []u8,
+    result_alignment: std.mem.Alignment,
+    context: []const u8,
+    context_alignment: std.mem.Alignment,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) ?*Io.AnyFuture {
+    return simConcurrent(userdata, result.len, result_alignment, context, context_alignment, start) catch {
+        // No task runtime attached: run eagerly on the caller, preserving
+        // `async` semantics (concurrency is optional for it).
+        start(context.ptr, result.ptr);
+        return null;
+    };
+}
+
+fn simConcurrent(
+    userdata: ?*anyopaque,
+    result_len: usize,
+    result_alignment: std.mem.Alignment,
+    context: []const u8,
+    context_alignment: std.mem.Alignment,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) Io.ConcurrentError!*Io.AnyFuture {
+    const backend = backendFromUserdata(userdata);
+    const runtime = backend.task_runtime orelse return error.ConcurrencyUnavailable;
+
+    const closure = AsyncClosure.create(
+        backend,
+        result_len,
+        result_alignment,
+        context,
+        context_alignment,
+        start,
+    ) catch return error.ConcurrencyUnavailable;
+    errdefer closure.destroy(backend.allocator);
+
+    backend.async_closures.append(backend.allocator, closure) catch return error.ConcurrencyUnavailable;
+    errdefer _ = backend.async_closures.pop();
+
+    // A cooperative task is a unit of concurrency in the deterministic
+    // simulation: it makes progress whenever the caller suspends, which is
+    // what `concurrent` requires of single-threaded executors.
+    closure.task_id = try runtime.spawn(AsyncClosure.run, closure);
+    return @ptrCast(closure);
+}
+
+fn simAwait(
+    userdata: ?*anyopaque,
+    any_future: *Io.AnyFuture,
+    result: []u8,
+    result_alignment: std.mem.Alignment,
+) void {
+    _ = result_alignment;
+    const backend = backendFromUserdata(userdata);
+    const closure: *AsyncClosure = @ptrCast(@alignCast(any_future));
+    // `await` is only called when `async` returned non-null, so a runtime
+    // was attached at spawn time.
+    const runtime = backend.task_runtime orelse unreachable;
+
+    if (!closure.done) {
+        if (runtime.inTask()) {
+            while (!closure.done) runtime.block(closure.completionKey());
+        } else {
+            runtime.runUntilDone(&closure.done);
+        }
+    }
+
+    @memcpy(result, closure.result[0..result.len]);
+    releaseClosure(backend, closure);
+}
+
+fn simCancel(
+    userdata: ?*anyopaque,
+    any_future: *Io.AnyFuture,
+    result: []u8,
+    result_alignment: std.mem.Alignment,
+) void {
+    // Cooperative tasks cannot be preempted, and the deterministic model has
+    // no external event that could interrupt them mid-run: cancellation runs
+    // the task to completion, exactly like `await`.
+    simAwait(userdata, any_future, result, result_alignment);
+}
+
+fn releaseClosure(backend: *Backend, closure: *AsyncClosure) void {
+    for (backend.async_closures.items, 0..) |candidate, index| {
+        if (candidate == closure) {
+            _ = backend.async_closures.swapRemove(index);
+            break;
+        }
+    }
+    closure.destroy(backend.allocator);
 }
 
 fn simRandom(userdata: ?*anyopaque, buffer: []u8) void {

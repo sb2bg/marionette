@@ -4,6 +4,7 @@ const backend = @import("backend.zig");
 
 pub const FutexWaitResult = backend.FutexWaitResult;
 pub const FutexWaitSet = backend.FutexWaitSet;
+pub const TaskRuntime = @import("task.zig").TaskRuntime;
 pub const Backend = backend.Backend;
 
 pub const deinitBackendOpaque = backend.deinitBackendOpaque;
