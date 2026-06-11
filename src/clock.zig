@@ -118,13 +118,13 @@ pub const SimClock = struct {
     /// Advance simulated time by `duration_ns`.
     ///
     /// `duration_ns` must be an exact multiple of this clock's tick size.
+    /// The advance is one jump: this clock has no per-tick side effects, so
+    /// stepping tick by tick would be observably identical but
+    /// O(duration / tick_ns), which breaks large time jumps at fine tick
+    /// resolutions.
     pub fn runFor(self: *SimClock, duration_ns: Duration) void {
         std.debug.assert(duration_ns % self.tick_ns == 0);
-
-        var ticks_remaining = duration_ns / self.tick_ns;
-        while (ticks_remaining > 0) : (ticks_remaining -= 1) {
-            self.tick();
-        }
+        self.advanceBy(duration_ns);
     }
 
     /// Round a duration up to the next representable simulation tick.
