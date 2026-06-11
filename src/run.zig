@@ -367,55 +367,113 @@ fn runTwiceWithStateLifecycle(
     comptime scenario: fn (*State) anyerror!void,
     comptime state_checks: []const StateCheck(State),
 ) RunError!RunReport {
+    // Always execute both runs, even when the first fails: a failure that
+    // does not reproduce with the same seed is itself a determinism leak,
+    // and a failure that does reproduce is verified replayable.
     var first = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
-    switch (first) {
-        .failed => |failure| return .{ .failed = failure },
-        .passed => {},
-    }
     errdefer first.deinit();
 
     var second = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
-    switch (second) {
-        .failed => |failure| {
-            const passed = first.passed;
-            var failure_options = failure.options;
-            if (failure.owns_options) deinitRunOptions(allocator, &failure_options);
-            return .{ .failed = .{
-                .allocator = allocator,
-                .options = passed.options,
-                .owns_options = passed.owns_options,
-                .first_trace = passed.trace,
-                .second_trace = failure.first_trace,
-                .first_event_count = passed.event_count,
-                .second_event_count = failure.first_event_count,
-                .kind = failure.kind,
-                .error_name = failure.error_name,
-                .check_name = failure.check_name,
-                .owns_check_name = failure.owns_check_name,
-            } };
+
+    switch (first) {
+        .passed => |first_passed| switch (second) {
+            .passed => |*second_passed| {
+                if (!std.mem.eql(u8, first_passed.trace, second_passed.trace)) {
+                    if (second_passed.owns_options) deinitRunOptions(allocator, &second_passed.options);
+                    return .{ .failed = .{
+                        .allocator = allocator,
+                        .options = first_passed.options,
+                        .owns_options = first_passed.owns_options,
+                        .kind = .determinism_mismatch,
+                        .first_trace = first_passed.trace,
+                        .second_trace = second_passed.trace,
+                        .first_event_count = first_passed.event_count,
+                        .second_event_count = second_passed.event_count,
+                    } };
+                }
+
+                second.deinit();
+                return .{ .passed = first_passed };
+            },
+            .failed => |second_failure| {
+                // The first run passed, so the second run's failure is a
+                // determinism leak surfaced through an error.
+                var failure_options = second_failure.options;
+                if (second_failure.owns_options) deinitRunOptions(allocator, &failure_options);
+                return .{ .failed = .{
+                    .allocator = allocator,
+                    .options = first_passed.options,
+                    .owns_options = first_passed.owns_options,
+                    .first_trace = first_passed.trace,
+                    .second_trace = second_failure.first_trace,
+                    .first_event_count = first_passed.event_count,
+                    .second_event_count = second_failure.first_event_count,
+                    .kind = .second_run_failed,
+                    .error_name = second_failure.error_name,
+                    .check_name = second_failure.check_name,
+                    .owns_check_name = second_failure.owns_check_name,
+                } };
+            },
         },
-        .passed => {},
-    }
-    errdefer second.deinit();
+        .failed => |first_failure| switch (second) {
+            .passed => |second_passed| {
+                // The failure did not reproduce: a determinism leak.
+                var passed_options = second_passed.options;
+                if (second_passed.owns_options) deinitRunOptions(allocator, &passed_options);
+                return .{ .failed = .{
+                    .allocator = allocator,
+                    .options = first_failure.options,
+                    .owns_options = first_failure.owns_options,
+                    .kind = .first_run_failed,
+                    .first_trace = first_failure.first_trace,
+                    .second_trace = second_passed.trace,
+                    .first_event_count = first_failure.first_event_count,
+                    .second_event_count = second_passed.event_count,
+                    .error_name = first_failure.error_name,
+                    .check_name = first_failure.check_name,
+                    .owns_check_name = first_failure.owns_check_name,
+                } };
+            },
+            .failed => |second_failure| {
+                const reproduced = first_failure.kind == second_failure.kind and
+                    optionalTextEqual(first_failure.error_name, second_failure.error_name) and
+                    optionalTextEqual(first_failure.check_name, second_failure.check_name) and
+                    std.mem.eql(u8, first_failure.first_trace, second_failure.first_trace);
+                if (reproduced) {
+                    // Verified replayable failure: report the first run's
+                    // failure as-is.
+                    second.deinit();
+                    return .{ .failed = first_failure };
+                }
 
-    const first_passed = first.passed;
-    var second_passed = second.passed;
-    if (!std.mem.eql(u8, first_passed.trace, second_passed.trace)) {
-        if (second_passed.owns_options) deinitRunOptions(allocator, &second_passed.options);
-        return .{ .failed = .{
-            .allocator = allocator,
-            .options = first_passed.options,
-            .owns_options = first_passed.owns_options,
-            .kind = .determinism_mismatch,
-            .first_trace = first_passed.trace,
-            .second_trace = second_passed.trace,
-            .first_event_count = first_passed.event_count,
-            .second_event_count = second_passed.event_count,
-        } };
+                // Same seed, two different failures: a determinism leak.
+                // Keep both runs' diagnostics.
+                var failure_options = second_failure.options;
+                if (second_failure.owns_options) deinitRunOptions(allocator, &failure_options);
+                return .{ .failed = .{
+                    .allocator = allocator,
+                    .options = first_failure.options,
+                    .owns_options = first_failure.owns_options,
+                    .kind = .determinism_mismatch,
+                    .first_trace = first_failure.first_trace,
+                    .second_trace = second_failure.first_trace,
+                    .first_event_count = first_failure.first_event_count,
+                    .second_event_count = second_failure.first_event_count,
+                    .error_name = first_failure.error_name,
+                    .check_name = first_failure.check_name,
+                    .owns_check_name = first_failure.owns_check_name,
+                    .second_error_name = second_failure.error_name,
+                    .second_check_name = second_failure.check_name,
+                    .owns_second_check_name = second_failure.owns_check_name,
+                } };
+            },
+        },
     }
+}
 
-    second_passed.deinit();
-    return .{ .passed = first_passed };
+fn optionalTextEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.mem.eql(u8, a.?, b.?);
 }
 
 fn runOnceWithStateLifecycle(
@@ -613,6 +671,82 @@ test "run: same-seed trace mismatch is reported" {
             try std.testing.expectEqual(RunFailureKind.determinism_mismatch, failure.kind);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "value=1") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "value=2") != null);
+        },
+    }
+}
+
+var flaky_counter: u64 = 0;
+
+fn passThenFailScenario(world: *World) !void {
+    try world.record("scenario.flaky", .{});
+    flaky_counter += 1;
+    if (flaky_counter >= 2) return error.SecondRunBoom;
+}
+
+fn failThenPassScenario(world: *World) !void {
+    try world.record("scenario.flaky", .{});
+    flaky_counter += 1;
+    if (flaky_counter == 1) return error.FirstRunBoom;
+}
+
+test "run: fail-then-pass is reported as a determinism leak" {
+    flaky_counter = 0;
+    var report = try run(std.testing.allocator, .{ .seed = 1234 }, failThenPassScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.first_run_failed, failure.kind);
+            try std.testing.expectEqualStrings("FirstRunBoom", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.flaky") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "scenario.flaky") != null);
+        },
+    }
+}
+
+fn divergingFailureScenario(world: *World) !void {
+    flaky_counter += 1;
+    try world.record("scenario.attempt value={}", .{flaky_counter});
+    return if (flaky_counter == 1) error.FirstBoom else error.SecondBoom;
+}
+
+test "run: failures that do not replay byte-identically are a determinism mismatch" {
+    flaky_counter = 0;
+    var report = try run(std.testing.allocator, .{ .seed = 1234 }, divergingFailureScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.determinism_mismatch, failure.kind);
+            try std.testing.expectEqualStrings("FirstBoom", failure.error_name.?);
+            try std.testing.expectEqualStrings("SecondBoom", failure.second_error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "value=1") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "value=2") != null);
+
+            var buffer: [512]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try failure.writeSummary(&writer);
+            const summary = writer.buffered();
+            try std.testing.expect(std.mem.indexOf(u8, summary, "error=FirstBoom") != null);
+            try std.testing.expect(std.mem.indexOf(u8, summary, "second_error=SecondBoom") != null);
+        },
+    }
+}
+
+test "run: pass-then-fail is reported as a determinism leak" {
+    flaky_counter = 0;
+    var report = try run(std.testing.allocator, .{ .seed = 1234 }, passThenFailScenario);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.second_run_failed, failure.kind);
+            try std.testing.expectEqualStrings("SecondRunBoom", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.flaky") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "scenario.flaky") != null);
         },
     }
 }

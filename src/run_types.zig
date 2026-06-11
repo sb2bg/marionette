@@ -289,6 +289,16 @@ pub const RunFailureKind = enum {
     check_failed,
     /// Two executions with the same seed produced different traces.
     determinism_mismatch,
+    /// The first run passed but the second failed with the same seed. This
+    /// is a determinism leak surfaced through an error rather than trace
+    /// bytes; `error_name` (and `check_name`, if set) describe the second
+    /// run's failure.
+    second_run_failed,
+    /// The first run failed but the second passed with the same seed. This
+    /// is a determinism leak: the failure did not reproduce. `error_name`
+    /// (and `check_name`, if set) describe the first run's failure, and the
+    /// second trace is the passing run's trace.
+    first_run_failed,
 };
 
 /// Data-bearing failure report.
@@ -304,6 +314,10 @@ pub const RunFailure = struct {
     error_name: ?[]const u8 = null,
     check_name: ?[]const u8 = null,
     owns_check_name: bool = false,
+    /// Second run's failure details when both runs failed differently.
+    second_error_name: ?[]const u8 = null,
+    second_check_name: ?[]const u8 = null,
+    owns_second_check_name: bool = false,
 
     /// Release owned traces.
     pub fn deinit(self: *RunFailure) void {
@@ -312,6 +326,9 @@ pub const RunFailure = struct {
         if (self.owns_options) deinitRunOptions(self.allocator, &self.options);
         if (self.owns_check_name) {
             if (self.check_name) |name| self.allocator.free(name);
+        }
+        if (self.owns_second_check_name) {
+            if (self.second_check_name) |name| self.allocator.free(name);
         }
         self.* = undefined;
     }
@@ -350,6 +367,13 @@ pub const RunFailure = struct {
         }
         if (self.check_name) |name| {
             try writer.print(" check=", .{});
+            try world_module.writeEscapedTraceText(writer, name, false);
+        }
+        if (self.second_error_name) |name| {
+            try writer.print(" second_error={s}", .{name});
+        }
+        if (self.second_check_name) |name| {
+            try writer.print(" second_check=", .{});
             try world_module.writeEscapedTraceText(writer, name, false);
         }
         try writer.writeByte('\n');
