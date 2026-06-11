@@ -88,11 +88,26 @@ trace. Instead, the runner captures:
 
 Failure kinds:
 
-- `scenario_error`: user scenario returned an error. The first trace is the
-  partial trace through the last completed event.
-- `check_failed`: a named check returned an error after the scenario body.
-  The first trace is the partial trace through the check failure.
-- `determinism_mismatch`: both runs completed, but their traces differed.
+- `scenario_error`: user scenario returned an error in both runs with an
+  identical trace. The first trace is the partial trace through the last
+  completed event; the failure is verified replayable.
+- `check_failed`: a named check returned an error after the scenario body,
+  identically in both runs. The first trace is the partial trace through the
+  check failure.
+- `determinism_mismatch`: the runs diverged. Either both passed with
+  different traces, or both failed but not byte-identically. When both runs
+  failed, `error`/`check` describe the first run and
+  `second_error`/`second_check` describe the second.
+- `second_run_failed`: the first run passed but the second failed with the
+  same seed. A determinism leak surfaced through an error; `error` (and
+  `check`, if set) describe the second run's failure.
+- `first_run_failed`: the first run failed but the second passed with the
+  same seed. A determinism leak: the failure did not reproduce. `error` (and
+  `check`, if set) describe the first run's failure, and the second trace is
+  the passing run's trace.
+
+The runner always executes both runs, even when the first fails, so every
+reported `scenario_error` or `check_failed` has already been replayed once.
 
 Panics are different from error returns. Zig's default panic path may abort
 before Marionette can report a partial trace, so simulated failures should
