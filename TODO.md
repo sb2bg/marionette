@@ -190,3 +190,64 @@ section. Check items off as they are fixed; link commits or issues inline.
 - [ ] CLAUDE.md directory layout is stale: lists `examples/rate_limiter.zig`
       and `tests/tidy_self_check.zig` (neither exists), omits `src/io/`,
       `src/network/`, `src/disk/`, `validation/`, `docs/`.
+
+## std.Io scheduling milestone (2026-06-11)
+
+- [x] Traced `Io.random`/`Io.randomSecure`: `io.random len=N digest=H`
+      events (fixed-seed Wyhash digest of the bytes). Trace header bumped
+      to `version=1`; documented in `docs/trace-format.md`.
+- [x] Scheduling inside `std.Io`: `World.simulate` now owns a cooperative
+      scheduler (teardown-registered) and attaches both the futex wait set
+      and a new type-erased `TaskRuntime` seam (`src/io/task.zig`) to the
+      backend. `Io.async`/`Io.concurrent` spawn deterministic tasks with
+      seeded, replay-visible interleaving; `await` parks in-task or drives
+      the scheduler from the scenario context (`runUntilDone`); `cancel`
+      awaits completion (cooperative tasks cannot be preempted). Bare
+      backends keep the old semantics (eager async,
+      `error.ConcurrencyUnavailable` for concurrent). `runUntilIdle` was
+      refactored into a shared `stepOnce` (verified under ReleaseSafe).
+- [ ] `Io.Group` (`groupAsync`/`groupConcurrent`/`groupAwait`/`groupCancel`)
+      still fails closed, matching the current state of Zig's own
+      fiber-backed backends. Implement once the single-future path has
+      mileage.
+- [ ] Cooperative cancellation points: `cancel` currently awaits; a real
+      implementation needs cancel-request state surfaced through
+      `checkCancel` at suspension points.
+- [x] Fiber stacks are now unwind-safe (was: testing.allocator crashed on
+      fiber-side alloc/free). Root cause per review: the entry stack had no
+      valid termination, with an uninitialized return-address slot on
+      x86_64 and a stale link register on aarch64/riscv64, so DWARF
+      unwinders restored garbage caller state. Fixed with a zeroed sentinel
+      root frame below the start closure plus link-register zeroing in the
+      entry trampoline (zio's scheme). Pinned by a regression test that
+      allocs/frees through `std.testing.allocator` inside a task, and the
+      io async tests run on `std.testing.allocator` again (leak checking
+      restored).
+- [ ] Windows x86_64 fiber entry uses the SysV argument register (`rdi`);
+      the Win64 ABI passes the first argument in `rcx`. Pre-existing,
+      compile-only verified today; fix alongside the first real Windows CI
+      run (zio's coroEntry has the win64 variant to crib from).
+- [x] Review fix (P1): main-context blocking no longer panics. Wait-set
+      calls with no current task route to `driveMainUntil`: the main
+      context drives the scheduler (ready tasks run, time advances to the
+      nearest task/caller deadline, due tasks wake at their own deadlines)
+      until a `wake` hits its key or its deadline passes. The main waiter
+      is woken before task waiters (fixed, deterministic priority; traced
+      as `scheduler.wake_main`). A main wait with no runnable work, no
+      timers, and no deadline panics as a deterministic deadlock. Note the
+      semantic change: main-context empty accept with nothing pending now
+      deadlock-panics instead of returning `WouldBlock` (the bare-backend
+      `WouldBlock` path is unchanged).
+- [x] Review fix (P1): completed tasks release their fibers eagerly. The
+      `stepOnce` completion arm destroys the fiber (256 KiB stack) as soon
+      as the task can never run again; `OpaqueEntry` adapters free
+      themselves at task start. Remaining growth per completed task is one
+      small `Task` record in `tasks` (kept for `completedCount` and id
+      lookup); recycle those if worlds ever run task counts where a linear
+      scan or the records themselves matter.
+- [ ] Validation harnesses still construct their own
+      `mar.experimental.TaskScheduler` and re-attach its wait set, leaving
+      the world-owned scheduler idle (last-attach-wins, so behavior is
+      consistent). Migrate them to `io.async` and retire the experimental
+      exports once net-wait ergonomics (peer-parked handshakes) no longer
+      need direct scheduler access.
