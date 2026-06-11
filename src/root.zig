@@ -19,17 +19,8 @@ test {
     _ = fiber_module;
 }
 
-/// Return the clock implementation for a comptime mode.
-pub const Clock = clock_module.Clock;
-
-/// Clock backend selected at comptime.
-pub const ClockMode = clock_module.Mode;
-
 /// Duration in nanoseconds.
 pub const Duration = clock_module.Duration;
-
-/// Wall-clock implementation backed by Zig's host IO clock.
-pub const ProductionClock = clock_module.ProductionClock;
 
 /// Deterministic fake clock advanced explicitly by tests.
 pub const SimClock = clock_module.SimClock;
@@ -39,9 +30,6 @@ pub const Timestamp = clock_module.Timestamp;
 
 /// Stable simulated node/process identifier.
 pub const NodeId = network_module.NodeId;
-
-/// Errors returned by unstable network runtime validation.
-pub const UnstableNetworkError = network_module.NetworkError;
 
 /// Errors returned by deterministic network runtime validation.
 pub const NetworkError = network_module.NetworkError;
@@ -121,25 +109,16 @@ pub const Random = @import("random.zig").Random;
 /// Deterministic simulation engine state.
 pub const World = @import("world.zig").World;
 
-/// Unstable fixed-capacity deterministic event queue for examples.
-///
-/// This is a low-level event queue, not the cooperative task scheduler.
-pub const UnstableEventQueue = @import("scheduler.zig").EventQueue;
+/// Pre-stabilization surface. Everything here is expected to move or change
+/// as `Sim` takes ownership of scheduling; it lives in one namespace so the
+/// stability contract is visible at the call site.
+pub const experimental = struct {
+    /// Seeded cooperative scheduler for early `std.Io` concurrency validation.
+    pub const TaskScheduler = @import("scheduler.zig").TaskScheduler;
 
-/// Errors returned by unstable fixed-capacity event queues.
-pub const UnstableEventQueueError = @import("scheduler.zig").EventQueueError;
-
-/// Unstable seeded cooperative scheduler for early `std.Io` concurrency validation.
-pub const UnstableTaskScheduler = @import("scheduler.zig").TaskScheduler;
-
-/// Build a `std.Io` futex wait-set view over an unstable task scheduler.
-pub const unstableTaskSchedulerFutexWaitSet = @import("scheduler.zig").futexWaitSet;
-
-/// Unstable deterministic network primitive for examples and early scheduler work.
-pub const UnstableNetwork = network_module.UnstableNetwork;
-
-/// Fixed topology and per-path capacity for one unstable network instance.
-pub const UnstableNetworkOptions = network_module.NetworkOptions;
+    /// Build a `std.Io` futex wait-set view over a task scheduler.
+    pub const taskSchedulerFutexWaitSet = @import("scheduler.zig").futexWaitSet;
+};
 
 /// Fixed topology and per-path capacity for one network simulation.
 pub const NetworkOptions = network_module.NetworkOptions;
@@ -215,9 +194,6 @@ pub const RunAttributeValue = run_module.RunAttributeValue;
 
 /// Build one replay-visible typed attribute from a scalar value.
 pub const runAttribute = run_module.runAttribute;
-
-/// Build run attributes from a scalar-only run config struct.
-pub const runAttributesFrom = run_module.runAttributesFrom;
 
 /// Named scenario check run by `run`.
 pub const Check = run_module.Check;

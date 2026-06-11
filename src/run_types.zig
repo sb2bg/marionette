@@ -53,44 +53,6 @@ pub fn runAttribute(key: []const u8, value: anytype) RunAttribute {
     return .{ .key = key, .value = runAttributeValue(value) };
 }
 
-/// Build run attributes from a scalar-only run config struct.
-///
-/// Contract:
-/// - Only deterministic scalar fields are supported: ints, floats, bools, and
-///   UTF-8 string slices/literals.
-/// - Fields are emitted in declaration order.
-/// - Field names become exported attribute keys.
-/// - Runtime behavior must depend on the original config, not on the derived
-///   attributes.
-///
-/// Use `runAttribute` when a stable exported key should differ from an
-/// internal field name.
-pub fn runAttributesFrom(config: anytype) [runAttributeFieldCount(@TypeOf(config))]RunAttribute {
-    const Config = @TypeOf(config);
-    const fields = switch (@typeInfo(Config)) {
-        .@"struct" => |struct_info| struct_info.fields,
-        else => @compileError("runAttributesFrom expects a struct"),
-    };
-
-    var attributes: [fields.len]RunAttribute = undefined;
-    inline for (fields, 0..) |field, index| {
-        attributes[index] = runAttribute(field.name, @field(config, field.name));
-    }
-    return attributes;
-}
-
-fn runAttributeFieldCount(comptime Config: type) comptime_int {
-    return switch (@typeInfo(Config)) {
-        .@"struct" => |struct_info| {
-            if (struct_info.is_tuple) {
-                @compileError("runAttributesFrom expects a named-field struct");
-            }
-            return struct_info.fields.len;
-        },
-        else => @compileError("runAttributesFrom expects a struct"),
-    };
-}
-
 fn runAttributeValue(value: anytype) RunAttributeValue {
     const Value = @TypeOf(value);
     return switch (@typeInfo(Value)) {
@@ -402,36 +364,6 @@ pub const RunReport = union(enum) {
         self.* = undefined;
     }
 };
-
-test "runAttributesFrom: derives typed attributes from config structs" {
-    const Profile = struct {
-        replicas: u8,
-        retry_limit: i16,
-        faults_enabled: bool,
-        mode: []const u8,
-        weight: f32,
-    };
-
-    const attributes = runAttributesFrom(Profile{
-        .replicas = 3,
-        .retry_limit = -1,
-        .faults_enabled = true,
-        .mode = "smoke",
-        .weight = 1.5,
-    });
-
-    try std.testing.expectEqual(@as(usize, 5), attributes.len);
-    try std.testing.expectEqualStrings("replicas", attributes[0].key);
-    try std.testing.expectEqual(@as(u64, 3), attributes[0].value.uint);
-    try std.testing.expectEqualStrings("retry_limit", attributes[1].key);
-    try std.testing.expectEqual(@as(i64, -1), attributes[1].value.int);
-    try std.testing.expectEqualStrings("faults_enabled", attributes[2].key);
-    try std.testing.expectEqual(true, attributes[2].value.boolean);
-    try std.testing.expectEqualStrings("mode", attributes[3].key);
-    try std.testing.expectEqualStrings("smoke", attributes[3].value.string);
-    try std.testing.expectEqualStrings("weight", attributes[4].key);
-    try std.testing.expectEqual(@as(f64, 1.5), attributes[4].value.float);
-}
 
 test "runAttribute: accepts string literals" {
     const attribute = runAttribute("profile", "smoke");

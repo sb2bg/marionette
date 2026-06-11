@@ -30,7 +30,7 @@ const MailboxScenario = struct {
         };
     }
 
-    fn timeoutReceiver(_: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn timeoutReceiver(_: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
         self.receivers_started += 1;
         _ = self.mailbox.receive(30) catch |err| switch (err) {
@@ -43,7 +43,7 @@ const MailboxScenario = struct {
         @panic("empty mailbox receive unexpectedly succeeded");
     }
 
-    fn exchangeReceiver(_: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn exchangeReceiver(_: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
         self.receivers_started += 1;
         const envelope = self.mailbox.receive(1000) catch |err| switch (err) {
@@ -53,7 +53,7 @@ const MailboxScenario = struct {
         self.receiver_got_letter = true;
     }
 
-    fn sender(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn sender(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
         while (self.receivers_started < 1) {
             self.sender_yields += 1;
@@ -75,9 +75,9 @@ fn runMailboxTrace(allocator: std.mem.Allocator, seed: u64, kind: ScenarioKind) 
         runtime_allocator.destroy(world);
     }
 
-    const scheduler = try runtime_allocator.create(mar.UnstableTaskScheduler);
+    const scheduler = try runtime_allocator.create(mar.experimental.TaskScheduler);
     errdefer runtime_allocator.destroy(scheduler);
-    scheduler.* = mar.UnstableTaskScheduler.init(runtime_allocator, world);
+    scheduler.* = mar.experimental.TaskScheduler.init(runtime_allocator, world);
     defer {
         scheduler.deinit();
         runtime_allocator.destroy(scheduler);
@@ -85,7 +85,7 @@ fn runMailboxTrace(allocator: std.mem.Allocator, seed: u64, kind: ScenarioKind) 
 
     var backend = mar.SimIo.Backend.init(runtime_allocator, world, mar.Disk.unavailable(), 4096);
     defer backend.deinit();
-    backend.attachFutexWaitSet(mar.unstableTaskSchedulerFutexWaitSet(scheduler));
+    backend.attachFutexWaitSet(mar.experimental.taskSchedulerFutexWaitSet(scheduler));
 
     const scenario = try runtime_allocator.create(MailboxScenario);
     defer runtime_allocator.destroy(scenario);

@@ -15,30 +15,8 @@ pub const Timestamp = u64;
 /// Duration in nanoseconds.
 pub const Duration = u64;
 
-/// Clock backend selected at comptime.
-///
-/// Passing the mode at comptime keeps services generic over time while
-/// still letting release builds erase unused simulation code.
-pub const Mode = enum {
-    /// Wall-clock time backed by Zig's host IO clock.
-    production,
-    /// Deterministic fake time owned by a simulation world.
-    simulation,
-};
-
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns: Duration = 1;
-
-/// Return the clock implementation for `mode`.
-///
-/// Services should usually be generic over `ClockType`, with callers
-/// passing `Clock(.production)` or `Clock(.simulation)` at comptime.
-pub fn Clock(comptime mode: Mode) type {
-    return switch (mode) {
-        .production => ProductionClock,
-        .simulation => SimClock,
-    };
-}
 
 /// Production clock backed by the host `std.Io` provided at construction.
 ///
@@ -143,11 +121,6 @@ pub const SimClock = struct {
         self.now_ns += duration_ns;
     }
 };
-
-test "clock: comptime selector chooses implementation" {
-    try std.testing.expectEqual(ProductionClock, Clock(.production));
-    try std.testing.expectEqual(SimClock, Clock(.simulation));
-}
 
 test "clock: sim clock starts at configured time" {
     var clock: SimClock = .init(.{ .start_ns = 42, .tick_ns = 5 });

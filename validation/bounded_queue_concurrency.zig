@@ -107,7 +107,7 @@ const ConsumerArg = struct {
 
 const QueueScenario = struct {
     world: *mar.World,
-    scheduler: *mar.UnstableTaskScheduler,
+    scheduler: *mar.experimental.TaskScheduler,
     queue: BoundedQueue,
     producers: [producer_count]ProducerArg = undefined,
     consumers: [consumer_count]ConsumerArg = undefined,
@@ -121,7 +121,7 @@ const QueueScenario = struct {
     close_only_started: usize = 0,
     close_only_exited: usize = 0,
 
-    fn init(world: *mar.World, scheduler: *mar.UnstableTaskScheduler, io: Io, close_mode: CloseMode) QueueScenario {
+    fn init(world: *mar.World, scheduler: *mar.experimental.TaskScheduler, io: Io, close_mode: CloseMode) QueueScenario {
         return .{
             .world = world,
             .scheduler = scheduler,
@@ -145,7 +145,7 @@ const QueueScenario = struct {
         self.consumed_count += 1;
     }
 
-    fn producer(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn producer(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const producer_arg: *ProducerArg = @ptrCast(@alignCast(arg));
         const scenario = producer_arg.scenario;
 
@@ -165,7 +165,7 @@ const QueueScenario = struct {
         }
     }
 
-    fn consumer(_: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn consumer(_: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const consumer_arg: *ConsumerArg = @ptrCast(@alignCast(arg));
         const scenario = consumer_arg.scenario;
 
@@ -177,7 +177,7 @@ const QueueScenario = struct {
         scenario.record("bounded_queue.consumer_done consumer={} done={}", .{ consumer_arg.id, scenario.consumers_done });
     }
 
-    fn closeOnlyConsumer(_: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn closeOnlyConsumer(_: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const consumer_arg: *ConsumerArg = @ptrCast(@alignCast(arg));
         const scenario = consumer_arg.scenario;
 
@@ -194,7 +194,7 @@ const QueueScenario = struct {
         });
     }
 
-    fn closeOnlyCloser(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn closeOnlyCloser(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const scenario: *QueueScenario = @ptrCast(@alignCast(arg));
 
         while (scenario.close_only_started < close_only_consumers or scheduler.blockedCount() < close_only_consumers) {
@@ -231,7 +231,7 @@ const TraceResult = struct {
 
 fn setupRuntime(runtime_allocator: std.mem.Allocator, seed: u64) !struct {
     world: *mar.World,
-    scheduler: *mar.UnstableTaskScheduler,
+    scheduler: *mar.experimental.TaskScheduler,
     backend: mar.SimIo.Backend,
 } {
     const world = try runtime_allocator.create(mar.World);
@@ -239,14 +239,14 @@ fn setupRuntime(runtime_allocator: std.mem.Allocator, seed: u64) !struct {
     world.* = try mar.World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
     errdefer world.deinit();
 
-    const scheduler = try runtime_allocator.create(mar.UnstableTaskScheduler);
+    const scheduler = try runtime_allocator.create(mar.experimental.TaskScheduler);
     errdefer runtime_allocator.destroy(scheduler);
-    scheduler.* = mar.UnstableTaskScheduler.init(runtime_allocator, world);
+    scheduler.* = mar.experimental.TaskScheduler.init(runtime_allocator, world);
     errdefer scheduler.deinit();
 
     var backend = mar.SimIo.Backend.init(runtime_allocator, world, mar.Disk.unavailable(), 4096);
     errdefer backend.deinit();
-    backend.attachFutexWaitSet(mar.unstableTaskSchedulerFutexWaitSet(scheduler));
+    backend.attachFutexWaitSet(mar.experimental.taskSchedulerFutexWaitSet(scheduler));
 
     return .{
         .world = world,

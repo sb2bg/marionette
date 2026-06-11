@@ -56,7 +56,7 @@ const Scenario = struct {
         };
     }
 
-    fn serverTask(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn serverTask(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const self: *Scenario = @ptrCast(@alignCast(arg));
         const stream = self.listener.accept(self.io) catch @panic("std_io_net_kv accept failed");
         defer stream.close(self.io);
@@ -80,7 +80,7 @@ const Scenario = struct {
         }
     }
 
-    fn clientTask(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn clientTask(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const self: *Scenario = @ptrCast(@alignCast(arg));
         scheduler.yieldUntilBlockedCount(1);
 
@@ -123,7 +123,7 @@ const Scenario = struct {
         );
     }
 
-    fn faultController(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
+    fn faultController(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
         const self: *Scenario = @ptrCast(@alignCast(arg));
         self.controller_waiting = true;
         scheduler.blockCurrent(response_queued_key);
@@ -162,9 +162,9 @@ pub fn runScenario(
         runtime_allocator.destroy(world);
     }
 
-    const scheduler = try runtime_allocator.create(mar.UnstableTaskScheduler);
+    const scheduler = try runtime_allocator.create(mar.experimental.TaskScheduler);
     errdefer runtime_allocator.destroy(scheduler);
-    scheduler.* = mar.UnstableTaskScheduler.init(runtime_allocator, world);
+    scheduler.* = mar.experimental.TaskScheduler.init(runtime_allocator, world);
     defer {
         scheduler.deinit();
         runtime_allocator.destroy(scheduler);
@@ -177,7 +177,7 @@ pub fn runScenario(
     } });
     const io = sim.env.io();
     const backend: *mar.SimIo.Backend = @ptrCast(@alignCast(io.userdata.?));
-    backend.attachFutexWaitSet(mar.unstableTaskSchedulerFutexWaitSet(scheduler));
+    backend.attachFutexWaitSet(mar.experimental.taskSchedulerFutexWaitSet(scheduler));
 
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
 

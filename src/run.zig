@@ -16,7 +16,6 @@ pub const RunReport = run_types.RunReport;
 pub const RunResult = run_types.RunResult;
 pub const StateCheck = run_types.StateCheck;
 pub const runAttribute = run_types.runAttribute;
-pub const runAttributesFrom = run_types.runAttributesFrom;
 pub const TraceError = world_module.TraceError;
 
 pub const RunError = std.mem.Allocator.Error || TraceError;
