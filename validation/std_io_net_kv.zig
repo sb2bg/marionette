@@ -70,7 +70,12 @@ const Scenario = struct {
             );
 
             if (request_index == 0 and self.faulted()) {
-                while (!self.controller_waiting) scheduler.yieldCurrent();
+                var controller_waits: u8 = 0;
+                while (!self.controller_waiting) {
+                    controller_waits += 1;
+                    if (controller_waits > 32) @panic("fault controller did not start");
+                    scheduler.yieldCurrent();
+                }
                 _ = scheduler.wake(response_queued_key, 1) catch @panic("response wake failed");
             }
         }
