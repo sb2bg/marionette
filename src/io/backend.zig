@@ -12,6 +12,7 @@ const futex_module = @import("futex.zig");
 const net_module = @import("net.zig");
 const network_module = @import("../network/root.zig");
 const World = @import("../world.zig").World;
+const traceField = @import("../world.zig").traceField;
 
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
@@ -655,8 +656,20 @@ fn releaseClosure(backend: *Backend, closure: *AsyncClosure) void {
 }
 
 fn simRandom(userdata: ?*anyopaque, buffer: []u8) void {
-    worldFromUserdata(userdata).unsafeUntracedRandom().bytes(buffer);
+    const world = worldFromUserdata(userdata);
+    world.unsafeUntracedRandom().bytes(buffer);
+
+    // Trace the draw so replay divergence is visible at the draw site. The
+    // digest stands in for the bytes: byte-identical draws produce
+    // byte-identical trace lines without inflating traces by buffer size.
+    // Wyhash with a fixed seed is deterministic across runs and platforms.
+    const digest = std.hash.Wyhash.hash(0, buffer);
+    world.recordFields("io.random", &.{
+        traceField("len", .{ .uint = @intCast(buffer.len) }),
+        traceField("digest", .{ .uint = digest }),
+    }) catch @panic("failed to record simulated io random");
 }
+
 
 fn simRandomSecure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
     simRandom(userdata, buffer);

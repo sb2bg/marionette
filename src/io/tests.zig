@@ -46,6 +46,8 @@ test "io: simulation random is deterministic" {
     Io.random(b_backend.io(), &b_bytes);
 
     try std.testing.expectEqualSlices(u8, &a_bytes, &b_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, a.traceBytes(), "io.random len=16 digest=") != null);
+    try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
 }
 
 test "io: simulation randomSecure is deterministic" {

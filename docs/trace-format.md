@@ -10,8 +10,13 @@ Phase 0 uses newline-delimited UTF-8 text.
 The first line is a header:
 
 ```text
-marionette.trace format=text version=0
+marionette.trace format=text version=1
 ```
+
+Version 1 (2026-06-11) added `io.random` events: every `Io.random` /
+`Io.randomSecure` draw in simulation records its length and a fixed-seed
+Wyhash digest of the produced bytes, so replay divergence is visible at the
+draw site without inflating traces by buffer size.
 
 Every later line is one event:
 
@@ -22,7 +27,7 @@ event=<u64> <component>.<action> <key>=<value> ...
 Example:
 
 ```text
-marionette.trace format=text version=0
+marionette.trace format=text version=1
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1000000
 event=1 run.name value=smoke
 event=2 run.tag value=scenario:smoke
