@@ -56,7 +56,6 @@ pub const default_patterns = [_]Pattern{
 };
 
 pub const default_allowed = [_]Allow{
-    .{ .path = "src/clock.zig", .needle = "std.time" },
     .{ .path = "src/tidy.zig" },
 };
 
@@ -451,9 +450,9 @@ test "tidy allows wrapper files to mention banned patterns" {
     try scanSourceForPath(
         std.testing.allocator,
         &result,
-        "./src/clock.zig",
+        "./src/host_clock.zig",
         "const now = std.time.nanoTimestamp();\n",
-        .{},
+        .{ .allowed = &.{.{ .path = "src/host_clock.zig" }} },
     );
 
     try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
