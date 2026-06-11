@@ -36,6 +36,10 @@ const use_guard_pages = switch (builtin.os.tag) {
 const stack_canary: u64 = 0x5AFE_57AC_CA4A_111E;
 const stack_canary_size = @sizeOf(u64);
 
+/// Bytes reserved below the start closure for the zeroed sentinel root
+/// frame that terminates stack unwinding. See `placeClosure`.
+const sentinel_frame_size = 2 * @sizeOf(usize);
+
 pub const Error = error{
     FiberUnsupported,
     StackTooSmall,
@@ -66,7 +70,7 @@ pub const Fiber = struct {
 
     pub fn create(allocator: std.mem.Allocator, options: CreateOptions) Error!*Fiber {
         if (!supported) return error.FiberUnsupported;
-        if (options.stack_size < @sizeOf(StartClosure) + stack_alignment + stack_canary_size) {
+        if (options.stack_size < @sizeOf(StartClosure) + stack_alignment + stack_canary_size + sentinel_frame_size) {
             return error.StackTooSmall;
         }
 
@@ -503,7 +507,20 @@ fn placeClosure(stack: []align(stack_alignment) u8) *StartClosure {
         @intFromPtr(stack.ptr) + stack.len - @sizeOf(StartClosure),
         stack_alignment,
     );
-    return @ptrFromInt(address);
+    const closure: *StartClosure = @ptrFromInt(address);
+
+    // Sentinel root frame. Stack unwinders (the testing allocator captures a
+    // trace on every alloc/free) walk past `entryCall` and restore its
+    // caller's state from these slots; they were previously uninitialized
+    // stack bytes, so the unwinder dereferenced garbage and crashed. A zero
+    // return address / frame pointer is the conventional end-of-stack
+    // marker. On x86_64 the slot directly below the closure is the entry
+    // function's return address; on aarch64/riscv64 termination also relies
+    // on the trampoline zeroing the link register before entering.
+    const sentinel: *[2]usize = @ptrFromInt(address - 2 * @sizeOf(usize));
+    sentinel.* = .{ 0, 0 };
+
+    return closure;
 }
 
 fn initContext(closure: *StartClosure) Context {
@@ -530,13 +547,18 @@ fn initContext(closure: *StartClosure) Context {
 
 fn entryTrampoline() callconv(.naked) void {
     switch (builtin.cpu.arch) {
+        // The link register holds whatever the previous context left there;
+        // zero it so the entry function's frame record terminates unwinding
+        // instead of pointing at a stale code address.
         .aarch64 => asm volatile (
+            \\ mov x30, xzr
             \\ mov x0, sp
             \\ b %[call]
             :
             : [call] "X" (&entryCall),
         ),
         .riscv64 => asm volatile (
+            \\ mv ra, zero
             \\ mv a0, sp
             \\ j %[call]
             :
