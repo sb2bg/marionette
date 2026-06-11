@@ -123,12 +123,18 @@ pub const Random = struct {
         int_less_than_u64: *const fn (*anyopaque, u64) RandomError!u64,
     };
 
-    /// Draw an untraced `u64` from host entropy.
+    /// Draw a `u64` from this environment's random authority.
+    ///
+    /// Simulation draws come from the world's seeded stream and are traced;
+    /// production draws come from host entropy and are untraced.
     pub fn randomU64(self: Random) RandomError!u64 {
         return self.vtable.random_u64(self.ptr);
     }
 
-    /// Draw an untraced boolean from host entropy.
+    /// Draw a boolean from this environment's random authority.
+    ///
+    /// Simulation draws come from the world's seeded stream and are traced;
+    /// production draws come from host entropy and are untraced.
     pub fn boolean(self: Random) RandomError!bool {
         return self.vtable.boolean(self.ptr);
     }
