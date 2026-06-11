@@ -51,10 +51,18 @@ contract is intentionally narrow:
 - simulation envs return Marionette's current deterministic `std.Io` backend.
 
 The simulation backend supports deterministic clock, sleep, random, and
-`randomSecure` operations today. It also supports synchronous `async` and
-`Group.async` for functions that complete immediately, inert cancellation checks,
-`Io.Queue` operations that can complete without parking, and a small in-memory
-TCP stream subset for `std.Io.net` listen/connect/accept/read/write/close.
+`randomSecure` operations today; random draws are traced (`io.random` events
+carry length and a fixed-seed digest of the bytes). `World.simulate` owns a
+cooperative scheduler, so `io.async` and `io.concurrent` spawn deterministic
+scheduler tasks with seeded, replay-visible interleaving: `future.await`
+parks the awaiting task, or drives the scheduler when awaited from the
+scenario itself. Cancellation runs the task to completion (cooperative tasks
+cannot be preempted); `Io.Group` operations still fail closed, matching the
+current state of Zig's own fiber-backed backends. Without a task runtime
+attached (bare `Backend`), `async` runs eagerly on the caller and
+`concurrent` returns `error.ConcurrencyUnavailable`. The backend also
+supports `Io.Queue` operations and a small in-memory TCP stream subset for
+`std.Io.net` listen/connect/accept/read/write/close.
 When the backend is attached to a scheduler wait set, `Io.sleep` parks the
 current fiber until its deadline, empty accepts park until a connection is
 queued, and open-peer empty reads park until bytes arrive or the peer closes.
@@ -106,9 +114,13 @@ The future deterministic implementation maps `std.Io` operations onto existing
 Marionette simulator state.
 
 - `io.sleep(duration)` parks the current task and advances simulated time.
+  (Done.)
 - `io.async` and `io.concurrent` enqueue deterministic simulator tasks.
-- `future.await(io)` parks until the target task completes.
-- `future.cancel(io)` requests cancellation at the next yield point.
+  (Done.)
+- `future.await(io)` parks until the target task completes. (Done; awaiting
+  from the non-task scenario context drives the scheduler instead.)
+- `future.cancel(io)` requests cancellation at the next yield point. (Today
+  it awaits completion; cooperative cancellation points are future work.)
 - `Io.Queue(T)` becomes a deterministic queue with documented wake order.
 - file I/O routes through the disk simulator and `DiskControl` fault state.
 - network I/O routes through the network simulator and `NetworkControl` fault
