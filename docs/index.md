@@ -218,7 +218,8 @@ is partial: local same-process endpoints and experimental framed loopback paths
 exist, but cross-process production transport is still roadmap work. Allocator
 simulation, async/cancel integration, and broader scheduler parity are planned.
 
-The [`examples/`](../examples/) directory is the best place to start.
+The [`examples/`](https://github.com/sb2bg/marionette/tree/main/examples)
+directory is the best place to start.
 
 ## Install
 

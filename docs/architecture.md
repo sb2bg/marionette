@@ -370,7 +370,7 @@ Marionette keeps several kinds of evidence deliberately separate:
 - Internal examples such as the bounded queue and replicated register are
   capability demonstrations and regression targets, not external findings.
 
-See [Findings](../FOUND_BUGS.md) for the classification rules and current
+See [Findings](findings.md) for the classification rules and current
 results.
 
 ## Non-Goals
