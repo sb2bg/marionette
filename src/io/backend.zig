@@ -511,7 +511,13 @@ fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     };
 
     if (backend.futex_wait_set) |wait_set| {
-        _ = wait_set.blockUntil(backend.sleepWaitKey(), deadline_ns);
+        // All sleepers share one wait key, so a wake on that key (nothing
+        // issues one today) must not end a sleep early. Re-park until the
+        // deadline has actually passed; the scheduler returns `timed_out`
+        // immediately once it has.
+        while (world.now() < deadline_ns) {
+            _ = wait_set.blockUntil(backend.sleepWaitKey(), deadline_ns);
+        }
         return;
     }
 
