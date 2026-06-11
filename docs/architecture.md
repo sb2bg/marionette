@@ -37,21 +37,20 @@ Marionette currently has:
   traces.
 - Run names, tags, and `RunAttribute`, which make expanded run facts
   replay-visible in traces and failure summaries without losing scalar value
-  types. `runAttribute` is the preferred direct constructor; `runAttributesFrom`
-  remains available for scalar-only config structs whose field names are stable
-  exported metadata keys.
+  types. `runAttribute` is the constructor; keys are written explicitly so
+  exported metadata names never silently track internal field renames.
 - `mar.Check`, a named post-scenario check hook.
 - `mar.runCase` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.
-- `mar.UnstableEventQueue`, a fixed-capacity deterministic event queue sketch for
-  stable `(ready_at, event_id)`-style ordering.
+- An internal fixed-capacity deterministic event queue used by the network
+  packet core for stable `(ready_at, event_id)`-style ordering.
 - A seeded cooperative task scheduler with stable task ids, replay-visible
   selection, blocked wait sets, timed waits, deterministic wake ordering, and
   deadlock detection.
 - A scheduler-backed `std.Io` futex path used by cooperative
   `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
   target.
-- `mar.UnstableNetwork`, a fixed-topology deterministic network sketch with
+- An internal fixed-topology deterministic packet core with
   per-link queues, seeded packet loss, tick-aligned latency, process up/down
   state, directed link filters, simple partitions, and stable
   `(deliver_at, packet_id)` delivery order.

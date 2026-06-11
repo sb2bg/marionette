@@ -150,11 +150,9 @@ event=5 run.attribute key=packet_loss_percent value=uint:20
 
 Tags should be stable scalar labels. Attribute keys should be stable scalar
 text, and values should use the narrow typed union Marionette exposes.
-Use `mar.runAttribute` when writing exported metadata names directly.
-`mar.runAttributesFrom` is still available for scalar-only config structs, but
-field names become exported trace keys, so it is best for small config structs
-whose field names are already stable public metadata. Runtime behavior should
-read from the config, not from derived attributes. Do not put pointers,
+Use `mar.runAttribute` to build attributes; keys are written explicitly so
+exported trace keys never silently track internal field renames. Runtime
+behavior should read from the config, not from derived attributes. Do not put pointers,
 addresses, unordered dumps, or machine-local paths in run metadata.
 
 ## Checks

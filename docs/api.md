@@ -18,18 +18,11 @@ The same seed produces the same stream within a single Zig version.
 
 ## `Clock`
 
-Clock implementations are selected at comptime:
-
-```zig
-const ProdClock = mar.Clock(.production);
-const SimClock = mar.Clock(.simulation);
-```
-
-`mar.Clock(.production)` returns `mar.ProductionClock`, which reads host time
-through Zig's host IO clock.
-
-`mar.Clock(.simulation)` returns `mar.SimClock`, which advances only when the
-caller explicitly ticks or sleeps it.
+Simulated time is owned by the world. `mar.SimClock` advances only when the
+caller explicitly ticks or sleeps it; application code reads time through
+`env.clock` (or, in `std.Io`-shaped code, `std.Io.Clock.*` over the
+environment's `io()`). Production code reads host time through the `std.Io`
+its composition root already owns; Marionette does not wrap host time.
 
 All timestamps and durations are nanoseconds:
 
@@ -176,32 +169,6 @@ whole `World`:
 ```zig
 const latency_ns = try env.random.intLessThan(u64, 1_000_000);
 ```
-
-## Event Queue
-
-`mar.UnstableEventQueue` is a fixed-capacity deterministic event queue. It is
-a scheduler sketch for examples, not the final scheduler API. It currently
-uses a linear scan on pop; the real scheduler should use a heap once queues get
-hot.
-
-```zig
-const Event = struct {
-    ready_at: u64,
-    id: u64,
-};
-
-fn lessThan(a: Event, b: Event) bool {
-    return a.ready_at < b.ready_at or (a.ready_at == b.ready_at and a.id < b.id);
-}
-
-const Queue = mar.UnstableEventQueue(Event, 64, lessThan);
-var queue = Queue.init();
-try queue.push(.{ .ready_at = 10, .id = 1 });
-```
-
-Callers provide the ordering function explicitly. For distributed simulation,
-that ordering should be based on stable fields such as `(ready_at, event_id)`,
-not pointer identity or hash-map iteration.
 
 ## Disk
 
@@ -562,11 +529,9 @@ var report = try mar.run(std.testing.allocator, .{
 scenario code runs and are included in failure summaries. Tags are loose
 searchable labels. Attributes are stable scalar facts needed to reproduce the
 run without forcing tools to parse presentation strings. Use
-`mar.runAttribute` when writing exported metadata names directly.
-`mar.runAttributesFrom` remains available for scalar-only config structs, but
-it intentionally treats field names as exported attribute keys and emits fields
-in declaration order. Runtime behavior should read from the config, not from
-derived attributes.
+`mar.runAttribute` to build attributes; keys are written explicitly so exported
+metadata names never silently track internal field renames. Runtime behavior
+should read from the config, not from derived attributes.
 
 World-only checks can be attached to the run options:
 

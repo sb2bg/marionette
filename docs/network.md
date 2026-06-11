@@ -34,7 +34,7 @@ The portable lessons for Marionette are:
 - Trace sends, drops, deliveries, and state changes separately.
 - Layer advanced faults on top of a small packet core.
 
-The current `UnstableNetwork` already follows the core shape: fixed topology,
+The internal packet core already follows this shape: fixed topology,
 per-directed-path queues, path-local capacity, stable packet ids, seeded
 latency/drop decisions, explicit link filters, explicit partitions, path clogs,
 node up/down state, and delivery order by `(deliver_at, packet_id)`.
@@ -112,8 +112,9 @@ while (try receiver.receive()) |envelope| {
 endpoint has no pending messages.
 
 Application-shaped code sends and drains through typed endpoints, while fault
-orchestration goes through `sim.control.network`. `mar.UnstableNetwork` remains
-the lower-level packet-core primitive for focused simulator work.
+orchestration goes through `sim.control.network`. The packet core underneath
+is module-internal; focused simulator work imports it directly rather than
+through the public API.
 
 ## Topology
 
@@ -262,7 +263,7 @@ map iteration order, and wall-clock time must never decide delivery order.
 
 Network latency is measured in nanoseconds, but it must align with the
 world's tick size. Explicit network-control time advances in whole ticks, so
-`UnstableNetwork` rejects `min_latency_ns` and `latency_jitter_ns` values that
+the packet core rejects `min_latency_ns` and `latency_jitter_ns` values that
 are not whole multiples of the world's tick.
 
 When using composition-root simulation, prefer:
@@ -373,7 +374,7 @@ elapsed and the unpartition roll fires. Explicit `partition`, `heal`,
 
 ## Current Limits
 
-`UnstableNetwork` does not yet support:
+The packet core does not yet support:
 
 - Replay recording.
 - Packet duplication.
@@ -395,5 +396,5 @@ smallest useful packet core before growing.
 The app-facing/control split in `network-api.md` still matters. The remaining
 network work is liveness-oriented: replay recording, duplicate/broadcast
 semantics, richer latency distributions, and named bus composition.
-`UnstableNetwork` remains a simulator primitive; examples should not teach it
-as the final production network surface.
+The packet core remains a module-internal simulator primitive; examples
+should not teach it as the final production network surface.

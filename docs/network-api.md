@@ -91,7 +91,7 @@ fn init(world: *mar.World) !Harness {
 ```
 
 The application-shaped code depends on narrow handles such as `Recorder` plus
-typed endpoints, not on `control`, `World`, `std.net`, or `UnstableNetwork`.
+typed endpoints, not on `control`, `World`, `std.net`, or the packet core.
 
 ## Simulator-Control Authority
 

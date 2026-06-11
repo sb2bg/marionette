@@ -41,7 +41,7 @@ The current network surface is:
 - `Production.endpoint(Message, opts)`: production-shaped local in-process endpoint
   with declared self id and peer topology; it is not a cross-process transport,
   and real socket backing is still future work.
-- `mar.UnstableNetwork(Payload, NetworkOptions)`: packet core with declared
+- The internal packet core (`network/packet_core.zig`): declared
   topology, per-link queues, send-time drops, latency with jitter, link/node
   state, and per-path clogging.
 - `sim.control.tick()`: outer tick that advances `World` and evolves subsystem
@@ -117,8 +117,8 @@ linearizability checker, time-travel debugging.
 
 ### Shipped, marked unstable
 
-- `mar.UnstableEventQueue`: fixed-capacity priority queue primitive.
-- `mar.UnstableNetwork` plus `NetworkOptions` for packet-core work.
+- The internal fixed-capacity event queue (`scheduler.zig`) and packet core
+  (`network/packet_core.zig`); both module-internal since the API prune.
 
 Unstable types will change without deprecation cycles until Phase 2 closes.
 
