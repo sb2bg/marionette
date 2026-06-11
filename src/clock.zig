@@ -40,28 +40,31 @@ pub fn Clock(comptime mode: Mode) type {
     };
 }
 
-/// Production clock backed by the host operating system.
+/// Production clock backed by the host `std.Io` provided at construction.
 ///
 /// This is intentionally small: `now()` reads wall-clock time and
 /// `sleep()` blocks the current thread. It is the only Marionette clock
-/// implementation allowed to read host time.
+/// implementation allowed to read host time, and it does so only through
+/// the injected `std.Io`, never a global.
 pub const ProductionClock = struct {
-    /// Construct a production clock.
-    pub fn init() ProductionClock {
-        return .{};
+    io: std.Io,
+
+    /// Construct a production clock over the host `std.Io`.
+    pub fn init(io: std.Io) ProductionClock {
+        return .{ .io = io };
     }
 
     /// Return the current wall-clock timestamp in nanoseconds.
-    pub fn now(_: *const ProductionClock) Timestamp {
-        const timestamp = std.Io.Clock.real.now(std.Options.debug_io);
+    pub fn now(self: *const ProductionClock) Timestamp {
+        const timestamp = std.Io.Clock.real.now(self.io);
         std.debug.assert(timestamp.nanoseconds >= 0);
         return @intCast(timestamp.nanoseconds);
     }
 
     /// Block the current thread for `duration_ns` nanoseconds.
-    pub fn sleep(_: *ProductionClock, duration_ns: Duration) void {
+    pub fn sleep(self: *ProductionClock, duration_ns: Duration) void {
         std.Io.sleep(
-            std.Options.debug_io,
+            self.io,
             .fromNanoseconds(duration_ns),
             .awake,
         ) catch unreachable;

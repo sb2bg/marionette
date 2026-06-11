@@ -361,7 +361,7 @@ pub const Production = struct {
             .allocator = options.allocator,
             .io_backend = options.io,
             .disk = try disk_module.RealDisk.init(options.root_dir, options.io, options.disk),
-            .clock = .init(),
+            .clock = .init(options.io),
             .random_source = .{ .io = options.io },
             .tracer = options.tracer orelse .none(),
             .network_io = .init(options.allocator, options.io),
