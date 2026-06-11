@@ -53,10 +53,26 @@ pub const default_patterns = [_]Pattern{
     .{ .needle = "std.fs.copyFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.fs.deleteFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
     .{ .needle = "std.net", .reason = "use caller-provided std.Io.net or Marionette Endpoint handles", .match = .prefix },
+    .{ .needle = "std.posix", .reason = "route host access through Marionette authorities or caller-provided std.Io", .match = .prefix },
+    .{ .needle = "std.process", .reason = "process state is host state; receive configuration from the composition root", .match = .prefix },
+    .{ .needle = "std.heap.page_allocator", .reason = "pass an allocator explicitly" },
+    .{ .needle = "std.Options.debug_io", .reason = "use the std.Io provided by the composition root" },
 };
 
 pub const default_allowed = [_]Allow{
     .{ .path = "src/tidy.zig" },
+    // Fiber stacks come from mmap so a guard page can sit below them; a
+    // documented exception to allocator discipline.
+    .{ .path = "src/fiber.zig", .needle = "std.posix" },
+    // CLI entry points own argument parsing and exit codes.
+    .{ .path = "src/main_run.zig", .needle = "std.process" },
+    .{ .path = "src/main_tidy.zig", .needle = "std.process" },
+    // Test harnesses allocate world and scheduler state that outlives the
+    // testing allocator's per-test leak tracking.
+    .{ .path = "src/scheduler.zig", .needle = "std.heap.page_allocator" },
+    .{ .path = "validation/bounded_queue_concurrency.zig", .needle = "std.heap.page_allocator" },
+    .{ .path = "validation/mailbox_concurrency.zig", .needle = "std.heap.page_allocator" },
+    .{ .path = "validation/std_io_net_kv.zig", .needle = "std.heap.page_allocator" },
 };
 
 pub const Options = struct {
