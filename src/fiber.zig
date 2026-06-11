@@ -16,6 +16,16 @@ pub const Switch = std_fiber.Switch;
 pub const default_stack_size = 64 * 1024;
 pub const stack_alignment = 16;
 
+/// Whether fiber stacks come from mmap with a PROT_NONE guard page below
+/// the usable region. An overflow then faults at the offending write
+/// instead of corrupting adjacent heap and masquerading as nondeterminism.
+/// Stacks on these targets bypass the user-passed allocator; this is a
+/// deliberate, documented exception to allocator discipline.
+const use_guard_pages = switch (builtin.os.tag) {
+    .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => true,
+    else => false,
+};
+
 /// Sentinel written at the low end of every fiber stack, checked by the
 /// scheduler after every switch. Best-effort diagnostics only: it catches
 /// overflows that write contiguously through the low end (deep call chains,
@@ -42,10 +52,17 @@ pub const CreateOptions = struct {
 
 pub const Fiber = struct {
     allocator: std.mem.Allocator,
-    stack: []align(stack_alignment) u8,
+    memory: Memory,
     context: Context,
     closure: *StartClosure,
     finished: bool = false,
+
+    const Memory = union(enum) {
+        /// mmap'd region laid out as [guard page][usable stack].
+        mapped: []align(std.heap.page_size_min) u8,
+        /// Plain allocation with canary-only protection.
+        heap: []align(stack_alignment) u8,
+    };
 
     pub fn create(allocator: std.mem.Allocator, options: CreateOptions) Error!*Fiber {
         if (!supported) return error.FiberUnsupported;
@@ -56,17 +73,45 @@ pub const Fiber = struct {
         const self = try allocator.create(Fiber);
         errdefer allocator.destroy(self);
 
-        const stack = try allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), options.stack_size);
-        errdefer allocator.free(stack);
+        const memory: Memory = if (use_guard_pages) memory: {
+            const page_size = std.heap.pageSize();
+            const usable_len = std.mem.alignForward(usize, options.stack_size, page_size);
+            const mapping = std.posix.mmap(
+                null,
+                usable_len + page_size,
+                .{ .READ = true, .WRITE = true },
+                .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+                -1,
+                0,
+            ) catch return error.OutOfMemory;
+            errdefer std.posix.munmap(mapping);
+            // std.posix has no mprotect wrapper, so replace the lowest page
+            // with an inaccessible mapping via MAP_FIXED to form the guard.
+            _ = std.posix.mmap(
+                @alignCast(mapping.ptr),
+                page_size,
+                .{},
+                .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true },
+                -1,
+                0,
+            ) catch return error.OutOfMemory;
+            break :memory .{ .mapped = mapping };
+        } else .{
+            .heap = try allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), options.stack_size),
+        };
+
+        self.* = .{
+            .allocator = allocator,
+            .memory = memory,
+            .context = undefined,
+            .closure = undefined,
+        };
+
+        const stack = self.usableStack();
         std.mem.writeInt(u64, stack[0..stack_canary_size], stack_canary, .little);
 
         const closure = placeClosure(stack);
-        self.* = .{
-            .allocator = allocator,
-            .stack = stack,
-            .context = undefined,
-            .closure = closure,
-        };
+        self.closure = closure;
         closure.* = .{
             .self_context = &self.context,
             .finish_context = options.finish_context,
@@ -81,7 +126,13 @@ pub const Fiber = struct {
 
     pub fn destroy(self: *Fiber) void {
         const allocator = self.allocator;
-        allocator.free(self.stack);
+        switch (self.memory) {
+            // The comptime branch keeps std.posix out of analysis on
+            // targets without guard pages; the arm itself still exists
+            // because the union does.
+            .mapped => |mapping| if (use_guard_pages) std.posix.munmap(mapping) else unreachable,
+            .heap => |stack| allocator.free(stack),
+        }
         allocator.destroy(self);
     }
 
@@ -96,7 +147,14 @@ pub const Fiber = struct {
     /// Whether the low-end stack sentinel is intact. False means the fiber
     /// overflowed its stack at some point since creation.
     pub fn canaryIntact(self: *const Fiber) bool {
-        return std.mem.readInt(u64, self.stack[0..stack_canary_size], .little) == stack_canary;
+        return std.mem.readInt(u64, self.usableStack()[0..stack_canary_size], .little) == stack_canary;
+    }
+
+    fn usableStack(self: *const Fiber) []align(stack_alignment) u8 {
+        return switch (self.memory) {
+            .mapped => |mapping| @alignCast(mapping[std.heap.pageSize()..]),
+            .heap => |stack| stack,
+        };
     }
 };
 
@@ -566,7 +624,7 @@ test "fiber: stack canary detects overflow writes" {
     defer fiber_instance.destroy();
 
     try std.testing.expect(fiber_instance.canaryIntact());
-    fiber_instance.stack[0] = 0;
+    fiber_instance.usableStack()[0] = 0;
     try std.testing.expect(!fiber_instance.canaryIntact());
 }
 
