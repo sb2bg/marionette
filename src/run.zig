@@ -290,8 +290,22 @@ fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) 
     return if (@hasField(@TypeOf(config), name)) @field(config, name) else default;
 }
 
+/// Derive the seed for one fuzz iteration.
+///
+/// A keyed two-dimensional derivation, not plain XOR or addition: XOR with
+/// the iteration makes bases differing only in their low log2(seed_count)
+/// bits cover identical seed sets, and `splitmix64(base + iteration)` makes
+/// adjacent bases overlap by all but one seed. Hashing the iteration before
+/// mixing makes cross-base collisions birthday-bound instead of structural.
 fn fuzzSeed(base_seed: u64, iteration: usize) u64 {
-    return base_seed ^ 0x9E37_79B9_7F4A_7C15 ^ @as(u64, @intCast(iteration));
+    return splitmix64(base_seed ^ splitmix64(@intCast(iteration)));
+}
+
+fn splitmix64(input: u64) u64 {
+    var z = input +% 0x9E37_79B9_7F4A_7C15;
+    z = (z ^ (z >> 30)) *% 0xBF58_476D_1CE4_E5B9;
+    z = (z ^ (z >> 27)) *% 0x94D0_49BB_1331_11EB;
+    return z ^ (z >> 31);
 }
 
 fn stateTypeFromInit(comptime init_state: anytype) type {
@@ -918,6 +932,30 @@ test "runCase: infers state type from init" {
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.value value=1") != null);
         },
         .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+test "fuzzSeed: distinct within a run and across related bases" {
+    const seed_count = 8;
+
+    // Distinct seeds within one run.
+    var seeds: [seed_count]u64 = undefined;
+    for (0..seed_count) |iteration| {
+        seeds[iteration] = fuzzSeed(1234, iteration);
+    }
+    for (seeds, 0..) |seed, i| {
+        for (seeds[i + 1 ..]) |other| {
+            try std.testing.expect(seed != other);
+        }
+    }
+
+    // Bases differing only in low bits must not cover the same seed set.
+    // The old XOR derivation made base and base ^ 1 identical sets.
+    for (0..seed_count) |iteration| {
+        const other = fuzzSeed(1235, iteration);
+        for (seeds) |seed| {
+            try std.testing.expect(seed != other);
+        }
     }
 }
 
