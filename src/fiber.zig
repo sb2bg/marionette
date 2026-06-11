@@ -171,7 +171,7 @@ pub inline fn contextSwitch(message: *const Switch) *const Switch {
 }
 
 /// Local copy of `std.Io.fiber.contextSwitch` with two corrections, both
-/// load-bearing for ReleaseSafe (see TODO.md for the full forensics):
+/// load-bearing for ReleaseSafe:
 ///
 /// 1. Corrected asm constraints. The std version lists the message
 ///    register (aarch64 `x1`, x86_64 `rsi`, riscv64 `a1`) as an input, an
