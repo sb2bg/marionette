@@ -231,7 +231,7 @@ Three process lessons came out of this:
 
 ## Upstream
 
-We're filing upstream against the Codeberg source with the
+[I'm filing upstream against the Codeberg source](https://codeberg.org/ziglang/zig/issues/35724) with the
 standalone reproducer. Marionette's local copy carries a removal note for
 the day the fix lands.
 
