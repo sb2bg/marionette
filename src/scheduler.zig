@@ -324,6 +324,9 @@ pub const TaskScheduler = struct {
             scheduler = returned_message.scheduler;
             const returned_task = returned_message.task;
             scheduler.current = null;
+            if (!returned_task.fiber_instance.canaryIntact()) {
+                @panic("fiber stack overflow: task smashed its stack canary");
+            }
             switch (returned_message.reason) {
                 .yielded => {
                     returned_task.clearBlock(.ready, .woken);

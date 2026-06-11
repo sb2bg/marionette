@@ -16,6 +16,16 @@ pub const Switch = std_fiber.Switch;
 pub const default_stack_size = 64 * 1024;
 pub const stack_alignment = 16;
 
+/// Sentinel written at the low end of every fiber stack, checked by the
+/// scheduler after every switch. Best-effort diagnostics only: it catches
+/// overflows that write contiguously through the low end (deep call chains,
+/// buffer overruns), but a single large stack-frame adjustment can jump past
+/// the canary and write outside the allocation without touching it.
+/// Dependable detection needs guard pages (mmap + mprotect); the canary is
+/// the portable fallback that works with plain allocator memory.
+const stack_canary: u64 = 0x5AFE_57AC_CA4A_111E;
+const stack_canary_size = @sizeOf(u64);
+
 pub const Error = error{
     FiberUnsupported,
     StackTooSmall,
@@ -39,13 +49,16 @@ pub const Fiber = struct {
 
     pub fn create(allocator: std.mem.Allocator, options: CreateOptions) Error!*Fiber {
         if (!supported) return error.FiberUnsupported;
-        if (options.stack_size < @sizeOf(StartClosure) + stack_alignment) return error.StackTooSmall;
+        if (options.stack_size < @sizeOf(StartClosure) + stack_alignment + stack_canary_size) {
+            return error.StackTooSmall;
+        }
 
         const self = try allocator.create(Fiber);
         errdefer allocator.destroy(self);
 
         const stack = try allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), options.stack_size);
         errdefer allocator.free(stack);
+        std.mem.writeInt(u64, stack[0..stack_canary_size], stack_canary, .little);
 
         const closure = placeClosure(stack);
         self.* = .{
@@ -78,6 +91,12 @@ pub const Fiber = struct {
 
     pub fn isFinished(self: *const Fiber) bool {
         return self.finished;
+    }
+
+    /// Whether the low-end stack sentinel is intact. False means the fiber
+    /// overflowed its stack at some point since creation.
+    pub fn canaryIntact(self: *const Fiber) bool {
+        return std.mem.readInt(u64, self.stack[0..stack_canary_size], .little) == stack_canary;
     }
 };
 
@@ -216,6 +235,26 @@ test "fiber: switches, resumes, and returns to finish context" {
 
     try std.testing.expect(state.fiber.isFinished());
     try std.testing.expectEqualStrings("0abcdef", state.events.items);
+}
+
+test "fiber: stack canary detects overflow writes" {
+    if (!supported) return error.SkipZigTest;
+
+    var finish_context: Context = undefined;
+    const Noop = struct {
+        fn run(_: *anyopaque) void {}
+    };
+
+    const fiber_instance = try Fiber.create(std.testing.allocator, .{
+        .finish_context = &finish_context,
+        .entry = Noop.run,
+        .arg = undefined,
+    });
+    defer fiber_instance.destroy();
+
+    try std.testing.expect(fiber_instance.canaryIntact());
+    fiber_instance.stack[0] = 0;
+    try std.testing.expect(!fiber_instance.canaryIntact());
 }
 
 test "fiber: rejects undersized stacks" {
