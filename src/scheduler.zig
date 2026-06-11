@@ -368,6 +368,22 @@ pub const TaskScheduler = struct {
         return self.countState(.blocked);
     }
 
+    /// Test-harness helper: yield until at least `count` tasks are blocked.
+    ///
+    /// Cooperative code cannot be signaled by a peer *after* it suspends,
+    /// so "wait until the peer is parked" is necessarily a poll. The bound
+    /// exists to fail loudly when the awaited suspension can never happen;
+    /// at this size, a fair random schedule starving the poller is
+    /// negligible even across large seed sweeps.
+    pub fn yieldUntilBlockedCount(self: *Self, count: usize) void {
+        var yields: u16 = 0;
+        while (self.blockedCount() < count) {
+            yields += 1;
+            if (yields > max_poll_yields) @panic("awaited tasks never blocked");
+            self.yieldCurrent();
+        }
+    }
+
     fn advanceToNextTimer(self: *Self) TaskSchedulerError!bool {
         const deadline = self.nextDeadline() orelse return false;
         const now = self.world.now();
@@ -530,6 +546,9 @@ pub const TaskScheduler = struct {
         });
     }
 };
+
+/// Yield bound for harness polling loops. See `yieldUntilBlockedCount`.
+pub const max_poll_yields = 256;
 
 fn sortTaskIds(task_ids: []TaskId) void {
     std.mem.sort(TaskId, task_ids, {}, std.sort.asc(TaskId));
@@ -745,7 +764,6 @@ const WakeSetScenario = struct {
     key: WaitKey = 0xABCD,
     waiting: u8 = 0,
     resumed: u8 = 0,
-    waker_yields: u8 = 0,
 
     fn waiter(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
@@ -756,11 +774,7 @@ const WakeSetScenario = struct {
 
     fn waker(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        while (self.waiting < 2) {
-            self.waker_yields += 1;
-            if (self.waker_yields > 32) @panic("waiters did not block");
-            scheduler.yieldCurrent();
-        }
+        scheduler.yieldUntilBlockedCount(2);
 
         const woken = scheduler.wake(self.key, 2) catch @panic("wake failed");
         if (woken != 2) @panic("unexpected wake count");
@@ -868,7 +882,6 @@ const TimeoutScenario = struct {
     waiting: u8 = 0,
     timed_out: u8 = 0,
     woken: u8 = 0,
-    waker_yields: u8 = 0,
 
     fn timedWaiter(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
@@ -881,11 +894,7 @@ const TimeoutScenario = struct {
 
     fn waker(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        while (self.waiting < 1) {
-            self.waker_yields += 1;
-            if (self.waker_yields > 32) @panic("waiter did not block");
-            scheduler.yieldCurrent();
-        }
+        scheduler.yieldUntilBlockedCount(1);
 
         const woken = scheduler.wake(self.key, 1) catch @panic("wake failed");
         if (woken != 1) @panic("unexpected wake count");
@@ -1149,17 +1158,14 @@ const MutexConditionScenario = struct {
     scheduler: *TaskScheduler,
     mutex: Io.Mutex = .init,
     condition: Io.Condition = .init,
-    waiter_ready: bool = false,
     condition_met: bool = false,
     waiter_observed: bool = false,
-    signaler_yields: u8 = 0,
 
     fn waiter(_: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        self.waiter_ready = true;
         while (!self.condition_met) {
             self.condition.waitUncancelable(self.io, &self.mutex);
         }
@@ -1168,11 +1174,8 @@ const MutexConditionScenario = struct {
 
     fn signaler(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        while (!self.waiter_ready) {
-            self.signaler_yields += 1;
-            if (self.signaler_yields > 32) @panic("waiter did not start");
-            scheduler.yieldCurrent();
-        }
+        // Wait for the waiter to park on the condition (releasing the mutex).
+        scheduler.yieldUntilBlockedCount(1);
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -1258,7 +1261,7 @@ const NetScenario = struct {
     accepted: bool = false,
     reader_started: bool = false,
     close_client: bool = true,
-    client_yields: u8 = 0,
+    client_yields: u16 = 0,
     read_bytes: [4]u8 = undefined,
     read_len: usize = 0,
     read_error: ?Io.net.Stream.Reader.Error = null,
@@ -1273,11 +1276,7 @@ const NetScenario = struct {
 
     fn connector(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        while (scheduler.blockedCount() < 1) {
-            self.client_yields += 1;
-            if (self.client_yields > 32) @panic("acceptor did not block");
-            scheduler.yieldCurrent();
-        }
+        scheduler.yieldUntilBlockedCount(1);
 
         const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
         defer stream.close(self.io);
@@ -1303,22 +1302,19 @@ const NetScenario = struct {
 
     fn exchangeClient(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        while (scheduler.blockedCount() < 1) {
-            self.client_yields += 1;
-            if (self.client_yields > 32) @panic("server did not block on accept");
-            scheduler.yieldCurrent();
-        }
+        scheduler.yieldUntilBlockedCount(1);
 
         const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
         defer {
             if (self.close_client) stream.close(self.io);
         }
 
-        while (!self.reader_started or scheduler.blockedCount() < 1) {
+        while (!self.reader_started) {
             self.client_yields += 1;
-            if (self.client_yields > 64) @panic("server did not block on read");
+            if (self.client_yields > max_poll_yields) @panic("server did not start reading");
             scheduler.yieldCurrent();
         }
+        scheduler.yieldUntilBlockedCount(1);
 
         const chunks: [1][]const u8 = .{"ping"};
         const written = self.io.vtable.netWrite(self.io.userdata, stream.socket.handle, "", &chunks, 1) catch @panic("write failed");
@@ -1337,7 +1333,7 @@ const NetPartitionScenario = struct {
     address: Io.net.IpAddress,
     server: Io.net.Server,
     reader_started: bool = false,
-    client_yields: u8 = 0,
+    client_yields: u16 = 0,
     first_read_error: ?Io.net.Stream.Reader.Error = null,
     second_read_bytes: [4]u8 = undefined,
     second_read_len: usize = 0,
@@ -1380,20 +1376,17 @@ const NetPartitionScenario = struct {
 
     fn clientTask(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        while (scheduler.blockedCount() < 1) {
-            self.client_yields += 1;
-            if (self.client_yields > 32) @panic("server did not block on accept");
-            scheduler.yieldCurrent();
-        }
+        scheduler.yieldUntilBlockedCount(1);
 
         const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
         defer stream.close(self.io);
 
-        while (!self.reader_started or scheduler.blockedCount() < 1) {
+        while (!self.reader_started) {
             self.client_yields += 1;
-            if (self.client_yields > 64) @panic("server did not block on read");
+            if (self.client_yields > max_poll_yields) @panic("server did not start reading");
             scheduler.yieldCurrent();
         }
+        scheduler.yieldUntilBlockedCount(1);
 
         const first_chunks: [1][]const u8 = .{"ping"};
         const first_written = self.io.vtable.netWrite(

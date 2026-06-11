@@ -21,7 +21,7 @@ const MailboxScenario = struct {
     receivers_started: u8 = 0,
     receiver_timed_out_count: u8 = 0,
     receiver_got_letter: bool = false,
-    sender_yields: u8 = 0,
+    sender_yields: u16 = 0,
 
     fn init(io: std.Io) MailboxScenario {
         return .{
@@ -57,7 +57,7 @@ const MailboxScenario = struct {
         const self: *@This() = @ptrCast(@alignCast(arg));
         while (self.receivers_started < 1) {
             self.sender_yields += 1;
-            if (self.sender_yields > 32) @panic("receiver did not start");
+            if (self.sender_yields > 256) @panic("receiver did not start");
             scheduler.yieldCurrent();
         }
         self.mailbox.send(&self.envelope) catch @panic("mailbox send failed");

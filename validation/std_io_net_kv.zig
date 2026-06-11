@@ -43,7 +43,7 @@ const Scenario = struct {
     server: sut.Server,
     controller_waiting: bool = false,
     first_response_timed_out: bool = false,
-    client_yields: u8 = 0,
+    poll_yields: u16 = 0,
 
     fn faulted(self: *const Scenario) bool {
         return self.mode != .happy;
@@ -70,10 +70,9 @@ const Scenario = struct {
             );
 
             if (request_index == 0 and self.faulted()) {
-                var controller_waits: u8 = 0;
                 while (!self.controller_waiting) {
-                    controller_waits += 1;
-                    if (controller_waits > 32) @panic("fault controller did not start");
+                    self.poll_yields += 1;
+                    if (self.poll_yields > 256) @panic("fault controller did not start");
                     scheduler.yieldCurrent();
                 }
                 _ = scheduler.wake(response_queued_key, 1) catch @panic("response wake failed");
@@ -83,11 +82,7 @@ const Scenario = struct {
 
     fn clientTask(scheduler: *mar.UnstableTaskScheduler, arg: *anyopaque) void {
         const self: *Scenario = @ptrCast(@alignCast(arg));
-        while (scheduler.blockedCount() < 1) {
-            self.client_yields += 1;
-            if (self.client_yields > 32) @panic("server did not block on accept");
-            scheduler.yieldCurrent();
-        }
+        scheduler.yieldUntilBlockedCount(1);
 
         var client = sut.Client.connect(self.io, self.address) catch @panic("std_io_net_kv connect failed");
         defer client.deinit();
