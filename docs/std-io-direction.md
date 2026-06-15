@@ -211,8 +211,10 @@ Marionette's simulated disk and network state.
 This means Phase 1 was not blocked on inventing coroutines from scratch. The
 bare context-switch spike is green for the pinned compiler, and the first
 scheduler layers now cover ready ordering, futex wait sets, and timed futex
-waits. Remaining scheduler risk is cancellation, async integration, broader
-I/O suspension, and same-seed trace stability as more real SUTs move onto the
+waits. `Io.async`/`Io.concurrent`/`await` now run through each simulation's
+world-owned scheduler, and the validation harnesses use them exclusively. Remaining
+scheduler risk is cooperative cancellation, `Io.Group` support, broader I/O
+suspension, and same-seed trace stability as more real SUTs move onto the
 backend.
 
 Do not build a separate libucontext or assembly coroutine runtime. Marionette's

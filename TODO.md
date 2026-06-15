@@ -245,9 +245,15 @@ section. Check items off as they are fixed; link commits or issues inline.
       small `Task` record in `tasks` (kept for `completedCount` and id
       lookup); recycle those if worlds ever run task counts where a linear
       scan or the records themselves matter.
-- [ ] Validation harnesses still construct their own
-      `mar.experimental.TaskScheduler` and re-attach its wait set, leaving
-      the world-owned scheduler idle (last-attach-wins, so behavior is
-      consistent). Migrate them to `io.async` and retire the experimental
-      exports once net-wait ergonomics (peer-parked handshakes) no longer
-      need direct scheduler access.
+- [x] Validation harnesses migrated to pure `std.Io` (2026-06-11): tasks
+      spawn with `Io.async`/`Io.concurrent`, fault handshakes use futex
+      flags, and the old blocked-count polling is replaced by the
+      sleep-one-tick idiom (time only advances once every non-timed task
+      has parked, so sleep-then-act deterministically sequences after
+      peers reach their blocking points). Deadlock-expecting scenarios use
+      the new `sim.control.runTasksUntilIdle()` /
+      `sim.control.blockedTaskCount()` harness hooks. `mar.experimental`
+      is retired; the scheduler is now fully internal. All harnesses and
+      all 12 scheduler test sites run on `std.testing.allocator` (leak
+      checking restored everywhere; no `page_allocator` tidy allowances
+      remain).
