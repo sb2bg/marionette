@@ -109,16 +109,6 @@ pub const Random = @import("random.zig").Random;
 /// Deterministic simulation engine state.
 pub const World = @import("world.zig").World;
 
-/// Pre-stabilization surface. Everything here is expected to move or change
-/// as `Sim` takes ownership of scheduling; it lives in one namespace so the
-/// stability contract is visible at the call site.
-pub const experimental = struct {
-    /// Seeded cooperative scheduler for early `std.Io` concurrency validation.
-    pub const TaskScheduler = @import("scheduler.zig").TaskScheduler;
-
-    /// Build a `std.Io` futex wait-set view over a task scheduler.
-    pub const taskSchedulerFutexWaitSet = @import("scheduler.zig").futexWaitSet;
-};
 
 /// Fixed topology and per-path capacity for one network simulation.
 pub const NetworkOptions = network_module.NetworkOptions;
