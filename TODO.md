@@ -3,6 +3,141 @@
 Findings from a full project review. Ordered roughly by severity within each
 section. Check items off as they are fixed; link commits or issues inline.
 
+## Codebase-wide review follow-ups (2026-06-14)
+
+The pinned Zig 0.16 Debug, ReleaseSafe, and ReleaseFast suites and the xitdb,
+Mailbox, bounded-queue, and `std.Io.net` KV validations were green during this
+review. Focused temporary probes reproduced the behavioral defects below; the
+probes were removed after verification.
+
+- [ ] **P1: make `World.simulate()` rollback teardown registration safely**
+      (`src/world.zig`)
+  - `SimDisk` is registered with `World` before the rest of simulation
+    construction completes, but its unconditional `errdefer` still destroys
+    it if a later allocation or initialization fails.
+  - The stale teardown entry then points at freed memory. A
+    `FailingAllocator` sweep reproduced a segfault in `World.deinit()` after
+    `simulate()` returned an allocation error.
+  - Construct all resources before registration, add a teardown-unregister
+    rollback operation, or guard every registered resource with explicit
+    ownership transfer state. Add an allocation-failure sweep for
+    `World.simulate`.
+
+- [ ] **P1: make simulated disk latency scheduler-aware**
+      (`src/disk/sim.zig` `advanceLatency`)
+  - Disk operations call `World.runFor` synchronously from the running task.
+    This advances the shared clock without parking the task or giving earlier
+    scheduler deadlines a chance to run.
+  - Reproduced with a task sleeping until 50 ns and another task performing a
+    100 ns disk write: the sleeper woke at 100 ns.
+  - Route task-side disk latency through a scheduler deadline/event. Preserve
+    the current synchronous time-advance behavior only for callers outside a
+    scheduled task. Cover read, write, sync, metadata, and error paths.
+
+- [ ] **P1: define and enforce one scheduling model per `World`**
+      (`src/world.zig`, `src/scheduler.zig`, `src/env.zig`)
+  - Each `World.simulate()` call creates an independent scheduler, while every
+    scheduler shares the world's one clock, RNG, and trace.
+  - Reproduced by leaving runnable work in simulation B and draining simulation
+    A: A advanced the world to its 100 ns timer while B's time-zero task
+    remained runnable, then B observed time 100 ns.
+  - Prefer one world-level scheduler shared by all simulations. The smaller
+    alternative is to reject a second `simulate()` call explicitly. The
+    current test only proves control-to-scheduler identity; extend it to cover
+    global runnable work, timers, RNG consumption, and network fault evolution.
+
+- [ ] **P1: make crash semantics match the documented process-restart model**
+      (`src/disk/sim.zig`, `src/io/backend.zig`, `src/scheduler.zig`)
+  - The crash observer closes file handles and invalidates file metadata, but
+    listeners, connections, scheduler tasks, and application memory survive.
+  - Reproduced by listening, crashing/restarting the disk, and successfully
+    connecting to the old listener afterward.
+  - Either reset every process-owned resource and require application state to
+    be rebuilt, or rename/document this as a disk-device crash. Do not describe
+    it as a machine/process crash while only the file layer restarts.
+
+- [ ] **P1: fix or disable x86_64 Windows fiber execution**
+      (`src/fiber.zig` `entryTrampoline`)
+  - Already noted below under the std.Io scheduling milestone: the trampoline
+    puts its first argument in SysV `rdi`, while Win64 requires `rcx`.
+  - Compile-only checks do not validate this ABI path. Add the Windows-specific
+    trampoline and an execution test on Windows CI, or report fibers as
+    unsupported for this target until that exists.
+
+- [ ] **P2: replace socket-as-node topology ownership**
+      (`src/io/backend.zig`, `src/io/net.zig`)
+  - This is the reproduced form of Bugs and correctness item 5 below. A
+    listener consumes one topology node and every client connection consumes
+    another; close only marks handles closed.
+  - In a two-node topology, the first listen/connect succeeds and the second
+    connect fails with `error.NetworkDown` even after the first socket closes.
+  - Implement the agreed node-is-process model with stable backend/node
+    identity and a shared connection/listener registry.
+
+- [ ] **P2: share one logical-path validator between `SimDisk` and `RealDisk`**
+      (`src/disk/sim.zig`, `src/disk/real.zig`, `src/io/file.zig`)
+  - Native `SimDisk` currently rejects only empty paths. `RealDisk` also
+    rejects NUL, absolute paths, and `..`; the `std.Io.File` adapter applies a
+    third, stricter rule set.
+  - This violates simulation/production parity and the documented rooted
+    logical namespace.
+  - Move validation into the disk model and test identical results across all
+    three entry points, including empty components, separators, `.`, `..`,
+    absolute paths, and NUL.
+
+- [ ] **P2: stop reporting successful production `syncDir` without syncing**
+      (`src/disk/real.zig`)
+  - `Disk.syncDir` promises that directory-entry metadata is persisted, while
+    `RealDisk.syncDir` validates the path and returns success without issuing a
+    directory sync.
+  - Implement the operation where the injected `std.Io` supports it, or return
+    an explicit unsupported/error result. A silent no-op can make production
+    durability weaker than the simulator's checked contract.
+
+- [ ] **P2: run every advertised validation in CI and bound hangs**
+      (`build.zig`, `.github/workflows/ci.yml`)
+  - `zig build test` omits `validate-xitdb`, `validate-mailbox`, and the
+    non-lazy `validate-bounded-queue` target. Only the `std.Io.net` KV
+    validation is included.
+  - Add explicit CI jobs for the lazy external targets and include the bounded
+    queue in the default or an explicit validation job. Run the relevant
+    optimization modes and pin a job/step timeout so a fiber regression becomes
+    a visible failure rather than a multi-hour spin.
+  - This complements the existing multi-platform, nightly sweep, and release
+    symbol checks in Missing infrastructure below.
+
+- [ ] **P3: retire completed tasks, closed handles, and stale futex records**
+      (`src/scheduler.zig`, `src/io/backend.zig`)
+  - Fiber stacks and awaited async closures are reclaimed, but one `Task`
+    record remains per completed task. Closed file/socket handle state and
+    futex address mappings also remain until world teardown.
+  - Several lookup/count paths are linear, so long-lived simulations grow in
+    both memory use and historical lookup cost.
+  - Add stable-id-safe retirement or recycling. Preserve enough completed-task
+    information for future collection and diagnostics without keeping every
+    full record. This consolidates Bugs item 4 and the remaining-growth note in
+    the std.Io scheduling milestone.
+
+- [ ] **P3: narrow the public/internal module boundary**
+      (`src/root.zig`, `src/io/root.zig`, `src/network/root.zig`)
+  - The top-level module currently exports roughly 77 declarations, while
+    `mar.SimIo` exposes backend coordinators, task runtimes, task controls, and
+    teardown hooks used for internal composition.
+  - Separate public API roots from internal wiring. Keep unstable low-level
+    surfaces explicitly named and avoid making implementation helpers part of
+    the discoverable user API.
+
+- [ ] **P3: reconcile scheduler-era documentation drift**
+      (`README.md`, `docs/api.md`, `docs/api-target.md`, `docs/overview.md`,
+      `docs/roadmap.md`, `docs/std-io-direction.md`)
+  - Several pages still call simulation `async` synchronous or list async
+    integration generally as future work, while scheduler-backed
+    `Io.async`/`Io.concurrent` are implemented.
+  - Distinguish the implemented single-future cooperative path from the
+    genuinely missing pieces: cancellation points, `Io.Group`, queue
+    suspension, richer reset/node-down behavior, and preemptive/threaded
+    concurrency.
+
 ## Bugs and correctness
 
 - [x] **1. `Io.sleep` in simulation is broken in three ways**
