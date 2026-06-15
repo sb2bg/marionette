@@ -243,7 +243,8 @@ claim is cooperative task scheduling inside Marionette's scheduler, not
 preemptive OS threads or memory-model interleavings. Atomics, lock-free
 algorithms, torn non-atomic reads, missed wakeups in host condition variables,
 and CPU reorderings remain outside this model and need different tools. The
-`std.Io` `async` / `await` / cancellation surface is also not complete yet.
+single-future `std.Io` `async` / `concurrent` / await path is implemented;
+cooperative cancellation points and `Io.Group` are not complete yet.
 
 The scheduler work exposed two concrete determinism leaks that future backend
 work should keep in view:
@@ -342,9 +343,9 @@ The experimental deterministic `std.Io` foundation is implemented:
 - TCP byte order is preserved within each stream; message reordering remains
   an `Endpoint(Message)`-altitude fault.
 
-Remaining deterministic `std.Io` work includes queue suspension, async/cancel
-integration, richer stream reset/node-down behavior, and continued validation
-against real `std.Io`-native libraries.
+Remaining deterministic `std.Io` work includes queue suspension, cooperative
+cancellation points, `Io.Group`, richer stream reset/node-down behavior, and
+continued validation against real `std.Io`-native libraries.
 
 The next maturity phase is production readiness and ecosystem leverage:
 

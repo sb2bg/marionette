@@ -112,7 +112,10 @@ Implemented operation concepts:
 
 - File identity: logical path-like names (`[]const u8`) scoped to the
   simulated disk. These are not host paths and must not read host filesystem
-  state. Trace output writes them through `recordFields` text escaping.
+  state. File paths use non-empty `/`-separated components and reject `.`,
+  `..`, empty components, backslashes, NUL, and host absolute/drive roots.
+  `.` is reserved for the root logical directory in `syncDir`. Trace output
+  writes paths through `recordFields` text escaping.
 - Offset and length: integer byte ranges.
 - Sector size: a configured simulation parameter, defaulting to 4096 bytes.
 - Completed operation: result delivered to user code after deterministic

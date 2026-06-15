@@ -86,9 +86,11 @@ implementation details, not part of the public teaching surface.
 `Env.io()` is the app-facing `std.Io` accessor. Production envs return the host
 `std.Io` supplied to `Production.init`; simulation envs return Marionette's
 current deterministic backend. That backend supports deterministic
-clock, sleep, random, `randomSecure`, synchronous `async`, immediate
-`Io.Queue` operations, and an in-memory TCP stream subset for
-`std.Io.net`. It also supports a flat file subset over `SimDisk`:
+clock, sleep, random, `randomSecure`, scheduler-backed `Io.async` /
+`Io.concurrent` / await, immediate non-blocking `Io.Queue` operations, and an
+in-memory TCP stream subset for `std.Io.net`. Cancellation currently awaits
+completion; cooperative cancellation points and `Io.Group` are not implemented.
+It also supports a flat file subset over `SimDisk`:
 `Dir.createFile`, `Dir.openFile`, `Dir.statFile`, `Dir.access`, positional and
 streaming file reads and writes, `File.length`, `File.stat`, `File.setLength`,
 `File.sync`, `File.close`, `Dir.deleteFile`, and `Dir.rename`. Streaming cursor

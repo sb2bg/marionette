@@ -65,9 +65,9 @@ The current disk surface is:
 - `Env.io()`: returns the host `std.Io` in production envs and Marionette's
   current deterministic `std.Io` backend in simulation envs. The simulation
   backend supports clock/random, scheduler-backed and trace-visible sleep,
-  synchronous `async`, and immediate `Io.Queue` operations today, plus an
-  in-memory TCP stream subset for
-  `std.Io.net` and a flat `std.Io.File` subset over `SimDisk`, including
+  scheduler-backed `Io.async` / `Io.concurrent` / await, and immediate
+  non-blocking `Io.Queue` operations today, plus an in-memory TCP stream subset
+  for `std.Io.net` and a flat `std.Io.File` subset over `SimDisk`, including
   delete and rename. It fails closed for full directory/filesystem behavior,
   process operations, datagrams, DNS, and real external network access not yet
   routed through the simulator.
@@ -846,11 +846,11 @@ across replicas. This belongs after the disk-backed replicated example exists.
 
 ### 18. Cooperative task scheduler and production task abstraction
 
-Add a small Marionette task abstraction and deterministic cooperative
-scheduler. Users write actor/task-shaped code against Marionette authorities;
-simulation runs those tasks on one single-threaded scheduler, routes sleeps and
-simulated IO waits through that scheduler, and traces every runnable-task
-decision.
+Marionette now has a deterministic cooperative scheduler behind simulated
+`std.Io`. `Io.async` and `Io.concurrent` enqueue single-future tasks, await
+parks the current task or drives the scheduler from the scenario context, and
+sleep, futex, and modeled network waits suspend through the same scheduler.
+Runnable-task choices and suspension boundaries are trace-visible.
 
 The production story is not "simulate cooperative tasks, then run arbitrary OS
 threads and claim equivalence." Production backends should preserve as much of
@@ -871,12 +871,13 @@ authority boundaries. It does not test kernel thread scheduling or CPU memory
 model behavior. That belongs to tools in the Shuttle/Loom family, not to
 Marionette's DST contract.
 
-Current status: the primitive spike is complete. `src/fiber.zig` wraps
-`std.Io.fiber` directly, without `std.Io.Evented`, and the same bare
-switch/resume test passes on `aarch64-macos` and `x86_64-macos` with Zig 0.16.
-The next work is scheduler policy, not stack switching.
+Current status: the single-future cooperative path is implemented and used by
+the Mailbox, bounded-queue, and `std.Io.net` KV validations. Remaining work is
+cooperative cancellation points, `Io.Group`, queue suspension, broader I/O
+suspension, and production-runtime parity. This remains cooperative scheduling,
+not preemptive thread or memory-model simulation.
 
-Before implementing this item, study:
+Design references that informed this item:
 
 - [FoundationDB simulation testing](https://apple.github.io/foundationdb/testing.html):
   the clearest public writeup of single-process deterministic cluster
@@ -898,17 +899,19 @@ Before implementing this item, study:
   [repository](https://github.com/madsim-rs/madsim): compare the Rust async
   runtime swap model against Marionette's explicit authority-passing style.
 
-Do not start API design until the notes above answer these questions:
+The implemented answers are deliberately narrow:
 
-- What is the smallest task primitive Marionette needs: spawn, sleep,
-  wait-for-IO, join/cancel, mailbox, or something narrower?
-- Where are yield points allowed, and how are they made replay-visible?
-- What is the production parity target: single-thread event loop first,
-  thread-per-core later, and preemptive threads as escape hatch only?
-- How does the scheduler interact with existing `Endpoint.receive`,
-  `Disk.read/write/sync`, `Clock.sleep`, and `SimControl.tick/runFor`?
-- What failure report should identify the scheduled task, runnable set, and
-  scheduling decision that led to a bug?
+- The task primitive is the single-future `std.Io` async/concurrent/await path;
+  cooperative cancellation points and `Io.Group` remain open.
+- Yield points are modeled waits such as sleep, futex, and network blocking,
+  with scheduler decisions and suspension outcomes recorded in the trace.
+- Production parity still targets a cooperative event loop or shared-nothing
+  thread-per-core design; preemptive threads are a documented guarantee
+  demotion.
+- Existing Marionette-native endpoint and disk operations remain explicit
+  authorities. Scheduler-aware disk latency is still open.
+- Deadlock and scheduler traces identify task ids, wait keys, deadlines, and
+  runnable choices; richer minimized failure reports remain future work.
 
 This is Flow/madsim-inspired in goal.
 
@@ -934,8 +937,9 @@ Implementation sequence:
    keeps a planted close-path lost-wakeup bug that Marionette reports as a
    deterministic deadlock. This is a concurrency capability demonstration, not
    an external SUT finding.
-7. Re-validate existing `std.Io` users, especially xitdb and the storage
-   examples, for same-seed trace stability under the new backend.
+7. Done: re-validate existing `std.Io` users, including xitdb, Mailbox, the
+   bounded-queue oracle, the network KV harness, and storage examples under the
+   scheduler-backed backend.
 
 ### 19. Scheduler-backed std.Io.net simulation
 
@@ -1032,11 +1036,10 @@ footgun where users forget to tick one subsystem.
 
 ### Cooperative tasks, not OS thread simulation
 
-Marionette may eventually grow a small cooperative task scheduler: spawned
-simulated tasks, deterministic sleeps, deterministic IO waits, and one
-scheduler choosing the next runnable task from a stable ordering. This is the
-Zig-native version of the lesson from FoundationDB Flow: production logic
-should be testable under deterministic time, IO, and scheduling.
+Marionette's scheduler runs spawned simulated tasks, deterministic sleeps, and
+modeled I/O waits on one stable, seeded ready queue. This is the Zig-native
+version of the lesson from FoundationDB Flow: production logic should be
+testable under deterministic time, I/O, and scheduling.
 
 Marionette will not build a new language or a preemptive user-thread runtime.
 Simulated tasks are single-threaded and yield only at Marionette authority

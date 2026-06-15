@@ -10,7 +10,7 @@ Mailbox, bounded-queue, and `std.Io.net` KV validations were green during this
 review. Focused temporary probes reproduced the behavioral defects below; the
 probes were removed after verification.
 
-- [ ] **P1: make `World.simulate()` rollback teardown registration safely**
+- [x] **P1: make `World.simulate()` rollback teardown registration safely**
       (`src/world.zig`)
   - `SimDisk` is registered with `World` before the rest of simulation
     construction completes, but its unconditional `errdefer` still destroys
@@ -18,10 +18,11 @@ probes were removed after verification.
   - The stale teardown entry then points at freed memory. A
     `FailingAllocator` sweep reproduced a segfault in `World.deinit()` after
     `simulate()` returned an allocation error.
-  - Construct all resources before registration, add a teardown-unregister
-    rollback operation, or guard every registered resource with explicit
-    ownership transfer state. Add an allocation-failure sweep for
-    `World.simulate`.
+  - Fixed with a teardown checkpoint that rolls back every registration added
+    by a failed `simulate()` call in reverse order, including nested network
+    registrations. Resource-local `errdefer`s now stop owning objects after
+    registration. A `checkAllAllocationFailures` sweep covers network-enabled
+    simulation construction.
 
 - [ ] **P1: make simulated disk latency scheduler-aware**
       (`src/disk/sim.zig` `advanceLatency`)
@@ -74,16 +75,41 @@ probes were removed after verification.
   - Implement the agreed node-is-process model with stable backend/node
     identity and a shared connection/listener registry.
 
-- [ ] **P2: share one logical-path validator between `SimDisk` and `RealDisk`**
+- [x] **P2: share one logical-path validator between `SimDisk` and `RealDisk`**
       (`src/disk/sim.zig`, `src/disk/real.zig`, `src/io/file.zig`)
   - Native `SimDisk` currently rejects only empty paths. `RealDisk` also
     rejects NUL, absolute paths, and `..`; the `std.Io.File` adapter applies a
     third, stricter rule set.
   - This violates simulation/production parity and the documented rooted
     logical namespace.
-  - Move validation into the disk model and test identical results across all
-    three entry points, including empty components, separators, `.`, `..`,
-    absolute paths, and NUL.
+  - Fixed with a platform-independent validator in the disk model. File paths
+    use non-empty `/`-separated components; `.`, `..`, empty components,
+    backslashes, absolute/drive roots, and NUL are rejected. `.` remains the
+    root-directory spelling for `syncDir`. Parity tests cover native simulated
+    disk, production disk, and the simulated `std.Io.File` adapter.
+
+- [ ] **P2: define and enforce filesystem-name parity across simulated and
+      production `std.Io`** (`src/io/file.zig`, `src/env.zig`,
+      `src/disk/model.zig`)
+  - The shared validator now enforces one rooted logical syntax, but it does
+    not make arbitrary accepted names behave identically across host
+    filesystems. Case sensitivity, Unicode normalization, Windows reserved
+    names/streams, trailing-dot/space handling, and path limits can still
+    diverge.
+  - Tightening only the simulation validator would be incorrect:
+    simulation `Env.io()` routes files through Marionette, while production
+    `Env.io()` returns the supplied host `std.Io` directly. A simulation-only
+    portable grammar could reject an otherwise valid unmodified production
+    library.
+  - Near term: document that the current guarantee is rooted, non-traversing
+    logical syntax rather than complete host filename parity. Keep uppercase,
+    Unicode, and ordinary punctuation accepted by the logical validator.
+  - Define a versioned, opt-in portable filename profile for applications that
+    want a cross-platform convention. Do not enforce it asymmetrically.
+  - Long term: add a production `std.Io` wrapper or equivalent composition
+    seam that can enforce the selected path policy in both modes. Reconsider
+    deterministic host-component encoding only once Marionette owns both
+    simulated and production file routing.
 
 - [ ] **P2: stop reporting successful production `syncDir` without syncing**
       (`src/disk/real.zig`)
@@ -94,15 +120,15 @@ probes were removed after verification.
     an explicit unsupported/error result. A silent no-op can make production
     durability weaker than the simulator's checked contract.
 
-- [ ] **P2: run every advertised validation in CI and bound hangs**
+- [x] **P2: run every advertised validation in CI and bound hangs**
       (`build.zig`, `.github/workflows/ci.yml`)
   - `zig build test` omits `validate-xitdb`, `validate-mailbox`, and the
     non-lazy `validate-bounded-queue` target. Only the `std.Io.net` KV
     validation is included.
-  - Add explicit CI jobs for the lazy external targets and include the bounded
-    queue in the default or an explicit validation job. Run the relevant
-    optimization modes and pin a job/step timeout so a fiber regression becomes
-    a visible failure rather than a multi-hour spin.
+  - `zig build test` now includes bounded-queue and `std.Io.net` KV validation.
+    CI runs that suite plus the lazy xitdb and Mailbox targets in Debug,
+    ReleaseSafe, and ReleaseFast, pinned to Zig 0.16.0 with both test-process
+    and job timeouts.
   - This complements the existing multi-platform, nightly sweep, and release
     symbol checks in Missing infrastructure below.
 
@@ -127,14 +153,14 @@ probes were removed after verification.
     surfaces explicitly named and avoid making implementation helpers part of
     the discoverable user API.
 
-- [ ] **P3: reconcile scheduler-era documentation drift**
+- [x] **P3: reconcile scheduler-era documentation drift**
       (`README.md`, `docs/api.md`, `docs/api-target.md`, `docs/overview.md`,
       `docs/roadmap.md`, `docs/std-io-direction.md`)
   - Several pages still call simulation `async` synchronous or list async
     integration generally as future work, while scheduler-backed
     `Io.async`/`Io.concurrent` are implemented.
-  - Distinguish the implemented single-future cooperative path from the
-    genuinely missing pieces: cancellation points, `Io.Group`, queue
+  - Updated to distinguish the implemented single-future cooperative path from
+    the genuinely missing pieces: cancellation points, `Io.Group`, queue
     suspension, richer reset/node-down behavior, and preemptive/threaded
     concurrency.
 

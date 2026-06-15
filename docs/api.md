@@ -248,17 +248,22 @@ const env = production.env();
 `Env` shape that simulation returns. Its disk adapter accepts relative paths,
 creates parent directories on write, reads missing or short files as
 zero-filled sectors, and uses the same sector alignment checks as `SimDisk`.
+Logical file paths use canonical rooted syntax: non-empty `/`-separated
+components, no `.`, `..`, empty components, backslashes, NUL, or host absolute
+roots. `.` is reserved for the root directory in `syncDir`.
 
 The `io` argument is the production host I/O backend used to perform
 filesystem calls and provide host randomness. `production.env().io()` returns
 that same host `std.Io`. Simulation envs return Marionette's current
 deterministic `std.Io` backend; it supports deterministic clock/random
-operations, synchronous `async`, immediate `Io.Queue` operations, and an
-in-memory TCP stream subset today. It also supports a flat file subset over
-`SimDisk`: create/open, access/statFile, positional and streaming read/write,
-length/stat/setLength, sync, close, delete, and rename. Streaming cursor state
-is per open file handle, advances only by bytes actually transferred, and is
-left unchanged by failed streaming operations. Full
+operations, scheduler-backed `Io.async` / `Io.concurrent` / await, immediate
+non-blocking `Io.Queue` operations, and an in-memory TCP stream subset today.
+Cancellation currently waits for completion; cooperative cancellation points
+and `Io.Group` remain future work. The backend also supports a flat file subset
+over `SimDisk`: create/open, access/statFile, positional and streaming
+read/write, length/stat/setLength, sync, close, delete, and rename. Streaming
+cursor state is per open file handle, advances only by bytes actually
+transferred, and is left unchanged by failed streaming operations. Full
 directory/filesystem behavior, process operations, datagrams, DNS, and real
 external network access still fail
 closed. See

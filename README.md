@@ -194,10 +194,12 @@ demonstration, not a third-party SUT finding.
 
 ## Cooperative concurrency
 
-Marionette also has an experimental scheduler-backed `std.Io` futex path for
-cooperative `Mutex` / `Condition` code. The pinned `g41797/mailbox` validation
-target runs unmodified and exercises timed receive, send/wake, same-deadline
-timeout ordering, and byte-identical same-seed replay. The internal
+Marionette has scheduler-backed cooperative `std.Io` tasks and futex waits for
+`Mutex` / `Condition` code. `Io.async` and `Io.concurrent` run as deterministic
+simulator tasks, and awaiting from either a task or the scenario drives the
+same scheduler. The pinned `g41797/mailbox` validation target runs unmodified
+and exercises timed receive, send/wake, same-deadline timeout ordering, and
+byte-identical same-seed replay. The internal
 `validate-bounded-queue` target adds a canonical FIFO oracle and a planted
 lost-wakeup deadlock to demonstrate concurrency bug detection without counting
 it as an external SUT finding. This is cooperative `std.Io` concurrency, not
@@ -257,14 +259,15 @@ The simulator currently models clock, deterministic randomness, disk, a flat
 `std.Io.File` subset, typed endpoint networking, a narrow scheduler-backed
 `std.Io.net` stream subset with accept/read suspension plus latency and
 send-time loss, delivery-time partitions, and deterministic healing, and
-experimental cooperative `std.Io` futex waits
-for `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
-target and the internal bounded-queue capability demo. It does not model
+cooperative `std.Io` tasks and futex waits for `Mutex` / `Condition` code,
+validated against the pinned `g41797/mailbox` target and the internal
+bounded-queue capability demo. It does not model
 arbitrary OS thread scheduling or memory-level concurrency; code that depends on
 those needs separate testing. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths
 exist, but cross-process production transport is still roadmap work. Allocator
-simulation, async/cancel integration, and broader scheduler parity are planned.
+simulation, cooperative cancellation points, `Io.Group`, queue suspension, and
+broader scheduler parity are planned.
 
 If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 
