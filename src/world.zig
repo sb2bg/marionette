@@ -161,6 +161,21 @@ pub const World = struct {
         });
     }
 
+    /// Tear down and unregister every resource added after `checkpoint`.
+    ///
+    /// Construction paths use this as a transaction rollback so a failed
+    /// composition cannot leave stale world-owned pointers behind.
+    fn rollbackTeardowns(self: *World, checkpoint: usize) void {
+        std.debug.assert(checkpoint <= self.teardowns.items.len);
+        var index = self.teardowns.items.len;
+        while (index > checkpoint) {
+            index -= 1;
+            const teardown = self.teardowns.items[index];
+            teardown.deinit(teardown.ptr, self.allocator);
+        }
+        self.teardowns.shrinkRetainingCapacity(checkpoint);
+    }
+
     pub const SimulateOptions = struct {
         disk: disk_module.DiskOptions = .{},
         network: ?network_module.SimNetworkOptions = null,
@@ -206,13 +221,18 @@ pub const World = struct {
 
     /// Build app and harness views over world-owned simulator resources.
     pub fn simulate(self: *World, options: SimulateOptions) !Simulation {
+        const teardown_checkpoint = self.teardowns.items.len;
+        errdefer self.rollbackTeardowns(teardown_checkpoint);
+
         const sim_disk = try self.allocator.create(disk_module.SimDisk);
-        errdefer self.allocator.destroy(sim_disk);
+        var sim_disk_registered = false;
+        errdefer if (!sim_disk_registered) self.allocator.destroy(sim_disk);
 
         sim_disk.* = try disk_module.SimDisk.init(self, options.disk);
-        errdefer sim_disk.deinit();
+        errdefer if (!sim_disk_registered) sim_disk.deinit();
 
         try self.registerTeardown(sim_disk, deinitSimDisk);
+        sim_disk_registered = true;
 
         const sim_io = try self.allocator.create(io_module.Backend);
         var sim_io_registered = false;
@@ -506,6 +526,26 @@ test "world: trace payload validation rejects ambiguous fields" {
     try std.testing.expect(!isValidTracePayload("request.accepted message=a=b"));
     try std.testing.expect(!isValidTracePayload("request.accepted message=line\nbreak"));
     try std.testing.expect(!isValidTracePayload("request.accepted path=C:\\tmp"));
+}
+
+fn simulateAllocationFailureSweep(allocator: std.mem.Allocator) !void {
+    var world = try World.init(allocator, .{ .seed = 0xA110C });
+    defer world.deinit();
+
+    _ = try world.simulate(.{
+        .network = .{
+            .nodes = 2,
+            .path_capacity = 4,
+        },
+    });
+}
+
+test "world: simulate rolls back teardown registrations on allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        simulateAllocationFailureSweep,
+        .{},
+    );
 }
 
 test "world: owns seeded random and simulated clock" {
