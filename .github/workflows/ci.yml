@@ -11,6 +11,7 @@ jobs:
   build:
     name: Zig build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -18,13 +19,23 @@ jobs:
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Build
         run: zig build
 
   test:
-    name: Zig test
+    name: Zig test (${{ matrix.optimize }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize:
+          - Debug
+          - ReleaseSafe
+          - ReleaseFast
 
     steps:
       - name: Checkout
@@ -32,9 +43,35 @@ jobs:
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Test
-        run: zig build test
+        run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 5m
 
-      - name: Test ReleaseSafe
-        run: zig build test -Doptimize=ReleaseSafe
+  external-validation:
+    name: ${{ matrix.target }} (${{ matrix.optimize }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - validate-xitdb
+          - validate-mailbox
+        optimize:
+          - Debug
+          - ReleaseSafe
+          - ReleaseFast
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Validate
+        run: zig build ${{ matrix.target }} -Doptimize=${{ matrix.optimize }} --test-timeout 5m

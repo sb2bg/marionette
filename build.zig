@@ -139,6 +139,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_example_tests.step);
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_validate_bounded_queue.step);
     test_step.dependOn(&run_validate_std_io_net_kv.step);
     test_step.dependOn(&tidy.step);
 }
