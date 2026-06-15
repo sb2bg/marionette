@@ -1,16 +1,15 @@
 //! External-style validation for the `std.Io.net` KV example.
 //!
-//! The SUT imports only `std`. This harness owns Marionette's scheduler,
-//! network control, seed, trace, and exact retry/idempotency oracle.
+//! The SUT imports only `std`. Scenario tasks also use only `std.Io`:
+//! `Io.async` for task structure and futex flags for the fault-injection
+//! handshake. Marionette owns the harness side: world, network control,
+//! seed, trace, and the exact retry/idempotency oracle.
 
 const std = @import("std");
 const mar = @import("marionette");
 const sut = @import("examples").std_io_net_kv;
 
 const Io = std.Io;
-const response_queued_key: usize = 710_001;
-const client_timed_out_key: usize = 710_002;
-const network_healed_key: usize = 710_003;
 
 pub const ScenarioMode = enum {
     happy,
@@ -41,9 +40,13 @@ const Scenario = struct {
     listener: Io.net.Server,
     mode: ScenarioMode,
     server: sut.Server,
-    controller_waiting: bool = false,
     first_response_timed_out: bool = false,
-    poll_yields: u16 = 0,
+    // Handshake flags for the fault choreography, signaled through the
+    // simulated `std.Io` futex path.
+    accept_waiting: u32 = 0,
+    response_queued: u32 = 0,
+    client_timed_out: u32 = 0,
+    network_healed: u32 = 0,
 
     fn faulted(self: *const Scenario) bool {
         return self.mode != .happy;
@@ -56,8 +59,22 @@ const Scenario = struct {
         };
     }
 
-    fn serverTask(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
-        const self: *Scenario = @ptrCast(@alignCast(arg));
+    fn signal(self: *Scenario, flag: *u32) void {
+        flag.* = 1;
+        self.io.futexWake(u32, flag, 1);
+    }
+
+    fn waitFor(self: *Scenario, flag: *u32) void {
+        while (flag.* == 0) {
+            self.io.futexWait(u32, flag, 0) catch @panic("handshake wait failed");
+        }
+    }
+
+    fn serverTask(self: *Scenario) void {
+        // Signal immediately before accept. Cooperative execution guarantees
+        // no client task can run between this signal and accept parking.
+        self.record("std_io_net_kv.server.accept_waiting", .{});
+        self.signal(&self.accept_waiting);
         const stream = self.listener.accept(self.io) catch @panic("std_io_net_kv accept failed");
         defer stream.close(self.io);
         self.record("std_io_net_kv.server.accepted", .{});
@@ -70,20 +87,13 @@ const Scenario = struct {
             );
 
             if (request_index == 0 and self.faulted()) {
-                while (!self.controller_waiting) {
-                    self.poll_yields += 1;
-                    if (self.poll_yields > 256) @panic("fault controller did not start");
-                    scheduler.yieldCurrent();
-                }
-                _ = scheduler.wake(response_queued_key, 1) catch @panic("response wake failed");
+                self.signal(&self.response_queued);
             }
         }
     }
 
-    fn clientTask(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
-        const self: *Scenario = @ptrCast(@alignCast(arg));
-        scheduler.yieldUntilBlockedCount(1);
-
+    fn clientTask(self: *Scenario) void {
+        self.waitFor(&self.accept_waiting);
         var client = sut.Client.connect(self.io, self.address) catch @panic("std_io_net_kv connect failed");
         defer client.deinit();
         self.record("std_io_net_kv.client.connected", .{});
@@ -101,8 +111,8 @@ const Scenario = struct {
                     error.Timeout => {
                         self.first_response_timed_out = true;
                         self.record("std_io_net_kv.client.timeout request_id=7", .{});
-                        _ = scheduler.wake(client_timed_out_key, 1) catch @panic("timeout wake failed");
-                        scheduler.blockCurrent(network_healed_key);
+                        self.signal(&self.client_timed_out);
+                        self.waitFor(&self.network_healed);
                     },
                     else => @panic("unexpected first PUT error"),
                 };
@@ -123,20 +133,18 @@ const Scenario = struct {
         );
     }
 
-    fn faultController(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
-        const self: *Scenario = @ptrCast(@alignCast(arg));
-        self.controller_waiting = true;
-        scheduler.blockCurrent(response_queued_key);
+    fn faultController(self: *Scenario) void {
+        self.waitFor(&self.response_queued);
 
         const server_side = [_]mar.NodeId{0};
         const client_side = [_]mar.NodeId{1};
         self.control.network.partition(&server_side, &client_side) catch @panic("partition failed");
         self.record("std_io_net_kv.fault partitioned=true", .{});
 
-        scheduler.blockCurrent(client_timed_out_key);
+        self.waitFor(&self.client_timed_out);
         self.control.network.heal() catch @panic("heal failed");
         self.record("std_io_net_kv.fault healed=true", .{});
-        _ = scheduler.wake(network_healed_key, 1) catch @panic("heal wake failed");
+        self.signal(&self.network_healed);
     }
 
     fn record(self: *Scenario, comptime fmt: []const u8, args: anytype) void {
@@ -149,26 +157,11 @@ pub fn runScenario(
     seed: u64,
     mode: ScenarioMode,
 ) !Outcome {
-    const runtime_allocator = std.heap.page_allocator;
-
-    const world = try runtime_allocator.create(mar.World);
-    errdefer runtime_allocator.destroy(world);
-    world.* = try mar.World.init(runtime_allocator, .{
+    var world = try mar.World.init(allocator, .{
         .seed = seed,
         .tick_ns = 10,
     });
-    defer {
-        world.deinit();
-        runtime_allocator.destroy(world);
-    }
-
-    const scheduler = try runtime_allocator.create(mar.experimental.TaskScheduler);
-    errdefer runtime_allocator.destroy(scheduler);
-    scheduler.* = mar.experimental.TaskScheduler.init(runtime_allocator, world);
-    defer {
-        scheduler.deinit();
-        runtime_allocator.destroy(scheduler);
-    }
+    defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{
         .nodes = 2,
@@ -176,8 +169,6 @@ pub fn runScenario(
         .path_capacity = 16,
     } });
     const io = sim.env.io();
-    const backend: *mar.SimIo.Backend = @ptrCast(@alignCast(io.userdata.?));
-    backend.attachFutexWaitSet(mar.experimental.taskSchedulerFutexWaitSet(scheduler));
 
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
 
@@ -189,11 +180,9 @@ pub fn runScenario(
         .happy, .retry_safe => .deduplicate,
         .retry_buggy => .apply_every_put,
     };
-    const scenario = try runtime_allocator.create(Scenario);
-    defer runtime_allocator.destroy(scenario);
-    scenario.* = .{
+    var scenario = Scenario{
         .io = io,
-        .world = world,
+        .world = &world,
         .control = sim.control,
         .address = address,
         .listener = listener,
@@ -201,27 +190,17 @@ pub fn runScenario(
         .server = sut.Server.init(server_mode),
     };
 
-    _ = try scheduler.spawn(.{
-        .entry = Scenario.serverTask,
-        .arg = scenario,
-    });
-    _ = try scheduler.spawn(.{
-        .entry = Scenario.clientTask,
-        .arg = scenario,
-    });
-    if (mode != .happy) {
-        _ = try scheduler.spawn(.{
-            .entry = Scenario.faultController,
-            .arg = scenario,
-        });
-    }
+    var server_future = Io.async(io, Scenario.serverTask, .{&scenario});
+    var client_future = Io.async(io, Scenario.clientTask, .{&scenario});
+    var controller_future = if (mode != .happy)
+        Io.async(io, Scenario.faultController, .{&scenario})
+    else
+        null;
 
-    try scheduler.runUntilIdle();
-    if (scheduler.blockedCount() != 0) return error.ScenarioDeadlocked;
-    const expected_completed: usize = if (mode == .happy) 2 else 3;
-    if (scheduler.completedCount() != expected_completed) {
-        return error.ScenarioTaskCountMismatch;
-    }
+    server_future.await(io);
+    client_future.await(io);
+    if (controller_future) |*future| future.await(io);
+    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
 
     const final_value = scenario.server.get(11);
     const invariant_violated =
@@ -265,6 +244,12 @@ test "std Io net KV happy path replays byte-identically" {
     try std.testing.expect(!first.invariant_violated);
     try std.testing.expectEqual(@as(?i64, 41), first.final_value);
     try std.testing.expect(std.mem.indexOf(u8, first.trace, "std_io_net_kv.client.get key=11 value=41 revision=1") != null);
+
+    const accept_waiting = std.mem.indexOf(u8, first.trace, "std_io_net_kv.server.accept_waiting").?;
+    const accept_blocked = std.mem.indexOfPos(u8, first.trace, accept_waiting, "scheduler.block task=").?;
+    const client_connected = std.mem.indexOfPos(u8, first.trace, accept_blocked, "std_io_net_kv.client.connected").?;
+    try std.testing.expect(accept_waiting < accept_blocked);
+    try std.testing.expect(accept_blocked < client_connected);
 }
 
 test "std Io net KV retry remains idempotent across partition and heal" {
