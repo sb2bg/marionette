@@ -792,6 +792,29 @@ pub fn taskRuntime(self: *TaskScheduler) io_module.TaskRuntime {
     };
 }
 
+/// Build the harness-facing control view over this scheduler.
+pub fn taskControl(self: *TaskScheduler) io_module.TaskControl {
+    return .{
+        .ptr = self,
+        .vtable = &task_control_vtable,
+    };
+}
+
+fn taskControlRunUntilIdle(ptr: *anyopaque) anyerror!void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    try scheduler.runUntilIdle();
+}
+
+fn taskControlBlockedCount(ptr: *const anyopaque) usize {
+    const scheduler: *const TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.blockedCount();
+}
+
+const task_control_vtable: io_module.TaskControl.VTable = .{
+    .run_until_idle = taskControlRunUntilIdle,
+    .blocked_count = taskControlBlockedCount,
+};
+
 fn taskRuntimeSpawn(
     ptr: *anyopaque,
     entry: *const fn (*anyopaque) void,

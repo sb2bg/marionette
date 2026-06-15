@@ -46,3 +46,26 @@ pub const TaskRuntime = struct {
         self.vtable.run_until_done(self.ptr, done);
     }
 };
+
+/// Harness-facing control over one simulation's cooperative task scheduler.
+///
+/// This is separate from `TaskRuntime`: application-facing `std.Io` uses the
+/// runtime to spawn and await tasks, while `SimControl` uses this view to
+/// inspect or drain the scheduler belonging to that specific simulation.
+pub const TaskControl = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        run_until_idle: *const fn (ptr: *anyopaque) anyerror!void,
+        blocked_count: *const fn (ptr: *const anyopaque) usize,
+    };
+
+    pub fn runUntilIdle(self: TaskControl) !void {
+        try self.vtable.run_until_idle(self.ptr);
+    }
+
+    pub fn blockedCount(self: TaskControl) usize {
+        return self.vtable.blocked_count(self.ptr);
+    }
+};

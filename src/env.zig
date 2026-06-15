@@ -7,6 +7,7 @@ const std = @import("std");
 
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk/root.zig");
+const io_task_module = @import("io/task.zig");
 const network_io_module = @import("network/io.zig");
 const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
@@ -440,11 +441,24 @@ pub const Production = struct {
 pub const SimControl = struct {
     disk: disk_module.DiskControl,
     network: network_module.AnyNetworkControl,
+    tasks: io_task_module.TaskControl,
     world: *World,
 
     pub fn tick(self: SimControl) !void {
         try self.world.tick();
         try self.network.evolveTickFaults();
+    }
+
+    /// Run scheduled `Io.async`/`Io.concurrent` tasks until none is
+    /// runnable. Returns `error.Deadlock` when blocked tasks remain; use
+    /// this instead of awaiting a future the scenario expects to strand.
+    pub fn runTasksUntilIdle(self: SimControl) !void {
+        try self.tasks.runUntilIdle();
+    }
+
+    /// Count of scheduler tasks currently blocked on a wait key or timer.
+    pub fn blockedTaskCount(self: SimControl) usize {
+        return self.tasks.blockedCount();
     }
 
     pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
@@ -598,6 +612,36 @@ test "env: simulation buggify is traced" {
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u64 less_than=100") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet rate=20/100 roll=") != null);
+}
+
+test "env: each simulation control drives its own scheduler" {
+    if (!@import("fiber.zig").supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn mark(ran: *bool) void {
+            ran.* = true;
+        }
+    };
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x51A });
+    defer world.deinit();
+
+    const first = try world.simulate(.{});
+    const second = try world.simulate(.{});
+
+    var first_ran = false;
+    var second_ran = false;
+    var first_future = try std.Io.concurrent(first.env.io(), Helper.mark, .{&first_ran});
+    var second_future = try std.Io.concurrent(second.env.io(), Helper.mark, .{&second_ran});
+
+    try first.control.runTasksUntilIdle();
+    try std.testing.expect(first_ran);
+    try std.testing.expect(!second_ran);
+    first_future.await(first.env.io());
+
+    try second.control.runTasksUntilIdle();
+    try std.testing.expect(second_ran);
+    second_future.await(second.env.io());
 }
 
 test "env: buggify accepts typed enum hooks" {

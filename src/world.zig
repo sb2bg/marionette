@@ -235,9 +235,9 @@ pub const World = struct {
             network_module.AnyNetworkControl.unavailable();
         sim_io.attachNetworkControl(network_control);
 
-        // The world owns a cooperative scheduler so `Io.async`,
-        // `Io.concurrent`, and scheduler-backed waits (futex, net, sleep)
-        // work out of the box, without callers constructing one.
+        // Each simulation gets a cooperative scheduler owned by the world,
+        // so `Io.async`, `Io.concurrent`, and scheduler-backed waits (futex,
+        // net, sleep) work out of the box without caller setup.
         const scheduler = try self.allocator.create(scheduler_module.TaskScheduler);
         var scheduler_registered = false;
         errdefer if (!scheduler_registered) self.allocator.destroy(scheduler);
@@ -263,6 +263,7 @@ pub const World = struct {
             .control = .{
                 .disk = sim_disk.control(),
                 .network = network_control,
+                .tasks = scheduler_module.taskControl(scheduler),
                 .world = self,
             },
         };
