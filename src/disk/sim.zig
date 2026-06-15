@@ -20,6 +20,7 @@ const DiskSync = model.DiskSync;
 const DiskSyncDir = model.DiskSyncDir;
 const DiskWrite = model.DiskWrite;
 const validateByteRange = model.validateByteRange;
+const validateLogicalPath = model.validateLogicalPath;
 
 pub const SimDisk = struct {
     const Self = @This();
@@ -293,7 +294,7 @@ pub const SimDisk = struct {
     }
 
     fn syncDir(self: *Self, options: SyncDir) DiskError!void {
-        try self.validatePath(options.path);
+        try validateLogicalPath(options.path, .directory);
         try self.ensureRunning();
 
         const op_id = self.consumeOpId();
@@ -643,7 +644,7 @@ pub const SimDisk = struct {
     }
 
     fn validatePath(_: *const Self, path: []const u8) DiskError!void {
-        if (path.len == 0) return error.InvalidPath;
+        try validateLogicalPath(path, .file);
     }
 
     fn ensureRunning(self: *const Self) DiskError!void {

@@ -212,7 +212,61 @@ pub const DiskCrash = struct {};
 
 pub const DiskRestart = struct {};
 
+/// Logical path role within a rooted Marionette disk namespace.
+pub const LogicalPathKind = enum {
+    file,
+    directory,
+};
+
+/// Validate canonical path syntax in Marionette's rooted namespace.
+///
+/// File paths use non-empty `/`-separated components. Empty, `.`, and `..`
+/// components, host absolute paths, Windows drive roots, backslashes, and NUL
+/// bytes are rejected. Directory paths follow the same rules, except that `.`
+/// names the logical root for operations such as `Disk.syncDir`.
+pub fn validateLogicalPath(path: []const u8, kind: LogicalPathKind) DiskError!void {
+    if (kind == .directory and std.mem.eql(u8, path, ".")) return;
+    if (path.len == 0) return error.InvalidPath;
+    if (path[0] == '/') return error.InvalidPath;
+    if (path.len >= 2 and std.ascii.isAlphabetic(path[0]) and path[1] == ':') {
+        return error.InvalidPath;
+    }
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.InvalidPath;
+
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| {
+        if (component.len == 0) return error.InvalidPath;
+        if (std.mem.eql(u8, component, ".")) return error.InvalidPath;
+        if (std.mem.eql(u8, component, "..")) return error.InvalidPath;
+    }
+}
+
 pub fn validateByteRange(offset: u64, len: usize) DiskError!void {
     const len_u64: u64 = @intCast(len);
     if (std.math.maxInt(u64) - offset < len_u64) return error.InvalidRange;
+}
+
+test "disk model: logical paths use canonical rooted syntax" {
+    try validateLogicalPath("wal.log", .file);
+    try validateLogicalPath("archive/wal.log", .file);
+    try validateLogicalPath(".", .directory);
+    try validateLogicalPath("archive", .directory);
+
+    const invalid_paths = [_][]const u8{
+        "",
+        ".",
+        "..",
+        "archive/./wal.log",
+        "archive/../wal.log",
+        "archive//wal.log",
+        "archive/wal.log/",
+        "/wal.log",
+        "C:/wal.log",
+        "archive\\wal.log",
+        "wal\x00.log",
+    };
+    for (invalid_paths) |path| {
+        try std.testing.expectError(error.InvalidPath, validateLogicalPath(path, .file));
+    }
 }

@@ -749,6 +749,52 @@ test "io: simulation files delete and rename through disk authority" {
     try std.testing.expectError(error.FileNotFound, cwd.openFile(io, "replace.log", .{}));
 }
 
+test "io: logical path validation matches simulated and real disks" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var real = try disk_module.RealDisk.init(tmp.dir, std.testing.io, .{});
+    defer real.deinit();
+
+    try sim.env.disk.write(.{ .path = "sim/valid.log", .offset = 0, .bytes = &.{} });
+    try real.disk().write(.{ .path = "real/valid.log", .offset = 0, .bytes = &.{} });
+    var valid_file = try Io.Dir.cwd().createFile(sim.env.io(), "io/valid.log", .{});
+    valid_file.close(sim.env.io());
+    try sim.env.disk.syncDir(.{ .path = "." });
+    try real.disk().syncDir(.{ .path = "." });
+
+    const invalid_paths = [_][]const u8{
+        "",
+        ".",
+        "..",
+        "archive/./wal.log",
+        "archive/../wal.log",
+        "archive//wal.log",
+        "archive/wal.log/",
+        "/wal.log",
+        "C:/wal.log",
+        "archive\\wal.log",
+        "wal\x00.log",
+    };
+    for (invalid_paths) |path| {
+        try std.testing.expectError(
+            error.InvalidPath,
+            sim.env.disk.write(.{ .path = path, .offset = 0, .bytes = &.{} }),
+        );
+        try std.testing.expectError(
+            error.InvalidPath,
+            real.disk().write(.{ .path = path, .offset = 0, .bytes = &.{} }),
+        );
+        try std.testing.expectError(
+            error.FileNotFound,
+            Io.Dir.cwd().createFile(sim.env.io(), path, .{}),
+        );
+    }
+}
+
 test "io: simulation tcp stream connects, accepts, reads, and writes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();

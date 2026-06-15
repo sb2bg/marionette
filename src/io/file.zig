@@ -20,7 +20,7 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.File.OpenError!Io.File {
             _ = dir;
             if (options.lock != .none) return error.FileLocksUnsupported;
-            if (!isValidSimPath(sub_path)) return error.FileNotFound;
+            disk_module.validateLogicalPath(sub_path, .file) catch return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
             const existing_index = findOrDiscoverFileMeta(backend, sub_path) catch |err| {
@@ -58,7 +58,7 @@ pub fn Ops(comptime Backend: type) type {
             _ = options.allow_directory;
             if (options.path_only) return error.AccessDenied;
             if (options.lock != .none) return error.FileLocksUnsupported;
-            if (!isValidSimPath(sub_path)) return error.FileNotFound;
+            disk_module.validateLogicalPath(sub_path, .file) catch return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
             const file_index = (findOrDiscoverFileMeta(backend, sub_path) catch |err| {
@@ -80,7 +80,7 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.StatFileError!Io.File.Stat {
             _ = dir;
             _ = options.follow_symlinks;
-            if (!isValidSimPath(sub_path)) return error.FileNotFound;
+            disk_module.validateLogicalPath(sub_path, .file) catch return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
             // Discovery failures other than not-found collapse to
@@ -100,7 +100,7 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.AccessError!void {
             _ = dir;
             if (options.execute) return error.AccessDenied;
-            if (!isValidSimPath(sub_path)) return error.FileNotFound;
+            disk_module.validateLogicalPath(sub_path, .file) catch return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
             _ = (findOrDiscoverFileMeta(backend, sub_path) catch {
@@ -114,7 +114,7 @@ pub fn Ops(comptime Backend: type) type {
             sub_path: []const u8,
         ) Io.Dir.DeleteFileError!void {
             _ = dir;
-            if (!isValidSimPath(sub_path)) return error.FileNotFound;
+            disk_module.validateLogicalPath(sub_path, .file) catch return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
             const file_index = (findOrDiscoverFileMeta(backend, sub_path) catch |err| {
@@ -139,8 +139,8 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.RenameError!void {
             _ = old_dir;
             _ = new_dir;
-            if (!isValidSimPath(old_sub_path)) return error.FileNotFound;
-            if (!isValidSimPath(new_sub_path)) return error.FileNotFound;
+            disk_module.validateLogicalPath(old_sub_path, .file) catch return error.FileNotFound;
+            disk_module.validateLogicalPath(new_sub_path, .file) catch return error.FileNotFound;
 
             const backend = backendFromUserdata(userdata);
             const old_index = (findOrDiscoverFileMeta(backend, old_sub_path) catch |err| {
@@ -421,19 +421,6 @@ pub fn Ops(comptime Backend: type) type {
             const index = try backend.createFileMeta(path);
             backend.files.items[index].len = stat_result.size;
             return index;
-        }
-
-        fn isValidSimPath(path: []const u8) bool {
-            if (path.len == 0) return false;
-            if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
-            if (std.fs.path.isAbsolute(path)) return false;
-
-            var parts = std.mem.splitAny(u8, path, "/\\");
-            while (parts.next()) |part| {
-                if (part.len == 0) return false;
-                if (std.mem.eql(u8, part, "..")) return false;
-            }
-            return true;
         }
 
         fn writePart(

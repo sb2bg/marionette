@@ -6,6 +6,7 @@ const model = @import("model.zig");
 const Disk = model.Disk;
 const DiskError = model.DiskError;
 const validateByteRange = model.validateByteRange;
+const validateLogicalPath = model.validateLogicalPath;
 
 /// Production adapter from a real root directory into Marionette's app-facing
 /// `Disk` capability.
@@ -103,8 +104,8 @@ pub const RealDisk = struct {
         };
     }
 
-    fn syncDir(self: *Self, options: Disk.SyncDir) DiskError!void {
-        try self.validatePath(options.path);
+    fn syncDir(_: *Self, options: Disk.SyncDir) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
         // `std.Io` does not expose directory fsync on all backends yet. Keep
         // the production adapter surface-compatible; real host durability is
         // still delegated to the platform and filesystem.
@@ -178,13 +179,7 @@ pub const RealDisk = struct {
     }
 
     fn validatePath(_: *const Self, path: []const u8) DiskError!void {
-        if (path.len == 0) return error.InvalidPath;
-        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
-        if (std.fs.path.isAbsolute(path)) return error.InvalidPath;
-        var iterator = std.mem.splitAny(u8, path, "/\\");
-        while (iterator.next()) |component| {
-            if (std.mem.eql(u8, component, "..")) return error.InvalidPath;
-        }
+        try validateLogicalPath(path, .file);
     }
 
     fn validateRange(self: *const Self, offset: u64, len: usize) DiskError!void {

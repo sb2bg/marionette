@@ -25,8 +25,10 @@ pub const DiskStatResult = model.DiskStatResult;
 pub const DiskSync = model.DiskSync;
 pub const DiskSyncDir = model.DiskSyncDir;
 pub const DiskWrite = model.DiskWrite;
+pub const LogicalPathKind = model.LogicalPathKind;
 pub const RealDisk = real.RealDisk;
 pub const SimDisk = sim.SimDisk;
+pub const validateLogicalPath = model.validateLogicalPath;
 
 test {
     _ = sim;
