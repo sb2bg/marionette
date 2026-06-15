@@ -67,12 +67,6 @@ pub const default_allowed = [_]Allow{
     // CLI entry points own argument parsing and exit codes.
     .{ .path = "src/main_run.zig", .needle = "std.process" },
     .{ .path = "src/main_tidy.zig", .needle = "std.process" },
-    // Test harnesses allocate world and scheduler state that outlives the
-    // testing allocator's per-test leak tracking.
-    .{ .path = "src/scheduler.zig", .needle = "std.heap.page_allocator" },
-    .{ .path = "validation/bounded_queue_concurrency.zig", .needle = "std.heap.page_allocator" },
-    .{ .path = "validation/mailbox_concurrency.zig", .needle = "std.heap.page_allocator" },
-    .{ .path = "validation/std_io_net_kv.zig", .needle = "std.heap.page_allocator" },
 };
 
 pub const Options = struct {

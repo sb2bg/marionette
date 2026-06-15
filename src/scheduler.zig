@@ -957,7 +957,7 @@ const ToyTask = struct {
 };
 
 fn runToySchedulerTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1011,7 +1011,7 @@ const UnwindScenario = struct {
 test "TaskScheduler: fiber stacks are unwind-safe for stack-tracing allocators" {
     if (!fiber.supported) return error.SkipZigTest;
 
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1038,7 +1038,7 @@ test "TaskScheduler: fiber stacks are unwind-safe for stack-tracing allocators" 
 test "TaskScheduler: completed tasks release their fibers eagerly" {
     if (!fiber.supported) return error.SkipZigTest;
 
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1109,7 +1109,7 @@ const WakeSetScenario = struct {
 };
 
 fn runWakeSetSchedulerTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1169,7 +1169,7 @@ test "TaskScheduler: wait-set wake order replays deterministically" {
 test "TaskScheduler: blocked tasks without a wake report deadlock" {
     if (!fiber.supported) return error.SkipZigTest;
 
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1229,7 +1229,7 @@ const TimeoutScenario = struct {
 };
 
 fn runTimeoutTrace(allocator: std.mem.Allocator, seed: u64, spawn_waker: bool, waiter_count: usize) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1343,7 +1343,7 @@ const TimedFutexScenario = struct {
 };
 
 fn runTimedFutexTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1424,7 +1424,7 @@ const SleepOrderingScenario = struct {
 };
 
 fn runSleepOrderingTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1512,7 +1512,7 @@ const MutexConditionScenario = struct {
 };
 
 fn runMutexConditionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1745,7 +1745,7 @@ const NetPartitionScenario = struct {
 };
 
 fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1826,7 +1826,7 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
 }
 
 fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
@@ -1903,7 +1903,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
 }
 
 fn runNetworkPartitionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
