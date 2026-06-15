@@ -1,10 +1,16 @@
 //! External SUT validation for g41797/mailbox running on Marionette's
-//! scheduler-backed `std.Io` futex implementation.
+//! deterministic `std.Io` implementation.
+//!
+//! The SUT and the scenario tasks use only `std.Io`: tasks are spawned with
+//! `Io.async`, and mailbox blocking goes through the simulated futex path.
+//! Marionette appears only as the harness (world construction and trace
+//! collection).
 
 const std = @import("std");
 const mar = @import("marionette");
 const mailbox = @import("mailbox");
 
+const Io = std.Io;
 const Letter = u32;
 const Mbx = mailbox.MailBox(Letter);
 
@@ -15,24 +21,20 @@ const ScenarioKind = enum {
 };
 
 const MailboxScenario = struct {
-    io: std.Io,
+    io: Io,
     mailbox: Mbx,
     envelope: Mbx.Envelope = .{ .letter = 42 },
-    receivers_started: u8 = 0,
     receiver_timed_out_count: u8 = 0,
     receiver_got_letter: bool = false,
-    sender_yields: u16 = 0,
 
-    fn init(io: std.Io) MailboxScenario {
+    fn init(io: Io) MailboxScenario {
         return .{
             .io = io,
             .mailbox = .init(io),
         };
     }
 
-    fn timeoutReceiver(_: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(arg));
-        self.receivers_started += 1;
+    fn timeoutReceiver(self: *MailboxScenario) void {
         _ = self.mailbox.receive(30) catch |err| switch (err) {
             error.Timeout => {
                 self.receiver_timed_out_count += 1;
@@ -43,9 +45,7 @@ const MailboxScenario = struct {
         @panic("empty mailbox receive unexpectedly succeeded");
     }
 
-    fn exchangeReceiver(_: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(arg));
-        self.receivers_started += 1;
+    fn exchangeReceiver(self: *MailboxScenario) void {
         const envelope = self.mailbox.receive(1000) catch |err| switch (err) {
             error.Timeout, error.Closed, error.Interrupted => @panic("unexpected mailbox receive error"),
         };
@@ -53,90 +53,50 @@ const MailboxScenario = struct {
         self.receiver_got_letter = true;
     }
 
-    fn sender(scheduler: *mar.experimental.TaskScheduler, arg: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(arg));
-        while (self.receivers_started < 1) {
-            self.sender_yields += 1;
-            if (self.sender_yields > 256) @panic("receiver did not start");
-            scheduler.yieldCurrent();
-        }
+    fn sender(self: *MailboxScenario) void {
+        // Sleep one tick before sending: simulated time only advances once
+        // every non-timed task has parked, so the receiver is guaranteed to
+        // be blocked in `receive` and the send exercises the futex wake of
+        // a blocked waiter rather than a fast-path receive.
+        Io.sleep(self.io, .fromNanoseconds(10), .awake) catch unreachable;
         self.mailbox.send(&self.envelope) catch @panic("mailbox send failed");
     }
 };
 
 fn runMailboxTrace(allocator: std.mem.Allocator, seed: u64, kind: ScenarioKind) ![]u8 {
-    const runtime_allocator = std.heap.page_allocator;
+    var world = try mar.World.init(std.testing.allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
 
-    const world = try runtime_allocator.create(mar.World);
-    errdefer runtime_allocator.destroy(world);
-    world.* = try mar.World.init(runtime_allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer {
-        world.deinit();
-        runtime_allocator.destroy(world);
-    }
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
 
-    const scheduler = try runtime_allocator.create(mar.experimental.TaskScheduler);
-    errdefer runtime_allocator.destroy(scheduler);
-    scheduler.* = mar.experimental.TaskScheduler.init(runtime_allocator, world);
-    defer {
-        scheduler.deinit();
-        runtime_allocator.destroy(scheduler);
-    }
-
-    var backend = mar.SimIo.Backend.init(runtime_allocator, world, mar.Disk.unavailable(), 4096);
-    defer backend.deinit();
-    backend.attachFutexWaitSet(mar.experimental.taskSchedulerFutexWaitSet(scheduler));
-
-    const scenario = try runtime_allocator.create(MailboxScenario);
-    defer runtime_allocator.destroy(scenario);
-    scenario.* = MailboxScenario.init(backend.io());
+    var scenario = MailboxScenario.init(io);
 
     switch (kind) {
         .timeout => {
-            _ = try scheduler.spawn(.{
-                .entry = MailboxScenario.timeoutReceiver,
-                .arg = scenario,
-            });
-        },
-        .timeout_pair => {
-            _ = try scheduler.spawn(.{
-                .entry = MailboxScenario.timeoutReceiver,
-                .arg = scenario,
-            });
-            _ = try scheduler.spawn(.{
-                .entry = MailboxScenario.timeoutReceiver,
-                .arg = scenario,
-            });
-        },
-        .exchange => {
-            _ = try scheduler.spawn(.{
-                .entry = MailboxScenario.exchangeReceiver,
-                .arg = scenario,
-            });
-            _ = try scheduler.spawn(.{
-                .entry = MailboxScenario.sender,
-                .arg = scenario,
-            });
-        },
-    }
-
-    try scheduler.runUntilIdle();
-    try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
-
-    switch (kind) {
-        .timeout => {
+            var receiver = Io.async(io, MailboxScenario.timeoutReceiver, .{&scenario});
+            receiver.await(io);
             try std.testing.expectEqual(@as(u8, 1), scenario.receiver_timed_out_count);
             try std.testing.expectEqual(@as(u64, 30), world.now());
         },
         .timeout_pair => {
+            var first = Io.async(io, MailboxScenario.timeoutReceiver, .{&scenario});
+            var second = Io.async(io, MailboxScenario.timeoutReceiver, .{&scenario});
+            first.await(io);
+            second.await(io);
             try std.testing.expectEqual(@as(u8, 2), scenario.receiver_timed_out_count);
             try std.testing.expectEqual(@as(u64, 30), world.now());
         },
         .exchange => {
+            var receiver = Io.async(io, MailboxScenario.exchangeReceiver, .{&scenario});
+            var send = Io.async(io, MailboxScenario.sender, .{&scenario});
+            receiver.await(io);
+            send.await(io);
             try std.testing.expect(scenario.receiver_got_letter);
         },
     }
 
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
     return try allocator.dupe(u8, world.traceBytes());
 }
 
@@ -174,5 +134,7 @@ test "mailbox send wakes blocked receiver deterministically on Marionette futexe
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.block task=") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "deadline_ns=1000") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.wake key=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout") == null);
+    // The sender's own one-tick sleep times out by design; the receiver
+    // (task 0) must be woken by the send, never by its 1000ns deadline.
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=0") == null);
 }
