@@ -764,7 +764,10 @@ test "io: logical path validation matches simulated and real disks" {
     var valid_file = try Io.Dir.cwd().createFile(sim.env.io(), "io/valid.log", .{});
     valid_file.close(sim.env.io());
     try sim.env.disk.syncDir(.{ .path = "." });
-    try real.disk().syncDir(.{ .path = "." });
+    try std.testing.expectError(
+        error.DirectorySyncUnsupported,
+        real.disk().syncDir(.{ .path = "." }),
+    );
 
     const invalid_paths = [_][]const u8{
         "",

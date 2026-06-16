@@ -106,9 +106,11 @@ pub const RealDisk = struct {
 
     fn syncDir(_: *Self, options: Disk.SyncDir) DiskError!void {
         try validateLogicalPath(options.path, .directory);
-        // `std.Io` does not expose directory fsync on all backends yet. Keep
-        // the production adapter surface-compatible; real host durability is
-        // still delegated to the platform and filesystem.
+        // Zig 0.16's std.Io has no directory-sync operation. Calling fileSync
+        // on a directory handle is backend/platform-specific and can panic on
+        // errors that File.sync considers unreachable, so fail explicitly
+        // rather than claiming directory-entry durability.
+        return error.DirectorySyncUnsupported;
     }
 
     fn stat(self: *Self, options: Disk.Stat) DiskError!Disk.StatResult {
