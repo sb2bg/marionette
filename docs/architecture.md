@@ -78,7 +78,7 @@ Marionette does not yet have:
 - Event-by-event invariant checking.
 - Seed shrinking.
 - Syscall interception.
-- General async/cancel integration.
+- Broader async integration such as `Io.Group` and cooperative cancellation.
 - Preemptive OS-thread or memory-model exploration.
 
 ## Source Layout
