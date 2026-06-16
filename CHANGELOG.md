@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.3.0 - Unreleased
+## v0.3.0 - 2026-06-16
 
 Marionette's third release makes deterministic `std.Io` execution the primary
 integration tier:
