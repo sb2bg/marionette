@@ -51,6 +51,7 @@ pub fn mapDiskSyncError(err: disk_module.DiskError) Io.File.SyncError {
         error.InvalidPath,
         error.InvalidRate,
         error.InvalidRange,
+        error.DirectorySyncUnsupported,
         error.OutOfMemory,
         error.InvalidTracePayload,
         => error.InputOutput,

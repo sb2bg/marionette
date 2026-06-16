@@ -280,6 +280,7 @@ pub const World = struct {
 
         sim_io.attachFutexWaitSet(scheduler_module.futexWaitSet(scheduler));
         sim_io.attachTaskRuntime(scheduler_module.taskRuntime(scheduler));
+        sim_disk.attachLatencyRuntime(scheduler_module.diskLatencyRuntime(scheduler));
 
         return .{
             .env = .{

@@ -13,10 +13,32 @@ pub const DiskError = error{
     InvalidPath,
     InvalidRate,
     InvalidRange,
+    DirectorySyncUnsupported,
     DiskCrashed,
     ReadError,
     WriteError,
 } || std.mem.Allocator.Error || @import("../world.zig").TraceError;
+
+/// Scheduler hook used by `SimDisk` to suspend task-side operations until
+/// their simulated completion deadline without depending on the scheduler
+/// module directly.
+pub const DiskLatencyRuntime = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        in_task: *const fn (ptr: *anyopaque) bool,
+        wait_until: *const fn (ptr: *anyopaque, deadline_ns: clock_module.Timestamp) void,
+    };
+
+    pub fn inTask(self: DiskLatencyRuntime) bool {
+        return self.vtable.in_task(self.ptr);
+    }
+
+    pub fn waitUntil(self: DiskLatencyRuntime, deadline_ns: clock_module.Timestamp) void {
+        self.vtable.wait_until(self.ptr, deadline_ns);
+    }
+};
 
 pub const DiskOptions = struct {
     sector_size: u64 = 4096,

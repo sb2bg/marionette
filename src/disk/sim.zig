@@ -13,6 +13,7 @@ const DiskControl = @import("control.zig").DiskControl;
 const DiskCrash = model.DiskCrash;
 const DiskError = model.DiskError;
 const DiskFaultOptions = model.DiskFaultOptions;
+const DiskLatencyRuntime = model.DiskLatencyRuntime;
 const DiskOptions = model.DiskOptions;
 const DiskRead = model.DiskRead;
 const DiskRestart = model.DiskRestart;
@@ -135,6 +136,7 @@ pub const SimDisk = struct {
     next_file_id: FileId = 1,
     crashed: bool = false,
     crash_observer: ?CrashObserver = null,
+    latency_runtime: ?DiskLatencyRuntime = null,
 
     pub fn init(world: *World, options: DiskOptions) DiskError!Self {
         const resolved_options = try resolveOptions(world, options);
@@ -159,6 +161,12 @@ pub const SimDisk = struct {
     /// Register the single observer notified after each crash lands.
     pub fn setCrashObserver(self: *Self, observer: CrashObserver) void {
         self.crash_observer = observer;
+    }
+
+    /// Attach the simulation scheduler used to park task-side disk calls.
+    /// Bare callers keep the synchronous `World.runFor` behavior.
+    pub fn attachLatencyRuntime(self: *Self, runtime: DiskLatencyRuntime) void {
+        self.latency_runtime = runtime;
     }
 
     pub fn deinit(self: *Self) void {
@@ -674,6 +682,14 @@ pub const SimDisk = struct {
         if (latency_ns == 0) return latency_ns;
         if (std.math.maxInt(clock_module.Timestamp) - self.world.now() < latency_ns) {
             return error.InvalidDuration;
+        }
+        const deadline_ns = self.world.now() + latency_ns;
+        if (self.latency_runtime) |runtime| {
+            if (runtime.inTask()) {
+                runtime.waitUntil(deadline_ns);
+                std.debug.assert(self.world.now() >= deadline_ns);
+                return latency_ns;
+            }
         }
         try self.world.runFor(latency_ns);
         return latency_ns;

@@ -12,6 +12,8 @@ pub const WaitKeyTag = enum(usize) {
     sleep = 3,
     /// Async task completion, keyed by scheduler task id.
     task = 4,
+    /// Simulated disk operation completion deadline.
+    disk = 5,
 };
 
 pub const FutexWaitResult = enum {

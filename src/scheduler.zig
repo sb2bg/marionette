@@ -4,6 +4,7 @@ const std = @import("std");
 
 const disk_module = @import("disk/root.zig");
 const fiber = @import("fiber.zig");
+const futex_module = @import("io/futex.zig");
 const io_module = @import("io/root.zig");
 const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
@@ -792,6 +793,36 @@ pub fn taskRuntime(self: *TaskScheduler) io_module.TaskRuntime {
     };
 }
 
+/// Build the disk-latency suspension view over a scheduler.
+pub fn diskLatencyRuntime(self: *TaskScheduler) disk_module.DiskLatencyRuntime {
+    return .{
+        .ptr = self,
+        .vtable = &disk_latency_runtime_vtable,
+    };
+}
+
+const disk_latency_wait_key = futex_module.waitKey(.disk, 0);
+
+fn diskLatencyInTask(ptr: *anyopaque) bool {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.current != null;
+}
+
+fn diskLatencyWaitUntil(ptr: *anyopaque, deadline_ns: u64) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    while (scheduler.world.now() < deadline_ns) {
+        switch (scheduler.blockCurrentUntil(disk_latency_wait_key, deadline_ns)) {
+            .timed_out => {},
+            .woken => continue,
+        }
+    }
+}
+
+const disk_latency_runtime_vtable: disk_module.DiskLatencyRuntime.VTable = .{
+    .in_task = diskLatencyInTask,
+    .wait_until = diskLatencyWaitUntil,
+};
+
 /// Build the harness-facing control view over this scheduler.
 pub fn taskControl(self: *TaskScheduler) io_module.TaskControl {
     return .{
@@ -1501,6 +1532,135 @@ test "TaskScheduler: std.Io sleep parks behind an earlier deadline" {
     const earlier_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=1 deadline_ns=50").?;
     const sleep_timeout = std.mem.indexOf(u8, first, "scheduler.timeout task=0 deadline_ns=100").?;
     try std.testing.expect(earlier_timeout < sleep_timeout);
+}
+
+const disk_latency_operation_count = 11;
+
+const DiskLatencyOrderingScenario = struct {
+    world: *World,
+    io: Io,
+    disk: disk_module.Disk,
+    control: disk_module.DiskControl,
+    operation_times: [disk_latency_operation_count]u64 = @splat(0),
+    timer_times: [disk_latency_operation_count]u64 = @splat(0),
+
+    fn recordOperation(self: *@This(), index: usize) void {
+        self.operation_times[index] = self.world.now();
+    }
+
+    fn operations(self: *@This()) void {
+        self.disk.write(.{ .path = "alpha", .offset = 0, .bytes = "abcd" }) catch
+            @panic("disk write failed");
+        self.recordOperation(0);
+
+        var read_buffer: [4]u8 = undefined;
+        self.disk.read(.{ .path = "alpha", .offset = 0, .buffer = &read_buffer }) catch
+            @panic("disk read failed");
+        if (!std.mem.eql(u8, &read_buffer, "abcd")) @panic("disk read mismatch");
+        self.recordOperation(1);
+
+        var some_buffer: [2]u8 = undefined;
+        const read_len = self.disk.readSome(.{
+            .path = "alpha",
+            .offset = 1,
+            .buffer = &some_buffer,
+        }) catch @panic("disk readSome failed");
+        if (read_len != 2 or !std.mem.eql(u8, &some_buffer, "bc")) @panic("disk readSome mismatch");
+        self.recordOperation(2);
+
+        const stat = self.disk.stat(.{ .path = "alpha" }) catch @panic("disk stat failed");
+        if (stat.size != 4) @panic("disk stat mismatch");
+        self.recordOperation(3);
+
+        self.disk.setLength(.{ .path = "alpha", .len = 2 }) catch
+            @panic("disk setLength failed");
+        self.recordOperation(4);
+
+        self.disk.sync(.{ .path = "alpha" }) catch @panic("disk sync failed");
+        self.recordOperation(5);
+
+        self.disk.rename(.{ .old_path = "alpha", .new_path = "archive/alpha" }) catch
+            @panic("disk rename failed");
+        self.recordOperation(6);
+
+        self.disk.syncDir(.{ .path = "." }) catch @panic("disk syncDir failed");
+        self.recordOperation(7);
+
+        self.disk.delete(.{ .path = "archive/alpha" }) catch @panic("disk delete failed");
+        self.recordOperation(8);
+
+        self.control.setFaults(.{ .write_error_rate = .always() }) catch
+            @panic("failed to set disk faults");
+        self.disk.write(.{ .path = "faulted", .offset = 0, .bytes = "x" }) catch |err| {
+            if (err != error.WriteError) @panic("unexpected faulted write error");
+        };
+        self.recordOperation(9);
+
+        _ = self.disk.stat(.{ .path = "missing" }) catch |err| {
+            if (err != error.FileNotFound) @panic("unexpected missing stat error");
+            self.recordOperation(10);
+            return;
+        };
+        @panic("missing stat unexpectedly succeeded");
+    }
+
+    fn earlierTimers(self: *@This()) void {
+        for (0..disk_latency_operation_count) |index| {
+            const duration_ns: u64 = if (index == 0) 50 else 100;
+            Io.sleep(self.io, .fromNanoseconds(duration_ns), .awake) catch
+                @panic("disk ordering timer failed");
+            self.timer_times[index] = self.world.now();
+        }
+    }
+};
+
+fn runDiskLatencyOrderingTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    var world = try World.init(std.testing.allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{
+        .disk = .{
+            .sector_size = 1,
+            .min_latency_ns = 100,
+        },
+    });
+    const io = sim.env.io();
+
+    var scenario: DiskLatencyOrderingScenario = .{
+        .world = &world,
+        .io = io,
+        .disk = sim.env.disk,
+        .control = sim.control.disk,
+    };
+
+    var operations = Io.async(io, DiskLatencyOrderingScenario.operations, .{&scenario});
+    var timers = Io.async(io, DiskLatencyOrderingScenario.earlierTimers, .{&scenario});
+    operations.await(io);
+    timers.await(io);
+    for (0..disk_latency_operation_count) |index| {
+        try std.testing.expectEqual(
+            @as(u64, @intCast((index + 1) * 100)),
+            scenario.operation_times[index],
+        );
+        try std.testing.expectEqual(
+            @as(u64, @intCast(50 + index * 100)),
+            scenario.timer_times[index],
+        );
+    }
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "TaskScheduler: disk latency parks every operation behind earlier deadlines" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const first = try runDiskLatencyOrderingTrace(std.testing.allocator, 0xD15C);
+    defer std.testing.allocator.free(first);
+    const second = try runDiskLatencyOrderingTrace(std.testing.allocator, 0xD15C);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "disk.write op=9 path=faulted offset=0 len=1 status=io_error latency_ns=100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "disk.stat op=10 path=missing status=not_found latency_ns=100") != null);
 }
 
 const MutexConditionScenario = struct {

@@ -14,6 +14,7 @@ pub const DiskCrash = model.DiskCrash;
 pub const DiskDelete = model.DiskDelete;
 pub const DiskError = model.DiskError;
 pub const DiskFaultOptions = model.DiskFaultOptions;
+pub const DiskLatencyRuntime = model.DiskLatencyRuntime;
 pub const DiskOptions = model.DiskOptions;
 pub const DiskRead = model.DiskRead;
 pub const DiskReadSome = model.DiskReadSome;
