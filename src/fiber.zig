@@ -9,7 +9,11 @@ const builtin = @import("builtin");
 
 const std_fiber = std.Io.fiber;
 
-pub const supported = std_fiber.supported;
+/// Win64 uses `rcx` for the first argument, while the current x86_64 entry
+/// trampoline is SysV-only. Keep the target compileable but fail closed until
+/// a Windows trampoline has execution coverage.
+pub const supported = std_fiber.supported and
+    !(builtin.os.tag == .windows and builtin.cpu.arch == .x86_64);
 pub const Context = std_fiber.Context;
 pub const Switch = std_fiber.Switch;
 
