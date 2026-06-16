@@ -35,27 +35,43 @@ probes were removed after verification.
     the current synchronous time-advance behavior only for callers outside a
     scheduled task. Cover read, write, sync, metadata, and error paths.
 
-- [ ] **P1: define and enforce one scheduling model per `World`**
+- [x] **P1: define and enforce one scheduling model per `World`**
       (`src/world.zig`, `src/scheduler.zig`, `src/env.zig`)
   - Each `World.simulate()` call creates an independent scheduler, while every
     scheduler shares the world's one clock, RNG, and trace.
   - Reproduced by leaving runnable work in simulation B and draining simulation
     A: A advanced the world to its 100 ns timer while B's time-zero task
     remained runnable, then B observed time 100 ns.
-  - Prefer one world-level scheduler shared by all simulations. The smaller
-    alternative is to reject a second `simulate()` call explicitly. The
-    current test only proves control-to-scheduler identity; extend it to cover
-    global runnable work, timers, RNG consumption, and network fault evolution.
+  - Enforced one simulation per world by returning
+    `error.SimulationAlreadyCreated` before a second construction can mutate
+    shared state. Failed construction resets the guard after rolling back its
+    teardown registrations, so callers may retry.
+  - Regression coverage checks rejection is trace-neutral and verifies a
+    topology failure can be followed by one successful construction.
 
-- [ ] **P1: make crash semantics match the documented process-restart model**
-      (`src/disk/sim.zig`, `src/io/backend.zig`, `src/scheduler.zig`)
+- [ ] **P1: introduce first-class logical processes and real restart semantics**
+      (`src/world.zig`, `src/env.zig`, `src/disk/sim.zig`,
+      `src/io/backend.zig`, `src/io/net.zig`, `src/scheduler.zig`)
   - The crash observer closes file handles and invalidates file metadata, but
     listeners, connections, scheduler tasks, and application memory survive.
   - Reproduced by listening, crashing/restarting the disk, and successfully
     connecting to the old listener afterward.
-  - Either reset every process-owned resource and require application state to
-    be rebuilt, or rename/document this as a disk-device crash. Do not describe
-    it as a machine/process crash while only the file layer restarts.
+  - Add a logical-process runtime owned by the simulation. Each process needs a
+    stable `NodeId`, its own `Backend`/`std.Io`, task ownership, volatile
+    application state, sockets/listeners, and durable disk association, while
+    all processes share the world's scheduler, clock, RNG, trace, and network
+    fault authority.
+  - `kill` must cancel every process-owned task, close its listeners and
+    connections, discard volatile state and unsynced disk state, and wake peers
+    with transport-appropriate errors. `restart` must rerun a registered
+    process initializer against the surviving durable state.
+  - Keep `Endpoint(Message)`/`ByteEndpoint` and `std.Io.net` as sibling
+    surfaces over the same topology and fault state. Target fault-model parity,
+    not identical semantics: endpoints expose message loss/delay/reordering;
+    TCP preserves byte order and translates faults into blocking, timeout,
+    reset, EOF, or network-down behavior.
+  - Use Madsim's one-runtime/many-logical-nodes model as a reference. Do not use
+    real OS processes for deterministic simulation.
 
 - [ ] **P1: fix or disable x86_64 Windows fiber execution**
       (`src/fiber.zig` `entryTrampoline`)
@@ -72,8 +88,9 @@ probes were removed after verification.
     another; close only marks handles closed.
   - In a two-node topology, the first listen/connect succeeds and the second
     connect fails with `error.NetworkDown` even after the first socket closes.
-  - Implement the agreed node-is-process model with stable backend/node
-    identity and a shared connection/listener registry.
+  - Implement the first networking slice of the logical-process P1: stable
+    backend/node identity, a shared world-level connection/listener registry,
+    and futex-key namespacing across process backends.
 
 - [x] **P2: share one logical-path validator between `SimDisk` and `RealDisk`**
       (`src/disk/sim.zig`, `src/disk/real.zig`, `src/io/file.zig`)
