@@ -32,6 +32,7 @@ Today the demonstrated tiers are:
 - cooperative `std.Io` task scheduling for `Mutex` / `Condition` code;
 - scheduler-backed `std.Io.net` streams with deterministic latency,
   partitions, timeouts, healing, and retry;
+- scheduler-aware disk operations that park tasks behind earlier deadlines;
 - typed endpoint message passing with deterministic loss, latency, and
   partitions.
 
@@ -245,6 +246,7 @@ have.
 - [Roadmap](docs/roadmap.md)
 - [Prior art](docs/prior-art.md)
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
+- [Releasing](docs/releasing.md)
 - [Blog](docs/blog/index.md)
 
 ## Status
@@ -269,12 +271,18 @@ exist, but cross-process production transport is still roadmap work. Allocator
 simulation, cooperative cancellation points, `Io.Group`, queue suspension, and
 broader scheduler parity are planned.
 
+Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows
+fiber path is deliberately disabled until its Win64 entry ABI has execution
+coverage. `RealDisk.syncDir` returns `error.DirectorySyncUnsupported` because
+Zig 0.16 does not expose a portable directory-sync operation; it never reports
+durability that it did not perform.
+
 If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 
 ## Install
 
 ```
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.2.0.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 Requires Zig 0.16.x.

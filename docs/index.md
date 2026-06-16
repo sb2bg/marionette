@@ -196,6 +196,7 @@ Passing runs return traces for persistence, diffing, or external tooling.
 - [Roadmap](roadmap.md)
 - [Prior art](prior-art.md)
 - [TigerBeetle Lessons](tigerbeetle-lessons.md)
+- [Releasing](releasing.md)
 - [Blog](blog/index.md)
 
 ## Status
@@ -209,14 +210,22 @@ change as the simulator grows.
 The simulator currently models clock, deterministic randomness, disk, a flat
 `std.Io.File` subset, typed endpoint networking, a narrow scheduler-backed
 `std.Io.net` stream subset with deterministic latency, timeout, partition, and
-healing behavior, and experimental cooperative `std.Io` futex waits for
+healing behavior, and cooperative `std.Io` tasks and futex waits for
 `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
-target and the internal bounded-queue capability demo.
+target and the internal bounded-queue capability demo. Simulated disk
+operations park scheduler tasks until their completion deadlines rather than
+skipping earlier timers.
 It does not model arbitrary OS thread scheduling or memory-level concurrency;
 code that depends on those needs separate testing. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths
 exist, but cross-process production transport is still roadmap work. Allocator
-simulation, async/cancel integration, and broader scheduler parity are planned.
+simulation, cooperative cancellation, `Io.Group`, and broader scheduler parity
+are planned.
+
+Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows
+fiber path is deliberately disabled until its Win64 entry ABI has execution
+coverage. `RealDisk.syncDir` returns `error.DirectorySyncUnsupported` because
+Zig 0.16 does not expose a portable directory-sync operation.
 
 The [`examples/`](https://github.com/sb2bg/marionette/tree/main/examples)
 directory is the best place to start.
@@ -224,7 +233,7 @@ directory is the best place to start.
 ## Install
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.2.0.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 Requires Zig 0.16.x.

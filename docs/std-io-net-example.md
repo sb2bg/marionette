@@ -126,6 +126,11 @@ host access, TLS, `sendmsg` / `recvmsg`, full connection-reset behavior, or
 preemptive OS-thread scheduling. Unsupported vtable regions fail closed rather
 than silently using host I/O.
 
+Listener and connection allocation is also still tied to the fixed topology:
+each listener/client allocation consumes a node slot for the simulation's
+lifetime. Size the topology for the demonstrated scenario; reconnect loops and
+process-owned socket identity are part of the planned logical-process work.
+
 ## What This Proves
 
 This validation proves that production-shaped `std.Io.net` client/server code

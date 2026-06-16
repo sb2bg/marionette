@@ -253,6 +253,10 @@ zero-filled sectors, and uses the same sector alignment checks as `SimDisk`.
 Logical file paths use canonical rooted syntax: non-empty `/`-separated
 components, no `.`, `..`, empty components, backslashes, NUL, or host absolute
 roots. `.` is reserved for the root directory in `syncDir`.
+This guarantees rooted, non-traversing syntax, not identical behavior across
+host filesystems: case sensitivity, Unicode normalization, reserved names,
+trailing dots/spaces, and path limits may still differ. A portable filename
+profile remains future work.
 
 The `io` argument is the production host I/O backend used to perform
 filesystem calls and provide host randomness. `production.env().io()` returns
@@ -326,6 +330,11 @@ metadata for creates, deletes, and renames in that logical directory. Without
 matching the classic parent-directory-fsync storage bug class. Cross-directory
 renames require syncing both parent directories before the rename is fully
 durable.
+
+`RealDisk.syncDir` currently returns `error.DirectorySyncUnsupported`. Zig
+0.16 does not expose a portable directory-sync operation through `std.Io`, so
+the production adapter fails explicitly instead of reporting durability it did
+not establish.
 
 Faults are disabled by default. Enable them through `mar.DiskControl`:
 

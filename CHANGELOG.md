@@ -1,19 +1,50 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 - Unreleased
 
+Marionette's third release makes deterministic `std.Io` execution the primary
+integration tier:
+
+- Adds scheduler-backed `Io.async`, `Io.concurrent`, and `Io.await`, including
+  task-side suspension and main-context scheduler driving.
+- Routes simulated sleep and disk-operation latency through scheduler
+  deadlines, so a long I/O operation cannot skip an earlier timer.
+- Adds traced deterministic `Io.random` / `Io.randomSecure` and compares replay
+  outcomes symmetrically, including failures.
+- Runs the pinned `g41797/mailbox` validation and the bounded-queue capability
+  validation entirely through ordinary `std.Io` tasks.
 - Adds an external-style fixed-frame KV client/server written only against
   `std.Io.net`, with deterministic happy-path replay and a
   partition/timeout/heal retry scenario.
 - Adds `zig build validate-std-io-net-kv` plus runnable correct and planted-bug
   scenarios. The exact oracle catches duplicate mutation application even when
   the final value is unchanged.
-- Fixes simulated graceful close so delayed bytes already accepted by the
-  network runtime are delivered before the reader observes EOF.
-- Keeps the scheduler-side run loop optimizer-opaque across fiber stack
-  switches, fixing a ReleaseSafe crash exposed by the client/server workload.
-- Documents the current TCP-like stream contract and unsupported network
-  boundary.
+- Suspends `std.Io.net` accept and read operations cooperatively and models
+  stream latency, send-time loss, delivery-time partitions, healing, retry
+  timeouts, and graceful close.
+- Models disk crashes as process restarts for the file layer: open handles are
+  invalidated and cached lengths are refreshed from durable disk state.
+- Fixes Zig 0.16 fiber context-switch constraints and optimizer visibility,
+  adds unwind-safe entry stacks, eagerly reclaims completed fiber stacks, and
+  adds POSIX guard pages with a portable stack-canary fallback.
+- Splits disk, network, and `std.Io` internals into focused modules and narrows
+  obsolete top-level API aliases.
+- Makes failed simulation construction roll back teardown registrations,
+  enforces one simulation per world, and shares rooted logical-path validation
+  between simulated and production disks.
+- Makes production directory sync fail explicitly with
+  `error.DirectorySyncUnsupported` rather than reporting durability without
+  performing it.
+- Disables x86_64 Windows fiber execution until the Win64 entry trampoline has
+  execution coverage; the disabled target remains compile-checked.
+- Expands CI to Debug, ReleaseSafe, and ReleaseFast validation, macOS execution,
+  a Win64 fiber compile check, and bounded job timeouts.
+
+Known limits remain: fibers are cooperative rather than preemptive; one world
+hosts one simulation; current `std.Io.net` listener/connection allocation
+consumes fixed topology nodes; `Io.Group`, cooperative cancellation, logical
+process restart, cross-process production networking, and complete host
+filename parity remain roadmap work.
 
 ## v0.2.0 - 2026-06-02
 
