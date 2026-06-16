@@ -903,13 +903,15 @@ The implemented answers are deliberately narrow:
 
 - The task primitive is the single-future `std.Io` async/concurrent/await path;
   cooperative cancellation points and `Io.Group` remain open.
-- Yield points are modeled waits such as sleep, futex, and network blocking,
-  with scheduler decisions and suspension outcomes recorded in the trace.
+- Yield points are modeled waits such as sleep, futex, network blocking, and
+  scheduled disk-operation latency, with scheduler decisions and suspension
+  outcomes recorded in the trace.
 - Production parity still targets a cooperative event loop or shared-nothing
   thread-per-core design; preemptive threads are a documented guarantee
   demotion.
-- Existing Marionette-native endpoint and disk operations remain explicit
-  authorities. Scheduler-aware disk latency is still open.
+- Existing Marionette-native endpoint operations remain explicit authorities.
+  Disk operations now park scheduled tasks behind latency deadlines while
+  bare/non-task calls preserve synchronous `World.runFor` behavior.
 - Deadlock and scheduler traces identify task ids, wait keys, deadlines, and
   runnable choices; richer minimized failure reports remain future work.
 
