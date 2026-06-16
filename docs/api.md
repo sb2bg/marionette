@@ -95,6 +95,8 @@ Application code should receive explicit handles from the composition root, not
 `World` directly.
 Scenarios and harnesses use `World` to construct simulations, drive time, and
 inspect trace bytes.
+Each `World` constructs at most one simulation. A failed `simulate` attempt
+rolls back its resources and leaves the world available for another attempt.
 
 Create a world with an explicit allocator:
 

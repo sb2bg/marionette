@@ -86,6 +86,8 @@ pub const World = struct {
     trace_log: std.ArrayList(u8),
     /// Next event index to write into the trace.
     event_index: u64,
+    /// Whether this world has successfully constructed its simulation.
+    simulation_created: bool,
     /// Simulator resources owned by the world and torn down in reverse order.
     teardowns: std.ArrayList(Teardown),
 
@@ -117,6 +119,7 @@ pub const World = struct {
             .rng = .init(options.seed),
             .trace_log = .empty,
             .event_index = 0,
+            .simulation_created = false,
             .teardowns = .empty,
         };
         errdefer world.deinit();
@@ -220,7 +223,14 @@ pub const World = struct {
     };
 
     /// Build app and harness views over world-owned simulator resources.
+    ///
+    /// A world may construct one simulation. Failed construction rolls back
+    /// registered resources and leaves the world available for another attempt.
     pub fn simulate(self: *World, options: SimulateOptions) !Simulation {
+        if (self.simulation_created) return error.SimulationAlreadyCreated;
+        self.simulation_created = true;
+        errdefer self.simulation_created = false;
+
         const teardown_checkpoint = self.teardowns.items.len;
         errdefer self.rollbackTeardowns(teardown_checkpoint);
 
@@ -255,7 +265,7 @@ pub const World = struct {
             network_module.AnyNetworkControl.unavailable();
         sim_io.attachNetworkControl(network_control);
 
-        // Each simulation gets a cooperative scheduler owned by the world,
+        // The simulation gets a cooperative scheduler owned by the world,
         // so `Io.async`, `Io.concurrent`, and scheduler-backed waits (futex,
         // net, sleep) work out of the box without caller setup.
         const scheduler = try self.allocator.create(scheduler_module.TaskScheduler);
@@ -545,6 +555,32 @@ test "world: simulate rolls back teardown registrations on allocation failure" {
         std.testing.allocator,
         simulateAllocationFailureSweep,
         .{},
+    );
+}
+
+test "world: failed simulation construction leaves the world retryable" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x51A });
+    defer world.deinit();
+
+    const teardown_checkpoint = world.teardowns.items.len;
+    try std.testing.expectError(
+        error.InvalidNode,
+        world.simulate(.{ .network = .{ .nodes = 0 } }),
+    );
+    try std.testing.expectEqual(teardown_checkpoint, world.teardowns.items.len);
+    try std.testing.expect(!world.simulation_created);
+
+    _ = try world.simulate(.{});
+    const before_teardown_count = world.teardowns.items.len;
+    const before_now = world.now();
+    var expected_rng = world.rng;
+
+    try std.testing.expectError(error.SimulationAlreadyCreated, world.simulate(.{}));
+    try std.testing.expectEqual(before_teardown_count, world.teardowns.items.len);
+    try std.testing.expectEqual(before_now, world.now());
+    try std.testing.expectEqual(
+        expected_rng.random().int(u64),
+        world.rng.random().int(u64),
     );
 }
 

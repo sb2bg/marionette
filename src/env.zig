@@ -614,34 +614,18 @@ test "env: simulation buggify is traced" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet rate=20/100 roll=") != null);
 }
 
-test "env: each simulation control drives its own scheduler" {
-    if (!@import("fiber.zig").supported) return error.SkipZigTest;
-
-    const Helper = struct {
-        fn mark(ran: *bool) void {
-            ran.* = true;
-        }
-    };
-
+test "env: world rejects a second simulation without changing trace state" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0x51A });
     defer world.deinit();
 
-    const first = try world.simulate(.{});
-    const second = try world.simulate(.{});
+    _ = try world.simulate(.{});
+    const before_trace = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(before_trace);
+    const before_event_index = world.nextEventIndex();
 
-    var first_ran = false;
-    var second_ran = false;
-    var first_future = try std.Io.concurrent(first.env.io(), Helper.mark, .{&first_ran});
-    var second_future = try std.Io.concurrent(second.env.io(), Helper.mark, .{&second_ran});
-
-    try first.control.runTasksUntilIdle();
-    try std.testing.expect(first_ran);
-    try std.testing.expect(!second_ran);
-    first_future.await(first.env.io());
-
-    try second.control.runTasksUntilIdle();
-    try std.testing.expect(second_ran);
-    second_future.await(second.env.io());
+    try std.testing.expectError(error.SimulationAlreadyCreated, world.simulate(.{}));
+    try std.testing.expectEqual(before_event_index, world.nextEventIndex());
+    try std.testing.expectEqualStrings(before_trace, world.traceBytes());
 }
 
 test "env: buggify accepts typed enum hooks" {
