@@ -24,16 +24,19 @@ probes were removed after verification.
     registration. A `checkAllAllocationFailures` sweep covers network-enabled
     simulation construction.
 
-- [ ] **P1: make simulated disk latency scheduler-aware**
+- [x] **P1: make simulated disk latency scheduler-aware**
       (`src/disk/sim.zig` `advanceLatency`)
   - Disk operations call `World.runFor` synchronously from the running task.
     This advances the shared clock without parking the task or giving earlier
     scheduler deadlines a chance to run.
   - Reproduced with a task sleeping until 50 ns and another task performing a
     100 ns disk write: the sleeper woke at 100 ns.
-  - Route task-side disk latency through a scheduler deadline/event. Preserve
-    the current synchronous time-advance behavior only for callers outside a
-    scheduled task. Cover read, write, sync, metadata, and error paths.
+  - Fixed with a type-erased disk-latency runtime attached by
+    `World.simulate()`. Task-side operations park until their completion
+    deadline, while bare callers preserve synchronous `World.runFor` behavior.
+    A replay test covers read, write, sync, `syncDir`, stat, `readSome`,
+    set-length, rename, delete, injected write failure, and not-found failure
+    against earlier scheduler deadlines.
 
 - [x] **P1: define and enforce one scheduling model per `World`**
       (`src/world.zig`, `src/scheduler.zig`, `src/env.zig`)
@@ -73,13 +76,14 @@ probes were removed after verification.
   - Use Madsim's one-runtime/many-logical-nodes model as a reference. Do not use
     real OS processes for deterministic simulation.
 
-- [ ] **P1: fix or disable x86_64 Windows fiber execution**
+- [x] **P1: fix or disable x86_64 Windows fiber execution**
       (`src/fiber.zig` `entryTrampoline`)
   - Already noted below under the std.Io scheduling milestone: the trampoline
     puts its first argument in SysV `rdi`, while Win64 requires `rcx`.
-  - Compile-only checks do not validate this ABI path. Add the Windows-specific
-    trampoline and an execution test on Windows CI, or report fibers as
-    unsupported for this target until that exists.
+  - The target now fails closed: `fiber.supported` is false on x86_64 Windows,
+    so scheduler-backed execution cannot enter the SysV trampoline. CI
+    cross-compiles the disabled fiber module until a Win64 trampoline and
+    execution runner are available.
 
 - [ ] **P2: replace socket-as-node topology ownership**
       (`src/io/backend.zig`, `src/io/net.zig`)
@@ -128,14 +132,15 @@ probes were removed after verification.
     deterministic host-component encoding only once Marionette owns both
     simulated and production file routing.
 
-- [ ] **P2: stop reporting successful production `syncDir` without syncing**
+- [x] **P2: stop reporting successful production `syncDir` without syncing**
       (`src/disk/real.zig`)
   - `Disk.syncDir` promises that directory-entry metadata is persisted, while
     `RealDisk.syncDir` validates the path and returns success without issuing a
     directory sync.
-  - Implement the operation where the injected `std.Io` supports it, or return
-    an explicit unsupported/error result. A silent no-op can make production
-    durability weaker than the simulator's checked contract.
+  - `RealDisk.syncDir` now validates the logical path and returns
+    `error.DirectorySyncUnsupported`. Zig 0.16 does not expose a portable
+    directory sync through injected `std.Io`; failing explicitly keeps the
+    durability contract truthful.
 
 - [x] **P2: run every advertised validation in CI and bound hangs**
       (`build.zig`, `.github/workflows/ci.yml`)
@@ -362,7 +367,12 @@ probes were removed after verification.
 
 - [ ] CI job verifying sim-mode symbols are absent from release binaries
       (promised by CLAUDE.md principle 2; currently unverified).
-- [ ] Multi-platform CI (macOS, Windows); only ubuntu runs today.
+- [ ] Multi-platform CI:
+  - [x] macOS executes Debug and ReleaseSafe suites.
+  - [x] The deliberately-disabled x86_64 Windows fiber target is
+        cross-compiled.
+  - [ ] Full Windows execution remains blocked on broader socket-handle and
+        Win64 fiber work.
 - [ ] Nightly long-running seed-sweep job (`expectFuzz` over examples with
       thousands of seeds).
 - [ ] CLAUDE.md directory layout is stale: lists `examples/rate_limiter.zig`
@@ -401,10 +411,11 @@ probes were removed after verification.
       allocs/frees through `std.testing.allocator` inside a task, and the
       io async tests run on `std.testing.allocator` again (leak checking
       restored).
-- [ ] Windows x86_64 fiber entry uses the SysV argument register (`rdi`);
-      the Win64 ABI passes the first argument in `rcx`. Pre-existing,
-      compile-only verified today; fix alongside the first real Windows CI
-      run (zio's coroEntry has the win64 variant to crib from).
+- [x] Disable Windows x86_64 fiber execution while the entry trampoline uses
+      the SysV argument register (`rdi`) instead of Win64's `rcx`. CI
+      compile-checks the fail-closed target; implementing and executing a
+      Win64 trampoline remains future work (zio's coroEntry has the variant to
+      crib from).
 - [x] Review fix (P1): main-context blocking no longer panics. Wait-set
       calls with no current task route to `driveMainUntil`: the main
       context drives the scheduler (ready tasks run, time advances to the
