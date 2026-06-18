@@ -93,6 +93,21 @@ fn init(world: *mar.World) !Harness {
 The application-shaped code depends on narrow handles such as `Recorder` plus
 typed endpoints, not on `control`, `World`, `std.net`, or the packet core.
 
+Ordinary `std.Io.net` code gets node identity from the simulation environment
+rather than from each socket. `sim.env` is node 0 for compatibility; multi-node
+stream tests should pass each process its own environment:
+
+```zig
+const server_env = try sim.envForNode(0);
+const client_env = try sim.envForNode(1);
+
+var listener = try address.listen(server_env.io(), .{});
+var client = try address.connect(client_env.io(), .{
+    .mode = .stream,
+    .protocol = .tcp,
+});
+```
+
 ## Simulator-Control Authority
 
 The simulator-control authority is for tests, scenarios, and future schedulers:

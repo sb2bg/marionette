@@ -177,10 +177,13 @@ Messages have configurable loss, latency, clogs, and partition dynamics through 
 
 The external-style [`std_io_net_kv`](examples/std_io_net_kv.zig) example
 imports only `std` and implements a fixed-frame PUT/GET service over
-`std.Io.net`. Its Marionette harness partitions the client from a queued
-response, surfaces the dropped delivery as `error.Timeout`, heals the link, and
-retries the request. A correct server deduplicates the retry; a planted buggy
-mode applies it twice and violates an exact revision oracle.
+`std.Io.net`. In simulation, node-scoped `std.Io` handles come from
+`sim.envForNode(node).io()`, so reconnecting sockets keep the same process
+identity instead of consuming topology. Its Marionette harness partitions the
+client from a queued response, surfaces the dropped delivery as `error.Timeout`,
+heals the link, and retries the request. A correct server deduplicates the
+retry; a planted buggy mode applies it twice and violates an exact revision
+oracle.
 
 ```sh
 zig build validate-std-io-net-kv

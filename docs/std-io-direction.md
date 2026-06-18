@@ -63,6 +63,10 @@ attached (bare `Backend`), `async` runs eagerly on the caller and
 `concurrent` returns `error.ConcurrencyUnavailable`. The backend also
 supports `Io.Queue` operations and a small in-memory TCP stream subset for
 `std.Io.net` listen/connect/accept/read/write/close.
+When network simulation is configured, `World.simulate()` creates one
+process-scoped I/O backend per declared node. Use `sim.envForNode(node).io()`
+when separate server/client tasks should speak as distinct simulated nodes;
+`sim.env.io()` remains node 0 for single-process and compatibility cases.
 When the backend is attached to a scheduler wait set, `Io.sleep` parks the
 current fiber until its deadline, empty accepts park until a connection is
 queued, and open-peer empty reads park until bytes arrive or the peer closes.

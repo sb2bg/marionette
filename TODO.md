@@ -55,10 +55,13 @@ probes were removed after verification.
 - [ ] **P1: introduce first-class logical processes and real restart semantics**
       (`src/world.zig`, `src/env.zig`, `src/disk/sim.zig`,
       `src/io/backend.zig`, `src/io/net.zig`, `src/scheduler.zig`)
-  - The crash observer closes file handles and invalidates file metadata, but
-    listeners, connections, scheduler tasks, and application memory survive.
-  - Reproduced by listening, crashing/restarting the disk, and successfully
-    connecting to the old listener afterward.
+  - First networking slice landed: `World.simulate()` now owns one
+    process-scoped `std.Io` backend per declared network node, with shared
+    listener/connection registration, process-local futex key namespaces, and
+    stable node identity across socket reconnects. Disk crash now closes
+    process-local listeners and connections as well as file handles.
+  - Remaining gap: scheduler tasks and application memory still survive a crash,
+    and restart does not rerun a registered process initializer.
   - Add a logical-process runtime owned by the simulation. Each process needs a
     stable `NodeId`, its own `Backend`/`std.Io`, task ownership, volatile
     application state, sockets/listeners, and durable disk association, while
@@ -85,16 +88,17 @@ probes were removed after verification.
     cross-compiles the disabled fiber module until a Win64 trampoline and
     execution runner are available.
 
-- [ ] **P2: replace socket-as-node topology ownership**
+- [x] **P2: replace socket-as-node topology ownership**
       (`src/io/backend.zig`, `src/io/net.zig`)
   - This is the reproduced form of Bugs and correctness item 5 below. A
     listener consumes one topology node and every client connection consumes
     another; close only marks handles closed.
   - In a two-node topology, the first listen/connect succeeds and the second
     connect fails with `error.NetworkDown` even after the first socket closes.
-  - Implement the first networking slice of the logical-process P1: stable
-    backend/node identity, a shared world-level connection/listener registry,
-    and futex-key namespacing across process backends.
+  - Fixed with the first networking slice of the logical-process P1: stable
+    backend/node identity, a shared process-runtime listener/connection registry,
+    globally unique socket handles, and futex-key namespacing across process
+    backends.
 
 - [x] **P2: share one logical-path validator between `SimDisk` and `RealDisk`**
       (`src/disk/sim.zig`, `src/disk/real.zig`, `src/io/file.zig`)
