@@ -912,11 +912,11 @@ fn simAwait(
     result_alignment: std.mem.Alignment,
 ) void {
     _ = result_alignment;
-    const backend = backendFromUserdata(userdata);
+    _ = backendFromUserdata(userdata);
     const closure: *AsyncClosure = @ptrCast(@alignCast(any_future));
     // `await` is only called when `async` returned non-null, so a runtime
     // was attached at spawn time.
-    const runtime = backend.task_runtime orelse unreachable;
+    const runtime = closure.backend.task_runtime orelse unreachable;
 
     if (!closure.done) {
         if (runtime.inTask()) {
@@ -927,7 +927,7 @@ fn simAwait(
     }
 
     @memcpy(result, closure.result[0..result.len]);
-    releaseClosure(backend, closure);
+    releaseClosure(closure);
 }
 
 fn simCancel(
@@ -942,7 +942,8 @@ fn simCancel(
     simAwait(userdata, any_future, result, result_alignment);
 }
 
-fn releaseClosure(backend: *Backend, closure: *AsyncClosure) void {
+fn releaseClosure(closure: *AsyncClosure) void {
+    const backend = closure.backend;
     for (backend.async_closures.items, 0..) |candidate, index| {
         if (candidate == closure) {
             _ = backend.async_closures.swapRemove(index);

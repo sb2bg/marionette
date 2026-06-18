@@ -10,6 +10,16 @@ fn testIo(world: *World) Backend {
     return .init(std.testing.allocator, world, disk_module.Disk.unavailable(), 4096);
 }
 
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, start, needle)) |index| {
+        count += 1;
+        start = index + needle.len;
+    }
+    return count;
+}
+
 test "io: simulation sleep rounds to clock resolution and records time movement" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
@@ -661,6 +671,62 @@ test "io: process kill cancels owned tasks and resets peers" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=killed") != null);
 }
 
+test "io: cross-process await releases the spawning backend closure" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn addOne(value: u32) u32 {
+            return value + 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA63, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    var future = Io.async(server_io, Helper.addOne, .{41});
+    try std.testing.expectEqual(@as(u32, 42), future.await(client_io));
+
+    const server_backend = try sim.io_runtime.backendForNode(0);
+    const client_backend = try sim.io_runtime.backendForNode(1);
+    try std.testing.expectEqual(@as(usize, 0), server_backend.async_closures.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client_backend.async_closures.items.len);
+
+    try sim.killProcess(0);
+}
+
+test "io: process kill from inside owned task completes as killed" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        sim: World.Simulation,
+        after_kill_call: bool = false,
+
+        fn task(self: *@This()) void {
+            self.sim.killProcess(0) catch @panic("self kill failed");
+            self.after_kill_call = true;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA64, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var scenario: Scenario = .{ .sim = sim };
+    var future = Io.async(io, Scenario.task, .{&scenario});
+    future.await(io);
+
+    try std.testing.expect(scenario.after_kill_call);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=manual") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=killed") != null);
+}
+
 test "io: process restart reruns registered initializer against durable state" {
     if (!fiber_supported) return error.SkipZigTest;
 
@@ -708,8 +774,13 @@ test "io: process restart reruns registered initializer against durable state" {
     });
 
     try sim.killProcess(0);
+    try sim.killProcess(0);
     try std.testing.expectEqual(@as(u32, 1), state.kills);
     try std.testing.expectEqual(@as(u32, 0), state.volatile_value);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(world.traceBytes(), "process.kill node=0 reason=manual"),
+    );
 
     try sim.restartProcess(0);
     try std.testing.expectEqual(@as(u32, 1), state.starts);
@@ -720,7 +791,45 @@ test "io: process restart reruns registered initializer against durable state" {
     try sim.restartProcess(0);
     try std.testing.expectEqual(@as(u32, 2), state.starts);
     try std.testing.expectEqual(@as(u32, 2), state.kills);
+    try std.testing.expectEqual(@as(u32, 7), state.volatile_value);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.restart node=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=restart") != null);
+}
+
+test "io: restarting an unregistered process does not kill it" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        starts: u32 = 0,
+        kills: u32 = 0,
+
+        fn onKill(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.kills += 1;
+        }
+
+        fn restart(raw: *anyopaque, _: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.starts += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA65, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    try std.testing.expectError(error.ProcessNotRegistered, sim.restartProcess(0));
+
+    var state: State = .{};
+    try sim.registerProcess(0, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+
+    try sim.restartProcess(0);
+    try std.testing.expectEqual(@as(u32, 1), state.starts);
+    try std.testing.expectEqual(@as(u32, 1), state.kills);
 }
 
 test "io: completed async tasks release their fiber stacks" {

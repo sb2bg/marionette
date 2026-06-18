@@ -441,13 +441,11 @@ pub const World = struct {
         };
 
         const process_supervisor = try self.allocator.create(ProcessSupervisor);
-        var process_supervisor_initialized = false;
         var process_supervisor_registered = false;
         errdefer if (!process_supervisor_registered) self.allocator.destroy(process_supervisor);
 
         process_supervisor.* = try ProcessSupervisor.init(self.allocator, self, base_env, sim_io);
-        process_supervisor_initialized = true;
-        errdefer if (process_supervisor_initialized and !process_supervisor_registered) process_supervisor.deinit();
+        errdefer if (!process_supervisor_registered) process_supervisor.deinit();
 
         try self.registerTeardown(process_supervisor, deinitProcessSupervisorOpaque);
         process_supervisor_registered = true;
