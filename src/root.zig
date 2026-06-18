@@ -97,6 +97,9 @@ pub const Control = env_module.SimControl;
 /// App and control views returned by `World.simulate`.
 pub const Sim = @import("world.zig").World.Simulation;
 
+/// Type-erased logical-process lifecycle callbacks for simulation restart.
+pub const ProcessLifecycle = @import("world.zig").ProcessLifecycle;
+
 /// Probability that a BUGGIFY hook fires in simulation.
 pub const BuggifyRate = env_module.BuggifyRate;
 
@@ -108,7 +111,6 @@ pub const Random = @import("random.zig").Random;
 
 /// Deterministic simulation engine state.
 pub const World = @import("world.zig").World;
-
 
 /// Fixed topology and per-path capacity for one network simulation.
 pub const NetworkOptions = network_module.NetworkOptions;

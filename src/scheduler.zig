@@ -78,6 +78,7 @@ pub const TaskScheduler = struct {
         stack_size: usize = default_task_stack_size,
         entry: Entry,
         arg: *anyopaque,
+        process_id: ?io_module.ProcessId = null,
     };
 
     const TaskState = enum {
@@ -108,6 +109,7 @@ pub const TaskScheduler = struct {
         scheduler: *Self,
         entry: Entry,
         arg: *anyopaque,
+        process_id: ?io_module.ProcessId = null,
         /// Null once the task has completed: the fiber (and its stack) is
         /// reclaimed eagerly so long-lived worlds spawning many tasks do not
         /// accumulate dead stacks until teardown.
@@ -116,6 +118,7 @@ pub const TaskScheduler = struct {
         blocked_key: ?WaitKey = null,
         blocked_deadline_ns: ?u64 = null,
         wait_result: WaitResult = .woken,
+        kill_requested: bool = false,
 
         fn run(arg: *anyopaque) void {
             const task: *Task = @ptrCast(@alignCast(arg));
@@ -173,6 +176,16 @@ pub const TaskScheduler = struct {
         entry: *const fn (*anyopaque) void,
         arg: *anyopaque,
     ) TaskSchedulerError!TaskId {
+        return try self.spawnOpaqueForProcess(null, entry, arg);
+    }
+
+    /// Spawn a type-erased task owned by `process_id`.
+    pub fn spawnOpaqueForProcess(
+        self: *Self,
+        process_id: ?io_module.ProcessId,
+        entry: *const fn (*anyopaque) void,
+        arg: *anyopaque,
+    ) TaskSchedulerError!TaskId {
         const adapter = try self.allocator.create(OpaqueEntry);
         errdefer self.allocator.destroy(adapter);
         adapter.* = .{ .entry = entry, .arg = arg };
@@ -182,6 +195,7 @@ pub const TaskScheduler = struct {
         return try self.spawn(.{
             .entry = OpaqueEntry.run,
             .arg = adapter,
+            .process_id = process_id,
         });
     }
 
@@ -217,6 +231,7 @@ pub const TaskScheduler = struct {
             .scheduler = self,
             .entry = options.entry,
             .arg = options.arg,
+            .process_id = options.process_id,
             .fiber_instance = null,
         };
 
@@ -235,7 +250,7 @@ pub const TaskScheduler = struct {
         try self.ready.append(self.allocator, task_id);
         errdefer _ = self.ready.pop();
 
-        try self.recordSpawn(task_id);
+        try self.recordSpawn(task_id, options.process_id);
         self.next_task_id += 1;
         return task_id;
     }
@@ -480,17 +495,28 @@ pub const TaskScheduler = struct {
         }
         switch (returned_message.reason) {
             .yielded => {
-                returned_task.clearBlock(.ready, .woken);
-                try scheduler.ready.append(scheduler.allocator, returned_task.id);
-                try scheduler.recordYield(returned_task.id);
+                if (returned_task.kill_requested) {
+                    try scheduler.completeKilledTask(returned_task);
+                } else {
+                    returned_task.clearBlock(.ready, .woken);
+                    try scheduler.ready.append(scheduler.allocator, returned_task.id);
+                    try scheduler.recordYield(returned_task.id);
+                }
             },
             .blocked => {
-                returned_task.block(returned_message.key, returned_message.deadline_ns);
-                try scheduler.recordBlock(returned_task.id, returned_message.key, returned_message.deadline_ns);
+                if (returned_task.kill_requested) {
+                    try scheduler.completeKilledTask(returned_task);
+                } else {
+                    returned_task.block(returned_message.key, returned_message.deadline_ns);
+                    try scheduler.recordBlock(returned_task.id, returned_message.key, returned_message.deadline_ns);
+                }
             },
             .completed => {
                 returned_task.clearBlock(.completed, .woken);
-                try scheduler.recordComplete(returned_task.id, "ok");
+                try scheduler.recordComplete(
+                    returned_task.id,
+                    if (returned_task.kill_requested) "killed" else "ok",
+                );
                 // The fiber finished and we are back on the scheduler stack:
                 // its stack can never run again, so reclaim it now instead of
                 // holding every dead stack until world teardown.
@@ -499,6 +525,44 @@ pub const TaskScheduler = struct {
             },
         }
         return .ran;
+    }
+
+    /// Cancel every non-completed task owned by `process_id`.
+    ///
+    /// Running fibers cannot be preempted safely; if the current fiber belongs
+    /// to the target process, it is marked and converted to `killed` at its
+    /// next scheduler suspension/completion boundary.
+    pub fn killProcess(self: *Self, process_id: io_module.ProcessId) void {
+        for (self.tasks.items) |task| {
+            if (task.process_id != @as(?io_module.ProcessId, process_id) or task.state == .completed) continue;
+            if (task == self.current) {
+                task.kill_requested = true;
+                continue;
+            }
+            self.completeKilledTask(task) catch @panic("failed to kill process task");
+        }
+    }
+
+    fn completeKilledTask(self: *Self, task: *Task) TaskSchedulerError!void {
+        if (task.state == .completed) return;
+
+        self.removeReadyTask(task.id);
+        task.clearBlock(.completed, .woken);
+        task.kill_requested = true;
+        try self.recordComplete(task.id, "killed");
+        if (task.fiber_instance) |fiber_instance| {
+            fiber_instance.destroy();
+            task.fiber_instance = null;
+        }
+    }
+
+    fn removeReadyTask(self: *Self, task_id: TaskId) void {
+        for (self.ready.items, 0..) |ready_id, index| {
+            if (ready_id == task_id) {
+                _ = self.ready.orderedRemove(index);
+                return;
+            }
+        }
     }
 
     pub fn runUntilIdle(self: *Self) !void {
@@ -634,10 +698,19 @@ pub const TaskScheduler = struct {
         return candidates;
     }
 
-    fn recordSpawn(self: *Self, task_id: TaskId) (std.mem.Allocator.Error || world_module.TraceError)!void {
-        try self.world.recordFields("scheduler.spawn", &.{
+    fn recordSpawn(
+        self: *Self,
+        task_id: TaskId,
+        process_id: ?io_module.ProcessId,
+    ) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        const fields = [_]world_module.TraceField{
             traceField("task", .{ .uint = task_id }),
-        });
+            traceField("process", .{ .uint = process_id orelse 0 }),
+        };
+        try self.world.recordFields(
+            "scheduler.spawn",
+            fields[0..if (process_id != null) 2 else 1],
+        );
     }
 
     fn recordYield(self: *Self, task_id: TaskId) (std.mem.Allocator.Error || world_module.TraceError)!void {
@@ -831,6 +904,14 @@ pub fn taskControl(self: *TaskScheduler) io_module.TaskControl {
     };
 }
 
+/// Build the process-lifecycle task control view over this scheduler.
+pub fn processTaskControl(self: *TaskScheduler) io_module.ProcessTaskControl {
+    return .{
+        .ptr = self,
+        .vtable = &process_task_control_vtable,
+    };
+}
+
 fn taskControlRunUntilIdle(ptr: *anyopaque) anyerror!void {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     try scheduler.runUntilIdle();
@@ -846,13 +927,23 @@ const task_control_vtable: io_module.TaskControl.VTable = .{
     .blocked_count = taskControlBlockedCount,
 };
 
+fn processTaskControlKillProcess(ptr: *anyopaque, process_id: io_module.ProcessId) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.killProcess(process_id);
+}
+
+const process_task_control_vtable: io_module.ProcessTaskControl.VTable = .{
+    .kill_process = processTaskControlKillProcess,
+};
+
 fn taskRuntimeSpawn(
     ptr: *anyopaque,
+    process_id: ?io_module.ProcessId,
     entry: *const fn (*anyopaque) void,
     arg: *anyopaque,
 ) io_module.TaskRuntime.SpawnError!u64 {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
-    return scheduler.spawnOpaque(entry, arg) catch return error.ConcurrencyUnavailable;
+    return scheduler.spawnOpaqueForProcess(process_id, entry, arg) catch return error.ConcurrencyUnavailable;
 }
 
 fn taskRuntimeInTask(ptr: *anyopaque) bool {

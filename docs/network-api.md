@@ -108,6 +108,14 @@ var client = try address.connect(client_env.io(), .{
 });
 ```
 
+The same node id is the logical-process id for scheduler-backed `std.Io`.
+Killing a process with `sim.killProcess(node)` cancels tasks spawned through
+that node's `Io`, closes its listeners/connections, and wakes surviving stream
+peers with reset errors. Restart is explicit: register a
+`mar.ProcessLifecycle`, then call `sim.restartProcess(node)` to rerun the
+initializer with a fresh node-scoped `Env` over durable disk state that survived
+the crash/kill sequence.
+
 ## Simulator-Control Authority
 
 The simulator-control authority is for tests, scenarios, and future schedulers:

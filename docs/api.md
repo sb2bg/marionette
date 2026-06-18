@@ -384,7 +384,10 @@ try control.restart();
 ```
 
 While crashed, disk operations return `error.DiskCrashed`. Crash outcomes are
-trace-visible:
+trace-visible. In simulation, `control.crash()` also kills every live logical
+process after pending-write outcomes are applied; `control.restart()` brings
+only the disk back up. Rerun registered application initializers with
+`sim.restartProcess(node)`.
 
 ```text
 disk.fault op=3 path=wal.log kind=crash_lost_write rate=1/10 roll=7 fired=false

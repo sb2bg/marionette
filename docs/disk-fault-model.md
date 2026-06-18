@@ -127,8 +127,11 @@ Implemented operation concepts:
   corrupt with `corruptSector`.
 - Pending writes: successful writes are visible to later reads immediately,
   but they are not durable until `sync`.
-- Crash window: `crash` processes pending writes, then marks the disk down
-  until `restart`.
+- Crash window: `crash` processes pending writes, kills every live logical
+  process through the simulation process supervisor, then marks the disk down
+  until `restart`. Disk restart only brings the disk authority back up;
+  application restart is modeled explicitly with `sim.restartProcess(node)`
+  after a lifecycle initializer has been registered.
 
 The Phase 1 implementation should start synchronous from the user's
 perspective: a `write` or `read` may advance simulated time internally and then

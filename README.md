@@ -185,6 +185,14 @@ heals the link, and retries the request. A correct server deduplicates the
 retry; a planted buggy mode applies it twice and violates an exact revision
 oracle.
 
+Simulation processes are first-class runtime owners. `sim.killProcess(node)`
+cancels that node's scheduler-backed `Io.async` work, closes process-local
+files/listeners/connections, and wakes surviving TCP peers with reset errors.
+`sim.registerProcess(node, lifecycle)` plus `sim.restartProcess(node)` reruns a
+registered initializer with that node's `Env` after volatile state has been
+discarded by the lifecycle's `on_kill` callback. Disk crash uses the same kill
+path after applying pending-write crash faults.
+
 ```sh
 zig build validate-std-io-net-kv
 zig build run-example -- std-io-net-kv --seed 12648430 --trace

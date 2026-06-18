@@ -4,8 +4,10 @@ const backend = @import("backend.zig");
 
 pub const FutexWaitResult = backend.FutexWaitResult;
 pub const FutexWaitSet = backend.FutexWaitSet;
+pub const ProcessId = @import("task.zig").ProcessId;
 pub const TaskRuntime = @import("task.zig").TaskRuntime;
 pub const TaskControl = @import("task.zig").TaskControl;
+pub const ProcessTaskControl = @import("task.zig").ProcessTaskControl;
 pub const Backend = backend.Backend;
 pub const ProcessRegistry = backend.ProcessRegistry;
 pub const ProcessRuntime = backend.ProcessRuntime;

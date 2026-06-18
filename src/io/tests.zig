@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Backend = @import("backend.zig").Backend;
 const disk_module = @import("../disk/root.zig");
+const env_module = @import("../env.zig");
 const World = @import("../world.zig").World;
 const Io = std.Io;
 
@@ -482,8 +483,10 @@ test "io: disk crash wakes std.Io.net accept waiters" {
     try sim.control.disk.restart();
 
     future.await(server_io);
-    try std.testing.expectEqual(error.SocketNotListening, scenario.accept_error.?);
+    try std.testing.expectEqual(@as(?Io.net.Server.AcceptError, null), scenario.accept_error);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.complete task=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=killed") != null);
 }
 
 test "io: disk crash closes live std.Io.net connections and wakes readers" {
@@ -501,7 +504,7 @@ test "io: disk crash closes live std.Io.net connections and wakes readers" {
 
         fn signal(io: Io, flag: *u32) void {
             flag.* = 1;
-            io.futexWake(u32, flag, 1);
+            io.futexWake(u32, flag, std.math.maxInt(u32));
         }
 
         fn waitFor(io: Io, flag: *u32) void {
@@ -567,8 +570,157 @@ test "io: disk crash closes live std.Io.net connections and wakes readers" {
 
     client_future.await(client_io);
     server_future.await(server_io);
-    try std.testing.expectEqual(error.SocketUnconnected, scenario.read_error.?);
+    try std.testing.expectEqual(@as(?Io.net.Stream.Reader.Error, null), scenario.read_error);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=disk_crash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=1 reason=disk_crash") != null);
+}
+
+test "io: process kill cancels owned tasks and resets peers" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        server_io: Io,
+        client_io: Io,
+        listener: Io.net.Server,
+        address: Io.net.IpAddress,
+        accepted: u32 = 0,
+        read_started: u32 = 0,
+        stop: u32 = 0,
+        read_error: ?Io.net.Stream.Reader.Error = null,
+
+        fn signal(io: Io, flag: *u32) void {
+            flag.* = 1;
+            io.futexWake(u32, flag, std.math.maxInt(u32));
+        }
+
+        fn waitFor(io: Io, flag: *u32) void {
+            while (flag.* == 0) {
+                io.futexWait(u32, flag, 0) catch @panic("futex wait failed");
+            }
+        }
+
+        fn serverTask(self: *@This()) void {
+            const stream = self.listener.accept(self.server_io) catch @panic("accept failed");
+            _ = stream;
+            signal(self.server_io, &self.accepted);
+            waitFor(self.server_io, &self.stop);
+        }
+
+        fn clientTask(self: *@This()) void {
+            const stream = self.address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
+            defer stream.close(self.client_io);
+            waitFor(self.server_io, &self.accepted);
+
+            var buffer: [1]u8 = undefined;
+            var buffers: [1][]u8 = .{&buffer};
+            signal(self.client_io, &self.read_started);
+            _ = self.client_io.vtable.netRead(
+                self.client_io.userdata,
+                stream.socket.handle,
+                &buffers,
+            ) catch |err| {
+                self.read_error = err;
+                return;
+            };
+            @panic("read unexpectedly succeeded after process kill");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5F, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4575) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+
+    var scenario: Scenario = .{
+        .server_io = server_io,
+        .client_io = client_io,
+        .listener = listener,
+        .address = address,
+    };
+
+    var server_future = Io.async(server_io, Scenario.serverTask, .{&scenario});
+    var client_future = Io.async(client_io, Scenario.clientTask, .{&scenario});
+
+    Scenario.waitFor(server_io, &scenario.accepted);
+    Scenario.waitFor(client_io, &scenario.read_started);
+
+    try sim.killProcess(0);
+
+    client_future.await(client_io);
+    server_future.await(server_io);
+    try std.testing.expectEqual(error.ConnectionResetByPeer, scenario.read_error.?);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=manual") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=killed") != null);
+}
+
+test "io: process restart reruns registered initializer against durable state" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        starts: u32 = 0,
+        kills: u32 = 0,
+        volatile_value: u32 = 99,
+        last_bytes: [4]u8 = @splat(0),
+
+        fn onKill(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.kills += 1;
+            self.volatile_value = 0;
+        }
+
+        fn restart(raw: *anyopaque, env: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const io = env.io();
+            var file = try Io.Dir.cwd().openFile(io, "restart.bin", .{ .mode = .read_only });
+            defer file.close(io);
+
+            try std.testing.expectEqual(@as(usize, 4), try file.readPositionalAll(io, &self.last_bytes, 0));
+            if (!std.mem.eql(u8, &self.last_bytes, "live")) return error.BadRestartData;
+            self.starts += 1;
+            self.volatile_value = 7;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA60, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "restart.bin", .{ .read = true });
+    try file.writePositionalAll(io, "live", 0);
+    try file.sync(io);
+    file.close(io);
+
+    var state: State = .{};
+    try sim.registerProcess(0, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+
+    try sim.killProcess(0);
+    try std.testing.expectEqual(@as(u32, 1), state.kills);
+    try std.testing.expectEqual(@as(u32, 0), state.volatile_value);
+
+    try sim.restartProcess(0);
+    try std.testing.expectEqual(@as(u32, 1), state.starts);
+    try std.testing.expectEqual(@as(u32, 1), state.kills);
+    try std.testing.expectEqual(@as(u32, 7), state.volatile_value);
+    try std.testing.expectEqualStrings("live", &state.last_bytes);
+
+    try sim.restartProcess(0);
+    try std.testing.expectEqual(@as(u32, 2), state.starts);
+    try std.testing.expectEqual(@as(u32, 2), state.kills);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.restart node=0") != null);
 }
 
 test "io: completed async tasks release their fiber stacks" {

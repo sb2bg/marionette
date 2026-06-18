@@ -4,8 +4,15 @@
 //! interface so the scheduler can depend on the io module without a cycle.
 //! `TaskScheduler.taskRuntime` provides the deterministic implementation.
 
+/// Logical process identifier used by the task/runtime seam.
+///
+/// This intentionally mirrors `network.NodeId` without importing the network
+/// module here; `env.zig` imports both network and io task interfaces.
+pub const ProcessId = u16;
+
 pub const TaskRuntime = struct {
     ptr: *anyopaque,
+    process_id: ?ProcessId = null,
     vtable: *const VTable,
 
     pub const SpawnError = error{ConcurrencyUnavailable};
@@ -13,7 +20,7 @@ pub const TaskRuntime = struct {
     pub const VTable = struct {
         /// Spawn a cooperative task running `entry(arg)`. Returns a stable
         /// task id usable as a wait-key payload.
-        spawn: *const fn (ptr: *anyopaque, entry: *const fn (*anyopaque) void, arg: *anyopaque) SpawnError!u64,
+        spawn: *const fn (ptr: *anyopaque, process_id: ?ProcessId, entry: *const fn (*anyopaque) void, arg: *anyopaque) SpawnError!u64,
         /// Whether the caller is currently running inside a scheduled task
         /// (as opposed to the harness/main context driving the scheduler).
         in_task: *const fn (ptr: *anyopaque) bool,
@@ -27,7 +34,7 @@ pub const TaskRuntime = struct {
     };
 
     pub fn spawn(self: TaskRuntime, entry: *const fn (*anyopaque) void, arg: *anyopaque) SpawnError!u64 {
-        return self.vtable.spawn(self.ptr, entry, arg);
+        return self.vtable.spawn(self.ptr, self.process_id, entry, arg);
     }
 
     pub fn inTask(self: TaskRuntime) bool {
@@ -44,6 +51,24 @@ pub const TaskRuntime = struct {
 
     pub fn runUntilDone(self: TaskRuntime, done: *const bool) void {
         self.vtable.run_until_done(self.ptr, done);
+    }
+};
+
+/// Process-level control over scheduler-owned work.
+///
+/// The I/O backend owns handles and futures; the scheduler owns fibers. This
+/// seam lets process kill close both sides without making the backend depend on
+/// scheduler internals.
+pub const ProcessTaskControl = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        kill_process: *const fn (ptr: *anyopaque, process_id: ProcessId) void,
+    };
+
+    pub fn killProcess(self: ProcessTaskControl, process_id: ProcessId) void {
+        self.vtable.kill_process(self.ptr, process_id);
     }
 };
 

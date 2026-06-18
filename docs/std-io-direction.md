@@ -67,6 +67,16 @@ When network simulation is configured, `World.simulate()` creates one
 process-scoped I/O backend per declared node. Use `sim.envForNode(node).io()`
 when separate server/client tasks should speak as distinct simulated nodes;
 `sim.env.io()` remains node 0 for single-process and compatibility cases.
+Those backends are also logical-process owners: `sim.killProcess(node)` closes
+that node's open file/socket/listener handles, cancels scheduler-backed tasks
+spawned through that node's `Io`, completes their futures so awaiters cannot
+deadlock, and wakes surviving TCP peers with `error.ConnectionResetByPeer`.
+`sim.registerProcess(node, lifecycle)` registers type-erased `on_kill` and
+`restart` callbacks; `sim.restartProcess(node)` kills a live incarnation if
+needed and reruns the initializer with that node's `Env` against surviving
+durable disk state. `DiskControl.crash()` uses the same supervisor after
+applying pending-write crash faults, killing every live process and marking
+file metadata stale for re-derivation after disk restart.
 When the backend is attached to a scheduler wait set, `Io.sleep` parks the
 current fiber until its deadline, empty accepts park until a connection is
 queued, and open-peer empty reads park until bytes arrive or the peer closes.

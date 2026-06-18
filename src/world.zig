@@ -49,6 +49,130 @@ pub fn traceField(key: []const u8, value: TraceValue) TraceField {
     return .{ .key = key, .value = value };
 }
 
+/// Type-erased logical-process lifecycle callbacks.
+///
+/// Register one of these with `World.Simulation.registerProcess`. `on_kill`
+/// is where harness-owned volatile state is discarded; `restart` is the
+/// process initializer rerun after a kill/crash against surviving durable
+/// state.
+pub const ProcessLifecycle = struct {
+    ptr: *anyopaque,
+    on_kill: ?*const fn (*anyopaque) void = null,
+    restart: *const fn (*anyopaque, env_module.Env) anyerror!void,
+};
+
+/// World-owned logical-process lifecycle supervisor.
+pub const ProcessSupervisor = struct {
+    allocator: std.mem.Allocator,
+    world: *World,
+    base_env: env_module.Env,
+    io_runtime: *io_module.ProcessRuntime,
+    lifecycles: []?ProcessLifecycle,
+    states: []ProcessState,
+
+    const ProcessState = enum {
+        alive,
+        killed,
+    };
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        world: *World,
+        base_env: env_module.Env,
+        io_runtime: *io_module.ProcessRuntime,
+    ) std.mem.Allocator.Error!ProcessSupervisor {
+        const process_count = io_runtime.processCount();
+        const lifecycles = try allocator.alloc(?ProcessLifecycle, process_count);
+        errdefer allocator.free(lifecycles);
+        @memset(lifecycles, null);
+
+        const states = try allocator.alloc(ProcessState, process_count);
+        errdefer allocator.free(states);
+        @memset(states, .alive);
+
+        return .{
+            .allocator = allocator,
+            .world = world,
+            .base_env = base_env,
+            .io_runtime = io_runtime,
+            .lifecycles = lifecycles,
+            .states = states,
+        };
+    }
+
+    pub fn deinit(self: *ProcessSupervisor) void {
+        self.allocator.free(self.states);
+        self.allocator.free(self.lifecycles);
+        self.* = undefined;
+    }
+
+    pub fn registerProcess(
+        self: *ProcessSupervisor,
+        node: network_module.NodeId,
+        lifecycle: ProcessLifecycle,
+    ) error{InvalidNode}!void {
+        const index = try self.nodeIndex(node);
+        self.lifecycles[index] = lifecycle;
+    }
+
+    pub fn killProcess(self: *ProcessSupervisor, node: network_module.NodeId) !void {
+        _ = try self.nodeIndex(node);
+        try self.io_runtime.kill(node);
+        try self.noteKilled(node, "manual");
+    }
+
+    pub fn restartProcess(self: *ProcessSupervisor, node: network_module.NodeId) !void {
+        const index = try self.nodeIndex(node);
+        const lifecycle = self.lifecycles[index] orelse return error.ProcessNotRegistered;
+
+        if (self.states[index] == .alive) {
+            try self.io_runtime.kill(node);
+            try self.noteKilled(node, "restart");
+        }
+
+        var env = self.base_env;
+        env.io_backend = try self.io_runtime.io(node);
+        try lifecycle.restart(lifecycle.ptr, env);
+        self.states[index] = .alive;
+        try self.world.recordFields("process.restart", &.{
+            traceField("node", .{ .uint = node }),
+        });
+    }
+
+    pub fn onDiskCrash(self: *ProcessSupervisor) void {
+        self.io_runtime.onDiskCrash();
+        for (self.states, 0..) |state, index| {
+            if (state != .alive) continue;
+            const node: network_module.NodeId = @intCast(index);
+            self.noteKilled(node, "disk_crash") catch @panic("failed to record process disk-crash kill");
+        }
+    }
+
+    fn noteKilled(
+        self: *ProcessSupervisor,
+        node: network_module.NodeId,
+        reason: []const u8,
+    ) !void {
+        const index = try self.nodeIndex(node);
+        if (self.states[index] == .killed) return;
+
+        if (self.lifecycles[index]) |lifecycle| {
+            if (lifecycle.on_kill) |on_kill| on_kill(lifecycle.ptr);
+        }
+        self.states[index] = .killed;
+        try self.world.recordFields("process.kill", &.{
+            traceField("node", .{ .uint = node }),
+            traceField("reason", .{ .literal = reason }),
+        });
+    }
+
+    fn nodeIndex(self: *const ProcessSupervisor, node: network_module.NodeId) error{InvalidNode}!usize {
+        const index: usize = @intCast(node);
+        if (index >= self.states.len) return error.InvalidNode;
+        return index;
+    }
+};
+
 /// Write text as an unambiguous trace value fragment.
 ///
 /// Spaces, `=`, `%`, backslash, control bytes, and non-ASCII bytes are encoded
@@ -188,6 +312,7 @@ pub const World = struct {
         env: env_module.Env,
         control: env_module.SimControl,
         io_runtime: *io_module.ProcessRuntime,
+        process_supervisor: *ProcessSupervisor,
 
         pub fn envForNode(self: Simulation, node: network_module.NodeId) !env_module.Env {
             var env = self.env;
@@ -226,6 +351,25 @@ pub const World = struct {
                 endpoint_handle.* = try self.byteEndpoint(first_node + @as(network_module.NodeId, @intCast(index)));
             }
             return handles;
+        }
+
+        /// Register lifecycle callbacks for one logical process.
+        pub fn registerProcess(self: Simulation, node: network_module.NodeId, lifecycle: ProcessLifecycle) !void {
+            try self.process_supervisor.registerProcess(node, lifecycle);
+        }
+
+        /// Kill one logical process: cancel its scheduler tasks, close its
+        /// process-local handles, and run its `on_kill` callback once.
+        pub fn killProcess(self: Simulation, node: network_module.NodeId) !void {
+            try self.process_supervisor.killProcess(node);
+        }
+
+        /// Restart one logical process by rerunning its registered initializer.
+        ///
+        /// If the process is still alive, it is killed first so restart always
+        /// creates a fresh incarnation.
+        pub fn restartProcess(self: Simulation, node: network_module.NodeId) !void {
+            try self.process_supervisor.restartProcess(node);
         }
     };
 
@@ -267,11 +411,6 @@ pub const World = struct {
         try self.registerTeardown(sim_io, io_module.deinitProcessRuntimeOpaque);
         sim_io_registered = true;
 
-        sim_disk.setCrashObserver(.{
-            .ptr = sim_io,
-            .on_crash = io_module.onProcessRuntimeDiskCrashOpaque,
-        });
-
         sim_io.attachNetworkControl(network_control);
 
         // The simulation gets a cooperative scheduler owned by the world,
@@ -289,17 +428,37 @@ pub const World = struct {
 
         sim_io.attachFutexWaitSet(scheduler_module.futexWaitSet(scheduler));
         sim_io.attachTaskRuntime(scheduler_module.taskRuntime(scheduler));
+        sim_io.attachProcessTaskControl(scheduler_module.processTaskControl(scheduler));
         sim_disk.attachLatencyRuntime(scheduler_module.diskLatencyRuntime(scheduler));
 
+        const base_env: env_module.Env = .{
+            .io_backend = (try sim_io.io(0)),
+            .disk = sim_disk.disk(),
+            .clock = env_module.Clock.fromWorld(self),
+            .random = env_module.Random.fromWorld(self),
+            .tracer = env_module.Tracer.fromWorld(self),
+            .buggify_enabled = true,
+        };
+
+        const process_supervisor = try self.allocator.create(ProcessSupervisor);
+        var process_supervisor_initialized = false;
+        var process_supervisor_registered = false;
+        errdefer if (!process_supervisor_registered) self.allocator.destroy(process_supervisor);
+
+        process_supervisor.* = try ProcessSupervisor.init(self.allocator, self, base_env, sim_io);
+        process_supervisor_initialized = true;
+        errdefer if (process_supervisor_initialized and !process_supervisor_registered) process_supervisor.deinit();
+
+        try self.registerTeardown(process_supervisor, deinitProcessSupervisorOpaque);
+        process_supervisor_registered = true;
+
+        sim_disk.setCrashObserver(.{
+            .ptr = process_supervisor,
+            .on_crash = onProcessSupervisorDiskCrashOpaque,
+        });
+
         return .{
-            .env = .{
-                .io_backend = (try sim_io.io(0)),
-                .disk = sim_disk.disk(),
-                .clock = env_module.Clock.fromWorld(self),
-                .random = env_module.Random.fromWorld(self),
-                .tracer = env_module.Tracer.fromWorld(self),
-                .buggify_enabled = true,
-            },
+            .env = base_env,
             .control = .{
                 .disk = sim_disk.control(),
                 .network = network_control,
@@ -307,6 +466,7 @@ pub const World = struct {
                 .world = self,
             },
             .io_runtime = sim_io,
+            .process_supervisor = process_supervisor,
         };
     }
 
@@ -314,6 +474,17 @@ pub const World = struct {
         const sim_disk: *disk_module.SimDisk = @ptrCast(@alignCast(ptr));
         sim_disk.deinit();
         allocator.destroy(sim_disk);
+    }
+
+    fn deinitProcessSupervisorOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const process_supervisor: *ProcessSupervisor = @ptrCast(@alignCast(ptr));
+        process_supervisor.deinit();
+        allocator.destroy(process_supervisor);
+    }
+
+    fn onProcessSupervisorDiskCrashOpaque(ptr: *anyopaque) void {
+        const process_supervisor: *ProcessSupervisor = @ptrCast(@alignCast(ptr));
+        process_supervisor.onDiskCrash();
     }
 
     /// Return the world's simulated clock.

@@ -52,25 +52,32 @@ probes were removed after verification.
   - Regression coverage checks rejection is trace-neutral and verifies a
     topology failure can be followed by one successful construction.
 
-- [ ] **P1: introduce first-class logical processes and real restart semantics**
+- [x] **P1: introduce first-class logical processes and real restart semantics**
       (`src/world.zig`, `src/env.zig`, `src/disk/sim.zig`,
       `src/io/backend.zig`, `src/io/net.zig`, `src/scheduler.zig`)
-  - First networking slice landed: `World.simulate()` now owns one
-    process-scoped `std.Io` backend per declared network node, with shared
-    listener/connection registration, process-local futex key namespaces, and
-    stable node identity across socket reconnects. Disk crash now closes
-    process-local listeners and connections as well as file handles.
-  - Remaining gap: scheduler tasks and application memory still survive a crash,
-    and restart does not rerun a registered process initializer.
-  - Add a logical-process runtime owned by the simulation. Each process needs a
-    stable `NodeId`, its own `Backend`/`std.Io`, task ownership, volatile
-    application state, sockets/listeners, and durable disk association, while
-    all processes share the world's scheduler, clock, RNG, trace, and network
-    fault authority.
-  - `kill` must cancel every process-owned task, close its listeners and
-    connections, discard volatile state and unsynced disk state, and wake peers
-    with transport-appropriate errors. `restart` must rerun a registered
-    process initializer against the surviving durable state.
+  - `World.simulate()` owns one process-scoped `std.Io` backend per declared
+    network node, with shared listener/connection registration, process-local
+    futex key namespaces, stable node identity across socket reconnects, and
+    process ownership for scheduler-backed `Io.async`/`Io.concurrent` tasks.
+  - `sim.killProcess(node)` cancels process-owned scheduler tasks, marks their
+    futures complete so awaiters cannot deadlock, closes process-local files,
+    listeners, and connections, unregisters listeners, and wakes surviving peers
+    with TCP reset errors.
+  - `DiskControl.crash()` routes through the same process supervisor after
+    applying pending-write crash faults, so a disk crash kills every live
+    process, closes I/O state, cancels scheduler work, invokes registered
+    `on_kill` callbacks once, and marks file metadata stale for re-derivation
+    from disk truth after disk restart.
+  - `sim.registerProcess(node, lifecycle)` and `sim.restartProcess(node)` add
+    registered process initializers. Restart kills a live incarnation first,
+    then reruns the initializer with that node's `Env` against surviving durable
+    disk state. Volatile harness/application state is discarded by the
+    registered `on_kill` callback.
+  - Cooperative caveat: a task already running on its fiber cannot be preempted
+    mid-instruction; if it kills its own process, the scheduler converts it to
+    a killed completion at the next yield/block/return boundary. Explicit
+    `killProcess` is process-local; unsynced disk-write loss remains modeled by
+    `DiskControl.crash()` because the current disk authority is global.
   - Keep `Endpoint(Message)`/`ByteEndpoint` and `std.Io.net` as sibling
     surfaces over the same topology and fault state. Target fault-model parity,
     not identical semantics: endpoints expose message loss/delay/reordering;

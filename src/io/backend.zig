@@ -19,6 +19,8 @@ const SocketHandle = Io.net.Socket.Handle;
 
 pub const FutexWaitResult = futex_module.FutexWaitResult;
 pub const FutexWaitSet = futex_module.FutexWaitSet;
+pub const ProcessId = @import("task.zig").ProcessId;
+pub const ProcessTaskControl = @import("task.zig").ProcessTaskControl;
 pub const TaskRuntime = @import("task.zig").TaskRuntime;
 
 pub const Backend = struct {
@@ -343,13 +345,16 @@ pub const Backend = struct {
         return Io.Timestamp.fromNanoseconds(@intCast(self.world.now()));
     }
 
-    /// Invalidate process-local state after a disk crash.
+    pub const KillOptions = struct {
+        invalidate_files: bool = false,
+    };
+
+    /// Tear down process-local runtime state.
     ///
-    /// A disk crash models a machine crash, which also kills the process:
-    /// every open handle dies with it. File metadata is marked stale and
-    /// re-derived from disk truth on first touch; timestamps are kept since
-    /// filesystem timestamps survive a real machine crash.
-    pub fn onDiskCrash(self: *Backend) void {
+    /// This is shared by explicit process kill and disk crash. Both close
+    /// handles and cancel process-owned async closures; disk crash also marks
+    /// cached file metadata stale so restart re-derives it from disk truth.
+    pub fn killProcess(self: *Backend, options: KillOptions) void {
         for (self.handles.items) |*entry| switch (entry.state) {
             .file => |file_state| file_state.closed = true,
             .listener => |listener_state| {
@@ -361,16 +366,36 @@ pub const Backend = struct {
                 connection_state.closed = true;
                 self.wakeConnection(entry.handle, std.math.maxInt(usize));
                 if (connection_state.peer) |peer| {
+                    if (peer.backend.connection(peer.handle)) |peer_state| {
+                        if (!peer_state.closed and peer_state.read_error == null) {
+                            peer_state.read_error = error.ConnectionResetByPeer;
+                        }
+                    }
                     peer.backend.wakeConnection(peer.handle, std.math.maxInt(usize));
                 }
             },
         };
-        // Tombstones go stale too: a crash can roll back an unsynced
-        // deletion, in which case the tombstoned entry must be revivable
-        // with its timestamps intact.
-        for (self.files.items) |*file_meta| {
-            file_meta.stale = true;
+
+        for (self.async_closures.items) |closure| closure.cancelForKill();
+
+        if (options.invalidate_files) {
+            // Tombstones go stale too: a crash can roll back an unsynced
+            // deletion, in which case the tombstoned entry must be revivable
+            // with its timestamps intact.
+            for (self.files.items) |*file_meta| {
+                file_meta.stale = true;
+            }
         }
+    }
+
+    /// Invalidate process-local state after a disk crash.
+    ///
+    /// A disk crash models a machine crash, which also kills the process:
+    /// every open handle dies with it. File metadata is marked stale and
+    /// re-derived from disk truth on first touch; timestamps are kept since
+    /// filesystem timestamps survive a real machine crash.
+    pub fn onDiskCrash(self: *Backend) void {
+        self.killProcess(.{ .invalidate_files = true });
     }
 
     pub fn closeFileHandlesForIndex(self: *Backend, file_index: usize) void {
@@ -499,6 +524,7 @@ pub const ProcessRuntime = struct {
     sector_size: u64,
     registry: ProcessRegistry,
     backends: []Backend,
+    task_control: ?ProcessTaskControl = null,
 
     pub fn init(
         self: *ProcessRuntime,
@@ -509,6 +535,7 @@ pub const ProcessRuntime = struct {
         process_count: usize,
     ) std.mem.Allocator.Error!void {
         std.debug.assert(process_count > 0);
+        std.debug.assert(process_count <= std.math.maxInt(ProcessId) + 1);
 
         const backends = try allocator.alloc(Backend, process_count);
         errdefer allocator.free(backends);
@@ -544,6 +571,10 @@ pub const ProcessRuntime = struct {
         return (try self.backendForNode(node)).io();
     }
 
+    pub fn processCount(self: *const ProcessRuntime) usize {
+        return self.backends.len;
+    }
+
     pub fn attachNetworkControl(self: *ProcessRuntime, control: network_module.AnyNetworkControl) void {
         for (self.backends) |*backend| backend.attachNetworkControl(control);
     }
@@ -553,11 +584,32 @@ pub const ProcessRuntime = struct {
     }
 
     pub fn attachTaskRuntime(self: *ProcessRuntime, runtime: TaskRuntime) void {
-        for (self.backends) |*backend| backend.attachTaskRuntime(runtime);
+        for (self.backends, 0..) |*backend, index| {
+            var process_runtime = runtime;
+            process_runtime.process_id = @intCast(index);
+            backend.attachTaskRuntime(process_runtime);
+        }
+    }
+
+    pub fn attachProcessTaskControl(self: *ProcessRuntime, control: ProcessTaskControl) void {
+        self.task_control = control;
     }
 
     pub fn onDiskCrash(self: *ProcessRuntime) void {
-        for (self.backends) |*backend| backend.onDiskCrash();
+        for (self.backends, 0..) |*backend, index| {
+            backend.onDiskCrash();
+            self.killProcessTasks(@intCast(index));
+        }
+    }
+
+    pub fn kill(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!void {
+        const backend = try self.backendForNode(node);
+        backend.killProcess(.{});
+        self.killProcessTasks(@intCast(node));
+    }
+
+    fn killProcessTasks(self: *ProcessRuntime, process_id: ProcessId) void {
+        if (self.task_control) |control| control.killProcess(process_id);
     }
 };
 
@@ -780,6 +832,20 @@ const AsyncClosure = struct {
 
     fn completionKey(self: *const AsyncClosure) usize {
         return futex_module.waitKey(.task, @intCast(self.task_id));
+    }
+
+    /// Publish cancellation completion for a future whose task was killed.
+    ///
+    /// `std.Io`'s single-future ABI has no cancellation error channel here, so
+    /// the least surprising simulator behavior is to unblock awaiters with a
+    /// zeroed result after the owning process has been killed.
+    fn cancelForKill(self: *AsyncClosure) void {
+        if (self.done) return;
+        @memset(self.result, 0);
+        self.done = true;
+        if (self.backend.task_runtime) |runtime| {
+            _ = runtime.wake(self.completionKey(), std.math.maxInt(usize));
+        }
     }
 
     /// Task entry: run the user function, then publish completion.
