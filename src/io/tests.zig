@@ -284,6 +284,293 @@ test "io: main-context net accept is woken by a connecting task" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.wake_main key=") != null);
 }
 
+test "io: std.Io.net reconnects reuse process node identity" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5A, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4572) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    for (0..3) |_| {
+        const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+        const accepted = try server.accept(server_io);
+        client.close(client_io);
+        accepted.close(server_io);
+    }
+}
+
+test "io: overlapping std.Io.net connections route bytes by socket handle" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5F, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 8 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4575) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    const client_a = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client_a.close(client_io);
+    const server_a = try server.accept(server_io);
+    defer server_a.close(server_io);
+
+    const client_b = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client_b.close(client_io);
+    const server_b = try server.accept(server_io);
+    defer server_b.close(server_io);
+
+    var writer_a = client_a.writer(client_io, &.{});
+    try writer_a.interface.writeAll("aa");
+    try writer_a.interface.flush();
+
+    var writer_b = client_b.writer(client_io, &.{});
+    try writer_b.interface.writeAll("bb");
+    try writer_b.interface.flush();
+
+    var reader_b = server_b.reader(server_io, &.{});
+    var out_b: [2]u8 = undefined;
+    try reader_b.interface.readSliceAll(&out_b);
+    try std.testing.expectEqualStrings("bb", &out_b);
+
+    var reader_a = server_a.reader(server_io, &.{});
+    var out_a: [2]u8 = undefined;
+    try reader_a.interface.readSliceAll(&out_a);
+    try std.testing.expectEqualStrings("aa", &out_a);
+}
+
+test "io: envForNode rejects nodes outside the configured topology" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5D, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    try std.testing.expectError(error.InvalidNode, sim.envForNode(2));
+}
+
+test "io: sim env io is node zero" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA60, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const default_io = sim.env.io();
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4576) catch unreachable;
+    var server = try address.listen(default_io, .{});
+    defer server.deinit(default_io);
+
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(node_zero_io);
+    defer accepted.close(node_zero_io);
+}
+
+test "io: duplicate listeners are rejected across process backends" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA61, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4577) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    try std.testing.expectError(error.AddressInUse, address.listen(client_io, .{}));
+}
+
+test "io: process futex keys are namespaced by backend" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn waitForFlag(io: Io, flag: *u32) void {
+            while (flag.* == 0) {
+                io.futexWait(u32, flag, 0) catch @panic("futex wait failed");
+            }
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5C, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    var flag: u32 = 0;
+    var future = Io.async(client_io, Helper.waitForFlag, .{ client_io, &flag });
+    try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
+    try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
+
+    flag = 1;
+    server_io.futexWake(u32, &flag, 1);
+    try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
+    try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
+
+    client_io.futexWake(u32, &flag, 1);
+    future.await(client_io);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+}
+
+test "io: disk crash closes process-local std.Io.net listeners" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5B, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4573) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    try std.testing.expectError(
+        error.ConnectionRefused,
+        address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }),
+    );
+    try std.testing.expectError(error.SocketNotListening, server.accept(server_io));
+}
+
+test "io: disk crash wakes std.Io.net accept waiters" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        io: Io,
+        listener: Io.net.Server,
+        waiting: u32 = 0,
+        accept_error: ?Io.net.Server.AcceptError = null,
+
+        fn acceptTask(self: *@This()) void {
+            self.waiting = 1;
+            self.io.futexWake(u32, &self.waiting, 1);
+            _ = self.listener.accept(self.io) catch |err| {
+                self.accept_error = err;
+                return;
+            };
+            @panic("accept unexpectedly succeeded after crash");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA62, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4578) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+
+    var scenario: Scenario = .{ .io = server_io, .listener = listener };
+    var future = Io.async(server_io, Scenario.acceptTask, .{&scenario});
+    while (scenario.waiting == 0) {
+        server_io.futexWait(u32, &scenario.waiting, 0) catch @panic("futex wait failed");
+    }
+
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    future.await(server_io);
+    try std.testing.expectEqual(error.SocketNotListening, scenario.accept_error.?);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+}
+
+test "io: disk crash closes live std.Io.net connections and wakes readers" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        server_io: Io,
+        client_io: Io,
+        listener: Io.net.Server,
+        address: Io.net.IpAddress,
+        accepted: u32 = 0,
+        read_started: u32 = 0,
+        crashed: u32 = 0,
+        read_error: ?Io.net.Stream.Reader.Error = null,
+
+        fn signal(io: Io, flag: *u32) void {
+            flag.* = 1;
+            io.futexWake(u32, flag, 1);
+        }
+
+        fn waitFor(io: Io, flag: *u32) void {
+            while (flag.* == 0) {
+                io.futexWait(u32, flag, 0) catch @panic("futex wait failed");
+            }
+        }
+
+        fn serverTask(self: *@This()) void {
+            const stream = self.listener.accept(self.server_io) catch @panic("accept failed");
+            defer stream.close(self.server_io);
+            signal(self.server_io, &self.accepted);
+
+            var buffer: [1]u8 = undefined;
+            var buffers: [1][]u8 = .{&buffer};
+            signal(self.server_io, &self.read_started);
+            _ = self.server_io.vtable.netRead(
+                self.server_io.userdata,
+                stream.socket.handle,
+                &buffers,
+            ) catch |err| {
+                self.read_error = err;
+                return;
+            };
+            @panic("read unexpectedly succeeded after crash");
+        }
+
+        fn clientTask(self: *@This()) void {
+            const stream = self.address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
+            defer stream.close(self.client_io);
+            waitFor(self.server_io, &self.read_started);
+            waitFor(self.server_io, &self.crashed);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5E, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4574) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+
+    var scenario: Scenario = .{
+        .server_io = server_io,
+        .client_io = client_io,
+        .listener = listener,
+        .address = address,
+    };
+
+    var server_future = Io.async(server_io, Scenario.serverTask, .{&scenario});
+    var client_future = Io.async(client_io, Scenario.clientTask, .{&scenario});
+
+    Scenario.waitFor(server_io, &scenario.accepted);
+    Scenario.waitFor(server_io, &scenario.read_started);
+
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    Scenario.signal(server_io, &scenario.crashed);
+
+    client_future.await(client_io);
+    server_future.await(server_io);
+    try std.testing.expectEqual(error.SocketUnconnected, scenario.read_error.?);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+}
+
 test "io: completed async tasks release their fiber stacks" {
     if (!fiber_supported) return error.SkipZigTest;
 
