@@ -557,6 +557,7 @@ test "register: same code on simulated and production network handles" {
     defer tmp.cleanup();
 
     var production = try mar.Production.init(.{
+        .allocator = std.testing.allocator,
         .root_dir = tmp.dir,
         .io = std.testing.io,
         .disk = .{ .sector_size = 16 },

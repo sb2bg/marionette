@@ -38,7 +38,11 @@ var sim_store = try writeAndRecover(sim.env.io(), std.Io.Dir.cwd());
 var tmp = std.testing.tmpDir(.{});
 defer tmp.cleanup();
 
-var production = try mar.Production.init(.{ .root_dir = tmp.dir, .io = std.testing.io });
+var production = try mar.Production.init(.{
+    .allocator = std.testing.allocator,
+    .root_dir = tmp.dir,
+    .io = std.testing.io,
+});
 defer production.deinit();
 
 const prod_env = production.env();

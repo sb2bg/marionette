@@ -415,6 +415,7 @@ test "xitdb modeled workload matches host std.Io file behavior" {
     defer tmp.cleanup();
 
     var production = try mar.Production.init(.{
+        .allocator = allocator,
         .root_dir = tmp.dir,
         .io = std.testing.io,
         .disk = .{ .sector_size = 4096 },

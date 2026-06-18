@@ -241,6 +241,7 @@ Construct a production capability bundle by scoping it to a root directory:
 
 ```zig
 var production = try mar.Production.init(.{
+    .allocator = allocator,
     .root_dir = root_dir,
     .io = io,
     .disk = .{ .sector_size = 4096 },

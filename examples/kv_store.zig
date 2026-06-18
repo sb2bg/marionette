@@ -307,6 +307,7 @@ test "kv store: same app code runs on simulated and real disks" {
     defer tmp.cleanup();
 
     var production = try mar.Production.init(.{
+        .allocator = std.testing.allocator,
         .root_dir = tmp.dir,
         .io = std.testing.io,
         .disk = .{ .sector_size = record_size },

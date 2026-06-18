@@ -205,7 +205,7 @@ pub const Tracer = struct {
 
     pub const VTable = struct {
         should_record: *const fn (*anyopaque) bool,
-        allocator: *const fn (*anyopaque) std.mem.Allocator,
+        allocator: ?*const fn (*anyopaque) std.mem.Allocator,
         record_payload: *const fn (*anyopaque, []const u8) TracerError!void,
     };
 
@@ -219,7 +219,7 @@ pub const Tracer = struct {
 
     pub fn record(self: Tracer, comptime fmt: []const u8, args: anytype) TracerError!void {
         if (!self.vtable.should_record(self.ptr)) return;
-        const allocator = self.vtable.allocator(self.ptr);
+        const allocator = self.vtable.allocator.?(self.ptr);
         const payload = try std.fmt.allocPrint(allocator, fmt, args);
         defer allocator.free(payload);
         try self.vtable.record_payload(self.ptr, payload);
@@ -233,7 +233,7 @@ pub const Tracer = struct {
 
     const noop_tracer_vtable: VTable = .{
         .should_record = noopTracerShouldRecord,
-        .allocator = noopTracerAllocator,
+        .allocator = null,
         .record_payload = noopTracerRecordPayload,
     };
 
@@ -263,10 +263,6 @@ pub const Tracer = struct {
 
     fn noopTracerShouldRecord(_: *anyopaque) bool {
         return false;
-    }
-
-    fn noopTracerAllocator(_: *anyopaque) std.mem.Allocator {
-        return std.heap.smp_allocator;
     }
 
     fn noopTracerRecordPayload(_: *anyopaque, _: []const u8) TracerError!void {}
@@ -347,7 +343,7 @@ pub const Production = struct {
     network_entries: std.ArrayList(network_module.ProductionNetworkEntry) = .empty,
 
     pub const Options = struct {
-        allocator: std.mem.Allocator = std.heap.smp_allocator,
+        allocator: std.mem.Allocator,
         /// Root directory that production disk paths are resolved beneath.
         /// The caller owns this directory and must keep it alive.
         root_dir: std.Io.Dir,
@@ -535,6 +531,7 @@ test "env: production exposes production authorities" {
     defer tmp.cleanup();
 
     var production = try Production.init(.{
+        .allocator = std.testing.allocator,
         .root_dir = tmp.dir,
         .io = std.testing.io,
         .disk = .{ .sector_size = 4 },
@@ -561,12 +558,14 @@ test "env: production byte endpoints use loopback sockets when listen is configu
     defer client_tmp.cleanup();
 
     var server = try Production.init(.{
+        .allocator = std.testing.allocator,
         .root_dir = server_tmp.dir,
         .io = std.testing.io,
     });
     defer server.deinit();
 
     var client = try Production.init(.{
+        .allocator = std.testing.allocator,
         .root_dir = client_tmp.dir,
         .io = std.testing.io,
     });
