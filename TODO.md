@@ -254,18 +254,15 @@ probes were removed after verification.
     and not a correctness bug, and logical keys keep raw addresses out of
     traces. Document this reasoning where the pointer-identity rule is
     knowingly bent, and add a growth bound or retirement scheme.
-- [ ] **5. Network node IDs are consumed per socket and never recycled**
+- [x] **5. Network node IDs are consumed per socket and never recycled**
       (`src/io/backend.zig` `allocateNetworkNode`)
   - Reconnect loops exhaust the fixed topology and get `error.NetworkDown`.
     Closed handle state is also only freed at backend deinit.
-  - Agreed design (2026-06-10): node = process. Each simulated process gets
-    its own `Backend`/`std.Io` with a stable node identity; sockets become
-    per-connection objects under that node, so connect/close cycles never
-    consume topology. Requires a shared (world-level) listener/connection
-    registry so connects rendezvous across backends, and futex key
-    namespacing so per-backend keys cannot collide in the shared wait set.
-    Session-sized refactor; rippling through scheduler net tests and
-    validation harnesses.
+  - Fixed with the logical-process runtime: node = process. Each simulated
+    process gets its own `Backend`/`std.Io` with a stable node identity;
+    sockets are per-connection objects under that node, so connect/close cycles
+    no longer consume topology. The process runtime owns the shared
+    listener/connection registry and namespaces futex keys across backends.
 - [x] **6. Fiber stacks have no overflow protection** (`src/fiber.zig`)
   - [x] Best-effort canary word at the stack's low end, checked by the
         scheduler after every context switch (panics on corruption).
@@ -360,7 +357,8 @@ probes were removed after verification.
       `disk/sim.zig` 1294, `run.zig` 1081); move scenario-style tests into
       sibling test files.
 - [x] Unbounded spin loop in `validation/std_io_net_kv.zig` `serverTask`
-      now panics after 32 yields like its siblings.
+      now uses scheduler/futex handshakes and the shared bounded polling
+      helpers instead of an unbounded spin.
 - [x] Harness-wide polling cleanup: "wait until peer is parked" cannot be
       converted to wake-key handshakes (a task cannot signal after it
       suspends), so the poll is inherent. Added
@@ -377,7 +375,7 @@ probes were removed after verification.
 ## Missing infrastructure
 
 - [ ] CI job verifying sim-mode symbols are absent from release binaries
-      (promised by CLAUDE.md principle 2; currently unverified).
+      (currently unverified).
 - [ ] Multi-platform CI:
   - [x] macOS executes Debug and ReleaseSafe suites.
   - [x] The deliberately-disabled x86_64 Windows fiber target is
@@ -386,9 +384,9 @@ probes were removed after verification.
         Win64 fiber work.
 - [ ] Nightly long-running seed-sweep job (`expectFuzz` over examples with
       thousands of seeds).
-- [ ] CLAUDE.md directory layout is stale: lists `examples/rate_limiter.zig`
-      and `tests/tidy_self_check.zig` (neither exists), omits `src/io/`,
-      `src/network/`, `src/disk/`, `validation/`, `docs/`.
+- [ ] Add and maintain a contributor-facing repository layout guide covering
+      `src/io/`, `src/network/`, `src/disk/`, `validation/`, `docs/`, and the
+      current example set.
 
 ## std.Io scheduling milestone (2026-06-11)
 

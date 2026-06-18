@@ -50,7 +50,7 @@ to reason about.
 The current trace format is plain text on purpose:
 
 ```text
-marionette.trace format=text version=0
+marionette.trace format=text version=1
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1000000
 event=1 world.tick now_ns=1000000
 event=2 world.random_u64 value=10121301305976376037

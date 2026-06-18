@@ -144,7 +144,7 @@ const trace = world.traceBytes();
 
 The returned trace slice is invalidated by later trace writes.
 
-Phase 0 traces start with `marionette.trace format=text version=0`. Every
+Phase 0 traces start with `marionette.trace format=text version=1`. Every
 later `World.record` line is prefixed with a global `event=<u64>` index.
 
 ## Random Choices In A World
@@ -200,6 +200,10 @@ const sim = try world.simulate(.{ .disk = .{
 const io = sim.env.io();
 const disk = sim.env.disk; // low-level sector API
 ```
+
+`sim.env.io()` is node 0's default process I/O. Multi-node `std.Io.net`
+scenarios should use `sim.envForNode(node).io()` so listeners and clients keep
+stable process identity across reconnects.
 
 If `DiskOptions.min_latency_ns` is omitted, it defaults to the world's tick
 duration. Passing a concrete value keeps that exact value and validates it
@@ -261,8 +265,10 @@ profile remains future work.
 The `io` argument is the production host I/O backend used to perform
 filesystem calls and provide host randomness. `production.env().io()` returns
 that same host `std.Io`. Simulation envs return Marionette's current
-deterministic `std.Io` backend; it supports deterministic clock/random
-operations, scheduler-backed `Io.async` / `Io.concurrent` / await, immediate
+deterministic `std.Io` backend; `sim.envForNode(node).io()` returns the
+process-scoped backend for a specific simulated node. The backend supports
+deterministic clock/random operations, scheduler-backed `Io.async` /
+`Io.concurrent` / await, immediate
 non-blocking `Io.Queue` operations, and an in-memory TCP stream subset today.
 Cancellation currently waits for completion; cooperative cancellation points
 and `Io.Group` remain future work. The backend also supports a flat file subset
@@ -396,6 +402,13 @@ disk.crash_write op=3 path=wal.log offset=0 len=4096 result=torn
 disk.crash pending_writes=1 landed=0 lost=0 torn=1 reordered=0
 disk.restart status=ok
 ```
+
+Process lifecycle is explicit on the `Sim` returned by `World.simulate`:
+`sim.killProcess(node)` tears down one logical process, while
+`sim.registerProcess(node, lifecycle)` and `sim.restartProcess(node)` rerun a
+registered initializer with that node's `Env`. Invalid nodes return
+`error.InvalidNode`; restarting without a registered lifecycle returns
+`error.ProcessNotRegistered`.
 
 ## Network
 
@@ -693,10 +706,10 @@ simulated failures.
 ## Build Support
 
 `src/build_support.zig` exposes a helper for wiring `marionette-tidy` into a
-build:
+build. Expose that file from your dependency as a build module, then import it:
 
 ```zig
-const marionette = @import("src/build_support.zig");
+const marionette = @import("marionette_build");
 
 const tidy = marionette.addTidyStep(b, .{
     .paths = &.{ "src", "examples", "tests" },

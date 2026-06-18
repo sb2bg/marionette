@@ -85,6 +85,7 @@ pub fn scenario(harness: *Harness) !void {
     try harness.control.disk.crash();
     try harness.control.disk.restart();
     try harness.control.disk.corruptSector(wal_path, record_size);
+    try harness.store.reopen();
     try harness.store.recover(.strict);
 }
 
@@ -186,12 +187,14 @@ retry; a planted buggy mode applies it twice and violates an exact revision
 oracle.
 
 Simulation processes are first-class runtime owners. `sim.killProcess(node)`
-cancels that node's scheduler-backed `Io.async` work, closes process-local
-files/listeners/connections, and wakes surviving TCP peers with reset errors.
+cancels that node's scheduler-backed `Io.async`/`Io.concurrent` work, closes
+process-local files/listeners/connections, and wakes surviving TCP peers with
+reset errors.
 `sim.registerProcess(node, lifecycle)` plus `sim.restartProcess(node)` reruns a
 registered initializer with that node's `Env` after volatile state has been
-discarded by the lifecycle's `on_kill` callback. Disk crash uses the same kill
-path after applying pending-write crash faults.
+discarded by the lifecycle's `on_kill` callback. Explicit process kill leaves
+the shared disk model intact; disk crash is the operation that first applies
+pending-write crash faults, then uses the same process-kill path.
 
 ```sh
 zig build validate-std-io-net-kv

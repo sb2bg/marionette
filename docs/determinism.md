@@ -55,7 +55,8 @@ Marionette enforces determinism in four layers.
    own exact or prefix bans through `addTidyStep`.
 
    ```zig
-   const marionette = @import("src/build_support.zig");
+   // Expose src/build_support.zig from the dependency as marionette_build.
+   const marionette = @import("marionette_build");
 
    const tidy = marionette.addTidyStep(b, .{
        .paths = &.{ "src", "examples", "tests" },

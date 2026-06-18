@@ -28,11 +28,11 @@ Example:
 
 ```text
 marionette.trace format=text version=1
-event=0 world.init seed=12648430 start_ns=0 tick_ns=1000000
+event=0 world.init seed=12648430 start_ns=0 tick_ns=1
 event=1 run.name value=smoke
 event=2 run.tag value=scenario:smoke
 event=3 run.attribute key=packet_loss_percent value=uint:20
-event=4 world.tick now_ns=1000000
+event=4 world.tick now_ns=1
 event=5 world.random_u64 value=10121301305976376037
 event=6 buggify hook=drop_packet rate=20/100 roll=73 fired=false
 event=7 request.accepted id=42
@@ -74,6 +74,8 @@ Rules:
 - The scheduler-backed stream adapter records `io.net.deliver` for delivered
   framed bytes and `io.net.delivery_error` when a delivery-time topology fault
   is translated into a stream error.
+- Logical process lifecycle records use `process.kill node=<u64> reason=<literal>`
+  and `process.restart node=<u64>`.
 
 ## What Goes In
 

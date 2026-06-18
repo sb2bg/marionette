@@ -41,10 +41,9 @@ integration tier:
   a Win64 fiber compile check, and bounded job timeouts.
 
 Known limits remain: fibers are cooperative rather than preemptive; one world
-hosts one simulation; current `std.Io.net` listener/connection allocation
-consumes fixed topology nodes; `Io.Group`, cooperative cancellation, logical
-process restart, cross-process production networking, and complete host
-filename parity remain roadmap work.
+hosts one simulation; current `std.Io.net` is still a narrow TCP-stream subset;
+`Io.Group`, cooperative cancellation points, cross-process production
+networking, and complete host filename parity remain roadmap work.
 
 ## v0.2.0 - 2026-06-02
 

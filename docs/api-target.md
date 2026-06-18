@@ -36,16 +36,25 @@ pub fn expectFuzz(opts: anytype) !void;
 pub fn expectFailure(opts: anytype) !void;
 
 pub const Env = struct {
+    io_backend: std.Io,
     disk: Disk,
     clock: EnvClock,
     random: EnvRandom,
     tracer: Tracer,
+    buggify_enabled: bool,
     pub fn io(self: Env) std.Io;
     pub fn recorder(self: Env) Recorder;
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void;
 };
 
 pub const Control = SimControl;
+pub const SimIo = ...;
+pub const ProcessLifecycle = struct {
+    ptr: *anyopaque,
+    on_kill: ?*const fn (*anyopaque) void = null,
+    restart: *const fn (*anyopaque, Env) anyerror!void,
+};
+pub const ProcessSupervisor = opaque {};
 
 pub fn Endpoint(comptime Message: type) type;
 pub fn CodecTransport(comptime Codec: type) type;
@@ -64,6 +73,12 @@ pub const SimNetworkOptions = struct {
 pub const Sim = struct {
     env: Env,
     control: Control,
+    io_runtime: *SimIo.ProcessRuntime,
+    process_supervisor: *ProcessSupervisor,
+    pub fn envForNode(self: Sim, node: NodeId) !Env;
+    pub fn registerProcess(self: Sim, node: NodeId, lifecycle: ProcessLifecycle) !void;
+    pub fn killProcess(self: Sim, node: NodeId) !void;
+    pub fn restartProcess(self: Sim, node: NodeId) !void;
     pub fn endpoint(self: Sim, comptime Message: type, node: NodeId) !Endpoint(Message);
     pub fn endpoints(self: Sim, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
     pub fn byteEndpoint(self: Sim, node: NodeId) !ByteEndpoint;
@@ -85,7 +100,9 @@ implementation details, not part of the public teaching surface.
 
 `Env.io()` is the app-facing `std.Io` accessor. Production envs return the host
 `std.Io` supplied to `Production.init`; simulation envs return Marionette's
-current deterministic backend. That backend supports deterministic
+current deterministic backend. Use `sim.envForNode(node).io()` when separate
+`std.Io.net` participants should run as distinct logical processes. That
+backend supports deterministic
 clock, sleep, random, `randomSecure`, scheduler-backed `Io.async` /
 `Io.concurrent` / await, immediate non-blocking `Io.Queue` operations, and an
 in-memory TCP stream subset for `std.Io.net`. Cancellation currently awaits
@@ -108,6 +125,13 @@ The current network endpoint is obtained from the composition root:
 ```zig
 const sim = try world.simulate(.{ .network = .{ .nodes = 4, .path_capacity = 64 } });
 var replica_0 = Replica.init(sim.env.io(), sim.env.recorder(), try sim.endpoint(Message, 0));
+```
+
+For stream-oriented code, prefer a node-scoped env:
+
+```zig
+const server_env = try sim.envForNode(0);
+var server = try Server.init(server_env.io(), server_env.recorder());
 ```
 
 The design keeps `Env` non-generic and passes `Endpoint(Message)` as a sibling

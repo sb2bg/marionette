@@ -43,7 +43,7 @@ Marionette currently has:
 - `mar.runCase` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.
 - An internal fixed-capacity deterministic event queue used by the network
-  packet core for stable `(ready_at, event_id)`-style ordering.
+  packet core for stable `(deliver_at, packet_id)`-style ordering.
 - A seeded cooperative task scheduler with stable task ids, replay-visible
   selection, blocked wait sets, timed waits, deterministic wake ordering, and
   deadlock detection.
@@ -59,6 +59,10 @@ Marionette currently has:
 - A narrow scheduler-backed `std.Io.net` TCP-stream subset whose empty
   `accept` and `read` operations suspend, and whose bytes can traverse the
   shared network latency, loss, clog, and partition model.
+- One process-scoped simulation `std.Io` backend per declared node, with stable
+  `sim.envForNode(node).io()` identity, shared listener/connection registry,
+  process-owned scheduler tasks, and explicit `killProcess`/`restartProcess`
+  lifecycle hooks.
 - `mar.Disk`, a lower-level disk capability for sector-oriented
   `read`/`write`/`sync` plus path-level metadata and lifecycle operations.
 - `mar.SimDisk`, a deterministic disk simulator with logical paths,
@@ -102,6 +106,7 @@ src/
     file.zig
     net.zig
     futex.zig
+    task.zig
     errors.zig
     tests.zig
   network/
@@ -213,8 +218,9 @@ test "single request is replayable" {
 ```
 
 The same composition-root pattern is now used for networked examples: build a
-simulation, pass `sim.env` plus node-scoped `Endpoint(Message)` handles into
-the production-shaped code, and keep `sim.control` in the harness.
+simulation, pass `sim.envForNode(node)` plus node-scoped `Endpoint(Message)`
+handles into the production-shaped code, and keep `sim.control` in the
+harness.
 
 ## Production Cost And BUGGIFY
 
@@ -294,7 +300,8 @@ is not deterministic enough.
 
 ## Multi-Node Authority Shape
 
-The current Phase 2 shape is a per-node endpoint handle:
+The current Phase 2 shape is a per-node endpoint handle plus a matching
+node-scoped environment:
 
 ```zig
 fn nodeMain(env: mar.Env, endpoint: mar.Endpoint(Message)) !void {
@@ -303,11 +310,12 @@ fn nodeMain(env: mar.Env, endpoint: mar.Endpoint(Message)) !void {
 }
 ```
 
-Each `Endpoint(Message)` is bound to one `NodeId`. Application code can send
-only as that node and receives only messages addressed to that node. The shared
-`World` remains the owner of global simulation state, but application code
-should receive `Env` plus typed node-scoped endpoints, not `World` plus a loose
-node id.
+Each `Endpoint(Message)` and each `sim.envForNode(node).io()` backend is bound
+to one `NodeId`. Application code can send only as that node, receives only
+messages addressed to that node, and opens stream sockets under that logical
+process. The shared `World` remains the owner of global simulation state, but
+application code should receive `Env` plus typed node-scoped endpoints, not
+`World` plus a loose node id.
 
 Rejected alternatives for now:
 
@@ -359,7 +367,7 @@ Required test classes:
 
 Marionette keeps several kinds of evidence deliberately separate:
 
-- `xitdb` and the maintained `kvdb` validation exercise real storage code
+- `xitdb` validation and the internal `kv_store` example exercise storage code
   through the deterministic `std.Io.File` subset and model oracles.
 - The pinned `g41797/mailbox` validation exercises unmodified cooperative
   `Mutex` / `Condition` code through scheduler-backed futex waits.

@@ -85,7 +85,7 @@ zig build run-example -- kv-store-bug --seed 12648430 --expect-failure
 Useful trace events include:
 
 ```text
-disk.crash_write op=2 path=kv.wal offset=16 len=16 result=torn
+disk.crash_write op=4 path=kv.wal offset=16 len=16 result=torn
 kv.recover.record offset=16 key=2 value=0 mode=buggy_accept_magic_only
 kv.invariant_violation reason=unsynced_record_recovered
 ```

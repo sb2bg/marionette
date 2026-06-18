@@ -82,10 +82,12 @@ The test harness gets `DiskControl` from `world.simulate(...).control.disk` to
 inspect disk state, inject scripted faults, or crash/restart the simulated
 disk. Those operations must not leak into the app-visible disk API.
 
-In later multi-node work, each simulated node should expose its own disk view:
+In multi-node simulations, get process-scoped app capabilities from
+`sim.envForNode(node)`:
 
 ```zig
-try node.env().disk.write(.{ .path = "wal.log", .offset = offset, .bytes = entry });
+const node_env = try sim.envForNode(node);
+try node_env.disk.write(.{ .path = "wal.log", .offset = offset, .bytes = entry });
 ```
 
 The shared `World` remains the owner of the clock, PRNG, global event index,
@@ -127,11 +129,11 @@ Implemented operation concepts:
   corrupt with `corruptSector`.
 - Pending writes: successful writes are visible to later reads immediately,
   but they are not durable until `sync`.
-- Crash window: `crash` processes pending writes, kills every live logical
-  process through the simulation process supervisor, then marks the disk down
-  until `restart`. Disk restart only brings the disk authority back up;
-  application restart is modeled explicitly with `sim.restartProcess(node)`
-  after a lifecycle initializer has been registered.
+- Crash window: `crash` processes pending writes and metadata, marks the disk
+  down, then kills every live logical process through the simulation process
+  supervisor. Disk restart only brings the disk authority back up; application
+  restart is modeled explicitly with `sim.restartProcess(node)` after a
+  lifecycle initializer has been registered.
 
 The Phase 1 implementation should start synchronous from the user's
 perspective: a `write` or `read` may advance simulated time internally and then
@@ -195,14 +197,23 @@ are escaped consistently. Current events:
 - `disk.read op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
 - `disk.write op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
 - `disk.sync op=<u64> path=<escaped-text> status=<literal> committed_writes=<u64> latency_ns=<u64>`
+- `disk.sync_dir op=<u64> path=<escaped-text> status=ok committed_metadata=<u64> latency_ns=<u64>`
+- `disk.stat op=<u64> path=<escaped-text> status=<literal> size=<u64> latency_ns=<u64>`
+- `disk.read_some op=<u64> path=<escaped-text> offset=<u64> requested_len=<u64> read_len=<u64> status=<literal> latency_ns=<u64>`
+- `disk.set_length op=<u64> path=<escaped-text> len=<u64> status=<literal> committed_writes=<u64> latency_ns=<u64>`
+- `disk.delete op=<u64> path=<escaped-text> status=<literal> committed_writes=<u64> latency_ns=<u64>`
+- `disk.rename op=<u64> path=<escaped-text> new_path=<escaped-text> status=<literal> committed_writes=<u64> latency_ns=<u64>`
 - `disk.fault op=<u64> path=<escaped-text> kind=<literal> rate=<literal> roll=<u64> fired=<bool>`
 - `disk.fault path=<escaped-text> offset=<u64> kind=scripted_corruption`
 - `disk.crash_write op=<u64> path=<escaped-text> offset=<u64> len=<u64> result=<literal>`
-- `disk.crash pending_writes=<u64> landed=<u64> lost=<u64> torn=<u64> reordered=<u64>`
+- `disk.crash_metadata op=<u64> dir=<escaped-text> kind=<literal> result=<literal>`
+- `disk.crash pending_writes=<u64> landed=<u64> lost=<u64> torn=<u64> reordered=<u64> pending_metadata=<u64> metadata_kept=<u64> metadata_lost=<u64>`
 - `disk.restart status=ok`
 
-Use status values such as `ok`, `io_error`, `corrupt`, and `torn`. Use fault
-kinds such as `read_error`, `write_error`, `corrupt_read`,
+Use status values such as `ok`, `not_found`, `io_error`, and `corrupt`. Use
+fault kinds such as `read_error`, `write_error`, `corrupt_read`,
+`crash_lost_write`, `crash_torn_write`, `crash_reordered_write`, and
+`crash_lost_metadata`.
 `crash_lost_write`, `crash_torn_write`, and `crash_reordered_write`.
 
 Trace fields must be scalar, deterministic, and independent of pointer

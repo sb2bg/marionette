@@ -126,10 +126,10 @@ host access, TLS, `sendmsg` / `recvmsg`, full connection-reset behavior, or
 preemptive OS-thread scheduling. Unsupported vtable regions fail closed rather
 than silently using host I/O.
 
-Listener and connection allocation is also still tied to the fixed topology:
-each listener/client allocation consumes a node slot for the simulation's
-lifetime. Size the topology for the demonstrated scenario; reconnect loops and
-process-owned socket identity are part of the planned logical-process work.
+Listener and connection allocation is process-scoped rather than
+socket-scoped. Use `sim.envForNode(node).io()` to give each server or client a
+stable simulated process identity; reconnect loops create new socket handles
+under that process without consuming additional topology nodes.
 
 ## What This Proves
 

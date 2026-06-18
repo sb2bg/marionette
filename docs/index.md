@@ -65,6 +65,7 @@ pub fn scenario(harness: *Harness) !void {
     try harness.control.disk.crash();
     try harness.control.disk.restart();
     try harness.control.disk.corruptSector(wal_path, record_size);
+    try harness.store.reopen();
     try harness.store.recover(.strict);
 }
 
@@ -96,7 +97,9 @@ Three pieces show up in every test:
 Every Marionette test has two surfaces.
 
 **`io`** is what production-shaped storage code should usually see. In
-simulation, `sim.env.io()` returns Marionette's deterministic `std.Io` backend.
+simulation, `sim.env.io()` returns node 0's deterministic `std.Io` backend, and
+multi-node `std.Io.net` code should use `sim.envForNode(node).io()` for stable
+per-process node identity.
 In production, `production.env().io()` returns the host `std.Io` supplied at
 setup. Application code that wants trace events should accept a narrow
 `mar.Recorder`, not all of `mar.Env`.
@@ -214,7 +217,9 @@ healing behavior, and cooperative `std.Io` tasks and futex waits for
 `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
 target and the internal bounded-queue capability demo. Simulated disk
 operations park scheduler tasks until their completion deadlines rather than
-skipping earlier timers.
+skipping earlier timers. When network simulation is configured, each node also
+has a process-scoped `std.Io` backend; `killProcess` and registered restart
+lifecycles model process death and explicit application restart.
 It does not model arbitrary OS thread scheduling or memory-level concurrency;
 code that depends on those needs separate testing. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths

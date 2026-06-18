@@ -61,16 +61,17 @@ The current disk surface is:
 - `mar.DiskControl`: harness-facing fault, scripted corruption, crash, and
   restart authority over the same `SimDisk` backing state.
 - `World.simulate(...)`: constructs world-owned simulator resources and
-  returns `{ env: Env, control: Control }`.
+  returns `{ env: Env, control: Control, io_runtime, process_supervisor }`.
 - `Env.io()`: returns the host `std.Io` in production envs and Marionette's
-  current deterministic `std.Io` backend in simulation envs. The simulation
-  backend supports clock/random, scheduler-backed and trace-visible sleep,
-  scheduler-backed `Io.async` / `Io.concurrent` / await, and immediate
-  non-blocking `Io.Queue` operations today, plus an in-memory TCP stream subset
-  for `std.Io.net` and a flat `std.Io.File` subset over `SimDisk`, including
-  delete and rename. It fails closed for full directory/filesystem behavior,
-  process operations, datagrams, DNS, and real external network access not yet
-  routed through the simulator.
+  current deterministic `std.Io` backend in simulation envs. `sim.envForNode`
+  returns per-node `Env` values backed by process-scoped `std.Io` backends.
+  The simulation backend supports clock/random, scheduler-backed and
+  trace-visible sleep, scheduler-backed `Io.async` / `Io.concurrent` / await,
+  and immediate non-blocking `Io.Queue` operations today, plus an in-memory TCP
+  stream subset for `std.Io.net` and a flat `std.Io.File` subset over
+  `SimDisk`, including delete and rename. It fails closed for full
+  directory/filesystem behavior, process operations, datagrams, DNS, and real
+  external network access not yet routed through the simulator.
 - `Env.disk`: low-level simulation disk view exposing sector-oriented `read`,
   `write`, and `sync`, plus file metadata and lifecycle operations. New
   storage examples should prefer `Env.io()` and `std.Io.File` unless they are
@@ -106,6 +107,9 @@ linearizability checker, time-travel debugging.
   crash/restart simulation.
 - `mar.DiskControl`: simulator-control disk capability.
 - `World.simulate`: world-owned simulator construction.
+- Process-scoped simulation I/O: one backend per declared node, stable
+  `envForNode(node).io()` identity, process-owned scheduler tasks, and
+  `registerProcess`/`killProcess`/`restartProcess` lifecycle hooks.
 - `Env.disk`: low-level simulation disk capability; `Env.io()` is the primary
   storage application surface.
 - `mar.Endpoint(Message)`, `mar.NetworkControl`, `SimNetworkOptions`, and
@@ -588,10 +592,12 @@ Acceptance criteria:
 ### 7. Crash / restart simulation
 
 Extend `sim.control.tick()` to roll per-node crash and restart probabilities with
-stability floors. Crashed nodes are already expressible via
-`sim.control.network.setNode(n, false)`, but there is no tick-driven randomness
-and no separation between "paused" and "crashed." Work this after item 4
-so the probabilistic fault machinery is shared.
+stability floors. Manual process crash/restart is now expressible with
+`sim.killProcess(node)` and `sim.restartProcess(node)`, while network-only node
+availability remains `sim.control.network.setNode(n, false)`. The missing work
+is tick-driven random fault evolution and stability floors over those existing
+controls. Work this after item 4 so the probabilistic fault machinery is
+shared.
 
 ### 8. Liveness mode transition
 
