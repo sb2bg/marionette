@@ -66,6 +66,7 @@ pub const TaskScheduler = struct {
     /// inside a wait-set call and driving the scheduler. See `driveMainUntil`.
     main_wait: ?MainWait = null,
     next_task_id: TaskId = 0,
+    completed_task_count: usize = 0,
 
     const MainWait = struct {
         key: WaitKey,
@@ -517,11 +518,7 @@ pub const TaskScheduler = struct {
                     returned_task.id,
                     if (returned_task.kill_requested) "killed" else "ok",
                 );
-                // The fiber finished and we are back on the scheduler stack:
-                // its stack can never run again, so reclaim it now instead of
-                // holding every dead stack until world teardown.
-                returned_task.fiber_instance.?.destroy();
-                returned_task.fiber_instance = null;
+                scheduler.retireCompletedTask(returned_task);
             },
         }
         return .ran;
@@ -533,10 +530,16 @@ pub const TaskScheduler = struct {
     /// to the target process, it is marked and converted to `killed` at its
     /// next scheduler suspension/completion boundary.
     pub fn killProcess(self: *Self, process_id: io_module.ProcessId) void {
-        for (self.tasks.items) |task| {
-            if (task.process_id != @as(?io_module.ProcessId, process_id) or task.state == .completed) continue;
+        var index: usize = 0;
+        while (index < self.tasks.items.len) {
+            const task = self.tasks.items[index];
+            if (task.process_id != @as(?io_module.ProcessId, process_id) or task.state == .completed) {
+                index += 1;
+                continue;
+            }
             if (task == self.current) {
                 task.kill_requested = true;
+                index += 1;
                 continue;
             }
             self.completeKilledTask(task) catch @panic("failed to kill process task");
@@ -550,10 +553,27 @@ pub const TaskScheduler = struct {
         task.clearBlock(.completed, .woken);
         task.kill_requested = true;
         try self.recordComplete(task.id, "killed");
-        if (task.fiber_instance) |fiber_instance| {
-            fiber_instance.destroy();
-            task.fiber_instance = null;
+        self.retireCompletedTask(task);
+    }
+
+    fn retireCompletedTask(self: *Self, task: *Task) void {
+        std.debug.assert(task.state == .completed);
+
+        // The fiber is either naturally finished or explicitly killed, and we
+        // are back on the scheduler stack. Nothing can resume this task, so the
+        // active table can forget the full record while stable task ids remain
+        // represented by `next_task_id` and `completed_task_count`.
+        if (task.fiber_instance) |fiber_instance| fiber_instance.destroy();
+
+        for (self.tasks.items, 0..) |candidate, index| {
+            if (candidate == task) {
+                _ = self.tasks.orderedRemove(index);
+                self.completed_task_count += 1;
+                self.allocator.destroy(task);
+                return;
+            }
         }
+        unreachable;
     }
 
     fn removeReadyTask(self: *Self, task_id: TaskId) void {
@@ -612,7 +632,7 @@ pub const TaskScheduler = struct {
     }
 
     pub fn completedCount(self: *const Self) usize {
-        return self.countState(.completed);
+        return self.completed_task_count + self.countState(.completed);
     }
 
     pub fn blockedCount(self: *const Self) usize {
@@ -806,7 +826,7 @@ pub const TaskScheduler = struct {
 
     fn recordCensus(self: *Self, event: []const u8) (std.mem.Allocator.Error || world_module.TraceError)!void {
         try self.world.recordFields(event, &.{
-            traceField("tasks", .{ .uint = @intCast(self.tasks.items.len) }),
+            traceField("tasks", .{ .uint = @intCast(self.next_task_id) }),
             traceField("completed", .{ .uint = @intCast(self.completedCount()) }),
             traceField("blocked", .{ .uint = @intCast(self.blockedCount()) }),
         });
@@ -1180,7 +1200,7 @@ test "TaskScheduler: fiber stacks are unwind-safe for stack-tracing allocators" 
     try std.testing.expectEqual(@as(u8, 1), scenario.allocations);
 }
 
-test "TaskScheduler: completed tasks release their fibers eagerly" {
+test "TaskScheduler: completed tasks retire their active records" {
     if (!fiber.supported) return error.SkipZigTest;
 
     const runtime_allocator = std.testing.allocator;
@@ -1212,9 +1232,7 @@ test "TaskScheduler: completed tasks release their fibers eagerly" {
     try scheduler.runUntilIdle();
 
     try std.testing.expectEqual(@as(usize, 3), scheduler.completedCount());
-    for (scheduler.tasks.items) |task| {
-        try std.testing.expectEqual(@as(?*fiber.Fiber, null), task.fiber_instance);
-    }
+    try std.testing.expectEqual(@as(usize, 0), scheduler.tasks.items.len);
     try std.testing.expectEqual(@as(usize, 0), scheduler.opaque_entries.items.len);
 }
 

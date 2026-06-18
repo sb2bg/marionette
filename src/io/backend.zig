@@ -174,6 +174,12 @@ pub const Backend = struct {
         }
 
         const address = @intFromPtr(ptr);
+        // Sim futexes intentionally key by pointer identity within a backend.
+        // If an allocator later reuses the address for a different futex after
+        // all old waiters are gone, reusing the logical key preserves valid
+        // program behavior while keeping raw addresses out of deterministic
+        // traces. Retiring these entries requires proving no waiter still
+        // holds the old key.
         for (self.futex_keys.items) |entry| {
             if (entry.address == address) return futex_module.waitKey(.futex, entry.key);
         }
@@ -502,6 +508,10 @@ pub const ProcessRegistry = struct {
 
     fn futexKey(self: *ProcessRegistry, backend: *Backend, ptr: *const u32) std.mem.Allocator.Error!usize {
         const address = @intFromPtr(ptr);
+        // Pointer identity is scoped by backend/process. Address reuse after a
+        // futex's lifetime maps to the same logical key only when valid code
+        // has already released all old waiters; otherwise the waiter itself is
+        // still proof that the old key is live.
         for (self.futex_keys.items) |entry| {
             if (entry.backend == backend and entry.address == address) return entry.key;
         }
