@@ -222,7 +222,7 @@ pub const Backend = struct {
     }
 
     pub fn allocateNetworkNode(self: *Backend) error{NetworkDown}!?network_module.NodeId {
-        const process_count = network_module.processCountFromControl(self.network_control) orelse return null;
+        const process_count = network_module.internal.processCountFromControl(self.network_control) orelse return null;
         if (self.process_node) |node| {
             if (@as(usize, node) >= process_count) return error.NetworkDown;
             return node;

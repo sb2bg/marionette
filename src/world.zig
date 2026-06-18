@@ -321,11 +321,11 @@ pub const World = struct {
         }
 
         pub fn endpoint(self: Simulation, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
-            return try network_module.endpointFromControl(Payload, self.control.network, node);
+            return try network_module.internal.endpointFromControl(Payload, self.control.network, node);
         }
 
         pub fn byteEndpoint(self: Simulation, node: network_module.NodeId) !network_module.ByteEndpoint {
-            return try network_module.byteEndpointFromControl(self.control.network, node);
+            return try network_module.internal.byteEndpointFromControl(self.control.network, node);
         }
 
         pub fn endpoints(
@@ -396,10 +396,10 @@ pub const World = struct {
         sim_disk_registered = true;
 
         const network_control = if (options.network) |network_options|
-            try network_module.initSimControl(self, network_options)
+            try network_module.internal.initSimControl(self, network_options)
         else
             network_module.AnyNetworkControl.unavailable();
-        const process_count = network_module.processCountFromControl(network_control) orelse 1;
+        const process_count = network_module.internal.processCountFromControl(network_control) orelse 1;
 
         const sim_io = try self.allocator.create(io_module.ProcessRuntime);
         var sim_io_registered = false;
@@ -408,7 +408,7 @@ pub const World = struct {
         try sim_io.init(self.allocator, self, sim_disk.disk(), sim_disk.sectorSize(), process_count);
         errdefer if (!sim_io_registered) sim_io.deinit();
 
-        try self.registerTeardown(sim_io, io_module.deinitProcessRuntimeOpaque);
+        try self.registerTeardown(sim_io, io_module.internal.deinitProcessRuntimeOpaque);
         sim_io_registered = true;
 
         sim_io.attachNetworkControl(network_control);

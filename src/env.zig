@@ -340,7 +340,7 @@ pub const Production = struct {
     random_source: std.Random.IoSource,
     tracer: Tracer,
     network_io: network_io_module.Host,
-    network_entries: std.ArrayList(network_module.ProductionNetworkEntry) = .empty,
+    network_entries: std.ArrayList(network_module.internal.ProductionNetworkEntry) = .empty,
 
     pub const Options = struct {
         allocator: std.mem.Allocator,
@@ -370,14 +370,14 @@ pub const Production = struct {
         comptime Payload: type,
         options: network_module.ProductionEndpointOptions,
     ) network_module.ProductionNetworkError!network_module.Endpoint(Payload) {
-        return try network_module.productionEndpoint(Payload, self.allocator, &self.network_entries, options);
+        return try network_module.internal.productionEndpoint(Payload, self.allocator, &self.network_entries, options);
     }
 
     pub fn byteEndpoint(
         self: *Production,
         options: network_module.ProductionEndpointOptions,
     ) network_module.ProductionByteEndpointError!network_module.ByteEndpoint {
-        return try network_module.productionByteEndpoint(self.allocator, self.network_io.io(), &self.network_entries, options);
+        return try network_module.internal.productionByteEndpoint(self.allocator, self.network_io.io(), &self.network_entries, options);
     }
 
     pub fn endpoints(

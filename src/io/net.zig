@@ -53,7 +53,7 @@ pub fn Ops(comptime Backend: type) type {
 
         fn drainNetworkReady(backend: *Backend, node: network_module.NodeId) Io.net.Stream.Reader.Error!void {
             while (true) {
-                const event = network_module.receiveReadyStreamEventFromControl(backend.network_control, node) catch |err| {
+                const event = network_module.internal.receiveReadyStreamEventFromControl(backend.network_control, node) catch |err| {
                     return errors.mapNetworkReadError(err);
                 } orelse return;
 
@@ -105,7 +105,7 @@ pub fn Ops(comptime Backend: type) type {
         }
 
         fn nextNetworkDeliveryAt(backend: *Backend, node: network_module.NodeId) Io.net.Stream.Reader.Error!?u64 {
-            return network_module.nextStreamDeliveryAtForControl(backend.network_control, node) catch |err| {
+            return network_module.internal.nextStreamDeliveryAtForControl(backend.network_control, node) catch |err| {
                 return errors.mapNetworkReadError(err);
             };
         }
@@ -263,7 +263,7 @@ pub fn Ops(comptime Backend: type) type {
                     const payload_len = try appendStreamFrame(backend, &frame, peer_ref.handle, header, data, splat);
                     if (payload_len == 0) return 0;
 
-                    const send_result = network_module.sendStreamBytesFromControl(
+                    const send_result = network_module.internal.sendStreamBytesFromControl(
                         backend.network_control,
                         from_node,
                         to_node,

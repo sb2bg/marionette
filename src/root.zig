@@ -2,14 +2,14 @@
 //!
 //! Public API entry point.
 
+const std = @import("std");
+
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
 const fiber_module = @import("fiber.zig");
 const io_module = @import("io/root.zig");
 const codec_module = @import("codec.zig");
-const message_pool_module = @import("message_pool.zig");
-const network_frame_module = @import("network/frame.zig");
 const network_module = @import("network/root.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
@@ -62,7 +62,9 @@ pub const DiskError = disk_module.DiskError;
 pub const Env = env_module.Env;
 
 /// Minimal deterministic `std.Io` backend helpers.
-pub const SimIo = io_module;
+pub const SimIo = struct {
+    pub const ProcessRuntime = io_module.ProcessRuntime;
+};
 
 /// Production capability composition root.
 pub const Production = env_module.Production;
@@ -169,12 +171,6 @@ pub const default_byte_pool_options = network_module.default_byte_pool_options;
 /// Simulator-control network capability.
 pub const NetworkControl = network_module.AnyNetworkControl;
 
-/// Production network frame encoding helpers.
-pub const NetworkFrame = network_frame_module;
-
-/// Bounded message buffer pool for production transport internals.
-pub const MessagePool = message_pool_module;
-
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
 
@@ -252,6 +248,29 @@ pub const TraceSummaryError = trace_summary_module.TraceSummaryError;
 
 /// Build an owned summary from line-oriented trace bytes.
 pub const summarize = trace_summary_module.summarize;
+
+test "public roots hide internal wiring" {
+    const public_api = @This();
+
+    try std.testing.expect(!@hasDecl(public_api, "MessagePool"));
+    try std.testing.expect(!@hasDecl(public_api, "NetworkFrame"));
+
+    try std.testing.expect(!@hasDecl(public_api.SimIo, "Backend"));
+    try std.testing.expect(!@hasDecl(public_api.SimIo, "TaskRuntime"));
+    try std.testing.expect(!@hasDecl(public_api.SimIo, "TaskControl"));
+    try std.testing.expect(!@hasDecl(public_api.SimIo, "FutexWaitSet"));
+
+    try std.testing.expect(!@hasDecl(io_module, "Backend"));
+    try std.testing.expect(!@hasDecl(io_module, "TaskRuntime"));
+    try std.testing.expect(!@hasDecl(io_module, "TaskControl"));
+    try std.testing.expect(!@hasDecl(io_module, "FutexWaitSet"));
+
+    try std.testing.expect(!@hasDecl(network_module, "NetworkSimulation"));
+    try std.testing.expect(!@hasDecl(network_module, "UnstableNetwork"));
+    try std.testing.expect(!@hasDecl(network_module, "ProductionNetworkEntry"));
+    try std.testing.expect(!@hasDecl(network_module, "initSimControl"));
+    try std.testing.expect(!@hasDecl(network_module, "sendStreamBytesFromControl"));
+}
 
 test {
     _ = @import("disk/root.zig");

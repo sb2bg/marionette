@@ -5,7 +5,7 @@ const std = @import("std");
 const disk_module = @import("disk/root.zig");
 const fiber = @import("fiber.zig");
 const futex_module = @import("io/futex.zig");
-const io_module = @import("io/root.zig");
+const io_internal = @import("io/root.zig").internal;
 const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
 
@@ -79,7 +79,7 @@ pub const TaskScheduler = struct {
         stack_size: usize = default_task_stack_size,
         entry: Entry,
         arg: *anyopaque,
-        process_id: ?io_module.ProcessId = null,
+        process_id: ?io_internal.ProcessId = null,
     };
 
     const TaskState = enum {
@@ -110,7 +110,7 @@ pub const TaskScheduler = struct {
         scheduler: *Self,
         entry: Entry,
         arg: *anyopaque,
-        process_id: ?io_module.ProcessId = null,
+        process_id: ?io_internal.ProcessId = null,
         /// Null once the task has completed: the fiber (and its stack) is
         /// reclaimed eagerly so long-lived worlds spawning many tasks do not
         /// accumulate dead stacks until teardown.
@@ -183,7 +183,7 @@ pub const TaskScheduler = struct {
     /// Spawn a type-erased task owned by `process_id`.
     pub fn spawnOpaqueForProcess(
         self: *Self,
-        process_id: ?io_module.ProcessId,
+        process_id: ?io_internal.ProcessId,
         entry: *const fn (*anyopaque) void,
         arg: *anyopaque,
     ) TaskSchedulerError!TaskId {
@@ -529,11 +529,11 @@ pub const TaskScheduler = struct {
     /// Running fibers cannot be preempted safely; if the current fiber belongs
     /// to the target process, it is marked and converted to `killed` at its
     /// next scheduler suspension/completion boundary.
-    pub fn killProcess(self: *Self, process_id: io_module.ProcessId) void {
+    pub fn killProcess(self: *Self, process_id: io_internal.ProcessId) void {
         var index: usize = 0;
         while (index < self.tasks.items.len) {
             const task = self.tasks.items[index];
-            if (task.process_id != @as(?io_module.ProcessId, process_id) or task.state == .completed) {
+            if (task.process_id != @as(?io_internal.ProcessId, process_id) or task.state == .completed) {
                 index += 1;
                 continue;
             }
@@ -721,7 +721,7 @@ pub const TaskScheduler = struct {
     fn recordSpawn(
         self: *Self,
         task_id: TaskId,
-        process_id: ?io_module.ProcessId,
+        process_id: ?io_internal.ProcessId,
     ) (std.mem.Allocator.Error || world_module.TraceError)!void {
         const fields = [_]world_module.TraceField{
             traceField("task", .{ .uint = task_id }),
@@ -840,7 +840,7 @@ fn sortTaskIds(task_ids: []TaskId) void {
     std.mem.sort(TaskId, task_ids, {}, std.sort.asc(TaskId));
 }
 
-pub fn futexWaitSet(self: *TaskScheduler) io_module.FutexWaitSet {
+pub fn futexWaitSet(self: *TaskScheduler) io_internal.FutexWaitSet {
     return .{
         .ptr = self,
         .vtable = &futex_wait_set_vtable,
@@ -852,7 +852,7 @@ fn waitSetBlock(ptr: *anyopaque, key: usize) void {
     scheduler.blockCurrent(key);
 }
 
-fn waitSetBlockUntil(ptr: *anyopaque, key: usize, deadline_ns: ?u64) io_module.FutexWaitResult {
+fn waitSetBlockUntil(ptr: *anyopaque, key: usize, deadline_ns: ?u64) io_internal.FutexWaitResult {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     return switch (scheduler.blockCurrentUntil(key, deadline_ns)) {
         .woken => .woken,
@@ -865,7 +865,7 @@ fn waitSetWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
     return scheduler.wake(key, max_count) catch @panic("scheduler wake failed");
 }
 
-const futex_wait_set_vtable: io_module.FutexWaitSet.VTable = .{
+const futex_wait_set_vtable: io_internal.FutexWaitSet.VTable = .{
     .block = waitSetBlock,
     .block_until = waitSetBlockUntil,
     .wake = waitSetWake,
@@ -879,7 +879,7 @@ pub fn deinitTaskSchedulerOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) 
 }
 
 /// Build the `std.Io` task runtime view over a scheduler.
-pub fn taskRuntime(self: *TaskScheduler) io_module.TaskRuntime {
+pub fn taskRuntime(self: *TaskScheduler) io_internal.TaskRuntime {
     return .{
         .ptr = self,
         .vtable = &task_runtime_vtable,
@@ -917,7 +917,7 @@ const disk_latency_runtime_vtable: disk_module.DiskLatencyRuntime.VTable = .{
 };
 
 /// Build the harness-facing control view over this scheduler.
-pub fn taskControl(self: *TaskScheduler) io_module.TaskControl {
+pub fn taskControl(self: *TaskScheduler) io_internal.TaskControl {
     return .{
         .ptr = self,
         .vtable = &task_control_vtable,
@@ -925,7 +925,7 @@ pub fn taskControl(self: *TaskScheduler) io_module.TaskControl {
 }
 
 /// Build the process-lifecycle task control view over this scheduler.
-pub fn processTaskControl(self: *TaskScheduler) io_module.ProcessTaskControl {
+pub fn processTaskControl(self: *TaskScheduler) io_internal.ProcessTaskControl {
     return .{
         .ptr = self,
         .vtable = &process_task_control_vtable,
@@ -942,26 +942,26 @@ fn taskControlBlockedCount(ptr: *const anyopaque) usize {
     return scheduler.blockedCount();
 }
 
-const task_control_vtable: io_module.TaskControl.VTable = .{
+const task_control_vtable: io_internal.TaskControl.VTable = .{
     .run_until_idle = taskControlRunUntilIdle,
     .blocked_count = taskControlBlockedCount,
 };
 
-fn processTaskControlKillProcess(ptr: *anyopaque, process_id: io_module.ProcessId) void {
+fn processTaskControlKillProcess(ptr: *anyopaque, process_id: io_internal.ProcessId) void {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     scheduler.killProcess(process_id);
 }
 
-const process_task_control_vtable: io_module.ProcessTaskControl.VTable = .{
+const process_task_control_vtable: io_internal.ProcessTaskControl.VTable = .{
     .kill_process = processTaskControlKillProcess,
 };
 
 fn taskRuntimeSpawn(
     ptr: *anyopaque,
-    process_id: ?io_module.ProcessId,
+    process_id: ?io_internal.ProcessId,
     entry: *const fn (*anyopaque) void,
     arg: *anyopaque,
-) io_module.TaskRuntime.SpawnError!u64 {
+) io_internal.TaskRuntime.SpawnError!u64 {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     return scheduler.spawnOpaqueForProcess(process_id, entry, arg) catch return error.ConcurrencyUnavailable;
 }
@@ -989,7 +989,7 @@ fn taskRuntimeRunUntilDone(ptr: *anyopaque, done: *const bool) void {
     };
 }
 
-const task_runtime_vtable: io_module.TaskRuntime.VTable = .{
+const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .spawn = taskRuntimeSpawn,
     .in_task = taskRuntimeInTask,
     .block = taskRuntimeBlock,
@@ -1524,7 +1524,7 @@ fn runTimedFutexTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         runtime_allocator.destroy(scheduler);
     }
 
-    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    var backend = io_internal.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
     defer backend.deinit();
     backend.attachFutexWaitSet(futexWaitSet(scheduler));
 
@@ -1605,7 +1605,7 @@ fn runSleepOrderingTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         runtime_allocator.destroy(scheduler);
     }
 
-    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    var backend = io_internal.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
     defer backend.deinit();
     backend.attachFutexWaitSet(futexWaitSet(scheduler));
 
@@ -1822,7 +1822,7 @@ fn runMutexConditionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         runtime_allocator.destroy(scheduler);
     }
 
-    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
+    var backend = io_internal.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
     defer backend.deinit();
     backend.attachFutexWaitSet(futexWaitSet(scheduler));
 
@@ -2057,7 +2057,7 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
         runtime_allocator.destroy(scheduler);
     }
 
-    var io_runtime: io_module.ProcessRuntime = undefined;
+    var io_runtime: io_internal.ProcessRuntime = undefined;
     try io_runtime.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096, 2);
     defer io_runtime.deinit();
     io_runtime.attachFutexWaitSet(futexWaitSet(scheduler));
@@ -2141,14 +2141,14 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
         runtime_allocator.destroy(scheduler);
     }
 
-    const network_control = try network_module.initSimControl(world, .{ .nodes = 2 });
+    const network_control = try network_module.internal.initSimControl(world, .{ .nodes = 2 });
     switch (kind) {
         .latency, .latency_close => try network_control.setLatency(.{ .min_latency_ns = 30 }),
         .drop => try network_control.setLossiness(.{ .drop_rate = .always() }),
         .accept, .exchange => {},
     }
 
-    var io_runtime: io_module.ProcessRuntime = undefined;
+    var io_runtime: io_internal.ProcessRuntime = undefined;
     try io_runtime.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096, 2);
     defer io_runtime.deinit();
     io_runtime.attachFutexWaitSet(futexWaitSet(scheduler));
@@ -2221,10 +2221,10 @@ fn runNetworkPartitionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         runtime_allocator.destroy(scheduler);
     }
 
-    const network_control = try network_module.initSimControl(world, .{ .nodes = 2 });
+    const network_control = try network_module.internal.initSimControl(world, .{ .nodes = 2 });
     try network_control.setLatency(.{ .min_latency_ns = 30 });
 
-    var io_runtime: io_module.ProcessRuntime = undefined;
+    var io_runtime: io_internal.ProcessRuntime = undefined;
     try io_runtime.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096, 2);
     defer io_runtime.deinit();
     io_runtime.attachFutexWaitSet(futexWaitSet(scheduler));
