@@ -115,3 +115,6 @@ jobs:
 
       - name: Compile disabled Win64 fiber path
         run: zig test src/fiber.zig -target x86_64-windows-gnu -OReleaseSafe -fno-emit-bin
+
+      - name: Check release symbols
+        run: zig build check-release-symbols

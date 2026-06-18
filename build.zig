@@ -10,6 +10,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const release_mod = b.addModule("marionette_release", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -43,6 +48,30 @@ pub fn build(b: *std.Build) void {
 
     const run_examples_step = b.step("run-example", "Run a Marionette example by seed");
     run_examples_step.dependOn(&run_examples_cmd.step);
+
+    const release_probe_mod = b.createModule(.{
+        .root_source_file = b.path("tests/release_symbol_probe.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    release_probe_mod.addImport("marionette", release_mod);
+
+    const release_probe_exe = b.addExecutable(.{
+        .name = "marionette-release-symbol-probe",
+        .root_module = release_probe_mod,
+    });
+
+    const check_release_symbols_cmd = b.addSystemCommand(&.{
+        "sh",
+        "tests/check_release_symbols.sh",
+    });
+    check_release_symbols_cmd.addArtifactArg(release_probe_exe);
+
+    const check_release_symbols_step = b.step(
+        "check-release-symbols",
+        "Verify production release binary does not contain simulation-only symbols",
+    );
+    check_release_symbols_step.dependOn(&check_release_symbols_cmd.step);
 
     if (b.lazyDependency("xitdb", .{
         .target = target,
@@ -131,6 +160,9 @@ pub fn build(b: *std.Build) void {
 
     const tidy = build_support.addTidyStep(b, .{
         .paths = &.{ "src", "examples", "tests", "validation" },
+        .extra_allowed = &.{
+            .{ .path = "tests/release_symbol_probe.zig", .needle = "std.process" },
+        },
         .target = target,
         .optimize = optimize,
     });
