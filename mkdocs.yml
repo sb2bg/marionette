@@ -32,6 +32,7 @@ nav:
   - Docs:
       - Overview: overview.md
       - Architecture: architecture.md
+      - Repository Layout: repository-layout.md
       - Trace Format: trace-format.md
       - Run: run.md
       - Findings: findings.md
