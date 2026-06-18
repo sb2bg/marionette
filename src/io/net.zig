@@ -118,7 +118,7 @@ pub fn Ops(comptime Backend: type) type {
             if (options.protocol != .tcp) return error.ProtocolUnsupportedBySystem;
 
             const backend = backendFromUserdata(userdata);
-            if (backend.findOpenListener(address) != null) return error.AddressInUse;
+            if (backend.findOpenListenerRef(address) != null) return error.AddressInUse;
 
             const node = backend.allocateNetworkNode() catch return error.NetworkDown;
             const listener = backend.allocator.create(Backend.ListenerState) catch return error.SystemResources;
@@ -127,6 +127,8 @@ pub fn Ops(comptime Backend: type) type {
             errdefer listener.pending.deinit(backend.allocator);
 
             const handle = backend.createHandle(.{ .listener = listener }) catch return error.SystemResources;
+            errdefer _ = backend.handles.pop();
+            backend.registerListener(handle, address.*) catch return error.SystemResources;
             return .{
                 .handle = handle,
                 .address = address.*,
@@ -144,8 +146,9 @@ pub fn Ops(comptime Backend: type) type {
             }
 
             const backend = backendFromUserdata(userdata);
-            const listener_entry = backend.findOpenListener(address) orelse return error.ConnectionRefused;
-            const listener = listener_entry.state.listener;
+            const listener_ref = backend.findOpenListenerRef(address) orelse return error.ConnectionRefused;
+            const listener_backend = listener_ref.backend;
+            const listener = listener_ref.state;
             const client_node = backend.allocateNetworkNode() catch return error.NetworkDown;
 
             const client = backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
@@ -153,21 +156,21 @@ pub fn Ops(comptime Backend: type) type {
             client.* = .{ .address = address.*, .node = client_node };
             errdefer client.inbox.deinit(backend.allocator);
 
-            const server = backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
-            errdefer backend.allocator.destroy(server);
+            const server = listener_backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
+            errdefer listener_backend.allocator.destroy(server);
             server.* = .{ .address = listener.address, .node = listener.node };
-            errdefer server.inbox.deinit(backend.allocator);
+            errdefer server.inbox.deinit(listener_backend.allocator);
 
             const client_handle = backend.createHandle(.{ .connection = client }) catch return error.SystemResources;
             errdefer _ = backend.handles.pop();
-            const server_handle = backend.createHandle(.{ .connection = server }) catch return error.SystemResources;
-            errdefer _ = backend.handles.pop();
+            const server_handle = listener_backend.createHandle(.{ .connection = server }) catch return error.SystemResources;
+            errdefer _ = listener_backend.handles.pop();
 
-            client.peer = server_handle;
-            server.peer = client_handle;
+            client.peer = .{ .backend = listener_backend, .handle = server_handle };
+            server.peer = .{ .backend = backend, .handle = client_handle };
 
-            listener.pending.append(backend.allocator, server_handle) catch return error.SystemResources;
-            backend.wakeListener(listener_entry.handle, 1);
+            listener.pending.append(listener_backend.allocator, server_handle) catch return error.SystemResources;
+            listener_backend.wakeListener(listener_ref.handle, 1);
             return .{
                 .handle = client_handle,
                 .address = address.*,
@@ -211,8 +214,8 @@ pub fn Ops(comptime Backend: type) type {
                     connection.read_error = null;
                     return err;
                 }
-                const peer_closed = if (connection.peer) |peer_handle|
-                    if (backend.connection(peer_handle)) |peer| peer.closed else true
+                const peer_closed = if (connection.peer) |peer_ref|
+                    if (peer_ref.backend.connection(peer_ref.handle)) |peer| peer.closed else true
                 else
                     true;
                 if (peer_closed and deadline_ns == null) return 0;
@@ -248,8 +251,8 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const connection = backend.connection(dest) orelse return error.SocketUnconnected;
             if (connection.closed) return error.SocketUnconnected;
-            const peer_handle = connection.peer orelse return error.SocketUnconnected;
-            const peer = backend.connection(peer_handle) orelse return error.ConnectionResetByPeer;
+            const peer_ref = connection.peer orelse return error.SocketUnconnected;
+            const peer = peer_ref.backend.connection(peer_ref.handle) orelse return error.ConnectionResetByPeer;
             if (peer.closed) return error.ConnectionResetByPeer;
 
             if (connection.node) |from_node| {
@@ -257,7 +260,7 @@ pub fn Ops(comptime Backend: type) type {
                     var frame: std.ArrayList(u8) = .empty;
                     defer frame.deinit(backend.allocator);
 
-                    const payload_len = try appendStreamFrame(backend, &frame, peer_handle, header, data, splat);
+                    const payload_len = try appendStreamFrame(backend, &frame, peer_ref.handle, header, data, splat);
                     if (payload_len == 0) return 0;
 
                     const send_result = network_module.sendStreamBytesFromControl(
@@ -271,11 +274,11 @@ pub fn Ops(comptime Backend: type) type {
                     switch (send_result) {
                         .queued => |deliver_at| {
                             connection.delivery_floor_ns = deliver_at;
-                            backend.wakeConnection(peer_handle, 1);
+                            peer_ref.backend.wakeConnection(peer_ref.handle, 1);
                         },
                         .dropped => {
                             if (peer.read_error == null) peer.read_error = error.Timeout;
-                            backend.wakeConnection(peer_handle, 1);
+                            peer_ref.backend.wakeConnection(peer_ref.handle, 1);
                         },
                     }
                     return payload_len;
@@ -285,8 +288,8 @@ pub fn Ops(comptime Backend: type) type {
             const start_len = peer.inbox.items.len;
             errdefer peer.inbox.shrinkRetainingCapacity(start_len);
 
-            try appendWritevPayload(backend, &peer.inbox, header, data, splat);
-            backend.wakeConnection(peer_handle, 1);
+            try appendWritevPayload(peer_ref.backend, &peer.inbox, header, data, splat);
+            peer_ref.backend.wakeConnection(peer_ref.handle, 1);
             return peer.inbox.items.len - start_len;
         }
 
@@ -297,13 +300,14 @@ pub fn Ops(comptime Backend: type) type {
                 switch (entry.state) {
                     .listener => |listener| {
                         listener.closed = true;
+                        backend.unregisterListener(handle);
                         backend.wakeListener(handle, std.math.maxInt(usize));
                     },
                     .connection => |connection| {
                         connection.closed = true;
                         backend.wakeConnection(handle, std.math.maxInt(usize));
-                        if (connection.peer) |peer_handle| {
-                            backend.wakeConnection(peer_handle, std.math.maxInt(usize));
+                        if (connection.peer) |peer| {
+                            peer.backend.wakeConnection(peer.handle, std.math.maxInt(usize));
                         }
                     },
                     .file => |file| file.closed = true,

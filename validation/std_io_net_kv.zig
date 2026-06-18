@@ -33,7 +33,9 @@ pub const Outcome = struct {
 };
 
 const Scenario = struct {
-    io: Io,
+    server_io: Io,
+    client_io: Io,
+    harness_io: Io,
     world: *mar.World,
     control: mar.Control,
     address: Io.net.IpAddress,
@@ -61,12 +63,12 @@ const Scenario = struct {
 
     fn signal(self: *Scenario, flag: *u32) void {
         flag.* = 1;
-        self.io.futexWake(u32, flag, 1);
+        self.harness_io.futexWake(u32, flag, 1);
     }
 
     fn waitFor(self: *Scenario, flag: *u32) void {
         while (flag.* == 0) {
-            self.io.futexWait(u32, flag, 0) catch @panic("handshake wait failed");
+            self.harness_io.futexWait(u32, flag, 0) catch @panic("handshake wait failed");
         }
     }
 
@@ -75,12 +77,12 @@ const Scenario = struct {
         // no client task can run between this signal and accept parking.
         self.record("std_io_net_kv.server.accept_waiting", .{});
         self.signal(&self.accept_waiting);
-        const stream = self.listener.accept(self.io) catch @panic("std_io_net_kv accept failed");
-        defer stream.close(self.io);
+        const stream = self.listener.accept(self.server_io) catch @panic("std_io_net_kv accept failed");
+        defer stream.close(self.server_io);
         self.record("std_io_net_kv.server.accepted", .{});
 
         for (0..self.requestLimit()) |request_index| {
-            self.server.serveOne(self.io, stream) catch @panic("std_io_net_kv serve failed");
+            self.server.serveOne(self.server_io, stream) catch @panic("std_io_net_kv serve failed");
             self.record(
                 "std_io_net_kv.server.response request_index={} revision={} applied_puts={}",
                 .{ request_index, self.server.revision, self.server.applied_puts },
@@ -94,7 +96,7 @@ const Scenario = struct {
 
     fn clientTask(self: *Scenario) void {
         self.waitFor(&self.accept_waiting);
-        var client = sut.Client.connect(self.io, self.address) catch @panic("std_io_net_kv connect failed");
+        var client = sut.Client.connect(self.client_io, self.address) catch @panic("std_io_net_kv connect failed");
         defer client.deinit();
         self.record("std_io_net_kv.client.connected", .{});
 
@@ -168,20 +170,26 @@ pub fn runScenario(
         .service_nodes = 1,
         .path_capacity = 16,
     } });
-    const io = sim.env.io();
+    const server_env = try sim.envForNode(0);
+    const client_env = try sim.envForNode(1);
+    const server_io = server_env.io();
+    const client_io = client_env.io();
+    const harness_io = sim.env.io();
 
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
 
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4570) catch unreachable;
-    var listener = try address.listen(io, .{});
-    defer listener.deinit(io);
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
 
     const server_mode: sut.ServerMode = switch (mode) {
         .happy, .retry_safe => .deduplicate,
         .retry_buggy => .apply_every_put,
     };
     var scenario = Scenario{
-        .io = io,
+        .server_io = server_io,
+        .client_io = client_io,
+        .harness_io = harness_io,
         .world = &world,
         .control = sim.control,
         .address = address,
@@ -190,16 +198,16 @@ pub fn runScenario(
         .server = sut.Server.init(server_mode),
     };
 
-    var server_future = Io.async(io, Scenario.serverTask, .{&scenario});
-    var client_future = Io.async(io, Scenario.clientTask, .{&scenario});
+    var server_future = Io.async(server_io, Scenario.serverTask, .{&scenario});
+    var client_future = Io.async(client_io, Scenario.clientTask, .{&scenario});
     var controller_future = if (mode != .happy)
-        Io.async(io, Scenario.faultController, .{&scenario})
+        Io.async(harness_io, Scenario.faultController, .{&scenario})
     else
         null;
 
-    server_future.await(io);
-    client_future.await(io);
-    if (controller_future) |*future| future.await(io);
+    server_future.await(server_io);
+    client_future.await(client_io);
+    if (controller_future) |*future| future.await(harness_io);
     if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
 
     const final_value = scenario.server.get(11);

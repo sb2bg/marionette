@@ -27,6 +27,8 @@ pub const Backend = struct {
     disk: disk_module.Disk,
     sector_size: u64,
     network_control: network_module.AnyNetworkControl = network_module.AnyNetworkControl.unavailable(),
+    process_registry: ?*ProcessRegistry = null,
+    process_node: ?network_module.NodeId = null,
     next_network_node: network_module.NodeId = 0,
     futex_wait_set: ?FutexWaitSet = null,
     task_runtime: ?TaskRuntime = null,
@@ -69,6 +71,17 @@ pub const Backend = struct {
         key: usize,
     };
 
+    pub const SocketRef = struct {
+        backend: *Backend,
+        handle: SocketHandle,
+    };
+
+    pub const ListenerRef = struct {
+        backend: *Backend,
+        handle: SocketHandle,
+        state: *ListenerState,
+    };
+
     pub const ListenerState = struct {
         address: Io.net.IpAddress,
         node: ?network_module.NodeId = null,
@@ -81,7 +94,7 @@ pub const Backend = struct {
         node: ?network_module.NodeId = null,
         inbox: std.ArrayList(u8) = .empty,
         read_error: ?Io.net.Stream.Reader.Error = null,
-        peer: ?SocketHandle = null,
+        peer: ?SocketRef = null,
         delivery_floor_ns: u64 = 0,
         closed: bool = false,
     };
@@ -147,7 +160,17 @@ pub const Backend = struct {
         self.network_control = control;
     }
 
+    pub fn attachProcessRegistry(self: *Backend, registry: *ProcessRegistry, node: network_module.NodeId) void {
+        self.process_registry = registry;
+        self.process_node = node;
+    }
+
     pub fn futexKey(self: *Backend, ptr: *const u32) usize {
+        if (self.process_registry) |registry| {
+            const key = registry.futexKey(self, ptr) catch @panic("failed to allocate sim futex key");
+            return futex_module.waitKey(.futex, key);
+        }
+
         const address = @intFromPtr(ptr);
         for (self.futex_keys.items) |entry| {
             if (entry.address == address) return futex_module.waitKey(.futex, entry.key);
@@ -192,6 +215,11 @@ pub const Backend = struct {
 
     pub fn allocateNetworkNode(self: *Backend) error{NetworkDown}!?network_module.NodeId {
         const process_count = network_module.processCountFromControl(self.network_control) orelse return null;
+        if (self.process_node) |node| {
+            if (@as(usize, node) >= process_count) return error.NetworkDown;
+            return node;
+        }
+
         if (@as(usize, self.next_network_node) >= process_count) return error.NetworkDown;
         const node = self.next_network_node;
         self.next_network_node += 1;
@@ -199,8 +227,13 @@ pub const Backend = struct {
     }
 
     pub fn createHandle(self: *Backend, state: HandleEntry.State) std.mem.Allocator.Error!SocketHandle {
-        const handle = self.next_handle;
-        self.next_handle += 1;
+        const handle = if (self.process_registry) |registry|
+            registry.allocateHandle()
+        else handle: {
+            const next = self.next_handle;
+            self.next_handle += 1;
+            break :handle next;
+        };
         try self.handles.append(self.allocator, .{
             .handle = handle,
             .state = state,
@@ -224,6 +257,26 @@ pub const Backend = struct {
             .file => {},
         };
         return null;
+    }
+
+    pub fn findOpenListenerRef(self: *Backend, address: *const Io.net.IpAddress) ?ListenerRef {
+        if (self.process_registry) |registry| return registry.findOpenListener(address);
+        const entry = self.findOpenListener(address) orelse return null;
+        return .{
+            .backend = self,
+            .handle = entry.handle,
+            .state = entry.state.listener,
+        };
+    }
+
+    pub fn registerListener(self: *Backend, handle: SocketHandle, address: Io.net.IpAddress) std.mem.Allocator.Error!void {
+        if (self.process_registry) |registry| {
+            try registry.registerListener(self, handle, address);
+        }
+    }
+
+    pub fn unregisterListener(self: *Backend, handle: SocketHandle) void {
+        if (self.process_registry) |registry| registry.unregisterListener(self, handle);
     }
 
     pub fn listener(self: *Backend, handle: SocketHandle) ?*ListenerState {
@@ -290,17 +343,27 @@ pub const Backend = struct {
         return Io.Timestamp.fromNanoseconds(@intCast(self.world.now()));
     }
 
-    /// Invalidate all file-layer state after a disk crash.
+    /// Invalidate process-local state after a disk crash.
     ///
     /// A disk crash models a machine crash, which also kills the process:
-    /// every open file handle dies with it, and cached lengths must not
-    /// survive into the "restarted" process. Metadata is marked stale and
-    /// re-derived from disk truth on first touch; timestamps are kept,
-    /// since filesystem timestamps survive a real machine crash.
+    /// every open handle dies with it. File metadata is marked stale and
+    /// re-derived from disk truth on first touch; timestamps are kept since
+    /// filesystem timestamps survive a real machine crash.
     pub fn onDiskCrash(self: *Backend) void {
         for (self.handles.items) |*entry| switch (entry.state) {
             .file => |file_state| file_state.closed = true,
-            .listener, .connection => {},
+            .listener => |listener_state| {
+                listener_state.closed = true;
+                self.unregisterListener(entry.handle);
+                self.wakeListener(entry.handle, std.math.maxInt(usize));
+            },
+            .connection => |connection_state| {
+                connection_state.closed = true;
+                self.wakeConnection(entry.handle, std.math.maxInt(usize));
+                if (connection_state.peer) |peer| {
+                    peer.backend.wakeConnection(peer.handle, std.math.maxInt(usize));
+                }
+            },
         };
         // Tombstones go stale too: a crash can roll back an unsynced
         // deletion, in which case the tombstoned entry must be revivable
@@ -341,6 +404,163 @@ pub const Backend = struct {
     }
 };
 
+pub const ProcessRegistry = struct {
+    allocator: std.mem.Allocator,
+    listeners: std.ArrayList(ListenerRegistration) = .empty,
+    futex_keys: std.ArrayList(FutexKeyRegistration) = .empty,
+    next_futex_key: usize = 1,
+    next_handle: SocketHandle = 1000,
+
+    const ListenerRegistration = struct {
+        backend: *Backend,
+        handle: SocketHandle,
+        address: Io.net.IpAddress,
+    };
+
+    const FutexKeyRegistration = struct {
+        backend: *Backend,
+        address: usize,
+        key: usize,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) ProcessRegistry {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *ProcessRegistry) void {
+        self.futex_keys.deinit(self.allocator);
+        self.listeners.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn allocateHandle(self: *ProcessRegistry) SocketHandle {
+        const handle = self.next_handle;
+        self.next_handle += 1;
+        return handle;
+    }
+
+    fn registerListener(
+        self: *ProcessRegistry,
+        backend: *Backend,
+        handle: SocketHandle,
+        address: Io.net.IpAddress,
+    ) std.mem.Allocator.Error!void {
+        try self.listeners.append(self.allocator, .{
+            .backend = backend,
+            .handle = handle,
+            .address = address,
+        });
+    }
+
+    fn unregisterListener(self: *ProcessRegistry, backend: *Backend, handle: SocketHandle) void {
+        for (self.listeners.items, 0..) |entry, index| {
+            if (entry.backend == backend and entry.handle == handle) {
+                _ = self.listeners.swapRemove(index);
+                return;
+            }
+        }
+    }
+
+    fn findOpenListener(self: *ProcessRegistry, address: *const Io.net.IpAddress) ?Backend.ListenerRef {
+        for (self.listeners.items) |entry| {
+            if (!entry.address.eql(address)) continue;
+            const listener = entry.backend.listener(entry.handle) orelse continue;
+            if (listener.closed) continue;
+            return .{
+                .backend = entry.backend,
+                .handle = entry.handle,
+                .state = listener,
+            };
+        }
+        return null;
+    }
+
+    fn futexKey(self: *ProcessRegistry, backend: *Backend, ptr: *const u32) std.mem.Allocator.Error!usize {
+        const address = @intFromPtr(ptr);
+        for (self.futex_keys.items) |entry| {
+            if (entry.backend == backend and entry.address == address) return entry.key;
+        }
+
+        const key = self.next_futex_key;
+        self.next_futex_key += 1;
+        try self.futex_keys.append(self.allocator, .{
+            .backend = backend,
+            .address = address,
+            .key = key,
+        });
+        return key;
+    }
+};
+
+pub const ProcessRuntime = struct {
+    allocator: std.mem.Allocator,
+    world: *World,
+    disk: disk_module.Disk,
+    sector_size: u64,
+    registry: ProcessRegistry,
+    backends: []Backend,
+
+    pub fn init(
+        self: *ProcessRuntime,
+        allocator: std.mem.Allocator,
+        world: *World,
+        disk: disk_module.Disk,
+        sector_size: u64,
+        process_count: usize,
+    ) std.mem.Allocator.Error!void {
+        std.debug.assert(process_count > 0);
+
+        const backends = try allocator.alloc(Backend, process_count);
+        errdefer allocator.free(backends);
+
+        self.* = .{
+            .allocator = allocator,
+            .world = world,
+            .disk = disk,
+            .sector_size = sector_size,
+            .registry = .init(allocator),
+            .backends = backends,
+        };
+
+        for (self.backends, 0..) |*backend, index| {
+            backend.* = Backend.init(allocator, world, disk, sector_size);
+            backend.attachProcessRegistry(&self.registry, @intCast(index));
+        }
+    }
+
+    pub fn deinit(self: *ProcessRuntime) void {
+        for (self.backends) |*backend| backend.deinit();
+        self.allocator.free(self.backends);
+        self.registry.deinit();
+        self.* = undefined;
+    }
+
+    pub fn backendForNode(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!*Backend {
+        if (@as(usize, node) >= self.backends.len) return error.InvalidNode;
+        return &self.backends[node];
+    }
+
+    pub fn io(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!Io {
+        return (try self.backendForNode(node)).io();
+    }
+
+    pub fn attachNetworkControl(self: *ProcessRuntime, control: network_module.AnyNetworkControl) void {
+        for (self.backends) |*backend| backend.attachNetworkControl(control);
+    }
+
+    pub fn attachFutexWaitSet(self: *ProcessRuntime, wait_set: FutexWaitSet) void {
+        for (self.backends) |*backend| backend.attachFutexWaitSet(wait_set);
+    }
+
+    pub fn attachTaskRuntime(self: *ProcessRuntime, runtime: TaskRuntime) void {
+        for (self.backends) |*backend| backend.attachTaskRuntime(runtime);
+    }
+
+    pub fn onDiskCrash(self: *ProcessRuntime) void {
+        for (self.backends) |*backend| backend.onDiskCrash();
+    }
+};
+
 const file_ops = file_module.Ops(Backend);
 const futex_ops = futex_module.Ops(Backend);
 const net_ops = net_module.Ops(Backend);
@@ -354,6 +574,17 @@ pub fn deinitBackendOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
 pub fn onDiskCrashOpaque(ptr: *anyopaque) void {
     const backend: *Backend = @ptrCast(@alignCast(ptr));
     backend.onDiskCrash();
+}
+
+pub fn deinitProcessRuntimeOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const runtime: *ProcessRuntime = @ptrCast(@alignCast(ptr));
+    runtime.deinit();
+    allocator.destroy(runtime);
+}
+
+pub fn onProcessRuntimeDiskCrashOpaque(ptr: *anyopaque) void {
+    const runtime: *ProcessRuntime = @ptrCast(@alignCast(ptr));
+    runtime.onDiskCrash();
 }
 
 const sim_vtable: Io.VTable = .{
@@ -669,7 +900,6 @@ fn simRandom(userdata: ?*anyopaque, buffer: []u8) void {
         traceField("digest", .{ .uint = digest }),
     }) catch @panic("failed to record simulated io random");
 }
-
 
 fn simRandomSecure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
     simRandom(userdata, buffer);

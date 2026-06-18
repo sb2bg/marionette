@@ -187,6 +187,13 @@ pub const World = struct {
     pub const Simulation = struct {
         env: env_module.Env,
         control: env_module.SimControl,
+        io_runtime: *io_module.ProcessRuntime,
+
+        pub fn envForNode(self: Simulation, node: network_module.NodeId) !env_module.Env {
+            var env = self.env;
+            env.io_backend = try self.io_runtime.io(node);
+            return env;
+        }
 
         pub fn endpoint(self: Simulation, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
             return try network_module.endpointFromControl(Payload, self.control.network, node);
@@ -244,25 +251,27 @@ pub const World = struct {
         try self.registerTeardown(sim_disk, deinitSimDisk);
         sim_disk_registered = true;
 
-        const sim_io = try self.allocator.create(io_module.Backend);
-        var sim_io_registered = false;
-        errdefer if (!sim_io_registered) self.allocator.destroy(sim_io);
-
-        sim_io.* = io_module.Backend.init(self.allocator, self, sim_disk.disk(), sim_disk.sectorSize());
-        errdefer if (!sim_io_registered) sim_io.deinit();
-
-        try self.registerTeardown(sim_io, io_module.deinitBackendOpaque);
-        sim_io_registered = true;
-
-        sim_disk.setCrashObserver(.{
-            .ptr = sim_io,
-            .on_crash = io_module.onDiskCrashOpaque,
-        });
-
         const network_control = if (options.network) |network_options|
             try network_module.initSimControl(self, network_options)
         else
             network_module.AnyNetworkControl.unavailable();
+        const process_count = network_module.processCountFromControl(network_control) orelse 1;
+
+        const sim_io = try self.allocator.create(io_module.ProcessRuntime);
+        var sim_io_registered = false;
+        errdefer if (!sim_io_registered) self.allocator.destroy(sim_io);
+
+        try sim_io.init(self.allocator, self, sim_disk.disk(), sim_disk.sectorSize(), process_count);
+        errdefer if (!sim_io_registered) sim_io.deinit();
+
+        try self.registerTeardown(sim_io, io_module.deinitProcessRuntimeOpaque);
+        sim_io_registered = true;
+
+        sim_disk.setCrashObserver(.{
+            .ptr = sim_io,
+            .on_crash = io_module.onProcessRuntimeDiskCrashOpaque,
+        });
+
         sim_io.attachNetworkControl(network_control);
 
         // The simulation gets a cooperative scheduler owned by the world,
@@ -284,7 +293,7 @@ pub const World = struct {
 
         return .{
             .env = .{
-                .io_backend = sim_io.io(),
+                .io_backend = (try sim_io.io(0)),
                 .disk = sim_disk.disk(),
                 .clock = env_module.Clock.fromWorld(self),
                 .random = env_module.Random.fromWorld(self),
@@ -297,6 +306,7 @@ pub const World = struct {
                 .tasks = scheduler_module.taskControl(scheduler),
                 .world = self,
             },
+            .io_runtime = sim_io,
         };
     }
 

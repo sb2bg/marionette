@@ -1764,7 +1764,8 @@ const NetScenarioKind = enum {
 };
 
 const NetScenario = struct {
-    io: Io,
+    server_io: Io,
+    client_io: Io,
     world: *World,
     address: Io.net.IpAddress,
     server: Io.net.Server,
@@ -1778,8 +1779,8 @@ const NetScenario = struct {
 
     fn acceptor(_: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        const stream = self.server.accept(self.io) catch @panic("accept failed");
-        defer stream.close(self.io);
+        const stream = self.server.accept(self.server_io) catch @panic("accept failed");
+        defer stream.close(self.server_io);
         self.accepted = true;
         self.world.record("io.net.accepted", .{}) catch @panic("record failed");
     }
@@ -1788,21 +1789,21 @@ const NetScenario = struct {
         const self: *@This() = @ptrCast(@alignCast(arg));
         scheduler.yieldUntilBlockedCount(1);
 
-        const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
-        defer stream.close(self.io);
+        const stream = self.address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
+        defer stream.close(self.client_io);
         self.world.record("io.net.connected", .{}) catch @panic("record failed");
     }
 
     fn exchangeServer(_: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        const stream = self.server.accept(self.io) catch @panic("accept failed");
-        defer stream.close(self.io);
+        const stream = self.server.accept(self.server_io) catch @panic("accept failed");
+        defer stream.close(self.server_io);
         self.accepted = true;
         self.world.record("io.net.accepted", .{}) catch @panic("record failed");
 
         self.reader_started = true;
         var buffers: [1][]u8 = .{&self.read_bytes};
-        self.read_len = self.io.vtable.netRead(self.io.userdata, stream.socket.handle, &buffers) catch |err| {
+        self.read_len = self.server_io.vtable.netRead(self.server_io.userdata, stream.socket.handle, &buffers) catch |err| {
             self.read_error = err;
             self.world.record("io.net.read_error error={s}", .{@errorName(err)}) catch @panic("record failed");
             return;
@@ -1814,9 +1815,9 @@ const NetScenario = struct {
         const self: *@This() = @ptrCast(@alignCast(arg));
         scheduler.yieldUntilBlockedCount(1);
 
-        const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
+        const stream = self.address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
         defer {
-            if (self.close_client) stream.close(self.io);
+            if (self.close_client) stream.close(self.client_io);
         }
 
         while (!self.reader_started) {
@@ -1827,7 +1828,7 @@ const NetScenario = struct {
         scheduler.yieldUntilBlockedCount(1);
 
         const chunks: [1][]const u8 = .{"ping"};
-        const written = self.io.vtable.netWrite(self.io.userdata, stream.socket.handle, "", &chunks, 1) catch @panic("write failed");
+        const written = self.client_io.vtable.netWrite(self.client_io.userdata, stream.socket.handle, "", &chunks, 1) catch @panic("write failed");
         if (written != 4) @panic("short write");
         self.world.record("io.net.wrote len={}", .{written}) catch @panic("record failed");
     }
@@ -1837,7 +1838,8 @@ const partition_retry_key: WaitKey = 900_001;
 const partition_done_key: WaitKey = 900_002;
 
 const NetPartitionScenario = struct {
-    io: Io,
+    server_io: Io,
+    client_io: Io,
     world: *World,
     network_control: network_module.AnyNetworkControl,
     address: Io.net.IpAddress,
@@ -1850,15 +1852,15 @@ const NetPartitionScenario = struct {
 
     fn serverTask(scheduler: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
-        const stream = self.server.accept(self.io) catch @panic("accept failed");
-        defer stream.close(self.io);
+        const stream = self.server.accept(self.server_io) catch @panic("accept failed");
+        defer stream.close(self.server_io);
         self.world.record("io.net.partition.accepted", .{}) catch @panic("record failed");
 
         self.reader_started = true;
         var first_read_bytes: [4]u8 = undefined;
         var first_buffers: [1][]u8 = .{&first_read_bytes};
-        const first_read_len = self.io.vtable.netRead(
-            self.io.userdata,
+        const first_read_len = self.server_io.vtable.netRead(
+            self.server_io.userdata,
             stream.socket.handle,
             &first_buffers,
         ) catch |err| read_error: {
@@ -1874,8 +1876,8 @@ const NetPartitionScenario = struct {
         _ = scheduler.wake(partition_retry_key, 1) catch @panic("retry wake failed");
 
         var second_buffers: [1][]u8 = .{&self.second_read_bytes};
-        self.second_read_len = self.io.vtable.netRead(
-            self.io.userdata,
+        self.second_read_len = self.server_io.vtable.netRead(
+            self.server_io.userdata,
             stream.socket.handle,
             &second_buffers,
         ) catch @panic("read after heal failed");
@@ -1888,8 +1890,8 @@ const NetPartitionScenario = struct {
         const self: *@This() = @ptrCast(@alignCast(arg));
         scheduler.yieldUntilBlockedCount(1);
 
-        const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
-        defer stream.close(self.io);
+        const stream = self.address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
+        defer stream.close(self.client_io);
 
         while (!self.reader_started) {
             self.client_yields += 1;
@@ -1899,8 +1901,8 @@ const NetPartitionScenario = struct {
         scheduler.yieldUntilBlockedCount(1);
 
         const first_chunks: [1][]const u8 = .{"ping"};
-        const first_written = self.io.vtable.netWrite(
-            self.io.userdata,
+        const first_written = self.client_io.vtable.netWrite(
+            self.client_io.userdata,
             stream.socket.handle,
             "",
             &first_chunks,
@@ -1915,8 +1917,8 @@ const NetPartitionScenario = struct {
 
         self.network_control.heal() catch @panic("heal failed");
         const retry_chunks: [1][]const u8 = .{"pong"};
-        const retry_written = self.io.vtable.netWrite(
-            self.io.userdata,
+        const retry_written = self.client_io.vtable.netWrite(
+            self.client_io.userdata,
             stream.socket.handle,
             "",
             &retry_chunks,
@@ -1946,19 +1948,22 @@ fn runNetTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenarioKind) !
         runtime_allocator.destroy(scheduler);
     }
 
-    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
-    defer backend.deinit();
-    backend.attachFutexWaitSet(futexWaitSet(scheduler));
+    var io_runtime: io_module.ProcessRuntime = undefined;
+    try io_runtime.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096, 2);
+    defer io_runtime.deinit();
+    io_runtime.attachFutexWaitSet(futexWaitSet(scheduler));
 
-    const io = backend.io();
+    const server_io = try io_runtime.io(0);
+    const client_io = try io_runtime.io(1);
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4567) catch unreachable;
-    var server = try address.listen(io, .{});
-    defer server.deinit(io);
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
 
     const scenario = try runtime_allocator.create(NetScenario);
     defer runtime_allocator.destroy(scenario);
     scenario.* = .{
-        .io = io,
+        .server_io = server_io,
+        .client_io = client_io,
         .world = world,
         .address = address,
         .server = server,
@@ -2034,20 +2039,23 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
         .accept, .exchange => {},
     }
 
-    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
-    defer backend.deinit();
-    backend.attachFutexWaitSet(futexWaitSet(scheduler));
-    backend.attachNetworkControl(network_control);
+    var io_runtime: io_module.ProcessRuntime = undefined;
+    try io_runtime.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096, 2);
+    defer io_runtime.deinit();
+    io_runtime.attachFutexWaitSet(futexWaitSet(scheduler));
+    io_runtime.attachNetworkControl(network_control);
 
-    const io = backend.io();
+    const server_io = try io_runtime.io(0);
+    const client_io = try io_runtime.io(1);
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4568) catch unreachable;
-    var server = try address.listen(io, .{});
-    defer server.deinit(io);
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
 
     const scenario = try runtime_allocator.create(NetScenario);
     defer runtime_allocator.destroy(scenario);
     scenario.* = .{
-        .io = io,
+        .server_io = server_io,
+        .client_io = client_io,
         .world = world,
         .address = address,
         .server = server,
@@ -2107,20 +2115,23 @@ fn runNetworkPartitionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     const network_control = try network_module.initSimControl(world, .{ .nodes = 2 });
     try network_control.setLatency(.{ .min_latency_ns = 30 });
 
-    var backend = io_module.Backend.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096);
-    defer backend.deinit();
-    backend.attachFutexWaitSet(futexWaitSet(scheduler));
-    backend.attachNetworkControl(network_control);
+    var io_runtime: io_module.ProcessRuntime = undefined;
+    try io_runtime.init(runtime_allocator, world, disk_module.Disk.unavailable(), 4096, 2);
+    defer io_runtime.deinit();
+    io_runtime.attachFutexWaitSet(futexWaitSet(scheduler));
+    io_runtime.attachNetworkControl(network_control);
 
-    const io = backend.io();
+    const server_io = try io_runtime.io(0);
+    const client_io = try io_runtime.io(1);
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4569) catch unreachable;
-    var server = try address.listen(io, .{});
-    defer server.deinit(io);
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
 
     const scenario = try runtime_allocator.create(NetPartitionScenario);
     defer runtime_allocator.destroy(scenario);
     scenario.* = .{
-        .io = io,
+        .server_io = server_io,
+        .client_io = client_io,
         .world = world,
         .network_control = network_control,
         .address = address,
