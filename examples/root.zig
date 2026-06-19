@@ -11,6 +11,10 @@ pub const idempotency_bug = @import("idempotency_bug.zig");
 pub const toy_sql_db = @import("toy_sql_db.zig");
 pub const std_io_net_kv = @import("std_io_net_kv.zig");
 
+test {
+    _ = @import("wal_record.zig");
+}
+
 test "examples: retry queue scenario is replayable" {
     const a = try retry_queue.runScenario(std.testing.allocator, 0xC0FFEE);
     defer std.testing.allocator.free(a);
@@ -100,11 +104,33 @@ test "examples: durable broadcast scenario is replayable" {
     defer std.testing.allocator.free(b);
 
     try std.testing.expectEqualStrings(a, b);
-    try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=durable-broadcast-smoke") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=durable-broadcast-network-faults") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "disk.sync") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "network.lossiness drop_rate=10/100") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "durable.broadcast.quorum op=1 value=41") != null);
     try std.testing.expect(std.mem.indexOf(u8, a, "durable.check quorum_durable=ok") != null);
+}
+
+test "examples: durable broadcast crash recovery scenario is replayable" {
+    const trace = try durable_broadcast.runCrashRecoveryScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "run.name value=durable-broadcast-crash-recovery") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.crash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.restart") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "durable.recover.record offset=0 op=1 value=41") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "network.heal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "durable.check quorum_durable=ok") != null);
+}
+
+test "examples: durable broadcast multi-record recovery reaches record one" {
+    const trace = try durable_broadcast.runMultiRecordScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "run.name value=durable-broadcast-multi-record") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "durable.append op=2 value=42 offset=24 sync=sync") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "durable.recover.record offset=24 op=2 value=42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "durable.check quorum_durable=ok") != null);
 }
 
 test "examples: durable broadcast checker catches broadcast before sync" {

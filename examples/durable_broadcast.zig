@@ -5,11 +5,14 @@
 
 const std = @import("std");
 const mar = @import("marionette");
+const wal_record = @import("wal_record.zig");
 
 pub const tick_ns: mar.Duration = 1_000_000;
 const log_path = "durable_broadcast.wal";
-const record_size = 24;
-const magic: u32 = 0x4d444231;
+const Record = wal_record.Fixed(u64, 8);
+const record_size = Record.record_size;
+const max_log_records = 2;
+const magic: u32 = 0x4d444231; // MDB1
 const replica_count = 3;
 const quorum = 2;
 const client_node_id: mar.NodeId = replica_count;
@@ -39,11 +42,19 @@ pub const checks = [_]mar.StateCheck(Harness){
 };
 
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    return runTrace(allocator, seed, "durable-broadcast-smoke", scenario);
+    return runTrace(allocator, seed, "durable-broadcast-network-faults", scenario);
 }
 
 pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return runReport(allocator, seed, "durable-broadcast-smoke", scenario);
+    return runReport(allocator, seed, "durable-broadcast-network-faults", scenario);
+}
+
+pub fn runCrashRecoveryScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    return runTrace(allocator, seed, "durable-broadcast-crash-recovery", crashRecoveryScenario);
+}
+
+pub fn runMultiRecordScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    return runTrace(allocator, seed, "durable-broadcast-multi-record", multiRecordScenario);
 }
 
 pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
@@ -114,6 +125,48 @@ pub const Harness = struct {
 };
 
 pub fn scenario(harness: *Harness) !void {
+    try configureNetworkFaults(harness);
+    try harness.service.submit(.{
+        .op = .{ .id = 1, .value = 41 },
+        .retry_limit = 8,
+        .sync_before_broadcast = true,
+    });
+}
+
+pub fn crashRecoveryScenario(harness: *Harness) !void {
+    try harness.service.submit(.{
+        .op = .{ .id = 1, .value = 41 },
+        .retry_limit = 2,
+        .sync_before_broadcast = true,
+    });
+
+    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try harness.control.disk.crash();
+    try harness.control.disk.restart();
+    try harness.service.recover();
+
+    try harness.control.network.heal();
+    try harness.service.broadcastRecovered(3);
+}
+
+pub fn multiRecordScenario(harness: *Harness) !void {
+    try harness.service.submit(.{
+        .op = .{ .id = 1, .value = 41 },
+        .retry_limit = 2,
+        .sync_before_broadcast = true,
+    });
+    try harness.service.submit(.{
+        .op = .{ .id = 2, .value = 42 },
+        .retry_limit = 2,
+        .sync_before_broadcast = true,
+    });
+
+    try harness.control.disk.crash();
+    try harness.control.disk.restart();
+    try harness.service.recover();
+}
+
+fn configureNetworkFaults(harness: *Harness) !void {
     try harness.control.network.setLossiness(.{ .drop_rate = .percent(10) });
     try harness.control.network.setLatency(.{
         .min_latency_ns = tick_ns,
@@ -129,20 +182,6 @@ pub fn scenario(harness: *Harness) !void {
         .partition_stability_min_ns = 2 * tick_ns,
         .unpartition_stability_min_ns = 2 * tick_ns,
     });
-
-    try harness.service.submit(.{
-        .op = .{ .id = 1, .value = 41 },
-        .retry_limit = 8,
-        .sync_before_broadcast = true,
-    });
-
-    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.service.recover();
-
-    try harness.control.network.heal();
-    try harness.service.broadcastRecovered(3);
 }
 
 pub fn buggyScenario(harness: *Harness) !void {
@@ -188,6 +227,7 @@ const DurableBroadcast = struct {
     replicas: [replica_count]Replica,
     durable_op: ?Op = null,
     last_quorum_op: ?Op = null,
+    next_offset: u64 = 0,
 
     fn init(env: mar.Env, client: Endpoint, replica_endpoints: [replica_count]Endpoint) DurableBroadcast {
         return .{
@@ -222,12 +262,14 @@ const DurableBroadcast = struct {
     fn append(self: *DurableBroadcast, op: Op, sync_mode: SyncMode) !void {
         var bytes: [record_size]u8 = @splat(0);
         encodeRecord(&bytes, op);
+        const offset = self.next_offset;
 
         try self.env.disk.write(.{
             .path = log_path,
-            .offset = 0,
+            .offset = offset,
             .bytes = &bytes,
         });
+        self.next_offset += record_size;
 
         if (sync_mode == .sync) {
             try self.env.disk.sync(.{ .path = log_path });
@@ -235,28 +277,33 @@ const DurableBroadcast = struct {
         }
 
         try self.env.record(
-            "durable.append op={} value={} sync={s}",
-            .{ op.id, op.value, @tagName(sync_mode) },
+            "durable.append op={} value={} offset={} sync={s}",
+            .{ op.id, op.value, offset, @tagName(sync_mode) },
         );
     }
 
     fn recover(self: *DurableBroadcast) !void {
         self.durable_op = null;
+        self.next_offset = 0;
 
-        var bytes: [record_size]u8 = @splat(0);
-        try self.env.disk.read(.{
-            .path = log_path,
-            .offset = 0,
-            .buffer = &bytes,
-        });
+        for (0..max_log_records) |index| {
+            const offset = index * record_size;
+            var bytes: [record_size]u8 = @splat(0);
+            try self.env.disk.read(.{
+                .path = log_path,
+                .offset = offset,
+                .buffer = &bytes,
+            });
 
-        const op = decodeRecord(&bytes) orelse {
-            try self.env.record("durable.recover.reject offset=0", .{});
-            return;
-        };
+            const op = decodeRecord(&bytes) orelse {
+                try self.env.record("durable.recover.reject offset={}", .{offset});
+                break;
+            };
 
-        self.durable_op = op;
-        try self.env.record("durable.recover.record op={} value={}", .{ op.id, op.value });
+            self.durable_op = op;
+            self.next_offset = offset + record_size;
+            try self.env.record("durable.recover.record offset={} op={} value={}", .{ offset, op.id, op.value });
+        }
     }
 
     fn broadcast(self: *DurableBroadcast, op: Op, retry_limit: u8) !void {
@@ -400,60 +447,19 @@ fn sameOp(maybe_op: ?Op, expected: Op) bool {
 }
 
 fn encodeRecord(bytes: *[record_size]u8, op: Op) void {
-    putU32(bytes[0..4], magic);
-    putU64(bytes[4..12], op.id);
-    putU64(bytes[12..20], op.value);
-    putU32(bytes[20..24], checksum(op));
+    var payload: Record.Payload = @splat(0);
+    std.mem.writeInt(u64, &payload, op.value, .little);
+    bytes.* = Record.encode(magic, op.id, payload);
 }
 
 fn decodeRecord(bytes: *const [record_size]u8) ?Op {
-    if (readU32(bytes[0..4]) != magic) return null;
-
+    const decoded = Record.decodeStrict(bytes, magic) orelse return null;
     const op: Op = .{
-        .id = readU64(bytes[4..12]),
-        .value = readU64(bytes[12..20]),
+        .id = decoded.id,
+        .value = std.mem.readInt(u64, &decoded.payload, .little),
     };
     if (op.id == 0) return null;
-    if (readU32(bytes[20..24]) != checksum(op)) return null;
     return op;
-}
-
-fn checksum(op: Op) u32 {
-    const folded_id: u32 = @truncate(op.id ^ (op.id >> 32));
-    const folded_value: u32 = @truncate(op.value ^ (op.value >> 32));
-    return magic ^ std.math.rotl(u32, folded_id, 7) ^ std.math.rotl(u32, folded_value, 17) ^ 0x5a5a_a5a5;
-}
-
-fn putU32(bytes: []u8, value: u32) void {
-    std.debug.assert(bytes.len == 4);
-    bytes[0] = @as(u8, @truncate(value));
-    bytes[1] = @as(u8, @truncate(value >> 8));
-    bytes[2] = @as(u8, @truncate(value >> 16));
-    bytes[3] = @as(u8, @truncate(value >> 24));
-}
-
-fn readU32(bytes: []const u8) u32 {
-    std.debug.assert(bytes.len == 4);
-    return @as(u32, bytes[0]) |
-        (@as(u32, bytes[1]) << 8) |
-        (@as(u32, bytes[2]) << 16) |
-        (@as(u32, bytes[3]) << 24);
-}
-
-fn putU64(bytes: []u8, value: u64) void {
-    std.debug.assert(bytes.len == 8);
-    for (0..8) |index| {
-        bytes[index] = @as(u8, @truncate(value >> @intCast(index * 8)));
-    }
-}
-
-fn readU64(bytes: []const u8) u64 {
-    std.debug.assert(bytes.len == 8);
-    var value: u64 = 0;
-    for (0..8) |index| {
-        value |= @as(u64, bytes[index]) << @intCast(index * 8);
-    }
-    return value;
 }
 
 fn countTrue(values: *const [replica_count]bool) u8 {

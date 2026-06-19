@@ -7,12 +7,14 @@
 
 const std = @import("std");
 const mar = @import("marionette");
+const wal_record = @import("wal_record.zig");
 
 pub const tick_ns: mar.Duration = 1_000_000;
 const wal_path = "kv.wal";
-const record_size = 16;
 const scenario_write_count = 2;
-const magic: u32 = 0x4d4b5631;
+const Record = wal_record.Fixed(u32, 4);
+const record_size = Record.record_size;
+const magic: u32 = 0x4d4b5631; // MKV1
 const committed_key: u32 = 1;
 const committed_value: u32 = 41;
 const volatile_key: u32 = 2;
@@ -210,48 +212,21 @@ const KVStore = struct {
 };
 
 fn encodeRecord(bytes: *[record_size]u8, entry: Entry) void {
-    putU32(bytes[0..4], magic);
-    putU32(bytes[4..8], entry.key);
-    putU32(bytes[8..12], entry.value);
-    putU32(bytes[12..16], checksum(entry.key, entry.value));
+    var payload: Record.Payload = @splat(0);
+    std.mem.writeInt(u32, &payload, entry.value, .little);
+    bytes.* = Record.encode(magic, entry.key, payload);
 }
 
 fn decodeRecord(bytes: *const [record_size]u8, mode: RecoveryMode) ?Entry {
-    if (readU32(bytes[0..4]) != magic) return null;
+    const decoded = switch (mode) {
+        .strict => Record.decodeStrict(bytes, magic),
+        .buggy_accept_magic_only => Record.decodeMagicOnly(bytes, magic),
+    } orelse return null;
 
-    const entry: Entry = .{
-        .key = readU32(bytes[4..8]),
-        .value = readU32(bytes[8..12]),
+    return .{
+        .key = decoded.id,
+        .value = std.mem.readInt(u32, &decoded.payload, .little),
     };
-
-    switch (mode) {
-        .strict => {
-            if (readU32(bytes[12..16]) != checksum(entry.key, entry.value)) return null;
-        },
-        .buggy_accept_magic_only => {},
-    }
-
-    return entry;
-}
-
-fn checksum(key: u32, value: u32) u32 {
-    return magic ^ std.math.rotl(u32, key, 7) ^ std.math.rotl(u32, value, 17) ^ 0xa5a5_5a5a;
-}
-
-fn putU32(bytes: []u8, value: u32) void {
-    std.debug.assert(bytes.len == 4);
-    bytes[0] = @as(u8, @truncate(value));
-    bytes[1] = @as(u8, @truncate(value >> 8));
-    bytes[2] = @as(u8, @truncate(value >> 16));
-    bytes[3] = @as(u8, @truncate(value >> 24));
-}
-
-fn readU32(bytes: []const u8) u32 {
-    std.debug.assert(bytes.len == 4);
-    return @as(u32, bytes[0]) |
-        (@as(u32, bytes[1]) << 8) |
-        (@as(u32, bytes[2]) << 16) |
-        (@as(u32, bytes[3]) << 24);
 }
 
 test "kv store: recovery passes through expectation helper" {
