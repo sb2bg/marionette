@@ -75,7 +75,9 @@ pub fn Ops(comptime Backend: type) type {
             // Cooperative atomicity: no task can run between this value check
             // and the park unless this function yields.
             const wait_set = backend.futex_wait_set orelse @panic("sim futex wait requires an attached scheduler");
-            switch (wait_set.blockUntil(backend.futexKey(ptr), deadline_ns)) {
+            const key = backend.beginFutexWait(ptr);
+            defer backend.endFutexWait(ptr);
+            switch (wait_set.blockUntil(key, deadline_ns)) {
                 .woken => {},
                 .timed_out => {},
             }
@@ -110,7 +112,8 @@ pub fn Ops(comptime Backend: type) type {
             if (max_waiters == 0) return;
             const backend = backendFromUserdata(userdata);
             const wait_set = backend.futex_wait_set orelse return;
-            _ = wait_set.wake(backend.futexKey(ptr), max_waiters);
+            const key = backend.futexWakeKey(ptr) orelse return;
+            _ = wait_set.wake(key, max_waiters);
         }
     };
 }

@@ -71,6 +71,7 @@ pub const Backend = struct {
     const FutexKeyEntry = struct {
         address: usize,
         key: usize,
+        waiters: usize = 0,
     };
 
     pub const SocketRef = struct {
@@ -89,6 +90,7 @@ pub const Backend = struct {
         node: ?network_module.NodeId = null,
         pending: std.ArrayList(SocketHandle) = .empty,
         closed: bool = false,
+        waiters: usize = 0,
     };
 
     pub const ConnectionState = struct {
@@ -99,6 +101,7 @@ pub const Backend = struct {
         peer: ?SocketRef = null,
         delivery_floor_ns: u64 = 0,
         closed: bool = false,
+        waiters: usize = 0,
     };
 
     pub const FileState = struct {
@@ -167,21 +170,32 @@ pub const Backend = struct {
         self.process_node = node;
     }
 
-    pub fn futexKey(self: *Backend, ptr: *const u32) usize {
+    fn findFutexKeyEntry(self: *Backend, address: usize) ?usize {
+        for (self.futex_keys.items, 0..) |entry, index| {
+            if (entry.address == address) return index;
+        }
+        return null;
+    }
+
+    fn retireFutexKeyAt(self: *Backend, index: usize) void {
+        std.debug.assert(self.futex_keys.items[index].waiters == 0);
+        _ = self.futex_keys.swapRemove(index);
+    }
+
+    pub fn beginFutexWait(self: *Backend, ptr: *const u32) usize {
         if (self.process_registry) |registry| {
-            const key = registry.futexKey(self, ptr) catch @panic("failed to allocate sim futex key");
+            const key = registry.beginFutexWait(self, ptr) catch @panic("failed to allocate sim futex key");
             return futex_module.waitKey(.futex, key);
         }
 
         const address = @intFromPtr(ptr);
         // Sim futexes intentionally key by pointer identity within a backend.
         // If an allocator later reuses the address for a different futex after
-        // all old waiters are gone, reusing the logical key preserves valid
-        // program behavior while keeping raw addresses out of deterministic
-        // traces. Retiring these entries requires proving no waiter still
-        // holds the old key.
-        for (self.futex_keys.items) |entry| {
-            if (entry.address == address) return futex_module.waitKey(.futex, entry.key);
+        // all old waiters are gone, a fresh logical key is also valid: no
+        // live wait can observe the old key. Raw addresses never enter traces.
+        if (self.findFutexKeyEntry(address)) |index| {
+            self.futex_keys.items[index].waiters += 1;
+            return futex_module.waitKey(.futex, self.futex_keys.items[index].key);
         }
 
         const key = self.next_futex_key;
@@ -189,8 +203,33 @@ pub const Backend = struct {
         self.futex_keys.append(self.allocator, .{
             .address = address,
             .key = key,
+            .waiters = 1,
         }) catch @panic("failed to allocate sim futex key");
         return futex_module.waitKey(.futex, key);
+    }
+
+    pub fn endFutexWait(self: *Backend, ptr: *const u32) void {
+        if (self.process_registry) |registry| {
+            registry.endFutexWait(self, ptr);
+            return;
+        }
+
+        const address = @intFromPtr(ptr);
+        const index = self.findFutexKeyEntry(address) orelse unreachable;
+        std.debug.assert(self.futex_keys.items[index].waiters > 0);
+        self.futex_keys.items[index].waiters -= 1;
+        if (self.futex_keys.items[index].waiters == 0) self.retireFutexKeyAt(index);
+    }
+
+    pub fn futexWakeKey(self: *Backend, ptr: *const u32) ?usize {
+        if (self.process_registry) |registry| {
+            const key = registry.futexWakeKey(self, ptr) orelse return null;
+            return futex_module.waitKey(.futex, key);
+        }
+
+        const address = @intFromPtr(ptr);
+        const index = self.findFutexKeyEntry(address) orelse return null;
+        return futex_module.waitKey(.futex, self.futex_keys.items[index].key);
     }
 
     pub fn listenerWaitKey(_: *Backend, handle: SocketHandle) usize {
@@ -247,6 +286,140 @@ pub const Backend = struct {
             .state = state,
         });
         return handle;
+    }
+
+    fn deinitHandleState(self: *Backend, state: HandleEntry.State) void {
+        switch (state) {
+            .listener => |listener_state| {
+                listener_state.pending.deinit(self.allocator);
+                self.allocator.destroy(listener_state);
+            },
+            .connection => |connection_state| {
+                connection_state.inbox.deinit(self.allocator);
+                self.allocator.destroy(connection_state);
+            },
+            .file => |file_state| {
+                self.allocator.destroy(file_state);
+            },
+        }
+    }
+
+    fn retireHandleAt(self: *Backend, index: usize) void {
+        const entry = self.handles.swapRemove(index);
+        self.deinitHandleState(entry.state);
+    }
+
+    fn closeConnectionState(
+        self: *Backend,
+        handle: SocketHandle,
+        connection_state: *ConnectionState,
+        reset_peer: bool,
+    ) void {
+        connection_state.closed = true;
+        self.wakeConnection(handle, std.math.maxInt(usize));
+        if (connection_state.peer) |peer| {
+            if (reset_peer) {
+                if (peer.backend.connection(peer.handle)) |peer_state| {
+                    if (!peer_state.closed and peer_state.read_error == null) {
+                        peer_state.read_error = error.ConnectionResetByPeer;
+                    }
+                }
+            }
+            peer.backend.wakeConnection(peer.handle, std.math.maxInt(usize));
+        }
+    }
+
+    fn closePendingConnections(self: *Backend, listener_state: *ListenerState) void {
+        while (listener_state.pending.items.len > 0) {
+            const pending_handle = listener_state.pending.pop().?;
+            for (self.handles.items, 0..) |entry, index| {
+                if (entry.handle != pending_handle) continue;
+                switch (entry.state) {
+                    .connection => |connection_state| {
+                        self.closeConnectionState(pending_handle, connection_state, true);
+                        if (connection_state.waiters == 0) {
+                            self.retireHandleAt(index);
+                        }
+                    },
+                    .listener, .file => {},
+                }
+                break;
+            }
+        }
+    }
+
+    pub fn retireFileHandle(self: *Backend, handle: Io.File.Handle) void {
+        const socket_handle: SocketHandle = @intCast(handle);
+        for (self.handles.items, 0..) |entry, index| switch (entry.state) {
+            .file => if (entry.handle == socket_handle) {
+                self.retireHandleAt(index);
+                return;
+            },
+            .listener, .connection => {},
+        };
+    }
+
+    pub fn retireNetHandle(self: *Backend, handle: SocketHandle) void {
+        for (self.handles.items, 0..) |entry, index| {
+            if (entry.handle != handle) continue;
+            switch (entry.state) {
+                .listener => |listener_state| {
+                    listener_state.closed = true;
+                    self.unregisterListener(handle);
+                    self.wakeListener(handle, std.math.maxInt(usize));
+                    self.closePendingConnections(listener_state);
+                    if (listener_state.waiters != 0) return;
+                    self.retireClosedNetHandleIfIdle(handle);
+                    return;
+                },
+                .connection => |connection_state| {
+                    self.closeConnectionState(handle, connection_state, false);
+                    if (connection_state.waiters != 0) return;
+                },
+                .file => {},
+            }
+            self.retireHandleAt(index);
+            return;
+        }
+    }
+
+    pub fn retireClosedNetHandleIfIdle(self: *Backend, handle: SocketHandle) void {
+        for (self.handles.items, 0..) |entry, index| {
+            if (entry.handle != handle) continue;
+            switch (entry.state) {
+                .listener => |listener_state| {
+                    if (!listener_state.closed or listener_state.waiters != 0) return;
+                },
+                .connection => |connection_state| {
+                    if (!connection_state.closed or connection_state.waiters != 0) return;
+                },
+                .file => return,
+            }
+            self.retireHandleAt(index);
+            return;
+        }
+    }
+
+    fn retireClosedNetHandlesAfterTaskKill(self: *Backend) void {
+        var index: usize = 0;
+        while (index < self.handles.items.len) {
+            switch (self.handles.items[index].state) {
+                .listener => |listener_state| {
+                    if (listener_state.closed) {
+                        self.retireHandleAt(index);
+                        continue;
+                    }
+                },
+                .connection => |connection_state| {
+                    if (connection_state.closed) {
+                        self.retireHandleAt(index);
+                        continue;
+                    }
+                },
+                .file => {},
+            }
+            index += 1;
+        }
     }
 
     pub fn findEntry(self: *Backend, handle: SocketHandle) ?*HandleEntry {
@@ -361,26 +534,36 @@ pub const Backend = struct {
     /// handles and cancel process-owned async closures; disk crash also marks
     /// cached file metadata stale so restart re-derives it from disk truth.
     pub fn killProcess(self: *Backend, options: KillOptions) void {
-        for (self.handles.items) |*entry| switch (entry.state) {
-            .file => |file_state| file_state.closed = true,
-            .listener => |listener_state| {
-                listener_state.closed = true;
-                self.unregisterListener(entry.handle);
-                self.wakeListener(entry.handle, std.math.maxInt(usize));
-            },
-            .connection => |connection_state| {
-                connection_state.closed = true;
-                self.wakeConnection(entry.handle, std.math.maxInt(usize));
-                if (connection_state.peer) |peer| {
-                    if (peer.backend.connection(peer.handle)) |peer_state| {
-                        if (!peer_state.closed and peer_state.read_error == null) {
-                            peer_state.read_error = error.ConnectionResetByPeer;
-                        }
+        var index: usize = 0;
+        while (index < self.handles.items.len) {
+            const entry = &self.handles.items[index];
+            const handle = entry.handle;
+            switch (entry.state) {
+                .file => {
+                    self.retireHandleAt(index);
+                    continue;
+                },
+                .listener => |listener_state| {
+                    listener_state.closed = true;
+                    self.unregisterListener(handle);
+                    self.wakeListener(handle, std.math.maxInt(usize));
+                    self.closePendingConnections(listener_state);
+                    if (listener_state.waiters == 0) {
+                        self.retireClosedNetHandleIfIdle(handle);
+                        index = 0;
+                        continue;
                     }
-                    peer.backend.wakeConnection(peer.handle, std.math.maxInt(usize));
-                }
-            },
-        };
+                },
+                .connection => |connection_state| {
+                    self.closeConnectionState(handle, connection_state, true);
+                    if (connection_state.waiters == 0) {
+                        self.retireHandleAt(index);
+                        continue;
+                    }
+                },
+            }
+            index += 1;
+        }
 
         for (self.async_closures.items) |closure| closure.cancelForKill();
 
@@ -405,12 +588,27 @@ pub const Backend = struct {
     }
 
     pub fn closeFileHandlesForIndex(self: *Backend, file_index: usize) void {
-        for (self.handles.items) |*entry| switch (entry.state) {
-            .file => |file_state| {
-                if (file_state.file_index == file_index) file_state.closed = true;
-            },
-            .listener, .connection => {},
-        };
+        var index: usize = 0;
+        while (index < self.handles.items.len) {
+            switch (self.handles.items[index].state) {
+                .file => |file_state| {
+                    if (file_state.file_index == file_index) {
+                        self.retireHandleAt(index);
+                        continue;
+                    }
+                },
+                .listener, .connection => {},
+            }
+            index += 1;
+        }
+    }
+
+    fn retireFutexKeysForBackend(self: *Backend) void {
+        if (self.process_registry) |registry| {
+            registry.retireFutexKeysForBackend(self);
+            return;
+        }
+        self.futex_keys.clearRetainingCapacity();
     }
 
     pub fn openFileHandle(
@@ -452,6 +650,7 @@ pub const ProcessRegistry = struct {
         backend: *Backend,
         address: usize,
         key: usize,
+        waiters: usize = 0,
     };
 
     pub fn init(allocator: std.mem.Allocator) ProcessRegistry {
@@ -506,14 +705,27 @@ pub const ProcessRegistry = struct {
         return null;
     }
 
-    fn futexKey(self: *ProcessRegistry, backend: *Backend, ptr: *const u32) std.mem.Allocator.Error!usize {
+    fn findFutexKeyRegistration(self: *ProcessRegistry, backend: *Backend, address: usize) ?usize {
+        for (self.futex_keys.items, 0..) |entry, index| {
+            if (entry.backend == backend and entry.address == address) return index;
+        }
+        return null;
+    }
+
+    fn retireFutexKeyAt(self: *ProcessRegistry, index: usize) void {
+        std.debug.assert(self.futex_keys.items[index].waiters == 0);
+        _ = self.futex_keys.swapRemove(index);
+    }
+
+    fn beginFutexWait(self: *ProcessRegistry, backend: *Backend, ptr: *const u32) std.mem.Allocator.Error!usize {
         const address = @intFromPtr(ptr);
         // Pointer identity is scoped by backend/process. Address reuse after a
-        // futex's lifetime maps to the same logical key only when valid code
-        // has already released all old waiters; otherwise the waiter itself is
-        // still proof that the old key is live.
-        for (self.futex_keys.items) |entry| {
-            if (entry.backend == backend and entry.address == address) return entry.key;
+        // futex's lifetime gets a fresh key once all old waiters are gone.
+        // While any waiter is blocked, the old stable logical key remains
+        // registered and raw addresses stay out of deterministic traces.
+        if (self.findFutexKeyRegistration(backend, address)) |index| {
+            self.futex_keys.items[index].waiters += 1;
+            return self.futex_keys.items[index].key;
         }
 
         const key = self.next_futex_key;
@@ -522,8 +734,34 @@ pub const ProcessRegistry = struct {
             .backend = backend,
             .address = address,
             .key = key,
+            .waiters = 1,
         });
         return key;
+    }
+
+    fn endFutexWait(self: *ProcessRegistry, backend: *Backend, ptr: *const u32) void {
+        const address = @intFromPtr(ptr);
+        const index = self.findFutexKeyRegistration(backend, address) orelse unreachable;
+        std.debug.assert(self.futex_keys.items[index].waiters > 0);
+        self.futex_keys.items[index].waiters -= 1;
+        if (self.futex_keys.items[index].waiters == 0) self.retireFutexKeyAt(index);
+    }
+
+    fn futexWakeKey(self: *ProcessRegistry, backend: *Backend, ptr: *const u32) ?usize {
+        const address = @intFromPtr(ptr);
+        const index = self.findFutexKeyRegistration(backend, address) orelse return null;
+        return self.futex_keys.items[index].key;
+    }
+
+    fn retireFutexKeysForBackend(self: *ProcessRegistry, backend: *Backend) void {
+        var index: usize = 0;
+        while (index < self.futex_keys.items.len) {
+            if (self.futex_keys.items[index].backend == backend) {
+                _ = self.futex_keys.swapRemove(index);
+                continue;
+            }
+            index += 1;
+        }
     }
 };
 
@@ -609,6 +847,8 @@ pub const ProcessRuntime = struct {
         for (self.backends, 0..) |*backend, index| {
             backend.onDiskCrash();
             self.killProcessTasks(@intCast(index));
+            backend.retireFutexKeysForBackend();
+            backend.retireClosedNetHandlesAfterTaskKill();
         }
     }
 
@@ -616,6 +856,8 @@ pub const ProcessRuntime = struct {
         const backend = try self.backendForNode(node);
         backend.killProcess(.{});
         self.killProcessTasks(@intCast(node));
+        backend.retireFutexKeysForBackend();
+        backend.retireClosedNetHandlesAfterTaskKill();
     }
 
     fn killProcessTasks(self: *ProcessRuntime, process_id: ProcessId) void {

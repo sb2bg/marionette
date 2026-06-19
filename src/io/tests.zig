@@ -420,15 +420,88 @@ test "io: process futex keys are namespaced by backend" {
     var future = Io.async(client_io, Helper.waitForFlag, .{ client_io, &flag });
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
 
     flag = 1;
     server_io.futexWake(u32, &flag, 1);
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
 
     client_io.futexWake(u32, &flag, 1);
     future.await(client_io);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
+}
+
+test "io: completed futex waits retire process key records" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn waitForFlag(io: Io, flag: *u32) void {
+            while (flag.* == 0) {
+                io.futexWait(u32, flag, 0) catch @panic("futex wait failed");
+            }
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5D, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var flag: u32 = 0;
+    var first = Io.async(io, Helper.waitForFlag, .{ io, &flag });
+    var second = Io.async(io, Helper.waitForFlag, .{ io, &flag });
+    try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
+    try std.testing.expectEqual(@as(usize, 2), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+
+    flag = 1;
+    io.futexWake(u32, &flag, 1);
+    try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
+    try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+
+    io.futexWake(u32, &flag, 1);
+    try sim.control.runTasksUntilIdle();
+    first.await(io);
+    second.await(io);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
+
+    io.futexWake(u32, &flag, 1);
+    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
+}
+
+test "io: process kill retires futex keys for killed waiters" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn waitForFlag(io: Io, flag: *u32) void {
+            while (flag.* == 0) {
+                io.futexWait(u32, flag, 0) catch @panic("futex wait failed");
+            }
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA65, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var flag: u32 = 0;
+    var future = Io.async(io, Helper.waitForFlag, .{ io, &flag });
+    try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
+    try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+
+    try sim.killProcess(0);
+    future.await(io);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
 }
 
 test "io: disk crash closes process-local std.Io.net listeners" {
@@ -438,13 +511,16 @@ test "io: disk crash closes process-local std.Io.net listeners" {
     const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
+    const server_backend = try sim.io_runtime.backendForNode(0);
 
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4573) catch unreachable;
     var server = try address.listen(server_io, .{});
     defer server.deinit(server_io);
+    try std.testing.expectEqual(@as(usize, 1), server_backend.handles.items.len);
 
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try std.testing.expectEqual(@as(usize, 0), server_backend.handles.items.len);
 
     try std.testing.expectError(
         error.ConnectionRefused,
@@ -1009,6 +1085,22 @@ test "io: simulation streaming cursors are per open file handle" {
     try std.testing.expectEqualStrings("ef", &read_out);
 }
 
+test "io: closed file handles retire backend state" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+    const backend = try sim.io_runtime.backendForNode(0);
+
+    var file = try Io.Dir.cwd().createFile(io, "retire-file.bin", .{ .read = true });
+    try std.testing.expectEqual(@as(usize, 1), backend.handles.items.len);
+
+    file.close(io);
+    try std.testing.expectEqual(@as(usize, 0), backend.handles.items.len);
+    try std.testing.expectError(error.AccessDenied, file.stat(io));
+}
+
 test "io: simulation streaming reads advance only by bytes read" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
@@ -1385,6 +1477,68 @@ test "io: simulation tcp stream connects, accepts, reads, and writes" {
     var client_read: [1][]u8 = .{&client_buffer};
     try std.testing.expectEqual(@as(usize, 4), try io.vtable.netRead(io.userdata, client.socket.handle, &client_read));
     try std.testing.expectEqualStrings("pong", &client_buffer);
+}
+
+test "io: closed sockets retire backend state" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var backend = testIo(&world);
+    defer backend.deinit();
+    const io = backend.io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 1244) catch unreachable;
+    var server = try address.listen(io, .{});
+    try std.testing.expectEqual(@as(usize, 1), backend.handles.items.len);
+
+    const client = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    const accepted = try server.accept(io);
+    try std.testing.expectEqual(@as(usize, 3), backend.handles.items.len);
+
+    client.close(io);
+    try std.testing.expectEqual(@as(usize, 2), backend.handles.items.len);
+    try std.testing.expectError(error.SocketUnconnected, io.vtable.netWrite(io.userdata, client.socket.handle, "", &.{""}, 1));
+
+    accepted.close(io);
+    try std.testing.expectEqual(@as(usize, 1), backend.handles.items.len);
+
+    server.deinit(io);
+    try std.testing.expectEqual(@as(usize, 0), backend.handles.items.len);
+    try std.testing.expectError(error.SocketNotListening, server.accept(io));
+}
+
+test "io: closing listener retires pending unaccepted connections" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var backend = testIo(&world);
+    defer backend.deinit();
+    const io = backend.io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 1245) catch unreachable;
+    var server = try address.listen(io, .{});
+    const client = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    try std.testing.expectEqual(@as(usize, 3), backend.handles.items.len);
+
+    server.deinit(io);
+    try std.testing.expectEqual(@as(usize, 1), backend.handles.items.len);
+    try std.testing.expectError(error.SocketNotListening, server.accept(io));
+
+    const chunk: [1][]const u8 = .{"ping"};
+    try std.testing.expectError(
+        error.ConnectionResetByPeer,
+        io.vtable.netWrite(io.userdata, client.socket.handle, "", &chunk, 1),
+    );
+
+    var buffer: [4]u8 = undefined;
+    var read_buffers: [1][]u8 = .{&buffer};
+    try std.testing.expectError(
+        error.ConnectionResetByPeer,
+        io.vtable.netRead(io.userdata, client.socket.handle, &read_buffers),
+    );
+
+    client.close(io);
+    try std.testing.expectEqual(@as(usize, 0), backend.handles.items.len);
 }
 
 test "io: simulation tcp stream fails closed for unknown addresses" {

@@ -201,7 +201,7 @@ pub fn Ops(comptime Backend: type) type {
         pub fn simFileClose(userdata: ?*anyopaque, files: []const Io.File) void {
             const backend = backendFromUserdata(userdata);
             for (files) |file| {
-                if (backend.file(file.handle)) |state| state.closed = true;
+                backend.retireFileHandle(file.handle);
             }
         }
 

@@ -189,11 +189,16 @@ pub fn Ops(comptime Backend: type) type {
             if (state.closed) return error.SocketNotListening;
             while (state.pending.items.len == 0) {
                 const wait_set = backend.futex_wait_set orelse return error.WouldBlock;
+                state.waiters += 1;
                 switch (wait_set.blockUntil(backend.listenerWaitKey(server), null)) {
                     .woken => {},
                     .timed_out => unreachable,
                 }
-                if (state.closed) return error.SocketNotListening;
+                state.waiters -= 1;
+                if (state.closed) {
+                    backend.retireClosedNetHandleIfIdle(server);
+                    return error.SocketNotListening;
+                }
             }
 
             const handle = state.pending.orderedRemove(0);
@@ -206,7 +211,10 @@ pub fn Ops(comptime Backend: type) type {
         pub fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Stream.Reader.Error!usize {
             const backend = backendFromUserdata(userdata);
             const connection = backend.connection(src) orelse return error.SocketUnconnected;
-            if (connection.closed) return error.SocketUnconnected;
+            if (connection.closed) {
+                backend.retireClosedNetHandleIfIdle(src);
+                return error.SocketUnconnected;
+            }
             if (connection.node) |node| try drainNetworkReady(backend, node);
             while (connection.inbox.items.len == 0) {
                 const deadline_ns = if (connection.node) |node| try nextNetworkDeliveryAt(backend, node) else null;
@@ -220,11 +228,16 @@ pub fn Ops(comptime Backend: type) type {
                     true;
                 if (peer_closed and deadline_ns == null) return 0;
                 const wait_set = backend.futex_wait_set orelse return error.Timeout;
+                connection.waiters += 1;
                 switch (wait_set.blockUntil(backend.connectionWaitKey(src), deadline_ns)) {
                     .woken => {},
                     .timed_out => {},
                 }
-                if (connection.closed) return error.SocketUnconnected;
+                connection.waiters -= 1;
+                if (connection.closed) {
+                    backend.retireClosedNetHandleIfIdle(src);
+                    return error.SocketUnconnected;
+                }
                 if (connection.node) |node| try drainNetworkReady(backend, node);
             }
 
@@ -296,22 +309,7 @@ pub fn Ops(comptime Backend: type) type {
         pub fn simNetClose(userdata: ?*anyopaque, handles: []const SocketHandle) void {
             const backend = backendFromUserdata(userdata);
             for (handles) |handle| {
-                const entry = backend.findEntry(handle) orelse continue;
-                switch (entry.state) {
-                    .listener => |listener| {
-                        listener.closed = true;
-                        backend.unregisterListener(handle);
-                        backend.wakeListener(handle, std.math.maxInt(usize));
-                    },
-                    .connection => |connection| {
-                        connection.closed = true;
-                        backend.wakeConnection(handle, std.math.maxInt(usize));
-                        if (connection.peer) |peer| {
-                            peer.backend.wakeConnection(peer.handle, std.math.maxInt(usize));
-                        }
-                    },
-                    .file => |file| file.closed = true,
-                }
+                backend.retireNetHandle(handle);
             }
         }
 
