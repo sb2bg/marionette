@@ -367,6 +367,25 @@ crash/restart, reusable profiles, and fuzz/search coverage in the active
 
 ---
 
+### Completed: WAL record helper and durable-broadcast scenario split
+
+**Status:** Done. `examples/wal_record.zig` now provides example-local
+fixed-size record framing with magic, id, payload bytes, and checksum.
+`examples/kv_store.zig` and `examples/durable_broadcast.zig` use the helper
+instead of carrying separate little-endian/checksum code.
+
+**Why it mattered:** The KV and durable-broadcast examples had crossed the
+point where duplicated WAL framing was useful as teaching material. A tiny
+shared helper keeps the examples focused on recovery behavior while still
+making corrupt/torn-record detection explicit user code.
+
+**Also done:** Durable broadcast now has separate network-fault,
+crash-recovery, and multi-record scenarios, so future swarm/search runs can
+target one behavior at a time and recovery bugs after record zero are
+reachable.
+
+---
+
 ## Active Work Queue
 
 0.4 should make the current simulator feel coherent rather than merely broad:
@@ -468,34 +487,6 @@ Acceptance criteria:
   example exists.
 - Define how destructive disk fault budgets interact with synced vs unsynced
   writes.
-
-### 3. WAL record framing helper
-
-The KV and durable-broadcast examples both hand-roll fixed-size records,
-checksums, and little-endian field helpers. That repetition has crossed the
-threshold where guidance alone is not enough; extract a tiny helper rather than
-letting a third example copy the same framing again.
-
-Acceptance criteria:
-
-- Add a small helper for fixed-size WAL records with magic, sequence/op id,
-  payload bytes, and checksum.
-- Migrate `examples/kv_store.zig` and `examples/durable_broadcast.zig` to use
-  it, reducing duplicated encode/decode code in both examples. `kv_store` now
-  already uses `std.Io.File` for storage; preserve that shape when extracting
-  the helper.
-- Document the helper with the same worked pattern: magic, key/sequence,
-  payload, and checksum fields.
-- Explain why corrupt/torn reads should be detected by user code, not inferred
-  by Marionette.
-- Link the guide from the KV and durable-broadcast example docs.
-
-Design notes:
-
-- Keep the helper small and explicit. It should not become a generic WAL or
-  recovery framework.
-- Establish a simple magic naming convention or registry comment while touching
-  the framing code; `kv_store` uses `MKV1`, durable broadcast uses `MDB1`.
 
 ### 4. External storage-engine parity follow-ups
 
@@ -602,22 +593,6 @@ Acceptance criteria:
 - Keep the existing deterministic buggy smoke test for stable failure traces.
 - Decide whether replicated-register and KV should also get bug-search tests,
   or document why single-seed demonstration is enough for those cases.
-
-### 6. Durable-broadcast scenario split and multi-record variant
-
-The first durable-broadcast example intentionally compresses fault setup,
-submit, crash/restart, recovery, heal, and rebroadcast into one scenario. Split
-the coverage once the helper code is extracted so swarm runs can target one
-behavior at a time.
-
-Acceptance criteria:
-
-- Add a short happy-path scenario that only submits under network faults and
-  checks durable quorum acknowledgement.
-- Keep a separate crash-recovery scenario for the scripted crash/recover/heal
-  path.
-- Add or sketch a multi-record variant so recovery bugs after record zero are
-  reachable.
 
 ### 7. Crash / restart simulation
 

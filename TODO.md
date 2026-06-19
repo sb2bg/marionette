@@ -165,19 +165,16 @@ probes were removed after verification.
   - This complements the existing multi-platform, nightly sweep, and release
     symbol checks in Missing infrastructure below.
 
-- [ ] **P3: retire closed handles and stale futex records**
+- [x] **P3: retire closed handles and stale futex records**
       (`src/scheduler.zig`, `src/io/backend.zig`)
   - Completed scheduler tasks now retire full `Task` records while preserving
     stable completed counts (`cab2dad`), and awaited async closures are
     reclaimed through the owning backend (`0b94098`).
-  - Closed file/socket handle state and futex address mappings still remain
-    until world teardown.
-  - Several lookup/count paths are linear, so long-lived simulations grow in
-    both memory use and historical lookup cost.
-  - Add stable-id-safe retirement or recycling for handles and futex mappings.
-    Preserve enough information for future collection and diagnostics without
-    keeping every full record. This consolidates Bugs item 4 and the remaining
-    growth after the std.Io scheduling milestone.
+  - Fixed remaining growth by retiring closed file handles, closed socket
+    state, pending listener-side connections, and futex key registrations.
+    Futex records now track live waiters and retire when the final waiter
+    leaves; process kill and disk crash purge killed backends' futex keys and
+    closed network handles.
 
 - [x] **P3: narrow the public/internal module boundary**
       (`src/root.zig`, `src/io/root.zig`, `src/network/root.zig`)
@@ -218,15 +215,13 @@ probes were removed after verification.
   - [x] Follow-up fixed: `simSleep` now re-parks in a loop until
         `now >= deadline`, so a stray wake on the shared `(.sleep, 0)` key
         can no longer end a sleep early.
-- [ ] **2. `SimClock.runFor` is O(duration / tick_ns)** (`src/clock.zig`)
+- [x] **2. `SimClock.runFor` is O(duration / tick_ns)** (`src/clock.zig`)
   - [x] The tick-by-tick loop in `SimClock.runFor` itself was
         side-effect-free; collapsed to a single `advanceBy` jump.
-  - [ ] `SimControl.runFor` (`src/env.zig`) and
-        `TypedRuntime.runForDeterministicFaults` (`src/network/sim.zig`) are
-        observably per-tick (each tick draws RNG for fault evolution and
-        records `world.tick`), so collapsing them changes behavior. They
-        need an event-driven redesign (jump to next deadline/clog expiry,
-        evolve faults at event boundaries).
+  - [x] `SimControl.runFor` (`src/env.zig`) and network fault evolution now
+        use an event-driven redesign: large runs jump to scheduled fault
+        boundaries and deterministic clog expiries instead of replaying every
+        intermediate tick. `runFor(0)` remains a no-op.
   - Agreed design (2026-06-10): land it now rather than defer; pre-1.0 is
     the cheapest time to break traces. Draw fault-event times from the seed
     directly (geometric next-occurrence instead of per-tick Bernoulli
@@ -249,15 +244,12 @@ probes were removed after verification.
     carrying the renamed file's mtime onto it. Real fix is moving
     timestamp ownership into SimDisk (per-write timestamps at landing),
     part of the disk-model roadmap.
-- [ ] **4. Futex key table grows unboundedly** (`src/io/backend.zig`
+- [x] **4. Futex key table grows unboundedly** (`src/io/backend.zig`
       `futexKey`)
-  - Entries are never removed, so long-lived sims with many short-lived
-    futexes leak table entries and slow the linear lookup.
-  - Address reuse after free maps a new futex to the old key. For valid
-    programs (no waiters left when the old futex dies) this is consistent
-    and not a correctness bug, and logical keys keep raw addresses out of
-    traces. Document this reasoning where the pointer-identity rule is
-    knowingly bent, and add a growth bound or retirement scheme.
+  - Fixed by replacing permanent futex-address mappings with waiter-counted
+    registrations. Completed waits retire their key when the last waiter
+    leaves, wake without a live waiter becomes a no-op, and process
+    kill/disk crash clears registrations owned by the killed backend.
 - [x] **5. Network node IDs are consumed per socket and never recycled**
       (`src/io/backend.zig` `allocateNetworkNode`)
   - Reconnect loops exhaust the fixed topology and get `error.NetworkDown`.
