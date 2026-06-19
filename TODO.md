@@ -165,19 +165,21 @@ probes were removed after verification.
   - This complements the existing multi-platform, nightly sweep, and release
     symbol checks in Missing infrastructure below.
 
-- [ ] **P3: retire completed tasks, closed handles, and stale futex records**
+- [ ] **P3: retire closed handles and stale futex records**
       (`src/scheduler.zig`, `src/io/backend.zig`)
-  - Fiber stacks and awaited async closures are reclaimed, but one `Task`
-    record remains per completed task. Closed file/socket handle state and
-    futex address mappings also remain until world teardown.
+  - Completed scheduler tasks now retire full `Task` records while preserving
+    stable completed counts (`cab2dad`), and awaited async closures are
+    reclaimed through the owning backend (`0b94098`).
+  - Closed file/socket handle state and futex address mappings still remain
+    until world teardown.
   - Several lookup/count paths are linear, so long-lived simulations grow in
     both memory use and historical lookup cost.
-  - Add stable-id-safe retirement or recycling. Preserve enough completed-task
-    information for future collection and diagnostics without keeping every
-    full record. This consolidates Bugs item 4 and the remaining-growth note in
-    the std.Io scheduling milestone.
+  - Add stable-id-safe retirement or recycling for handles and futex mappings.
+    Preserve enough information for future collection and diagnostics without
+    keeping every full record. This consolidates Bugs item 4 and the remaining
+    growth after the std.Io scheduling milestone.
 
-- [ ] **P3: narrow the public/internal module boundary**
+- [x] **P3: narrow the public/internal module boundary**
       (`src/root.zig`, `src/io/root.zig`, `src/network/root.zig`)
   - The top-level module currently exports roughly 77 declarations, while
     `mar.SimIo` exposes backend coordinators, task runtimes, task controls, and
@@ -185,6 +187,8 @@ probes were removed after verification.
   - Separate public API roots from internal wiring. Keep unstable low-level
     surfaces explicitly named and avoid making implementation helpers part of
     the discoverable user API.
+  - Fixed by moving backend coordinators, task runtimes, task controls, and
+    process-lifecycle wiring under explicit internal roots (`5d9a424`).
 
 - [x] **P3: reconcile scheduler-era documentation drift**
       (`README.md`, `docs/api.md`, `docs/api-target.md`, `docs/overview.md`,
@@ -344,10 +348,9 @@ probes were removed after verification.
 - [x] `env.Random` doc comments said "untraced from host entropy"; now
       describe both the traced simulation path and the untraced production
       path (`src/env.zig`).
-- [ ] `Production.Options.allocator` defaults to `std.heap.smp_allocator`
-      (`src/env.zig`); consider making it required per the allocator
-      discipline principle. The noop tracer's `smp_allocator` return is dead
-      code but a footgun.
+- [x] `Production.Options.allocator` defaulted to `std.heap.smp_allocator`
+      (`src/env.zig`); it is now required by `Production.init`, and examples
+      plus docs pass explicit allocators (`6ca1cbd`, `1533f16`).
 - [ ] Inconsistent misuse contracts: `SimControl.runFor` returns
       `error.InvalidDuration` while `World.runFor`/`SimClock.runFor` assert.
 - [ ] Inconsistent random consumption for disabled hooks: disk `rollFault`
@@ -374,8 +377,8 @@ probes were removed after verification.
 
 ## Missing infrastructure
 
-- [ ] CI job verifying sim-mode symbols are absent from release binaries
-      (currently unverified).
+- [x] CI job verifying sim-mode symbols are absent from release binaries
+      (`2e28c65`).
 - [ ] Multi-platform CI:
   - [x] macOS executes Debug and ReleaseSafe suites.
   - [x] The deliberately-disabled x86_64 Windows fiber target is
@@ -384,9 +387,9 @@ probes were removed after verification.
         Win64 fiber work.
 - [ ] Nightly long-running seed-sweep job (`expectFuzz` over examples with
       thousands of seeds).
-- [ ] Add and maintain a contributor-facing repository layout guide covering
+- [x] Add and maintain a contributor-facing repository layout guide covering
       `src/io/`, `src/network/`, `src/disk/`, `validation/`, `docs/`, and the
-      current example set.
+      current example set (`08cb67a`).
 
 ## std.Io scheduling milestone (2026-06-11)
 

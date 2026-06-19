@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Adds process-scoped simulation `std.Io` backends with stable per-node
+  identity, shared listener/connection registration, and process-local futex
+  namespaces.
+- Adds logical process lifecycle controls: `killProcess`, registered process
+  initializers, and restart semantics that discard volatile state while
+  preserving durable disk state.
+- Fixes cross-process async closure cleanup so awaits release task closures
+  through the owning backend.
+- Requires callers to pass an allocator to `Production.init`, removing the
+  production default to `std.heap.smp_allocator`.
+- Retires completed scheduler task records after completion while preserving
+  stable task counts.
+- Narrows the public/internal module boundary so backend coordinators, task
+  runtimes, and teardown hooks are kept under explicit internal roots.
+- Adds a release-symbol readiness check that verifies simulation-only symbols
+  are absent from release binaries.
+- Adds a contributor-facing repository layout guide.
+
 ## v0.3.0 - 2026-06-16
 
 Marionette's third release makes deterministic `std.Io` execution the primary
