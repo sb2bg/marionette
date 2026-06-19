@@ -45,8 +45,9 @@ The current network surface is:
   topology, per-link queues, send-time drops, latency with jitter, link/node
   state, and per-path clogging.
 - `sim.control.tick()`: outer tick that advances `World` and evolves subsystem
-  fault state. `sim.control.runFor(duration)` steps tick by tick rather than
-  jumping time.
+  fault state. `sim.control.runFor(duration)` advances through deterministic
+  event and fault-evolution boundaries; long quiet spans may jump rather than
+  emitting one tick per configured tick.
 - `endpoint.receive()`: the public delivery loop primitive, routing time
   movement through the simulated network handle.
 
@@ -137,10 +138,10 @@ These items were finished during the pre-disk stabilization pass.
 **Status:** Done. `mar.summarize` and `Summary.writeSummary` are exported and
 covered by tests.
 
-**Why it mattered:** `sim.runFor` emits one `world.tick` event per tick. Once
-probabilistic faults land, per-tick event volume grows again. The
-summary layer has to exist before trace volume outpaces human reading, not
-after.
+**Why it mattered:** Early `runFor` paths emitted one `world.tick` event per
+tick, and probabilistic faults add their own trace volume at evolution
+boundaries. The summary layer has to exist before trace volume outpaces human
+reading, not after.
 
 **Scope:**
 
@@ -349,11 +350,6 @@ advances simulated time through the simulation wrapper.
 
 ---
 
-## Active Work Queue
-
-Ordered by priority. Each entry has acceptance criteria, a rough size, and the
-design context. Pick from the top unless coordinating otherwise.
-
 ### Completed: Probabilistic tick-evolved network faults with stability floors
 
 **Status:** Done. Network control now has focused lossiness, latency, clog,
@@ -361,60 +357,95 @@ and partition-dynamics setters. Clogs and automatic node-isolating partitions
 are tick-evolved and have stability floors. The replicated-register example
 has a swarm fuzz scenario that exercises the profile.
 
-**Why now:** The outer `sim.control.tick()` is built and the packet-core drain bypass
-is gone. This is the next piece that makes VOPR-style swarm testing possible,
-and the first disk-backed recovery example is now in place.
+**Why it mattered:** The outer `sim.control.tick()` is built and the
+packet-core drain bypass is gone. This was the first scalable seeded-fault
+slice and the proof point for VOPR-style swarm testing.
 
-**Scope:**
+**Follow-up:** generalize the same tick-evolution shape to process
+crash/restart, reusable profiles, and fuzz/search coverage in the active
+0.4 queue.
 
-- Add runtime fault controls separate from static `SimNetworkOptions`
-  topology and capacity.
-- Per-path clog probability per tick, with minimum clog duration.
-- The first automatic partition strategy is narrow: isolate one random
-  service node from all other service nodes and clients, hold it for at
-  least `partition_stability_min_ns`, and heal only after an unpartition
-  roll passes once the stability floor has elapsed.
-- Partition probability per tick with `partition_stability_min_ns` floor.
-- Unpartition probability per tick with `unpartition_stability_min_ns` floor.
-- All rolls happen only inside `sim.control.tick()`, never inside `popReady` or
-  `send`. Lazy expiry remains only for deadline-based deterministic clogs.
-- All random draws are trace-visible through `world.randomIntLessThan`;
-  network domain events record state changes.
+---
 
-**Acceptance criteria:**
+## Active Work Queue
 
-- A scenario that sets runtime clog probability to `.percent(10)` and runs
-  for N ticks produces the same trace bytes on two runs with the same seed.
-- A scenario that sets `partition_stability_min_ns` prevents flip-flop: once
-  a partition begins, the next unpartition roll is gated until the floor
-  has passed.
-- A swarm-style scenario in the replicated-register example exercises
-  probabilistic clogs and completes successfully across ~100 seeds.
-- Documentation in `docs/network.md` describes the probability model and
-  gives a worked example.
+0.4 should make the current simulator feel coherent rather than merely broad:
+seeded faults evolve at stable control boundaries, process restart is explicit
+and replayable, common scenarios can select named profiles, and examples prove
+bug discoverability with small fuzz/search sweeps.
 
-**Files likely to change:**
+Pick from the top unless coordinating otherwise. Code work belongs in these
+items; docs-only edits should keep the story current without claiming future
+implementation as done.
 
-- `src/network/sim.zig` (rolls inside `evolveTickFaults`).
-- `src/network/types.zig` and `src/network/control.zig` (runtime fault options and control surface).
-- `examples/replicated_register.zig` (new swarm scenario).
-- `docs/network.md`.
-- New test cases in `src/network/tests.zig` and a fuzz test variant.
+### 1. Scalable seeded fault evolution
 
-**Size:** ~400 lines including docs and tests.
+Generalize the network fault-evolution pattern into a small subsystem contract:
+the outer simulator tick advances time, each subsystem draws seeded rolls at
+that boundary, and every state transition is trace-visible. Network already
+does this for loss, latency, clogs, and partitions; 0.4 should make that shape
+obvious enough for process, disk, and future allocation faults to reuse.
 
-**Design notes:**
+Acceptance criteria:
 
-- The rolls must be drawn from `world.randomIntLessThan` so they are seeded
-  and traced.
-- Stability floors are enforced by tracking `last_state_change_at_ns` per
-  link (or per partition group) and refusing rolls until the floor is
-  crossed.
-- Do not fold automatic partitioning into the existing `partition(left, right)`
-  control operation. Keep the explicit user-driven operation
-  separate from tick-driven probabilistic evolution. User ops set state
-  immediately; probabilistic evolution is governed by probabilities and
-  stability.
+- Document the per-tick fault-evolution contract and the trace expectations.
+- Keep random draws centralized through the world PRNG so same-seed traces stay
+  byte-identical.
+- Avoid per-operation hidden random evolution except for explicitly
+  operation-shaped faults such as disk read/write fault decisions.
+- Add or update a validation scenario that would fail if a subsystem evolved
+  faults from an untraced boundary.
+
+### 2. Process crash/restart probabilities
+
+Manual process lifecycle hooks exist today:
+`sim.registerProcess(node, lifecycle)`, `sim.killProcess(node)`, and
+`sim.restartProcess(node)`. The missing 0.4 piece is tick-driven probabilistic
+crash and restart over those hooks, with stability floors and trace-visible
+state transitions.
+
+Acceptance criteria:
+
+- Add per-node crash and restart rates plus minimum down/up durations.
+- Roll only from `sim.control.tick()` or `runFor` fault-evolution boundaries.
+- Distinguish process liveness from network reachability:
+  `control.network.setNode(n, false)` remains a network availability fault.
+- Restart reruns the registered lifecycle and reports a clear error when no
+  lifecycle is registered.
+- Add a small deterministic scenario proving same-seed crash/restart traces
+  are identical.
+
+### 3. Named simulation profiles
+
+Lift the hand-built scenario settings into named profiles so examples and CI
+can say what kind of run they are performing without rewriting rates and
+budgets at every call site.
+
+Acceptance criteria:
+
+- Ship at least `smoke`, `swarm`, `replay`, and `performance` profiles.
+- Profiles expand into `RunOptions`, simulator topology defaults, and runtime
+  fault controls without hiding the fully expanded values from traces or
+  failure summaries.
+- Keep `replay` exact: a seed plus expanded profile should be enough to
+  reproduce a failure.
+- Port the replicated-register swarm setup to the shared profile mechanism
+  without weakening its current coverage.
+
+### 4. Fuzz/search confidence for known-bug examples
+
+The suite has strong single-seed demonstrations. 0.4 should add modest
+fuzz/search coverage where the bug is probabilistic, so CI proves the fault
+profiles can discover known failures rather than only replay scripted failures.
+
+Acceptance criteria:
+
+- Add a durable-broadcast buggy fuzz/search variant where crash loss is
+  probabilistic instead of `.always()`.
+- Keep stable single-seed failure tests for readable traces.
+- Decide whether replicated-register and KV need matching bug-search tests, or
+  document why their deterministic demonstrations are enough for 0.4.
+- Failure reports must include seed, profile name, and expanded profile values.
 
 ---
 
@@ -466,18 +497,14 @@ Design notes:
 - Establish a simple magic naming convention or registry comment while touching
   the framing code; `kv_store` uses `MKV1`, durable broadcast uses `MDB1`.
 
-### 4. Disk file lifecycle and EOF-aware reads for real storage engines
+### 4. External storage-engine parity follow-ups
 
-The append-only WAL examples only needed sector-addressed `read`, `write`, and
-`sync`. Real embedded databases such as `xit-vcs/xitdb` and `lispking/kvdb`
-need a wider storage authority before they can run meaningfully under
-Marionette: file size metadata, EOF-aware reads, truncate/clear, delete, and
-atomic-ish rename for compaction.
-
-This is the first external-compatibility gap discovered by inspecting a real
-Zig storage engine. Add the smallest deterministic disk surface that can port
-`kvdb`'s pager/WAL layer without letting application code reach back to
-`std.fs`.
+The first external-storage compatibility gap has mostly been closed:
+Marionette now has file size metadata, EOF-aware reads, truncate/clear,
+delete, rename, directory sync modeling, a flat `std.Io.File` subset over
+`SimDisk`, and pinned xitdb validation coverage. The remaining work is no
+longer the base disk lifecycle surface; it is confidence-building around
+external storage engines and crash profiles.
 
 Current partial progress: `Disk` now exposes path-level `stat`, EOF-aware
 `readSome`, `setLength`, `delete`, `rename`, and `syncDir`, backed by both
@@ -560,6 +587,9 @@ Design notes:
 
 ### 5. Bug-detection fuzz coverage
 
+**Moved to the active 0.4 queue.** Keep this section only as historical
+context until the active item lands.
+
 Most deliberately buggy examples are single-seed demonstrations. Add a small
 fuzz/search layer where the bug is probabilistic, so the suite proves failures
 are discoverable under realistic profiles rather than only under scripted
@@ -591,6 +621,9 @@ Acceptance criteria:
 
 ### 7. Crash / restart simulation
 
+**Moved to the active 0.4 queue.** The manual lifecycle hooks described below
+exist; the remaining work is probabilistic process crash/restart evolution.
+
 Extend `sim.control.tick()` to roll per-node crash and restart probabilities with
 stability floors. Manual process crash/restart is now expressible with
 `sim.killProcess(node)` and `sim.restartProcess(node)`, while network-only node
@@ -608,6 +641,8 @@ nodes up, and leaves non-core failures permanent. See VOPR's
 and item 5.
 
 ### 9. Named simulation profiles
+
+**Moved to the active 0.4 queue.**
 
 Ship `smoke`, `swarm`, `replay`, `performance` as first-class named
 profiles that expand into `RunOptions`, `SimNetworkOptions`, and runtime
@@ -1203,9 +1238,8 @@ become confusing.
 
 ---
 
-Last meaningful update: production endpoint topology options started; roadmap
-item 15 restructured into production-transport sub-tasks (15a-15k) and
-named-bus composition split into a separate item 16. See
-`docs/network-production.md` for the target architecture. Update this roadmap
-in the same PR as any substantive code change. Contributors should expect the
-roadmap to reflect the true state of the code.
+Last meaningful update: 0.4 active queue refreshed around scalable seeded fault
+evolution, process crash/restart probabilities, named profiles, and fuzz/search
+confidence; completed network fault evolution moved out of the active queue.
+Update this roadmap in the same PR as any substantive code change.
+Contributors should expect the roadmap to reflect the true state of the code.

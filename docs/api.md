@@ -258,10 +258,16 @@ zero-filled sectors, and uses the same sector alignment checks as `SimDisk`.
 Logical file paths use canonical rooted syntax: non-empty `/`-separated
 components, no `.`, `..`, empty components, backslashes, NUL, or host absolute
 roots. `.` is reserved for the root directory in `syncDir`.
-This guarantees rooted, non-traversing syntax, not identical behavior across
-host filesystems: case sensitivity, Unicode normalization, reserved names,
-trailing dots/spaces, and path limits may still differ. A portable filename
-profile remains future work.
+That validator is a namespace boundary, not a full portable filename profile.
+It guarantees rooted, non-traversing logical syntax and keeps host absolute
+paths and current-working-directory behavior out of app code. It does not
+guarantee identical behavior across host filesystems: case sensitivity,
+Unicode normalization, Windows reserved names and alternate streams, trailing
+dots/spaces, and path limits may still differ. Uppercase, Unicode, and
+ordinary punctuation remain accepted by the logical syntax today. Complete
+host filename parity requires a future opt-in portable filename profile or a
+production `std.Io` wrapper that can enforce the same policy in simulation and
+production.
 
 The `io` argument is the production host I/O backend used to perform
 filesystem calls and provide host randomness. `production.env().io()` returns
@@ -449,8 +455,8 @@ while (try receiver.receive()) |envelope| {
 future for that endpoint, and returns `null` when the endpoint has no pending
 messages.
 
-Latency values must align with the world's tick size because Phase 0 simulated
-time advances in whole ticks.
+Latency values must align with the world's tick size because simulated
+delivery and fault-evolution boundaries are tick-aligned.
 
 When a simulation owns time-evolved faults, advance time through simulation
 control:
@@ -460,7 +466,9 @@ try sim.control.tick();
 try sim.control.runFor(10 * ns_per_ms);
 ```
 
-This advances the backing world and then evolves network fault state.
+This advances the backing world and evolves network fault state at
+deterministic control boundaries. Long `runFor` calls may jump between
+boundaries rather than iterating every tick in the interval.
 
 Nodes are up by default. Mark one down or up with:
 

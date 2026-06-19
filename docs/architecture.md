@@ -169,7 +169,8 @@ Current behavior:
 
 - `now()` reads the world's current simulated timestamp.
 - `tick()` advances by the world's configured tick duration.
-- `runFor(duration)` advances by whole ticks.
+- `runFor(duration)` advances through deterministic event and fault-evolution
+  boundaries, and may jump across spans where no boundary exists.
 - Scheduler timers, timed futex waits, and delayed network delivery advance
   time only when no task is runnable, jumping to the next deterministic event.
 

@@ -264,9 +264,11 @@ map iteration order, and wall-clock time must never decide delivery order.
 ## Time
 
 Network latency is measured in nanoseconds, but it must align with the
-world's tick size. Explicit network-control time advances in whole ticks, so
+world's tick size. Fault-evolution and delivery boundaries are tick-aligned, so
 the packet core rejects `min_latency_ns` and `latency_jitter_ns` values that
-are not whole multiples of the world's tick.
+are not whole multiples of the world's tick. Long `sim.control.runFor(...)`
+calls may still jump between deterministic boundaries instead of iterating
+every tick in the interval.
 
 When using composition-root simulation, prefer:
 
@@ -276,11 +278,12 @@ try sim.control.runFor(10 * ns_per_ms);
 ```
 
 over calling `world.tick()` or `world.runFor(...)` directly. Simulation control
-advances the world and evolves network fault state. Single ticks keep the
-explicit tick boundary; longer runs use `world.run_for` jumps between network
-fault events so large simulated sleeps do not scale with `duration / tick_ns`.
-This keeps future disk/network/crash subsystems from each needing separate
-caller-managed ticks.
+advances the world and evolves network fault state at deterministic boundaries.
+Single ticks keep the explicit tick boundary; longer positive `runFor(...)`
+calls use `world.run_for` jumps between scheduled fault events so large
+simulated sleeps do not scale with `duration / tick_ns`. `runFor(0)` is a
+no-op. This mirrors VOPR's outer simulator tick and keeps future
+disk/network/crash subsystems from each needing separate caller-managed ticks.
 
 The current latency model is uniform integer jitter over whole ticks:
 
@@ -341,12 +344,14 @@ register example does with `register.message`.
 ## Fault Evolution
 
 Packet loss is still a send-time decision. Probabilistic path clogs and
-automatic partitions evolve only when simulation control advances time with
-`sim.control.tick()` or `sim.control.runFor(...)`; observation methods do not
-fire random partition or clog probabilities. `tick()` preserves the explicit
-one-tick boundary. `runFor(...)` samples seeded next-occurrence times for
-probabilistic faults and advances directly to those timestamps, while still
-stopping at deterministic clog-expiry boundaries.
+automatic partitions are control-evolved decisions: random rolls happen only
+when simulation control advances to a fault-evolution boundary with
+`sim.control.tick()` or a positive `sim.control.runFor(...)`. Observation
+methods do not fire random partition or clog probabilities. `tick()` preserves
+the explicit one-tick boundary. `runFor(...)` samples seeded next-occurrence
+times for probabilistic faults and advances directly to those timestamps, while
+still stopping at deterministic clog-expiry boundaries. Lazy `popReady`
+expiration remains only for deterministic clog deadlines.
 
 The runtime fault profile is separate from static topology. Prefer focused
 control calls for scenario readability:
