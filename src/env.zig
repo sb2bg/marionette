@@ -460,9 +460,11 @@ pub const SimControl = struct {
     pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
         const tick_ns = self.world.clock().tick_ns;
         if (duration_ns % tick_ns != 0) return error.InvalidDuration;
-        var remaining = duration_ns;
-        while (remaining > 0) : (remaining -= tick_ns) {
-            try self.tick();
+        if (duration_ns == 0) return;
+        if (self.network.world() != null) {
+            try self.network.evolveFor(duration_ns);
+        } else {
+            try self.world.runFor(duration_ns);
         }
     }
 };
@@ -487,6 +489,30 @@ test "env: simulation routes through world capabilities" {
     _ = sim.env.io();
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
+}
+
+test "env: simulation runFor without network jumps time in one event" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    try sim.control.runFor(1_000);
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 1_000), world.now());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.run_for start_ns=0 duration_ns=1000 end_ns=1000") != null);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, world.traceBytes(), "world.tick"));
+}
+
+test "env: simulation runFor zero duration is a no-op" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    try sim.control.runFor(0);
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, world.traceBytes(), "world.run_for"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, world.traceBytes(), "world.tick"));
 }
 
 test "env: recorder is a narrow trace capability" {

@@ -218,8 +218,10 @@ try sim.control.network.unclogAll();
 Clogs also expire when simulated time reaches `until_ns`. Endpoint receive
 evolves that deterministic expiry state before selecting a packet as a
 backstop. Scenario and scheduler code should move simulated time through
-`sim.control.tick()` or `sim.control.runFor(...)` so probabilistic network
-faults evolve at the same boundary as the clock.
+`sim.control.tick()` or `sim.control.runFor(...)`. A single `tick()` evolves
+faults at that tick boundary. A longer `runFor(...)` jumps between scheduled
+fault boundaries and deterministic clog expiries instead of replaying every
+intermediate tick.
 
 ## Partitions
 
@@ -274,9 +276,11 @@ try sim.control.runFor(10 * ns_per_ms);
 ```
 
 over calling `world.tick()` or `world.runFor(...)` directly. Simulation control
-advances the world and then evolves network fault state. This mirrors VOPR's
-outer simulator tick and keeps future disk/network/crash subsystems from each
-needing separate caller-managed ticks.
+advances the world and evolves network fault state. Single ticks keep the
+explicit tick boundary; longer runs use `world.run_for` jumps between network
+fault events so large simulated sleeps do not scale with `duration / tick_ns`.
+This keeps future disk/network/crash subsystems from each needing separate
+caller-managed ticks.
 
 The current latency model is uniform integer jitter over whole ticks:
 
@@ -337,11 +341,12 @@ register example does with `register.message`.
 ## Fault Evolution
 
 Packet loss is still a send-time decision. Probabilistic path clogs and
-automatic partitions are tick-evolved decisions: random rolls happen only when
-simulation control advances time with `sim.control.tick()` or
-`sim.control.runFor(...)`. Lazy `popReady` expiration remains only for
-deterministic clog deadlines; random partition or clog probabilities do not
-fire from observation methods.
+automatic partitions evolve only when simulation control advances time with
+`sim.control.tick()` or `sim.control.runFor(...)`; observation methods do not
+fire random partition or clog probabilities. `tick()` preserves the explicit
+one-tick boundary. `runFor(...)` samples seeded next-occurrence times for
+probabilistic faults and advances directly to those timestamps, while still
+stopping at deterministic clog-expiry boundaries.
 
 The runtime fault profile is separate from static topology. Prefer focused
 control calls for scenario readability:

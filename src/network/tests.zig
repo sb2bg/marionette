@@ -722,7 +722,7 @@ fn runCompositionClogTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return try allocator.dupe(u8, world.traceBytes());
 }
 
-test "composition network: probabilistic clogs are tick evolved and deterministic" {
+test "composition network: probabilistic clogs are scheduled and deterministic" {
     const a = try runCompositionClogTrace(std.testing.allocator, 1234);
     defer std.testing.allocator.free(a);
     const b = try runCompositionClogTrace(std.testing.allocator, 1234);
@@ -730,6 +730,136 @@ test "composition network: probabilistic clogs are tick evolved and deterministi
 
     try std.testing.expectEqualStrings(a, b);
     try std.testing.expect(std.mem.indexOf(u8, a, "world.random_int_less_than") != null);
+}
+
+test "composition network: runFor jumps when no fault boundary is pending" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    _ = try sim.endpoint(TestPayload, 0);
+
+    try sim.control.runFor(1_000);
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 1_000), world.now());
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, world.traceBytes(), "world.tick"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "world.run_for"));
+}
+
+test "composition network: runFor zero duration does not evolve faults" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 1, .path_capacity = 4 } });
+    _ = try sim.endpoint(TestPayload, 0);
+    try sim.control.network.setClogs(.{
+        .path_clog_rate = .percent(10),
+        .path_clog_duration_ns = 20,
+    });
+    try sim.control.network.setPartitionDynamics(.{ .partition_rate = .always() });
+
+    const before_len = world.traceBytes().len;
+    try sim.control.runFor(0);
+    const after = world.traceBytes()[before_len..];
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, after, "world.run_for"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, after, "world.random_int_less_than"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, after, "network.auto_partition"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, after, "network.clog from="));
+}
+
+test "composition network: runFor advances through deterministic clog expiries" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    _ = try sim.endpoint(TestPayload, 0);
+
+    try sim.control.network.clog(0, 1, 20);
+    try sim.control.runFor(50);
+
+    const trace = world.traceBytes();
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 50), world.now());
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace, "world.tick"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, trace, "world.run_for"));
+
+    const run_to_expiry = std.mem.indexOf(u8, trace, "world.run_for start_ns=0 duration_ns=20 end_ns=20").?;
+    const unclog = std.mem.indexOf(u8, trace, "network.unclog from=0 to=1 active=false").?;
+    try std.testing.expect(unclog > run_to_expiry);
+}
+
+test "composition network: probabilistic clogs are scheduled without per-tick RNG" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x51EA, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    _ = try sim.endpoint(TestPayload, 0);
+
+    try sim.control.network.setClogs(.{
+        .path_clog_rate = .percent(1),
+        .path_clog_duration_ns = 10,
+    });
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, world.traceBytes(), "world.random_int_less_than"));
+
+    try sim.control.runFor(10_000);
+
+    const trace = world.traceBytes();
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 10_000), world.now());
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace, "world.tick"));
+    try std.testing.expect(std.mem.count(u8, trace, "world.random_int_less_than") < 200);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "network.clog from=") != null);
+}
+
+test "composition network: runFor honors automatic partition stability boundary" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
+    _ = try sim.endpoint(TestPayload, 0);
+    try sim.control.network.setPartitionDynamics(.{
+        .partition_rate = .always(),
+        .partition_stability_min_ns = 30,
+    });
+
+    try sim.control.runFor(30);
+
+    const trace = world.traceBytes();
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 30), world.now());
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace, "world.tick"));
+    const run_to_boundary = std.mem.indexOf(u8, trace, "world.run_for start_ns=0 duration_ns=30 end_ns=30").?;
+    const partition = std.mem.indexOf(u8, trace, "network.auto_partition").?;
+    try std.testing.expect(partition > run_to_boundary);
+}
+
+test "composition network: receive jump does not strand due automatic partition" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 1, .path_capacity = 4 } });
+    const node_2 = try sim.endpoint(TestPayload, 2);
+    const node_3 = try sim.endpoint(TestPayload, 3);
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+    try sim.control.network.setPartitionDynamics(.{
+        .partition_rate = .always(),
+        .partition_stability_min_ns = 30,
+    });
+    try sim.control.runFor(10);
+
+    try node_2.send(3, .{ .value = 20 });
+    const envelope = (try node_3.receive()).?;
+    try std.testing.expectEqual(@as(u64, 20), envelope.message.value);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 40), world.now());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") == null);
+
+    try sim.control.runFor(10);
+
+    const trace = world.traceBytes();
+    const deliver = std.mem.indexOf(u8, trace, "network.deliver").?;
+    const partition = std.mem.indexOf(u8, trace, "network.auto_partition").?;
+    try std.testing.expect(partition > deliver);
+    try std.testing.expect(partition < std.mem.indexOf(u8, trace, "world.run_for start_ns=40 duration_ns=10 end_ns=50").?);
 }
 
 test "composition network: automatic partition honors unpartition stability" {

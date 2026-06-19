@@ -29,6 +29,7 @@ pub const AnyNetworkControl = struct {
         heal: *const fn (*anyopaque) anyerror!void,
         heal_links: *const fn (*anyopaque) anyerror!void,
         evolve_tick_faults: *const fn (*anyopaque) anyerror!void,
+        evolve_for: *const fn (*anyopaque, clock_module.Duration) anyerror!void,
         world: *const fn (*anyopaque) ?*World,
         shared: *const fn (*anyopaque) ?*anyopaque,
     };
@@ -88,6 +89,14 @@ pub const AnyNetworkControl = struct {
     pub fn evolveTickFaults(self: AnyNetworkControl) !void {
         try self.vtable.evolve_tick_faults(self.ptr);
     }
+
+    pub fn evolveFor(self: AnyNetworkControl, duration_ns: clock_module.Duration) !void {
+        try self.vtable.evolve_for(self.ptr, duration_ns);
+    }
+
+    pub fn world(self: AnyNetworkControl) ?*World {
+        return self.vtable.world(self.ptr);
+    }
 };
 var unavailable_network_control_ctx: u8 = 0;
 
@@ -105,6 +114,7 @@ const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
     .heal = unavailableControlHeal,
     .heal_links = unavailableControlHealLinks,
     .evolve_tick_faults = unavailableControlEvolveTickFaults,
+    .evolve_for = unavailableControlEvolveFor,
     .world = unavailableControlWorld,
     .shared = unavailableControlShared,
 };
@@ -158,6 +168,8 @@ fn unavailableControlHealLinks(_: *anyopaque) anyerror!void {
 }
 
 fn unavailableControlEvolveTickFaults(_: *anyopaque) anyerror!void {}
+
+fn unavailableControlEvolveFor(_: *anyopaque, _: clock_module.Duration) anyerror!void {}
 
 fn unavailableControlWorld(_: *anyopaque) ?*World {
     return null;
