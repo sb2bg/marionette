@@ -12,15 +12,15 @@ The current validation targets include an unmodified storage engine
 (`g41797/mailbox`), and an external-style client/server KV service whose SUT
 imports only `std.Io.net`.
 
-Write production-shaped code against `std.Io` plus any small Marionette handles
-it actually needs, such as `mar.Recorder` or `mar.Endpoint(Message)`. In tests,
+Write production-shaped code against `std.Io` wherever possible, and add small
+Marionette handles only when the application actually needs them. In tests,
 drive `control` to inject faults. For the modeled file and local endpoint
 surfaces, the same application logic can run on the simulator and on production
 adapters.
 
 ```zig
-fn writeAndRecover(io: std.Io, root: std.Io.Dir, recorder: mar.Recorder) !KVStore {
-    var store = try KVStore.init(io, root, recorder);
+fn writeAndRecover(io: std.Io, root: std.Io.Dir) !KVStore {
+    var store = try KVStore.init(io, root);
     try store.put(1, 41, .sync);
     try store.put(2, 99, .no_sync);
     try store.recover(.strict);
@@ -28,13 +28,21 @@ fn writeAndRecover(io: std.Io, root: std.Io.Dir, recorder: mar.Recorder) !KVStor
 }
 
 // In simulation: deterministic, fault-injectable, replayable from a seed.
+var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xC0FFEE });
+defer world.deinit();
+
 const sim = try world.simulate(.{ .disk = .{ .sector_size = 16 } });
-var sim_store = try writeAndRecover(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder());
+var sim_store = try writeAndRecover(sim.env.io(), std.Io.Dir.cwd());
 
 // In production: real disk, same code path.
+var tmp = std.testing.tmpDir(.{});
+defer tmp.cleanup();
+
 var production = try mar.Production.init(.{ .root_dir = tmp.dir, .io = std.testing.io });
+defer production.deinit();
+
 const prod_env = production.env();
-var prod_store = try writeAndRecover(prod_env.io(), tmp.dir, prod_env.recorder());
+var prod_store = try writeAndRecover(prod_env.io(), tmp.dir);
 ```
 
 That parity is the point. You do not write a simulator version of your code.
