@@ -54,6 +54,13 @@ pub const BuggifyRate = struct {
     }
 };
 
+pub const ProcessDynamicsOptions = struct {
+    crash_rate: BuggifyRate = .never(),
+    restart_rate: BuggifyRate = .never(),
+    crash_stability_min_ns: clock_module.Duration = 0,
+    restart_stability_min_ns: clock_module.Duration = 0,
+};
+
 pub const Clock = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -434,15 +441,54 @@ pub const Production = struct {
     }
 };
 
+pub const ProcessControl = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        set_dynamics: *const fn (*anyopaque, network_module.NodeId, ProcessDynamicsOptions) anyerror!void,
+        kill: *const fn (*anyopaque, network_module.NodeId) anyerror!void,
+        restart: *const fn (*anyopaque, network_module.NodeId) anyerror!void,
+        evolve_tick_faults: *const fn (*anyopaque) anyerror!void,
+        next_fault_boundary_before_or_at: *const fn (*anyopaque, clock_module.Timestamp) anyerror!?clock_module.Timestamp,
+        finish_run_for: *const fn (*anyopaque) anyerror!void,
+    };
+
+    pub fn setDynamics(self: ProcessControl, node: network_module.NodeId, options: ProcessDynamicsOptions) !void {
+        try self.vtable.set_dynamics(self.ptr, node, options);
+    }
+
+    pub fn kill(self: ProcessControl, node: network_module.NodeId) !void {
+        try self.vtable.kill(self.ptr, node);
+    }
+
+    pub fn restart(self: ProcessControl, node: network_module.NodeId) !void {
+        try self.vtable.restart(self.ptr, node);
+    }
+
+    fn evolveTickFaults(self: ProcessControl) !void {
+        try self.vtable.evolve_tick_faults(self.ptr);
+    }
+
+    fn nextFaultBoundaryBeforeOrAt(self: ProcessControl, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
+        return try self.vtable.next_fault_boundary_before_or_at(self.ptr, end_ns);
+    }
+
+    fn finishRunFor(self: ProcessControl) !void {
+        try self.vtable.finish_run_for(self.ptr);
+    }
+};
+
 pub const SimControl = struct {
     disk: disk_module.DiskControl,
     network: network_module.AnyNetworkControl,
+    process: ProcessControl,
     tasks: io_task_module.TaskControl,
     world: *World,
 
     pub fn tick(self: SimControl) !void {
         try self.world.tick();
-        try self.network.evolveTickFaults();
+        try self.evolveFaultsAtCurrentBoundary();
     }
 
     /// Run scheduled `Io.async`/`Io.concurrent` tasks until none is
@@ -461,13 +507,42 @@ pub const SimControl = struct {
         const tick_ns = self.world.clock().tick_ns;
         if (duration_ns % tick_ns != 0) return error.InvalidDuration;
         if (duration_ns == 0) return;
-        if (self.network.world() != null) {
-            try self.network.evolveFor(duration_ns);
-        } else {
-            try self.world.runFor(duration_ns);
+
+        const end_ns = std.math.add(clock_module.Timestamp, self.world.now(), duration_ns) catch return error.InvalidDuration;
+        try self.evolveFaultsAtCurrentBoundary();
+        while (true) {
+            const boundary_ns = minOptionalTimestamp(
+                try network_module.internal.nextFaultBoundaryBeforeOrAtForControl(self.network, end_ns),
+                try self.process.nextFaultBoundaryBeforeOrAt(end_ns),
+            ) orelse break;
+            if (boundary_ns > self.world.now()) {
+                try self.world.runFor(boundary_ns - self.world.now());
+            }
+            try self.evolveFaultsAtCurrentBoundary();
         }
+
+        if (end_ns > self.world.now()) {
+            try self.world.runFor(end_ns - self.world.now());
+        }
+        try network_module.internal.finishRunForControl(self.network);
+        try self.process.finishRunFor();
+    }
+
+    fn evolveFaultsAtCurrentBoundary(self: SimControl) !void {
+        try network_module.internal.evolveTickFaultsForControl(self.network);
+        try self.process.evolveTickFaults();
     }
 };
+
+fn minOptionalTimestamp(
+    a: ?clock_module.Timestamp,
+    b: ?clock_module.Timestamp,
+) ?clock_module.Timestamp {
+    return if (a) |a_value|
+        if (b) |b_value| @min(a_value, b_value) else a_value
+    else
+        b;
+}
 
 fn hookName(comptime hook: anytype) []const u8 {
     const Hook = @TypeOf(hook);

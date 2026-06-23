@@ -386,12 +386,31 @@ reachable.
 
 ---
 
+### Completed: Process crash/restart probabilities
+
+**Status:** Done. `sim.control.process.setDynamics(node, ...)` adds per-node
+crash and restart rates with stability floors. The existing manual
+`registerProcess`/`killProcess`/`restartProcess` lifecycle hooks remain, and
+the same manual kill/restart operations are also available through
+`sim.control.process`.
+
+**Why it mattered:** Process failures now evolve through the same traced
+control boundaries as network faults. `sim.control.runFor(...)` considers both
+network and process fault boundaries, so long quiet spans still jump while
+automatic crashes and restarts occur at their scheduled simulated timestamps.
+
+**Coverage:** Tests cover validation, stability floors, runFor boundary jumps,
+same-seed trace determinism, and `error.ProcessNotRegistered` when an
+automatic restart fires for a process with no registered lifecycle.
+
+---
+
 ## Active Work Queue
 
 0.4 should make the current simulator feel coherent rather than merely broad:
-seeded faults evolve at stable control boundaries, process restart is explicit
-and replayable, common scenarios can select named profiles, and examples prove
-bug discoverability with small fuzz/search sweeps.
+seeded faults evolve at stable control boundaries, common scenarios can select
+named profiles, and examples prove bug discoverability with small fuzz/search
+sweeps.
 
 Pick from the top unless coordinating otherwise. Code work belongs in these
 items; docs-only edits should keep the story current without claiming future
@@ -414,25 +433,6 @@ Acceptance criteria:
   operation-shaped faults such as disk read/write fault decisions.
 - Add or update a validation scenario that would fail if a subsystem evolved
   faults from an untraced boundary.
-
-### 2. Process crash/restart probabilities
-
-Manual process lifecycle hooks exist today:
-`sim.registerProcess(node, lifecycle)`, `sim.killProcess(node)`, and
-`sim.restartProcess(node)`. The missing 0.4 piece is tick-driven probabilistic
-crash and restart over those hooks, with stability floors and trace-visible
-state transitions.
-
-Acceptance criteria:
-
-- Add per-node crash and restart rates plus minimum down/up durations.
-- Roll only from `sim.control.tick()` or `runFor` fault-evolution boundaries.
-- Distinguish process liveness from network reachability:
-  `control.network.setNode(n, false)` remains a network availability fault.
-- Restart reruns the registered lifecycle and reports a clear error when no
-  lifecycle is registered.
-- Add a small deterministic scenario proving same-seed crash/restart traces
-  are identical.
 
 ### 3. Named simulation profiles
 
@@ -596,16 +596,11 @@ Acceptance criteria:
 
 ### 7. Crash / restart simulation
 
-**Moved to the active 0.4 queue.** The manual lifecycle hooks described below
-exist; the remaining work is probabilistic process crash/restart evolution.
-
-Extend `sim.control.tick()` to roll per-node crash and restart probabilities with
-stability floors. Manual process crash/restart is now expressible with
-`sim.killProcess(node)` and `sim.restartProcess(node)`, while network-only node
-availability remains `sim.control.network.setNode(n, false)`. The missing work
-is tick-driven random fault evolution and stability floors over those existing
-controls. Work this after item 4 so the probabilistic fault machinery is
-shared.
+**Completed in the 0.4 queue.** Manual lifecycle hooks and tick/runFor-driven
+process crash/restart probabilities now exist. Keep this historical entry only
+as context for why process liveness is separate from network reachability:
+`sim.control.process.*` owns logical process crashes and restarts, while
+`sim.control.network.setNode(n, false)` remains a network availability fault.
 
 ### 8. Liveness mode transition
 

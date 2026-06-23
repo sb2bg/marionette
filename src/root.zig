@@ -102,6 +102,12 @@ pub const Sim = @import("world.zig").World.Simulation;
 /// Type-erased logical-process lifecycle callbacks for simulation restart.
 pub const ProcessLifecycle = @import("world.zig").ProcessLifecycle;
 
+/// Simulator-control process capability.
+pub const ProcessControl = env_module.ProcessControl;
+
+/// Runtime process crash/restart fault configuration.
+pub const ProcessDynamicsOptions = env_module.ProcessDynamicsOptions;
+
 /// Probability that a BUGGIFY hook fires in simulation.
 pub const BuggifyRate = env_module.BuggifyRate;
 

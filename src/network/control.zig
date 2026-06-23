@@ -30,6 +30,8 @@ pub const AnyNetworkControl = struct {
         heal_links: *const fn (*anyopaque) anyerror!void,
         evolve_tick_faults: *const fn (*anyopaque) anyerror!void,
         evolve_for: *const fn (*anyopaque, clock_module.Duration) anyerror!void,
+        next_fault_boundary_before_or_at: *const fn (*anyopaque, clock_module.Timestamp) anyerror!?clock_module.Timestamp,
+        finish_run_for: *const fn (*anyopaque) anyerror!void,
         world: *const fn (*anyopaque) ?*World,
         shared: *const fn (*anyopaque) ?*anyopaque,
     };
@@ -86,18 +88,31 @@ pub const AnyNetworkControl = struct {
         try self.vtable.heal_links(self.ptr);
     }
 
-    pub fn evolveTickFaults(self: AnyNetworkControl) !void {
-        try self.vtable.evolve_tick_faults(self.ptr);
-    }
-
-    pub fn evolveFor(self: AnyNetworkControl, duration_ns: clock_module.Duration) !void {
-        try self.vtable.evolve_for(self.ptr, duration_ns);
-    }
-
     pub fn world(self: AnyNetworkControl) ?*World {
         return self.vtable.world(self.ptr);
     }
 };
+
+/// Internal run-loop hooks. Public harness code should drive fault evolution
+/// through `SimControl.tick` or `SimControl.runFor`.
+pub const internal = struct {
+    pub fn evolveTickFaults(control: AnyNetworkControl) !void {
+        try control.vtable.evolve_tick_faults(control.ptr);
+    }
+
+    pub fn evolveFor(control: AnyNetworkControl, duration_ns: clock_module.Duration) !void {
+        try control.vtable.evolve_for(control.ptr, duration_ns);
+    }
+
+    pub fn nextFaultBoundaryBeforeOrAt(control: AnyNetworkControl, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
+        return try control.vtable.next_fault_boundary_before_or_at(control.ptr, end_ns);
+    }
+
+    pub fn finishRunFor(control: AnyNetworkControl) !void {
+        try control.vtable.finish_run_for(control.ptr);
+    }
+};
+
 var unavailable_network_control_ctx: u8 = 0;
 
 const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
@@ -115,6 +130,8 @@ const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
     .heal_links = unavailableControlHealLinks,
     .evolve_tick_faults = unavailableControlEvolveTickFaults,
     .evolve_for = unavailableControlEvolveFor,
+    .next_fault_boundary_before_or_at = unavailableControlNextFaultBoundaryBeforeOrAt,
+    .finish_run_for = unavailableControlFinishRunFor,
     .world = unavailableControlWorld,
     .shared = unavailableControlShared,
 };
@@ -170,6 +187,12 @@ fn unavailableControlHealLinks(_: *anyopaque) anyerror!void {
 fn unavailableControlEvolveTickFaults(_: *anyopaque) anyerror!void {}
 
 fn unavailableControlEvolveFor(_: *anyopaque, _: clock_module.Duration) anyerror!void {}
+
+fn unavailableControlNextFaultBoundaryBeforeOrAt(_: *anyopaque, _: clock_module.Timestamp) anyerror!?clock_module.Timestamp {
+    return null;
+}
+
+fn unavailableControlFinishRunFor(_: *anyopaque) anyerror!void {}
 
 fn unavailableControlWorld(_: *anyopaque) ?*World {
     return null;

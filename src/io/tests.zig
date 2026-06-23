@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Backend = @import("backend.zig").Backend;
+const clock_module = @import("../clock.zig");
 const disk_module = @import("../disk/root.zig");
 const env_module = @import("../env.zig");
 const World = @import("../world.zig").World;
@@ -906,6 +907,145 @@ test "io: restarting an unregistered process does not kill it" {
     try sim.restartProcess(0);
     try std.testing.expectEqual(@as(u32, 1), state.starts);
     try std.testing.expectEqual(@as(u32, 1), state.kills);
+}
+
+test "io: process dynamics validate rates and tick-aligned durations" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA66, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+
+    try std.testing.expectError(
+        error.InvalidRate,
+        sim.control.process.setDynamics(0, .{
+            .crash_rate = .{ .numerator = 2, .denominator = 1 },
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidDuration,
+        sim.control.process.setDynamics(0, .{
+            .crash_rate = .always(),
+            .crash_stability_min_ns = 11,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidNode,
+        sim.control.process.setDynamics(1, .{ .crash_rate = .always() }),
+    );
+}
+
+test "io: process dynamics crash and restart at control boundaries" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        starts: u32 = 0,
+        kills: u32 = 0,
+
+        fn onKill(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.kills += 1;
+        }
+
+        fn restart(raw: *anyopaque, _: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.starts += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA67, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    var state: State = .{};
+    try sim.registerProcess(0, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+    try sim.control.process.setDynamics(0, .{
+        .crash_rate = .always(),
+        .restart_rate = .always(),
+        .crash_stability_min_ns = 20,
+        .restart_stability_min_ns = 30,
+    });
+
+    try sim.control.runFor(10);
+    try std.testing.expectEqual(@as(u32, 0), state.kills);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
+
+    try sim.control.runFor(10);
+    try std.testing.expectEqual(@as(u32, 1), state.kills);
+    try std.testing.expectEqual(@as(u32, 0), state.starts);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
+
+    try sim.control.runFor(30);
+    try std.testing.expectEqual(@as(u32, 1), state.kills);
+    try std.testing.expectEqual(@as(u32, 1), state.starts);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 50), world.now());
+
+    const trace = world.traceBytes();
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace, "world.tick"));
+    try std.testing.expect(std.mem.indexOf(u8, trace, "process.dynamics node=0 crash_rate=1/1 restart_rate=1/1 crash_stability_min_ns=20 restart_stability_min_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "world.run_for start_ns=10 duration_ns=10 end_ns=20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "process.kill node=0 reason=auto_crash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "world.run_for start_ns=20 duration_ns=30 end_ns=50") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "process.restart node=0 automatic=true") != null);
+}
+
+fn runProcessDynamicsTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    const State = struct {
+        fn onKill(_: *anyopaque) void {}
+        fn restart(_: *anyopaque, _: env_module.Env) anyerror!void {}
+    };
+
+    var world = try World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    var state: u8 = 0;
+    try sim.registerProcess(0, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+    try sim.control.process.setDynamics(0, .{
+        .crash_rate = .oneIn(2),
+        .restart_rate = .oneIn(2),
+        .crash_stability_min_ns = 10,
+        .restart_stability_min_ns = 10,
+    });
+    try sim.control.runFor(500);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "io: process dynamics are deterministic for the same seed" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const a = try runProcessDynamicsTrace(std.testing.allocator, 0xA68);
+    defer std.testing.allocator.free(a);
+    const b = try runProcessDynamicsTrace(std.testing.allocator, 0xA68);
+    defer std.testing.allocator.free(b);
+
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expect(std.mem.indexOf(u8, a, "world.random_int_less_than") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "process.kill node=0 reason=auto_crash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "process.restart node=0 automatic=true") != null);
+}
+
+test "io: automatic process restart reports missing lifecycle" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA69, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    try sim.control.process.setDynamics(0, .{ .restart_rate = .always() });
+    try sim.control.process.kill(0);
+
+    try std.testing.expectError(error.ProcessNotRegistered, sim.control.runFor(10));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=manual") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.restart node=0") == null);
 }
 
 test "io: completed async tasks release their fiber stacks" {

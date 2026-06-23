@@ -361,8 +361,7 @@ const SharedRuntime = struct {
         const end_ns = try addTimestamp(self.world.now(), duration_ns);
         try self.evolveTickFaults();
         while (true) {
-            try self.ensureAutoSchedules();
-            const boundary_ns = self.nextFaultBoundaryBeforeOrAt(end_ns) orelse break;
+            const boundary_ns = (try self.nextFaultBoundaryBeforeOrAt(end_ns)) orelse break;
             if (boundary_ns > self.world.now()) {
                 try self.world.runFor(boundary_ns - self.world.now());
             }
@@ -372,6 +371,10 @@ const SharedRuntime = struct {
         if (end_ns > self.world.now()) {
             try self.world.runFor(end_ns - self.world.now());
         }
+        try self.finishRunFor();
+    }
+
+    fn finishRunFor(self: *SharedRuntime) !void {
         try self.expireDeterministicFaults();
         self.last_fault_evolution_ns = self.world.now();
     }
@@ -488,7 +491,12 @@ const SharedRuntime = struct {
         return @max(@as(u64, 1), @as(u64, @intFromFloat(ticks)));
     }
 
-    fn nextFaultBoundaryBeforeOrAt(self: *const SharedRuntime, end_ns: clock_module.Timestamp) ?clock_module.Timestamp {
+    fn nextFaultBoundaryBeforeOrAt(self: *SharedRuntime, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
+        try self.ensureAutoSchedules();
+        return self.nextScheduledFaultBoundaryBeforeOrAt(end_ns);
+    }
+
+    fn nextScheduledFaultBoundaryBeforeOrAt(self: *const SharedRuntime, end_ns: clock_module.Timestamp) ?clock_module.Timestamp {
         var next: ?clock_module.Timestamp = null;
         for (self.links) |link| {
             if (link.clogged_until > self.world.now() and link.clogged_until <= end_ns) {
@@ -580,6 +588,8 @@ const shared_control_vtable: AnyNetworkControl.VTable = .{
     .heal_links = sharedControlHealLinks,
     .evolve_tick_faults = sharedControlEvolveTickFaults,
     .evolve_for = sharedControlEvolveFor,
+    .next_fault_boundary_before_or_at = sharedControlNextFaultBoundaryBeforeOrAt,
+    .finish_run_for = sharedControlFinishRunFor,
     .world = sharedControlWorld,
     .shared = sharedControlShared,
 };
@@ -638,6 +648,14 @@ fn sharedControlEvolveTickFaults(ptr: *anyopaque) anyerror!void {
 
 fn sharedControlEvolveFor(ptr: *anyopaque, duration_ns: clock_module.Duration) anyerror!void {
     try sharedControl(ptr).evolveFor(duration_ns);
+}
+
+fn sharedControlNextFaultBoundaryBeforeOrAt(ptr: *anyopaque, end_ns: clock_module.Timestamp) anyerror!?clock_module.Timestamp {
+    return try sharedControl(ptr).nextFaultBoundaryBeforeOrAt(end_ns);
+}
+
+fn sharedControlFinishRunFor(ptr: *anyopaque) anyerror!void {
+    try sharedControl(ptr).finishRunFor();
 }
 
 fn sharedControlWorld(ptr: *anyopaque) ?*World {

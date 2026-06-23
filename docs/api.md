@@ -400,7 +400,7 @@ While crashed, disk operations return `error.DiskCrashed`. Crash outcomes are
 trace-visible. In simulation, `control.crash()` also kills every live logical
 process after pending-write outcomes are applied; `control.restart()` brings
 only the disk back up. Rerun registered application initializers with
-`sim.restartProcess(node)`.
+`sim.control.process.restart(node)`.
 
 ```text
 disk.fault op=3 path=wal.log kind=crash_lost_write rate=1/10 roll=7 fired=false
@@ -410,12 +410,35 @@ disk.crash pending_writes=1 landed=0 lost=0 torn=1 reordered=0
 disk.restart status=ok
 ```
 
-Process lifecycle is explicit on the `Sim` returned by `World.simulate`:
-`sim.killProcess(node)` tears down one logical process, while
-`sim.registerProcess(node, lifecycle)` and `sim.restartProcess(node)` rerun a
-registered initializer with that node's `Env`. Invalid nodes return
-`error.InvalidNode`; restarting without a registered lifecycle returns
-`error.ProcessNotRegistered`.
+Process lifecycle is explicit on the `Sim` returned by `World.simulate`.
+`sim.registerProcess(node, lifecycle)` registers the initializer, while
+`sim.control.process.kill(node)` tears down one logical process and
+`sim.control.process.restart(node)` reruns the registered initializer with
+that node's `Env`. Invalid nodes return `error.InvalidNode`; restarting
+without a registered lifecycle returns `error.ProcessNotRegistered`.
+
+Per-node crash/restart dynamics live on the same process-control handle:
+
+```zig
+try sim.registerProcess(0, .{
+    .ptr = &state,
+    .on_kill = State.onKill,
+    .restart = State.restart,
+});
+try sim.control.process.setDynamics(0, .{
+    .crash_rate = .percent(1),
+    .restart_rate = .percent(10),
+    .crash_stability_min_ns = 10 * ns_per_ms,
+    .restart_stability_min_ns = 50 * ns_per_ms,
+});
+```
+
+Process dynamics evolve only through `sim.control.tick()` or positive
+`sim.control.runFor(...)` boundaries. Automatic crashes record
+`process.kill reason=auto_crash`; automatic restarts rerun the registered
+lifecycle and record `process.restart automatic=true`. Invalid rates return
+`error.InvalidRate`; stability durations must be tick-aligned or
+`setDynamics` returns `error.InvalidDuration`.
 
 ## Network
 

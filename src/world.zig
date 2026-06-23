@@ -69,6 +69,10 @@ pub const ProcessSupervisor = struct {
     io_runtime: *io_module.ProcessRuntime,
     lifecycles: []?ProcessLifecycle,
     states: []ProcessState,
+    dynamics: []env_module.ProcessDynamicsOptions,
+    state_changed_at_ns: []clock_module.Timestamp,
+    next_transition_at_ns: []?clock_module.Timestamp,
+    last_fault_evolution_ns: clock_module.Timestamp,
 
     const ProcessState = enum {
         alive,
@@ -90,6 +94,18 @@ pub const ProcessSupervisor = struct {
         errdefer allocator.free(states);
         @memset(states, .alive);
 
+        const dynamics = try allocator.alloc(env_module.ProcessDynamicsOptions, process_count);
+        errdefer allocator.free(dynamics);
+        @memset(dynamics, .{});
+
+        const state_changed_at_ns = try allocator.alloc(clock_module.Timestamp, process_count);
+        errdefer allocator.free(state_changed_at_ns);
+        @memset(state_changed_at_ns, world.now());
+
+        const next_transition_at_ns = try allocator.alloc(?clock_module.Timestamp, process_count);
+        errdefer allocator.free(next_transition_at_ns);
+        @memset(next_transition_at_ns, null);
+
         return .{
             .allocator = allocator,
             .world = world,
@@ -97,13 +113,24 @@ pub const ProcessSupervisor = struct {
             .io_runtime = io_runtime,
             .lifecycles = lifecycles,
             .states = states,
+            .dynamics = dynamics,
+            .state_changed_at_ns = state_changed_at_ns,
+            .next_transition_at_ns = next_transition_at_ns,
+            .last_fault_evolution_ns = world.now(),
         };
     }
 
     pub fn deinit(self: *ProcessSupervisor) void {
+        self.allocator.free(self.next_transition_at_ns);
+        self.allocator.free(self.state_changed_at_ns);
+        self.allocator.free(self.dynamics);
         self.allocator.free(self.states);
         self.allocator.free(self.lifecycles);
         self.* = undefined;
+    }
+
+    fn control(self: *ProcessSupervisor) env_module.ProcessControl {
+        return .{ .ptr = self, .vtable = &process_control_vtable };
     }
 
     pub fn registerProcess(
@@ -115,6 +142,29 @@ pub const ProcessSupervisor = struct {
         self.lifecycles[index] = lifecycle;
     }
 
+    fn setDynamics(
+        self: *ProcessSupervisor,
+        node: network_module.NodeId,
+        options: env_module.ProcessDynamicsOptions,
+    ) !void {
+        try self.validateDynamics(options);
+        const index = try self.nodeIndex(node);
+        self.dynamics[index] = options;
+        self.next_transition_at_ns[index] = null;
+        try self.world.record(
+            "process.dynamics node={} crash_rate={}/{} restart_rate={}/{} crash_stability_min_ns={} restart_stability_min_ns={}",
+            .{
+                node,
+                options.crash_rate.numerator,
+                options.crash_rate.denominator,
+                options.restart_rate.numerator,
+                options.restart_rate.denominator,
+                options.crash_stability_min_ns,
+                options.restart_stability_min_ns,
+            },
+        );
+    }
+
     pub fn killProcess(self: *ProcessSupervisor, node: network_module.NodeId) !void {
         _ = try self.nodeIndex(node);
         try self.io_runtime.kill(node);
@@ -122,6 +172,10 @@ pub const ProcessSupervisor = struct {
     }
 
     pub fn restartProcess(self: *ProcessSupervisor, node: network_module.NodeId) !void {
+        try self.restartProcessInternal(node, false);
+    }
+
+    fn restartProcessInternal(self: *ProcessSupervisor, node: network_module.NodeId, automatic: bool) !void {
         const index = try self.nodeIndex(node);
         const lifecycle = self.lifecycles[index] orelse return error.ProcessNotRegistered;
 
@@ -134,8 +188,11 @@ pub const ProcessSupervisor = struct {
         env.io_backend = try self.io_runtime.io(node);
         try lifecycle.restart(lifecycle.ptr, env);
         self.states[index] = .alive;
+        self.state_changed_at_ns[index] = self.world.now();
+        self.next_transition_at_ns[index] = null;
         try self.world.recordFields("process.restart", &.{
             traceField("node", .{ .uint = node }),
+            traceField("automatic", .{ .boolean = automatic }),
         });
     }
 
@@ -146,6 +203,28 @@ pub const ProcessSupervisor = struct {
             const node: network_module.NodeId = @intCast(index);
             self.noteKilled(node, "disk_crash") catch @panic("failed to record process disk-crash kill");
         }
+    }
+
+    fn evolveTickFaults(self: *ProcessSupervisor) !void {
+        try self.ensureAutoSchedules();
+        try self.fireDueTransitions();
+        self.last_fault_evolution_ns = self.world.now();
+    }
+
+    fn nextFaultBoundaryBeforeOrAt(self: *ProcessSupervisor, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
+        try self.ensureAutoSchedules();
+        var next: ?clock_module.Timestamp = null;
+        for (self.next_transition_at_ns) |maybe_at_ns| {
+            const at_ns = maybe_at_ns orelse continue;
+            if (at_ns > self.world.now() and at_ns <= end_ns) {
+                next = minOptionalTimestamp(next, at_ns);
+            }
+        }
+        return next;
+    }
+
+    fn finishRunFor(self: *ProcessSupervisor) !void {
+        self.last_fault_evolution_ns = self.world.now();
     }
 
     fn noteKilled(
@@ -160,10 +239,95 @@ pub const ProcessSupervisor = struct {
             if (lifecycle.on_kill) |on_kill| on_kill(lifecycle.ptr);
         }
         self.states[index] = .killed;
+        self.state_changed_at_ns[index] = self.world.now();
+        self.next_transition_at_ns[index] = null;
         try self.world.recordFields("process.kill", &.{
             traceField("node", .{ .uint = node }),
             traceField("reason", .{ .literal = reason }),
         });
+    }
+
+    fn validateDynamics(self: *const ProcessSupervisor, options: env_module.ProcessDynamicsOptions) !void {
+        try options.crash_rate.validate();
+        try options.restart_rate.validate();
+        try self.validateTickAlignedDuration(options.crash_stability_min_ns);
+        try self.validateTickAlignedDuration(options.restart_stability_min_ns);
+    }
+
+    fn validateTickAlignedDuration(self: *const ProcessSupervisor, duration_ns: clock_module.Duration) error{InvalidDuration}!void {
+        if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
+    }
+
+    fn ensureAutoSchedules(self: *ProcessSupervisor) !void {
+        const now_ns = self.world.now();
+        const tick_ns = self.world.clock().tick_ns;
+        const from_ns = if (now_ns >= self.last_fault_evolution_ns and now_ns - self.last_fault_evolution_ns == tick_ns)
+            self.last_fault_evolution_ns
+        else
+            now_ns;
+        for (self.next_transition_at_ns, 0..) |maybe_at_ns, index| {
+            if (maybe_at_ns == null) {
+                try self.scheduleTransitionFrom(index, from_ns);
+            }
+        }
+    }
+
+    fn scheduleTransitionFrom(
+        self: *ProcessSupervisor,
+        index: usize,
+        from_ns: clock_module.Timestamp,
+    ) !void {
+        self.next_transition_at_ns[index] = null;
+        const options = self.dynamics[index];
+        const rate = switch (self.states[index]) {
+            .alive => options.crash_rate,
+            .killed => options.restart_rate,
+        };
+        if (rate.numerator == 0) return;
+
+        const stability_ns = switch (self.states[index]) {
+            .alive => options.crash_stability_min_ns,
+            .killed => options.restart_stability_min_ns,
+        };
+        const floor_ns = try addTimestamp(self.state_changed_at_ns[index], stability_ns);
+        const eligible_from = if (floor_ns <= from_ns) from_ns else floor_ns - self.world.clock().tick_ns;
+        const ticks = try self.sampleNextOccurrenceTicks(rate);
+        self.next_transition_at_ns[index] = try addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns);
+    }
+
+    fn fireDueTransitions(self: *ProcessSupervisor) !void {
+        const now_ns = self.world.now();
+        for (self.next_transition_at_ns, 0..) |maybe_at_ns, index| {
+            const at_ns = maybe_at_ns orelse continue;
+            if (at_ns > now_ns) continue;
+
+            self.next_transition_at_ns[index] = null;
+            const node: network_module.NodeId = @intCast(index);
+            switch (self.states[index]) {
+                .alive => {
+                    try self.io_runtime.kill(node);
+                    try self.noteKilled(node, "auto_crash");
+                },
+                .killed => {
+                    try self.restartProcessInternal(node, true);
+                },
+            }
+        }
+    }
+
+    fn sampleNextOccurrenceTicks(self: *ProcessSupervisor, rate: env_module.BuggifyRate) !u64 {
+        std.debug.assert(rate.numerator > 0);
+        std.debug.assert(rate.numerator <= rate.denominator);
+        if (rate.numerator == rate.denominator) return 1;
+
+        const random_space: u64 = 1 << 53;
+        const draw = try self.world.randomIntLessThan(u64, random_space);
+        const uniform = (@as(f64, @floatFromInt(draw)) + 1.0) / (@as(f64, @floatFromInt(random_space)) + 1.0);
+        const failure_probability =
+            @as(f64, @floatFromInt(rate.denominator - rate.numerator)) /
+            @as(f64, @floatFromInt(rate.denominator));
+        const ticks = @ceil(std.math.log(f64, failure_probability, uniform));
+        return @max(@as(u64, 1), @as(u64, @intFromFloat(ticks)));
     }
 
     fn nodeIndex(self: *const ProcessSupervisor, node: network_module.NodeId) error{InvalidNode}!usize {
@@ -172,6 +336,73 @@ pub const ProcessSupervisor = struct {
         return index;
     }
 };
+
+const process_control_vtable: env_module.ProcessControl.VTable = .{
+    .set_dynamics = processControlSetDynamics,
+    .kill = processControlKill,
+    .restart = processControlRestart,
+    .evolve_tick_faults = processControlEvolveTickFaults,
+    .next_fault_boundary_before_or_at = processControlNextFaultBoundaryBeforeOrAt,
+    .finish_run_for = processControlFinishRunFor,
+};
+
+fn processControl(ptr: *anyopaque) *ProcessSupervisor {
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn processControlSetDynamics(
+    ptr: *anyopaque,
+    node: network_module.NodeId,
+    options: env_module.ProcessDynamicsOptions,
+) anyerror!void {
+    try processControl(ptr).setDynamics(node, options);
+}
+
+fn processControlKill(ptr: *anyopaque, node: network_module.NodeId) anyerror!void {
+    try processControl(ptr).killProcess(node);
+}
+
+fn processControlRestart(ptr: *anyopaque, node: network_module.NodeId) anyerror!void {
+    try processControl(ptr).restartProcess(node);
+}
+
+fn processControlEvolveTickFaults(ptr: *anyopaque) anyerror!void {
+    try processControl(ptr).evolveTickFaults();
+}
+
+fn processControlNextFaultBoundaryBeforeOrAt(
+    ptr: *anyopaque,
+    end_ns: clock_module.Timestamp,
+) anyerror!?clock_module.Timestamp {
+    return try processControl(ptr).nextFaultBoundaryBeforeOrAt(end_ns);
+}
+
+fn processControlFinishRunFor(ptr: *anyopaque) anyerror!void {
+    try processControl(ptr).finishRunFor();
+}
+
+fn addTimestamp(
+    timestamp: clock_module.Timestamp,
+    duration_ns: clock_module.Duration,
+) error{InvalidDuration}!clock_module.Timestamp {
+    return std.math.add(clock_module.Timestamp, timestamp, duration_ns) catch error.InvalidDuration;
+}
+
+fn addDurationTicks(
+    timestamp: clock_module.Timestamp,
+    ticks: u64,
+    tick_ns: clock_module.Duration,
+) error{InvalidDuration}!clock_module.Timestamp {
+    const duration_ns = std.math.mul(clock_module.Duration, ticks, tick_ns) catch return error.InvalidDuration;
+    return addTimestamp(timestamp, duration_ns);
+}
+
+fn minOptionalTimestamp(
+    current: ?clock_module.Timestamp,
+    candidate: clock_module.Timestamp,
+) ?clock_module.Timestamp {
+    return if (current) |value| @min(value, candidate) else candidate;
+}
 
 /// Write text as an unambiguous trace value fragment.
 ///
@@ -460,6 +691,7 @@ pub const World = struct {
             .control = .{
                 .disk = sim_disk.control(),
                 .network = network_control,
+                .process = process_supervisor.control(),
                 .tasks = scheduler_module.taskControl(scheduler),
                 .world = self,
             },
