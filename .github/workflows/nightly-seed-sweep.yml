@@ -1,0 +1,38 @@
+name: Nightly seed sweep
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      seed_count:
+        description: Deterministic seeds to run per scenario
+        required: false
+        default: "1000"
+
+permissions:
+  contents: read
+
+jobs:
+  seed-sweep:
+    name: Deterministic seed sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Run seed sweep
+        env:
+          SEED_SWEEP_COUNT: ${{ inputs.seed_count || '1000' }}
+        run: >-
+          zig build seed-sweep
+          -Doptimize=ReleaseSafe
+          -Dseed-sweep-count="$SEED_SWEEP_COUNT"
+          --test-timeout 40m

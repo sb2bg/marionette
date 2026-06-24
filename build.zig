@@ -147,6 +147,32 @@ pub fn build(b: *std.Build) void {
     );
     validate_std_io_net_kv_step.dependOn(&run_validate_std_io_net_kv.step);
 
+    const seed_sweep_count = b.option(
+        usize,
+        "seed-sweep-count",
+        "Number of deterministic seeds to run per nightly scenario",
+    ) orelse 1_000;
+    const seed_sweep_options = b.addOptions();
+    seed_sweep_options.addOption(usize, "count", seed_sweep_count);
+
+    const seed_sweep_mod = b.createModule(.{
+        .root_source_file = b.path("validation/nightly_seed_sweep.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seed_sweep_mod.addImport("marionette", mod);
+    seed_sweep_mod.addImport("examples", examples_mod);
+    seed_sweep_mod.addOptions("seed_sweep_options", seed_sweep_options);
+
+    const seed_sweep_tests = b.addTest(.{ .root_module = seed_sweep_mod });
+    const run_seed_sweep = b.addRunArtifact(seed_sweep_tests);
+
+    const seed_sweep_step = b.step(
+        "seed-sweep",
+        "Run the bounded long-running deterministic seed sweep",
+    );
+    seed_sweep_step.dependOn(&run_seed_sweep.step);
+
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),
         .target = target,
