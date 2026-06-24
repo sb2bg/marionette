@@ -171,11 +171,22 @@ Current behavior:
 - `tick()` advances by the world's configured tick duration.
 - `runFor(duration)` advances through deterministic event and fault-evolution
   boundaries, and may jump across spans where no boundary exists.
+- Time-evolved subsystems implement one private participant contract. The
+  simulator records `fault_evolution.boundary` before invoking the fixed
+  network and process participants, then asks the same participants for the
+  next boundary. Adding another time-evolved subsystem does not add another
+  hard-coded branch to the run loop.
 - Scheduler timers, timed futex waits, and delayed network delivery advance
   time only when no task is runnable, jumping to the next deterministic event.
 
 Sleeps, deadlines, timers, retries, network latency, and disk latency all route
 through the world's clock. No subsystem may introduce a second clock.
+
+This contract is for faults whose state evolves with simulated time, such as
+automatic clogs, partitions, process crashes, and process restarts. Disk
+read/write errors, corrupt reads, and crash outcomes remain operation-shaped:
+their traced rolls occur when the corresponding disk operation or explicit
+crash is performed, not at a time-evolution boundary.
 
 ## Randomness Model
 

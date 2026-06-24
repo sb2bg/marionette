@@ -64,6 +64,10 @@ Rules:
   `float:<f64>`.
 - BUGGIFY events use
   `buggify hook=<comptime-tag> rate=<numerator>/<denominator> roll=<value> fired=<bool>`.
+- Time-evolved simulator faults are preceded by
+  `fault_evolution.boundary now_ns=<u64>`. Seeded scheduling draws and any
+  network or process state transitions caused at that timestamp follow the
+  boundary record.
 - Unstable network events use `network.send`, `network.drop`, and
   `network.deliver` with stable packet ids and node ids.
 - Node-state changes use `network.node`.

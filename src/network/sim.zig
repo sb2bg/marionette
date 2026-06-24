@@ -348,12 +348,15 @@ const SharedRuntime = struct {
     fn evolveTickFaults(self: *SharedRuntime) !void {
         try self.ensureAutoSchedules();
         try self.expireDeterministicFaults();
+        try self.ensureAutoClogSchedulesFrom(self.world.now());
         try self.fireDueAutoPartition();
         try self.fireDueAutoClogs();
         self.last_fault_evolution_ns = self.world.now();
     }
 
     fn evolveFor(self: *SharedRuntime, duration_ns: clock_module.Duration) !void {
+        // Retained for VTable source compatibility. Composition code uses the
+        // shared fault-evolution participant through SimControl.
         const tick_ns = self.world.clock().tick_ns;
         if (duration_ns % tick_ns != 0) return error.InvalidDuration;
         if (duration_ns == 0) return;
@@ -370,6 +373,7 @@ const SharedRuntime = struct {
 
         if (end_ns > self.world.now()) {
             try self.world.runFor(end_ns - self.world.now());
+            try self.evolveTickFaults();
         }
         try self.finishRunFor();
     }
@@ -436,13 +440,17 @@ const SharedRuntime = struct {
             self.last_fault_evolution_ns
         else
             now_ns;
+        try self.ensureAutoClogSchedulesFrom(from_ns);
+        if (self.next_auto_partition_at_ns == null) {
+            try self.scheduleAutoPartitionFrom(from_ns);
+        }
+    }
+
+    fn ensureAutoClogSchedulesFrom(self: *SharedRuntime, from_ns: clock_module.Timestamp) !void {
         for (self.links) |*link| {
             if (link.next_auto_clog_at_ns == null) {
                 try self.scheduleAutoClogFrom(link, from_ns);
             }
-        }
-        if (self.next_auto_partition_at_ns == null) {
-            try self.scheduleAutoPartitionFrom(from_ns);
         }
     }
 
@@ -453,7 +461,7 @@ const SharedRuntime = struct {
     fn scheduleAutoClogFrom(self: *SharedRuntime, link: *Link, from_ns: clock_module.Timestamp) !void {
         link.next_auto_clog_at_ns = null;
         if (self.faults.path_clog_rate.numerator == 0) return;
-        if (link.clogged_until > from_ns) return;
+        if (link.clogged_until != 0 and link.clogged_until >= from_ns) return;
         const ticks = try self.sampleNextOccurrenceTicks(self.faults.path_clog_rate);
         link.next_auto_clog_at_ns = try addDurationTicks(from_ns, ticks, self.world.clock().tick_ns);
     }

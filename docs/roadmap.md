@@ -423,6 +423,25 @@ app deinit, app-init errors, and the replicated-register example now uses
 
 ---
 
+### Completed: Scalable seeded fault evolution
+
+**Status:** Done. `SimControl` coordinates a fixed set of private
+fault-evolution participants rather than naming network and process separately
+throughout the run loop. Every participant invocation has a
+`fault_evolution.boundary` trace record, and large quiet jumps stop only at
+participant-reported boundaries.
+
+**Why it mattered:** Network and process dynamics now share one time-evolution
+contract while disk read/write and crash rolls remain explicitly
+operation-shaped. Equal elapsed time through `tick()` and `runFor()` preserves
+the seeded random stream even across deterministic clog expiries.
+
+**Coverage:** Tests cover combined network/process evolution, byte-identical
+same-seed replay, traced transition boundaries, large quiet jumps, and
+tick-versus-runFor RNG equivalence at clog expiry.
+
+---
+
 ## Active Work Queue
 
 0.4 should make the current simulator feel coherent rather than merely broad:
@@ -434,25 +453,7 @@ Pick from the top unless coordinating otherwise. Code work belongs in these
 items; docs-only edits should keep the story current without claiming future
 implementation as done.
 
-### 1. Scalable seeded fault evolution
-
-Generalize the network fault-evolution pattern into a small subsystem contract:
-the outer simulator tick advances time, each subsystem draws seeded rolls at
-that boundary, and every state transition is trace-visible. Network already
-does this for loss, latency, clogs, and partitions; 0.4 should make that shape
-obvious enough for process, disk, and future allocation faults to reuse.
-
-Acceptance criteria:
-
-- Document the per-tick fault-evolution contract and the trace expectations.
-- Keep random draws centralized through the world PRNG so same-seed traces stay
-  byte-identical.
-- Avoid per-operation hidden random evolution except for explicitly
-  operation-shaped faults such as disk read/write fault decisions.
-- Add or update a validation scenario that would fail if a subsystem evolved
-  faults from an untraced boundary.
-
-### 3. Named simulation profiles
+### 1. Named simulation profiles
 
 Lift the hand-built scenario settings into named profiles so examples and CI
 can say what kind of run they are performing without rewriting rates and
@@ -460,7 +461,7 @@ budgets at every call site.
 
 Acceptance criteria:
 
-- Ship at least `smoke`, `swarm`, `replay`, and `performance` profiles.
+- Ship at least `baseline`, `swarm`, `replay`, and `performance` profiles.
 - Profiles expand into `RunOptions`, simulator topology defaults, and runtime
   fault controls without hiding the fully expanded values from traces or
   failure summaries.
@@ -469,7 +470,7 @@ Acceptance criteria:
 - Port the replicated-register swarm setup to the shared profile mechanism
   without weakening its current coverage.
 
-### 4. Fuzz/search confidence for known-bug examples
+### 2. Fuzz/search confidence for known-bug examples
 
 The suite has strong single-seed demonstrations. 0.4 should add modest
 fuzz/search coverage where the bug is probabilistic, so CI proves the fault
@@ -632,7 +633,7 @@ and item 5.
 
 **Moved to the active 0.4 queue.**
 
-Ship `smoke`, `swarm`, `replay`, `performance` as first-class named
+Ship `baseline`, `swarm`, `replay`, `performance` as first-class named
 profiles that expand into `RunOptions`, `SimNetworkOptions`, and runtime
 network fault controls. The replicated register example already manually
 constructs these; lift them into the library. Depends on item 4.
@@ -1226,8 +1227,8 @@ become confusing.
 
 ---
 
-Last meaningful update: 0.4 active queue refreshed around scalable seeded fault
-evolution, process crash/restart probabilities, named profiles, and fuzz/search
-confidence; completed network fault evolution moved out of the active queue.
+Last meaningful update: scalable seeded fault evolution and process
+crash/restart probabilities are complete. The active 0.4 queue now centers on
+named profiles and fuzz/search confidence.
 Update this roadmap in the same PR as any substantive code change.
 Contributors should expect the roadmap to reflect the true state of the code.

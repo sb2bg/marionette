@@ -341,8 +341,8 @@ const process_control_vtable: env_module.ProcessControl.VTable = .{
     .set_dynamics = processControlSetDynamics,
     .kill = processControlKill,
     .restart = processControlRestart,
-    .evolve_tick_faults = processControlEvolveTickFaults,
-    .next_fault_boundary_before_or_at = processControlNextFaultBoundaryBeforeOrAt,
+    .evolve_tick_faults = processControlEvolveAtBoundary,
+    .next_fault_boundary_before_or_at = processControlNextBoundaryBeforeOrAt,
     .finish_run_for = processControlFinishRunFor,
 };
 
@@ -366,11 +366,11 @@ fn processControlRestart(ptr: *anyopaque, node: network_module.NodeId) anyerror!
     try processControl(ptr).restartProcess(node);
 }
 
-fn processControlEvolveTickFaults(ptr: *anyopaque) anyerror!void {
+fn processControlEvolveAtBoundary(ptr: *anyopaque) anyerror!void {
     try processControl(ptr).evolveTickFaults();
 }
 
-fn processControlNextFaultBoundaryBeforeOrAt(
+fn processControlNextBoundaryBeforeOrAt(
     ptr: *anyopaque,
     end_ns: clock_module.Timestamp,
 ) anyerror!?clock_module.Timestamp {

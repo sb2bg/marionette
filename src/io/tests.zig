@@ -1033,6 +1033,82 @@ test "io: process dynamics are deterministic for the same seed" {
     try std.testing.expect(std.mem.indexOf(u8, a, "process.restart node=0 automatic=true") != null);
 }
 
+fn runCombinedFaultEvolutionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    const State = struct {
+        fn onKill(_: *anyopaque) void {}
+        fn restart(_: *anyopaque, _: env_module.Env) anyerror!void {}
+    };
+
+    var world = try World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{
+            .nodes = 3,
+            .service_nodes = 2,
+            .path_capacity = 4,
+        },
+    });
+    var state: u8 = 0;
+    try sim.registerProcess(0, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+    try sim.control.network.setPartitionDynamics(.{
+        .partition_rate = .always(),
+        .unpartition_rate = .always(),
+        .partition_stability_min_ns = 3_000,
+        .unpartition_stability_min_ns = 2_000,
+    });
+    try sim.control.process.setDynamics(0, .{
+        .crash_rate = .always(),
+        .restart_rate = .always(),
+        .crash_stability_min_ns = 2_000,
+        .restart_stability_min_ns = 3_000,
+    });
+
+    try sim.control.runFor(10_000);
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+fn expectFaultTransitionsFollowTracedBoundaries(trace: []const u8) !void {
+    var boundary_since_time_advance = false;
+    var lines = std.mem.splitScalar(u8, trace, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "world.run_for") != null) {
+            boundary_since_time_advance = false;
+        } else if (std.mem.indexOf(u8, line, "fault_evolution.boundary") != null) {
+            boundary_since_time_advance = true;
+        } else if (std.mem.indexOf(u8, line, "world.random_int_less_than") != null or
+            std.mem.indexOf(u8, line, "network.auto_partition") != null or
+            std.mem.indexOf(u8, line, "network.auto_heal") != null or
+            std.mem.indexOf(u8, line, "process.kill node=0 reason=auto_crash") != null or
+            std.mem.indexOf(u8, line, "process.restart node=0 automatic=true") != null)
+        {
+            try std.testing.expect(boundary_since_time_advance);
+        }
+    }
+}
+
+test "io: fixed fault participants evolve together across a large quiet jump" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const a = try runCombinedFaultEvolutionTrace(std.testing.allocator, 0xA6A);
+    defer std.testing.allocator.free(a);
+    const b = try runCombinedFaultEvolutionTrace(std.testing.allocator, 0xA6A);
+    defer std.testing.allocator.free(b);
+
+    try std.testing.expectEqualStrings(a, b);
+    try expectFaultTransitionsFollowTracedBoundaries(a);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, a, "world.tick"));
+    try std.testing.expect(std.mem.count(u8, a, "world.run_for") < 20);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.auto_partition") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "network.auto_heal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "process.kill node=0 reason=auto_crash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "process.restart node=0 automatic=true") != null);
+}
+
 test "io: automatic process restart reports missing lifecycle" {
     if (!fiber_supported) return error.SkipZigTest;
 

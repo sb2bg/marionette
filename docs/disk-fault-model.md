@@ -194,6 +194,11 @@ Disk traces are stable text events until the trace format changes globally.
 Disk code must use `World.recordFields` so logical paths and status strings
 are escaped consistently. Current events:
 
+Disk fault rolls are explicitly operation-shaped. They are tied to the
+operation id (or to an explicit crash) and do not participate in the
+time-evolved `fault_evolution.boundary` contract used by network and process
+dynamics.
+
 - `disk.read op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
 - `disk.write op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
 - `disk.sync op=<u64> path=<escaped-text> status=<literal> committed_writes=<u64> latency_ns=<u64>`

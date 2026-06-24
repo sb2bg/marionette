@@ -49,11 +49,8 @@ pub const internal = struct {
 
     pub const byteEndpointFromControl = sim.byteEndpointFromControl;
     pub const endpointFromControl = sim.endpointFromControl;
-    pub const evolveForControl = control.internal.evolveFor;
-    pub const evolveTickFaultsForControl = control.internal.evolveTickFaults;
-    pub const finishRunForControl = control.internal.finishRunFor;
+    pub const faultEvolutionParticipantFromControl = control.internal.faultEvolutionParticipant;
     pub const initSimControl = sim.initSimControl;
-    pub const nextFaultBoundaryBeforeOrAtForControl = control.internal.nextFaultBoundaryBeforeOrAt;
     pub const nextStreamDeliveryAtForControl = sim.nextStreamDeliveryAtForControl;
     pub const processCountFromControl = sim.processCountFromControl;
     pub const productionByteEndpoint = production.productionByteEndpoint;

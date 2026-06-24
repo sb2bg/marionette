@@ -1,6 +1,7 @@
 //! Type-erased network fault-control authority.
 
 const clock_module = @import("../clock.zig");
+const fault_evolution_module = @import("../fault_evolution.zig");
 const types = @import("types.zig");
 const World = @import("../world.zig").World;
 
@@ -93,23 +94,15 @@ pub const AnyNetworkControl = struct {
     }
 };
 
-/// Internal run-loop hooks. Public harness code should drive fault evolution
-/// through `SimControl.tick` or `SimControl.runFor`.
+/// Internal adapter used by the composition run loop.
 pub const internal = struct {
-    pub fn evolveTickFaults(control: AnyNetworkControl) !void {
-        try control.vtable.evolve_tick_faults(control.ptr);
-    }
-
-    pub fn evolveFor(control: AnyNetworkControl, duration_ns: clock_module.Duration) !void {
-        try control.vtable.evolve_for(control.ptr, duration_ns);
-    }
-
-    pub fn nextFaultBoundaryBeforeOrAt(control: AnyNetworkControl, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
-        return try control.vtable.next_fault_boundary_before_or_at(control.ptr, end_ns);
-    }
-
-    pub fn finishRunFor(control: AnyNetworkControl) !void {
-        try control.vtable.finish_run_for(control.ptr);
+    pub fn faultEvolutionParticipant(control: AnyNetworkControl) fault_evolution_module.Participant {
+        return .{
+            .ptr = control.ptr,
+            .evolve_at_boundary = control.vtable.evolve_tick_faults,
+            .next_boundary_before_or_at = control.vtable.next_fault_boundary_before_or_at,
+            .finish_run_for = control.vtable.finish_run_for,
+        };
     }
 };
 

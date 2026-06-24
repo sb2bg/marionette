@@ -769,6 +769,34 @@ test "composition network: runFor zero duration does not evolve faults" {
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, after, "network.clog from="));
 }
 
+fn randomAfterManualClogExpiry(advance_with_ticks: bool) !u64 {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    try sim.control.network.setClogs(.{
+        .path_clog_rate = .percent(50),
+        .path_clog_duration_ns = 20,
+    });
+    try sim.control.network.clog(0, 1, 20);
+
+    if (advance_with_ticks) {
+        try sim.control.tick();
+        try sim.control.tick();
+    } else {
+        try sim.control.runFor(20);
+    }
+
+    return try world.randomU64();
+}
+
+test "composition network: tick and runFor preserve RNG state across clog expiry" {
+    try std.testing.expectEqual(
+        try randomAfterManualClogExpiry(true),
+        try randomAfterManualClogExpiry(false),
+    );
+}
+
 test "composition network: runFor advances through deterministic clog expiries" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();

@@ -7,6 +7,7 @@ const std = @import("std");
 
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk/root.zig");
+const fault_evolution_module = @import("fault_evolution.zig");
 const io_task_module = @import("io/task.zig");
 const network_io_module = @import("network/io.zig");
 const network_module = @import("network/root.zig");
@@ -466,16 +467,13 @@ pub const ProcessControl = struct {
         try self.vtable.restart(self.ptr, node);
     }
 
-    fn evolveTickFaults(self: ProcessControl) !void {
-        try self.vtable.evolve_tick_faults(self.ptr);
-    }
-
-    fn nextFaultBoundaryBeforeOrAt(self: ProcessControl, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
-        return try self.vtable.next_fault_boundary_before_or_at(self.ptr, end_ns);
-    }
-
-    fn finishRunFor(self: ProcessControl) !void {
-        try self.vtable.finish_run_for(self.ptr);
+    fn faultEvolutionParticipant(self: ProcessControl) fault_evolution_module.Participant {
+        return .{
+            .ptr = self.ptr,
+            .evolve_at_boundary = self.vtable.evolve_tick_faults,
+            .next_boundary_before_or_at = self.vtable.next_fault_boundary_before_or_at,
+            .finish_run_for = self.vtable.finish_run_for,
+        };
     }
 };
 
@@ -510,11 +508,7 @@ pub const SimControl = struct {
 
         const end_ns = std.math.add(clock_module.Timestamp, self.world.now(), duration_ns) catch return error.InvalidDuration;
         try self.evolveFaultsAtCurrentBoundary();
-        while (true) {
-            const boundary_ns = minOptionalTimestamp(
-                try network_module.internal.nextFaultBoundaryBeforeOrAtForControl(self.network, end_ns),
-                try self.process.nextFaultBoundaryBeforeOrAt(end_ns),
-            ) orelse break;
+        while (try self.nextFaultBoundaryBeforeOrAt(end_ns)) |boundary_ns| {
             if (boundary_ns > self.world.now()) {
                 try self.world.runFor(boundary_ns - self.world.now());
             }
@@ -523,25 +517,42 @@ pub const SimControl = struct {
 
         if (end_ns > self.world.now()) {
             try self.world.runFor(end_ns - self.world.now());
+            try self.evolveFaultsAtCurrentBoundary();
         }
-        try network_module.internal.finishRunForControl(self.network);
-        try self.process.finishRunFor();
+        for (self.faultEvolutionParticipants()) |participant| {
+            try participant.finishRunFor();
+        }
+    }
+
+    fn faultEvolutionParticipants(self: SimControl) [2]fault_evolution_module.Participant {
+        return .{
+            network_module.internal.faultEvolutionParticipantFromControl(self.network),
+            self.process.faultEvolutionParticipant(),
+        };
     }
 
     fn evolveFaultsAtCurrentBoundary(self: SimControl) !void {
-        try network_module.internal.evolveTickFaultsForControl(self.network);
-        try self.process.evolveTickFaults();
+        try self.world.record("fault_evolution.boundary now_ns={}", .{self.world.now()});
+        for (self.faultEvolutionParticipants()) |participant| {
+            try participant.evolveAtBoundary();
+        }
+    }
+
+    fn nextFaultBoundaryBeforeOrAt(self: SimControl, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
+        var next: ?clock_module.Timestamp = null;
+        for (self.faultEvolutionParticipants()) |participant| {
+            const candidate = (try participant.nextBoundaryBeforeOrAt(end_ns)) orelse continue;
+            next = minOptionalTimestamp(next, candidate);
+        }
+        return next;
     }
 };
 
 fn minOptionalTimestamp(
-    a: ?clock_module.Timestamp,
-    b: ?clock_module.Timestamp,
+    current: ?clock_module.Timestamp,
+    candidate: clock_module.Timestamp,
 ) ?clock_module.Timestamp {
-    return if (a) |a_value|
-        if (b) |b_value| @min(a_value, b_value) else a_value
-    else
-        b;
+    return if (current) |value| @min(value, candidate) else candidate;
 }
 
 fn hookName(comptime hook: anytype) []const u8 {
