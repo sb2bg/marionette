@@ -405,6 +405,24 @@ automatic restart fires for a process with no registered lifecycle.
 
 ---
 
+### Completed: `SimCase` simulation runner
+
+**Status:** Done. `mar.SimCase(App)` standardizes the common simulation test
+shape: app initialization receives `mar.Sim`, scenarios and checks receive
+`*mar.SimCase(App)`, application state lives at `case.app`, and simulator
+authority remains available through `case.control()`.
+
+**Why it mattered:** Examples no longer need to define a custom harness just to
+call `World.simulate`, keep `control`, and store the application state. The
+lower-level `runCase` path remains available for raw `World` tests and unusual
+ownership.
+
+**Coverage:** Runner tests cover pass, fuzz, expected failure, state checks,
+app deinit, app-init errors, and the replicated-register example now uses
+`runSimCase`/`expectSim*`.
+
+---
+
 ## Active Work Queue
 
 0.4 should make the current simulator feel coherent rather than merely broad:

@@ -617,75 +617,89 @@ var report = try mar.run(std.testing.allocator, .{
 defer report.deinit();
 ```
 
-Stateful scenarios should usually use `runCase`. It infers the
-state type from the initializer, and run metadata such as `name`, `tags`, and
-`attributes` is optional:
+Simulation scenarios should usually use `runSimCase` and `SimCase(App)`. The
+app initializer receives `mar.Sim` directly, while scenarios and checks receive
+the standard case wrapper:
 
 ```zig
+const Case = mar.SimCase(Model);
+
 const Model = struct {
     env: mar.Env,
     committed: bool = false,
-
-    fn init(world: *mar.World) Model {
-        const sim = world.simulate(.{}) catch unreachable;
-        return .{ .env = sim.env };
-    }
 };
 
-fn scenario(model: *Model) !void {
-    model.committed = true;
-    try model.env.record("model.commit", .{});
+fn initModel(sim: mar.Sim) Model {
+    return .{ .env = sim.env };
 }
 
-fn committed(model: *const Model) !void {
-    if (!model.committed) return error.NotCommitted;
+fn scenario(case: *Case) !void {
+    try case.control().tick();
+    case.app.committed = true;
+    try case.env().record("model.commit", .{});
 }
 
-const state_checks = [_]mar.StateCheck(Model){
+fn committed(case: *const Case) !void {
+    if (!case.app.committed) return error.NotCommitted;
+}
+
+const state_checks = [_]mar.StateCheck(Case){
     .{ .name = "committed", .check = committed },
 };
 
-var report = try mar.runCase(.{
+var report = try mar.runSimCase(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
     .name = "model-smoke",
-    .init = Model.init,
+    .simulate = .{},
+    .init = initModel,
     .scenario = scenario,
     .checks = &state_checks,
 });
 defer report.deinit();
 ```
 
-`runCase` initializes fresh state for each replay attempt and passes the
-attempt's `World` into the initializer. Initializers may construct world-bound
-simulator authorities, but should not record trace events. Stateful scenarios
-and state checks receive only state; put environment authorities on the state
-when they need to record or advance time. If state owns non-world resources,
-provide `.deinit = State.deinit`; the deinitializer runs once per replay
-attempt after scenario execution and checks.
+`runSimCase` initializes fresh state for each replay attempt: it creates the
+`World`, records run metadata, calls `world.simulate(config.simulate)`, passes
+the resulting `mar.Sim` to `init`, and then runs the scenario and checks over
+`*mar.SimCase(App)`. Use `case.app` for application state and `case.control()`
+for simulator authority. `case.env()`, `case.envForNode(...)`,
+`case.endpoint(...)`, and related helpers forward to the underlying `mar.Sim`.
+`case.io()` and `case.ioForNode(node)` are the std.Io-facing equivalents for
+single-node and node-scoped simulated I/O.
+
+Use `runCase` when state really is custom or low-level. It passes the attempt's
+`World` into the initializer and leaves simulation setup entirely to the state
+type. If custom state owns non-world resources, provide
+`.deinit = State.deinit`; the deinitializer runs once per replay attempt after
+scenario execution and checks. `SimCase(App)` automatically calls `app.deinit()`
+when `App` defines that method.
 
 Tests that only need pass/fail behavior can skip report handling:
 
 ```zig
-try mar.expectPass(.{
+try mar.expectSimPass(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
-    .init = Model.init,
+    .simulate = .{},
+    .init = initModel,
     .scenario = scenario,
     .checks = &state_checks,
 });
 
-try mar.expectFuzz(.{
+try mar.expectSimFuzz(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
     .seeds = 1000,
-    .init = Model.init,
+    .simulate = .{},
+    .init = initModel,
     .scenario = scenario,
     .checks = &state_checks,
 });
 ```
 
-Use `mar.expectFailure` when proving a checker catches a known-buggy scenario.
+Use `mar.expectSimFailure` when proving a simulation checker catches a
+known-buggy scenario. Use `mar.expectFailure` for custom `runCase` state.
 Use the lower-level `mar.run` for world-only scenarios. The older
 `runWithState*` positional helpers are internal implementation details.
 

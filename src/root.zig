@@ -228,14 +228,29 @@ pub const run = run_module.run;
 /// Run a scenario through the struct-config runner.
 pub const runCase = run_module.runCase;
 
+/// Standard simulation scenario state wrapper.
+pub const SimCase = run_module.SimCase;
+
+/// Run a simulation case through the struct-config runner.
+pub const runSimCase = run_module.runSimCase;
+
 /// Expect a struct-config scenario to pass.
 pub const expectPass = run_module.expectPass;
+
+/// Expect a simulation case to pass.
+pub const expectSimPass = run_module.expectSimPass;
 
 /// Expect a struct-config scenario to fail.
 pub const expectFailure = run_module.expectFailure;
 
+/// Expect a simulation case to fail.
+pub const expectSimFailure = run_module.expectSimFailure;
+
 /// Expect a struct-config scenario to pass over many seeds.
 pub const expectFuzz = run_module.expectFuzz;
+
+/// Expect a simulation case to pass over many seeds.
+pub const expectSimFuzz = run_module.expectSimFuzz;
 
 /// Errors returned by expectation helpers.
 pub const ExpectRunError = run_module.ExpectRunError;

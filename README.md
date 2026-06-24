@@ -127,9 +127,15 @@ test "wal recovery fuzz" {
 }
 ```
 
-Three pieces, every test:
+Most simulation tests use `mar.SimCase(App)`: `init` receives `mar.Sim`,
+`scenario` receives `*mar.SimCase(App)`, and the app state lives at
+`case.app`. Custom harness types still work through `mar.runCase` when a test
+needs lower-level `World` access or unusual ownership.
 
-- **`init`** sets up your harness: your code under test, plus the `control` handle for fault injection.
+Three pieces, either way:
+
+- **`init`** sets up your app state from `mar.Sim`, or a custom harness from
+  `*mar.World` for lower-level tests.
 - **`scenario`** drives the action. It calls into your code through the handles
   created by `env`, and into the simulator via `control`.
 - **`checks`** assert invariants on the final state.

@@ -2,6 +2,8 @@
 
 const std = @import("std");
 
+const env_module = @import("env.zig");
+const network_module = @import("network/root.zig");
 const run_types = @import("run_types.zig");
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
@@ -41,6 +43,69 @@ const RunOnceResult = union(enum) {
         self.* = undefined;
     }
 };
+
+/// Standard simulation scenario state: the world-owned simulator handles plus
+/// user application state initialized from `mar.Sim`.
+pub fn SimCase(comptime App: type) type {
+    return struct {
+        const Self = @This();
+
+        sim: World.Simulation,
+        app: App,
+
+        pub fn env(self: *const Self) env_module.Env {
+            return self.sim.env;
+        }
+
+        pub fn control(self: *const Self) env_module.SimControl {
+            return self.sim.control;
+        }
+
+        pub fn envForNode(self: *const Self, node: network_module.NodeId) !env_module.Env {
+            return try self.sim.envForNode(node);
+        }
+
+        pub fn io(self: *const Self) std.Io {
+            return self.env().io();
+        }
+
+        pub fn ioForNode(self: *const Self, node: network_module.NodeId) !std.Io {
+            return (try self.envForNode(node)).io();
+        }
+
+        pub fn endpoint(self: *const Self, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
+            return try self.sim.endpoint(Payload, node);
+        }
+
+        pub fn byteEndpoint(self: *const Self, node: network_module.NodeId) !network_module.ByteEndpoint {
+            return try self.sim.byteEndpoint(node);
+        }
+
+        pub fn endpoints(
+            self: *const Self,
+            comptime Payload: type,
+            comptime count: usize,
+            first_node: network_module.NodeId,
+        ) ![count]network_module.Endpoint(Payload) {
+            return try self.sim.endpoints(Payload, count, first_node);
+        }
+
+        pub fn byteEndpoints(
+            self: *const Self,
+            comptime count: usize,
+            first_node: network_module.NodeId,
+        ) ![count]network_module.ByteEndpoint {
+            return try self.sim.byteEndpoints(count, first_node);
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (comptime appHasDeinit(App)) {
+                self.app.deinit();
+            }
+            self.* = undefined;
+        }
+    };
+}
 
 /// Run `scenario` twice with the same seed and compare byte-identical traces.
 ///
@@ -150,9 +215,37 @@ pub fn runCase(config: anytype) RunError!RunReport {
     return runCaseWithSeed(config, null);
 }
 
+/// Run one simulation case.
+///
+/// Required fields:
+/// - `allocator`
+/// - `simulate: mar.World.SimulateOptions`
+/// - `init: fn (mar.Sim) App` or `fn (mar.Sim) !App`
+/// - `scenario: fn (*mar.SimCase(App)) !void`
+///
+/// Optional fields mirror `RunOptions`: `seed`, `start_ns`, `tick_ns`,
+/// `name`, `tags`, `attributes`, `world_checks`, and `checks`.
+pub fn runSimCase(config: anytype) RunError!RunReport {
+    return runSimCaseWithSeed(config, null);
+}
+
 /// Expect a struct-config case to pass. Prints the failure summary otherwise.
 pub fn expectPass(config: anytype) ExpectRunError!void {
     var report = try runCase(config);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => {},
+        .failed => |failure| {
+            failure.print();
+            return error.ExpectedRunPass;
+        },
+    }
+}
+
+/// Expect a simulation case to pass. Prints the failure summary otherwise.
+pub fn expectSimPass(config: anytype) ExpectRunError!void {
+    var report = try runSimCase(config);
     defer report.deinit();
 
     switch (report) {
@@ -168,6 +261,18 @@ pub fn expectPass(config: anytype) ExpectRunError!void {
 /// needs to inspect the failure details.
 pub fn expectFailure(config: anytype) ExpectRunError!void {
     var report = try runCase(config);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => {},
+    }
+}
+
+/// Expect a simulation case to fail. Use `runSimCase` directly when the test
+/// needs to inspect the failure details.
+pub fn expectSimFailure(config: anytype) ExpectRunError!void {
+    var report = try runSimCase(config);
     defer report.deinit();
 
     switch (report) {
@@ -194,6 +299,31 @@ pub fn expectFuzz(config: anytype) ExpectRunError!void {
             .passed => {},
             .failed => |failure| {
                 std.debug.print("marionette fuzz failure: seed={} iteration={}\n", .{ seed, iteration });
+                failure.print();
+                return error.ExpectedRunPass;
+            },
+        }
+    }
+}
+
+/// Run a simulation case over many deterministic seeds.
+///
+/// Required extra field: `seeds`, the number of seeds to run. Optional `seed`
+/// acts as the base seed.
+pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
+    if (!@hasField(@TypeOf(config), "seeds")) {
+        @compileError("expectSimFuzz config requires a `seeds` field");
+    }
+
+    for (0..config.seeds) |iteration| {
+        const seed = fuzzSeed(configSeed(config), iteration);
+        var report = try runSimCaseWithSeed(config, seed);
+        defer report.deinit();
+
+        switch (report) {
+            .passed => {},
+            .failed => |failure| {
+                std.debug.print("marionette sim fuzz failure: seed={} iteration={}\n", .{ seed, iteration });
                 failure.print();
                 return error.ExpectedRunPass;
             },
@@ -265,6 +395,29 @@ fn runCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
     );
 }
 
+fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
+    if (!@hasField(@TypeOf(config), "simulate")) {
+        @compileError("runSimCase config requires a `simulate` field");
+    }
+
+    const App = appTypeFromSimInit(config.init);
+    const Case = SimCase(App);
+    validateSimScenario(Case, config.scenario);
+
+    const no_case_checks = [_]StateCheck(Case){};
+    const case_checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_case_checks;
+
+    return runTwiceWithSimCase(
+        config.allocator,
+        runOptionsFromConfig(config, seed_override),
+        simulateOptionsFromConfig(config.simulate),
+        App,
+        fallibleSimInit(App, config.init),
+        config.scenario,
+        case_checks,
+    );
+}
+
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
     return .{
         .seed = seed_override orelse configSeed(config),
@@ -287,6 +440,38 @@ fn configRunName(config: anytype) ?[]const u8 {
 
 fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
     return if (@hasField(@TypeOf(config), name)) @field(config, name) else default;
+}
+
+fn simulateOptionsFromConfig(simulate: anytype) World.SimulateOptions {
+    const Simulate = @TypeOf(simulate);
+    return .{
+        .disk = if (@hasField(Simulate, "disk")) diskOptionsFromConfig(simulate.disk) else .{},
+        .network = if (@hasField(Simulate, "network")) networkOptionsFromConfig(simulate.network) else null,
+    };
+}
+
+fn diskOptionsFromConfig(disk: anytype) @import("disk/root.zig").DiskOptions {
+    return .{
+        .sector_size = fieldOrDefault(disk, "sector_size", @as(u64, 4096)),
+        .min_latency_ns = fieldOrDefault(disk, "min_latency_ns", @as(?@import("clock.zig").Duration, null)),
+        .latency_jitter_ns = fieldOrDefault(disk, "latency_jitter_ns", @as(@import("clock.zig").Duration, 0)),
+    };
+}
+
+fn networkOptionsFromConfig(network: anytype) ?network_module.SimNetworkOptions {
+    const Network = @TypeOf(network);
+    return switch (@typeInfo(Network)) {
+        .null => null,
+        .optional => if (network) |options| networkOptionsFromConfig(options) else null,
+        else => .{
+            .nodes = if (@hasField(Network, "nodes"))
+                network.nodes
+            else
+                @compileError("runSimCase config.simulate.network requires a `nodes` field"),
+            .service_nodes = fieldOrDefault(network, "service_nodes", @as(usize, 0)),
+            .path_capacity = fieldOrDefault(network, "path_capacity", @as(usize, 64)),
+        },
+    };
 }
 
 /// Derive the seed for one fuzz iteration.
@@ -357,6 +542,68 @@ fn fallibleInit(comptime State: type, comptime init_state: anytype) fn (*World) 
     };
 }
 
+fn appTypeFromSimInit(comptime init_app: anytype) type {
+    const Return = simInitReturnType(init_app);
+    return switch (@typeInfo(Return)) {
+        .error_union => |error_union| error_union.payload,
+        else => Return,
+    };
+}
+
+fn simInitReturnType(comptime init_app: anytype) type {
+    const Init = @TypeOf(init_app);
+    const info = switch (@typeInfo(Init)) {
+        .@"fn" => |fn_info| fn_info,
+        else => @compileError("runSimCase config.init must be a function"),
+    };
+    if (info.params.len != 1 or info.params[0].type != World.Simulation) {
+        @compileError("runSimCase config.init must take `mar.Sim`");
+    }
+    return info.return_type orelse @compileError("runSimCase config.init must return app state");
+}
+
+fn validateSimScenario(comptime Case: type, comptime scenario: anytype) void {
+    const info = switch (@typeInfo(@TypeOf(scenario))) {
+        .@"fn" => |fn_info| fn_info,
+        else => @compileError("runSimCase config.scenario must be a function"),
+    };
+    if (info.params.len != 1 or info.params[0].type != *Case) {
+        @compileError("runSimCase config.scenario must take `*mar.SimCase(App)`");
+    }
+    const Return = info.return_type orelse @compileError("runSimCase config.scenario must return void or !void");
+    switch (@typeInfo(Return)) {
+        .error_union => |error_union| if (error_union.payload != void) {
+            @compileError("runSimCase config.scenario must return void or !void");
+        },
+        else => if (Return != void) {
+            @compileError("runSimCase config.scenario must return void or !void");
+        },
+    }
+}
+
+fn fallibleSimInit(comptime App: type, comptime init_app: anytype) fn (World.Simulation) anyerror!App {
+    const Return = simInitReturnType(init_app);
+    return switch (@typeInfo(Return)) {
+        .error_union => struct {
+            fn init(sim: World.Simulation) anyerror!App {
+                return try init_app(sim);
+            }
+        }.init,
+        else => struct {
+            fn init(sim: World.Simulation) anyerror!App {
+                return init_app(sim);
+            }
+        }.init,
+    };
+}
+
+fn appHasDeinit(comptime App: type) bool {
+    return switch (@typeInfo(App)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(App, "deinit"),
+        else => false,
+    };
+}
+
 fn runTwiceWithStateLifecycle(
     allocator: std.mem.Allocator,
     options: RunOptions,
@@ -372,7 +619,38 @@ fn runTwiceWithStateLifecycle(
     var first = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
     errdefer first.deinit();
 
-    var second = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
+    const second = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
+
+    return compareRunOnceResults(allocator, first, second);
+}
+
+fn runTwiceWithSimCase(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    simulate_options: World.SimulateOptions,
+    comptime App: type,
+    comptime init_app: fn (World.Simulation) anyerror!App,
+    comptime scenario: fn (*SimCase(App)) anyerror!void,
+    comptime state_checks: []const StateCheck(SimCase(App)),
+) RunError!RunReport {
+    // Always execute both runs, even when the first fails: a failure that
+    // does not reproduce with the same seed is itself a determinism leak,
+    // and a failure that does reproduce is verified replayable.
+    var first = try runOnceWithSimCase(allocator, options, simulate_options, App, init_app, scenario, state_checks);
+    errdefer first.deinit();
+
+    const second = try runOnceWithSimCase(allocator, options, simulate_options, App, init_app, scenario, state_checks);
+
+    return compareRunOnceResults(allocator, first, second);
+}
+
+fn compareRunOnceResults(
+    allocator: std.mem.Allocator,
+    first_result: RunOnceResult,
+    second_result: RunOnceResult,
+) RunReport {
+    const first = first_result;
+    var second = second_result;
 
     switch (first) {
         .passed => |first_passed| switch (second) {
@@ -473,6 +751,95 @@ fn runTwiceWithStateLifecycle(
 fn optionalTextEqual(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null or b == null) return a == null and b == null;
     return std.mem.eql(u8, a.?, b.?);
+}
+
+fn runOnceWithSimCase(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    simulate_options: World.SimulateOptions,
+    comptime App: type,
+    comptime init_app: fn (World.Simulation) anyerror!App,
+    comptime scenario: fn (*SimCase(App)) anyerror!void,
+    comptime state_checks: []const StateCheck(SimCase(App)),
+) RunError!RunOnceResult {
+    var world = try World.init(allocator, options.worldOptions());
+    defer world.deinit();
+    try recordRunContext(&world, options);
+
+    const sim = world.simulate(simulate_options) catch |err| {
+        return .{ .failed = try failureFromWorld(
+            allocator,
+            options,
+            .scenario_error,
+            &world,
+            err,
+            null,
+        ) };
+    };
+
+    var state: SimCase(App) = .{
+        .sim = sim,
+        .app = init_app(sim) catch |err| {
+            return .{ .failed = try failureFromWorld(
+                allocator,
+                options,
+                .scenario_error,
+                &world,
+                err,
+                null,
+            ) };
+        },
+    };
+    defer state.deinit();
+
+    scenario(&state) catch |err| {
+        return .{ .failed = try failureFromWorld(
+            allocator,
+            options,
+            .scenario_error,
+            &world,
+            err,
+            null,
+        ) };
+    };
+
+    for (state_checks) |check| {
+        check.check(&state) catch |err| {
+            return .{ .failed = try failureFromWorld(
+                allocator,
+                options,
+                .check_failed,
+                &world,
+                err,
+                check.name,
+            ) };
+        };
+    }
+
+    for (options.checks) |check| {
+        check.check(&world) catch |err| {
+            return .{ .failed = try failureFromWorld(
+                allocator,
+                options,
+                .check_failed,
+                &world,
+                err,
+                check.name,
+            ) };
+        };
+    }
+
+    const trace = try allocator.dupe(u8, world.traceBytes());
+    errdefer allocator.free(trace);
+    const owned_options = try cloneRunOptions(allocator, options);
+
+    return .{ .passed = .{
+        .allocator = allocator,
+        .options = owned_options,
+        .owns_options = true,
+        .trace = trace,
+        .event_count = world.nextEventIndex(),
+    } };
 }
 
 fn runOnceWithStateLifecycle(
@@ -1209,6 +1576,141 @@ test "runCase: deinitializes each replay attempt" {
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "lifecycle.check value=1") != null);
         },
         .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+var sim_case_deinit_count: u8 = 0;
+
+const SimCaseApp = struct {
+    env: env_module.Env,
+    value: u8 = 0,
+
+    fn init(sim: World.Simulation) !SimCaseApp {
+        _ = try sim.endpoint(u8, 0);
+        return .{ .env = sim.env };
+    }
+
+    fn deinit(_: *SimCaseApp) void {
+        sim_case_deinit_count += 1;
+    }
+};
+
+fn simCaseScenario(case: *SimCase(SimCaseApp)) !void {
+    case.app.value += 1;
+    try case.control().network.setLossiness(.{});
+    _ = case.io();
+    _ = try case.ioForNode(0);
+    _ = try case.endpoint(u8, 0);
+    try case.control().tick();
+    try case.env().record("simcase.value value={}", .{case.app.value});
+}
+
+fn simCaseCheck(case: *const SimCase(SimCaseApp)) !void {
+    if (case.app.value != 1) return error.BadSimCaseState;
+    try case.env().record("simcase.check value={}", .{case.app.value});
+}
+
+test "runSimCase: initializes app from simulation and deinitializes each replay" {
+    sim_case_deinit_count = 0;
+    const case_checks = [_]StateCheck(SimCase(SimCaseApp)){
+        .{ .name = "sim case is one", .check = simCaseCheck },
+    };
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = .{ .network = .{ .nodes = 1 } },
+        .init = SimCaseApp.init,
+        .scenario = simCaseScenario,
+        .checks = &case_checks,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| {
+            try std.testing.expectEqual(@as(u8, 2), sim_case_deinit_count);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "simcase.value value=1") != null);
+            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "simcase.check value=1") != null);
+        },
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+test "expectSimPass and expectSimFuzz accept passing cases" {
+    const case_checks = [_]StateCheck(SimCase(SimCaseApp)){
+        .{ .name = "sim case is one", .check = simCaseCheck },
+    };
+
+    try expectSimPass(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = .{ .network = .{ .nodes = 1 } },
+        .init = SimCaseApp.init,
+        .scenario = simCaseScenario,
+        .checks = &case_checks,
+    });
+
+    try expectSimFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .seeds = 4,
+        .simulate = .{ .network = .{ .nodes = 1 } },
+        .init = SimCaseApp.init,
+        .scenario = simCaseScenario,
+        .checks = &case_checks,
+    });
+}
+
+fn failingSimCaseCheck(case: *const SimCase(SimCaseApp)) !void {
+    try case.env().record("simcase.check.fail value={}", .{case.app.value});
+    return error.SimCaseInvariantBroken;
+}
+
+test "expectSimFailure accepts failing simulation cases" {
+    const case_checks = [_]StateCheck(SimCase(SimCaseApp)){
+        .{ .name = "sim case fails", .check = failingSimCaseCheck },
+    };
+
+    try expectSimFailure(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = .{ .network = .{ .nodes = 1 } },
+        .init = SimCaseApp.init,
+        .scenario = simCaseScenario,
+        .checks = &case_checks,
+    });
+}
+
+const FallibleSimApp = struct {
+    fn init(_: World.Simulation) !FallibleSimApp {
+        return error.SimInitFailed;
+    }
+};
+
+fn unreachableSimCaseScenario(_: *SimCase(FallibleSimApp)) !void {
+    return error.UnreachableSimScenario;
+}
+
+test "runSimCase: init errors become scenario failures" {
+    const case_checks = [_]StateCheck(SimCase(FallibleSimApp)){};
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = .{},
+        .init = FallibleSimApp.init,
+        .scenario = unreachableSimCaseScenario,
+        .checks = &case_checks,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.scenario_error, failure.kind);
+            try std.testing.expectEqualStrings("SimInitFailed", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "world.init") != null);
+        },
     }
 }
 

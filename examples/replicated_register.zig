@@ -30,8 +30,15 @@ const RegisterValue = struct {
 };
 
 const Endpoint = mar.Endpoint(MessagePayload);
+const Case = mar.SimCase(Replicas);
 
-pub const checks = [_]mar.StateCheck(Harness){
+const simulate_options = .{ .network = .{
+    .nodes = replica_count + 1,
+    .service_nodes = replica_count,
+    .path_capacity = max_messages,
+} };
+
+pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "committed register is safe", .check = committedRegisterIsSafe },
 };
 
@@ -64,7 +71,7 @@ fn runTrace(
     allocator: std.mem.Allocator,
     seed: u64,
     name: []const u8,
-    comptime scenario_fn: fn (*Harness) anyerror!void,
+    comptime scenario_fn: fn (*Case) anyerror!void,
 ) ![]u8 {
     var report = try runReport(allocator, seed, name, scenario_fn);
     defer report.deinit();
@@ -82,101 +89,89 @@ fn runReport(
     allocator: std.mem.Allocator,
     seed: u64,
     name: []const u8,
-    comptime scenario_fn: fn (*Harness) anyerror!void,
+    comptime scenario_fn: fn (*Case) anyerror!void,
 ) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .tick_ns = tick_ns,
         .name = name,
-        .init = Harness.init,
+        .simulate = simulate_options,
+        .init = initReplicas,
         .scenario = scenario_fn,
         .checks = &checks,
     });
 }
 
-pub const Harness = struct {
-    replicas: Replicas,
-    control: mar.Control,
-
-    pub fn init(world: *mar.World) !Harness {
-        const sim = try world.simulate(.{ .network = .{
-            .nodes = replica_count + 1,
-            .service_nodes = replica_count,
-            .path_capacity = max_messages,
-        } });
-        return .{
-            .replicas = Replicas.init(
-                sim.env,
-                try sim.endpoint(MessagePayload, client_node_id),
-                try sim.endpoints(MessagePayload, replica_count, 0),
-            ),
-            .control = sim.control,
-        };
-    }
-};
-
-fn committedRegisterIsSafe(harness: *const Harness) !void {
-    try checkCommittedAgreement(&harness.replicas);
-    try checkCommittedQuorumAccepted(&harness.replicas);
+fn initReplicas(sim: mar.Sim) !Replicas {
+    return Replicas.init(
+        sim.env,
+        try sim.endpoint(MessagePayload, client_node_id),
+        try sim.endpoints(MessagePayload, replica_count, 0),
+    );
 }
 
-pub fn scenario(harness: *Harness) !void {
-    try harness.control.network.setLossiness(.{ .drop_rate = .percent(20) });
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 8 });
+fn committedRegisterIsSafe(case: *const Case) !void {
+    try checkCommittedAgreement(&case.app);
+    try checkCommittedQuorumAccepted(&case.app);
 }
 
-pub fn buggyScenario(harness: *Harness) !void {
-    try harness.replicas.forceCommit(0, 1, 41);
-    try harness.replicas.forceCommit(1, 1, 42);
+pub fn scenario(case: *Case) !void {
+    try case.control().network.setLossiness(.{ .drop_rate = .percent(20) });
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 8 });
 }
 
-pub fn partitionScenario(harness: *Harness) !void {
+pub fn buggyScenario(case: *Case) !void {
+    try case.app.forceCommit(0, 1, 41);
+    try case.app.forceCommit(1, 1, 42);
+}
+
+pub fn partitionScenario(case: *Case) !void {
     const isolated = [_]mar.NodeId{0};
     const majority = [_]mar.NodeId{ 1, 2, client_node_id };
 
-    try harness.control.network.partition(&isolated, &majority);
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
+    try case.control().network.partition(&isolated, &majority);
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
 
-    try harness.control.network.heal();
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 1 });
+    try case.control().network.heal();
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 1 });
 
-    try checkReplicaCommitted(&harness.replicas, 0, 1, 41);
+    try checkReplicaCommitted(&case.app, 0, 1, 41);
 }
 
-pub fn conflictScenario(harness: *Harness) !void {
-    try harness.replicas.write(.{ .version = 1, .value = 41 });
-    try harness.replicas.write(.{ .version = 1, .value = 42 });
+pub fn conflictScenario(case: *Case) !void {
+    try case.app.write(.{ .version = 1, .value = 41 });
+    try case.app.write(.{ .version = 1, .value = 42 });
 }
 
-pub fn swarmScenario(harness: *Harness) !void {
-    try harness.control.network.setLossiness(.{ .drop_rate = .percent(10) });
-    try harness.control.network.setLatency(.{
+pub fn swarmScenario(case: *Case) !void {
+    try case.control().network.setLossiness(.{ .drop_rate = .percent(10) });
+    try case.control().network.setLatency(.{
         .min_latency_ns = tick_ns,
         .latency_jitter_ns = 2 * tick_ns,
     });
-    try harness.control.network.setClogs(.{
+    try case.control().network.setClogs(.{
         .path_clog_rate = .percent(10),
         .path_clog_duration_ns = 2 * tick_ns,
     });
-    try harness.control.network.setPartitionDynamics(.{
+    try case.control().network.setPartitionDynamics(.{
         .partition_rate = .percent(5),
         .unpartition_rate = .percent(20),
         .partition_stability_min_ns = 3 * tick_ns,
         .unpartition_stability_min_ns = 3 * tick_ns,
     });
 
-    try harness.control.runFor(4 * tick_ns);
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 6 });
+    try case.control().runFor(4 * tick_ns);
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 6 });
 
-    try harness.control.runFor(4 * tick_ns);
-    try harness.replicas.write(.{ .version = 2, .value = 42, .retry_limit = 6 });
+    try case.control().runFor(4 * tick_ns);
+    try case.app.write(.{ .version = 2, .value = 42, .retry_limit = 6 });
 
-    try harness.control.network.heal();
-    try harness.control.network.setLossiness(.{});
-    try harness.control.network.setClogs(.{});
-    try harness.control.network.setPartitionDynamics(.{});
-    try harness.replicas.write(.{ .version = 2, .value = 42, .retry_limit = 2 });
+    try case.control().network.heal();
+    try case.control().network.setLossiness(.{});
+    try case.control().network.setClogs(.{});
+    try case.control().network.setPartitionDynamics(.{});
+    try case.app.write(.{ .version = 2, .value = 42, .retry_limit = 2 });
 }
 
 const Replica = struct {
@@ -434,68 +429,74 @@ fn countTrue(values: *const [replica_count]bool) u8 {
 }
 
 test "register: smoke" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulate_options,
+        .init = initReplicas,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "register: smoke fuzz" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 32,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulate_options,
+        .init = initReplicas,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "register: bug detected" {
-    try mar.expectFailure(.{
+    try mar.expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulate_options,
+        .init = initReplicas,
         .scenario = buggyScenario,
         .checks = &checks,
     });
 }
 
 test "register: partition" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulate_options,
+        .init = initReplicas,
         .scenario = partitionScenario,
         .checks = &checks,
     });
 }
 
 test "register: conflict" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulate_options,
+        .init = initReplicas,
         .scenario = conflictScenario,
         .checks = &checks,
     });
 }
 
 test "register: swarm fuzz" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 100,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulate_options,
+        .init = initReplicas,
         .scenario = swarmScenario,
         .checks = &checks,
     });
@@ -506,11 +507,12 @@ test "register: swarm fuzz exercises tick-evolved network faults" {
     var saw_auto_clog = false;
 
     for (0..100) |iteration| {
-        var report = try mar.runCase(.{
+        var report = try mar.runSimCase(.{
             .allocator = std.testing.allocator,
             .seed = 0xC0FFEE + @as(u64, @intCast(iteration)),
             .tick_ns = tick_ns,
-            .init = Harness.init,
+            .simulate = simulate_options,
+            .init = initReplicas,
             .scenario = swarmScenario,
             .checks = &checks,
         });

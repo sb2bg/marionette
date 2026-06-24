@@ -177,93 +177,95 @@ var report = try mar.run(std.testing.allocator, .{
 }, scenario);
 ```
 
-Stateful scenarios should usually use `mar.runCase`. The state initializer
-runs once per replay attempt, so the second run starts from the same state as
-the first:
+Simulation scenarios should usually use `mar.runSimCase` and
+`mar.SimCase(App)`. The app initializer receives `mar.Sim` directly, so it can
+construct endpoints and other simulation-bound authorities without a custom
+harness whose only job is to store `control`:
 
 ```zig
+const Case = mar.SimCase(Model);
+
 const Model = struct {
     env: mar.Env,
     committed: bool = false,
-
-    fn init(world: *mar.World) Model {
-        const sim = world.simulate(.{}) catch unreachable;
-        return .{ .env = sim.env };
-    }
 };
 
-fn scenario(model: *Model) !void {
-    model.committed = true;
-    try model.env.record("model.commit", .{});
+fn initModel(sim: mar.Sim) Model {
+    return .{ .env = sim.env };
 }
 
-fn committed(model: *const Model) !void {
-    if (!model.committed) return error.NotCommitted;
-    try model.env.record("model.check committed=true", .{});
+fn scenario(case: *Case) !void {
+    try case.control().tick();
+    case.app.committed = true;
+    try case.env().record("model.commit", .{});
 }
 
-const state_checks = [_]mar.StateCheck(Model){
+fn committed(case: *const Case) !void {
+    if (!case.app.committed) return error.NotCommitted;
+    try case.env().record("model.check committed=true", .{});
+}
+
+const state_checks = [_]mar.StateCheck(Case){
     .{ .name = "committed", .check = committed },
 };
 
-var report = try mar.runCase(.{
+var report = try mar.runSimCase(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
     .name = "model-smoke",
-    .init = Model.init,
+    .simulate = .{},
+    .init = initModel,
     .scenario = scenario,
     .checks = &state_checks,
 });
 ```
 
-`init` receives the replay attempt's `World` so state can construct
-world-bound simulator authorities without a later bind step. It should not
-record trace events; scenario execution and checks own trace output. Stateful
-scenarios and state checks receive only state; put environment authorities on
-the state when they need to record or advance time.
+`runSimCase` initializes a fresh `World`, records run metadata, calls
+`world.simulate(config.simulate)`, passes the resulting `mar.Sim` to `init`,
+then runs the scenario and checks over `*mar.SimCase(App)`. Scenario code uses
+`case.app` for application state and `case.control()` for simulator authority.
+`case.env()`, `case.envForNode(...)`, `case.endpoint(...)`, and related helpers
+forward to the underlying `mar.Sim`. `case.io()` and `case.ioForNode(node)`
+are the std.Io-facing equivalents for single-node and node-scoped simulated
+I/O.
 
-Use `mar.expectPass` when the test only needs to fail loudly on a bad run:
+Use `mar.runCase` when state really is custom or low-level. It passes the
+attempt's `World` into the initializer and leaves simulation setup entirely to
+the state type.
+
+Use `mar.expectSimPass` when a simulation test only needs to fail loudly on a
+bad run:
 
 ```zig
-const Store = struct {
-    env: mar.Env,
-    control: mar.Control,
-
-    fn init(world: *mar.World) !Store {
-        const sim = try world.simulate(.{});
-
-        return .{
-            .env = sim.env,
-            .control = sim.control,
-        };
-    }
-};
-
-try mar.expectPass(.{
+try mar.expectSimPass(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
-    .init = Store.init,
+    .simulate = .{},
+    .init = initModel,
     .scenario = scenario,
     .checks = &state_checks,
 });
 ```
 
-Use `mar.expectFuzz` to run many deterministic seeds and report the failing
+Use `mar.expectSimFuzz` to run many deterministic seeds and report the failing
 seed if one fails:
 
 ```zig
-try mar.expectFuzz(.{
+try mar.expectSimFuzz(.{
     .allocator = std.testing.allocator,
     .seed = 0x1234,
     .seeds = 1000,
-    .init = Store.init,
+    .simulate = .{},
+    .init = initModel,
     .scenario = scenario,
     .checks = &state_checks,
 });
 ```
 
-Use `mar.expectFailure` when proving a checker catches a known-buggy scenario.
-If state owns non-world resources, pass an explicit infallible deinitializer:
+Use `mar.expectSimFailure` when proving a simulation checker catches a
+known-buggy scenario. Use `mar.expectFailure` for custom `runCase` state.
+If custom `runCase` state owns non-world resources, pass an explicit
+infallible deinitializer:
 
 ```zig
 var report = try mar.runCase(.{
