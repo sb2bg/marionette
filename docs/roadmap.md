@@ -68,9 +68,10 @@ The current disk surface is:
   returns per-node `Env` values backed by process-scoped `std.Io` backends.
   The simulation backend supports clock/random, scheduler-backed and
   trace-visible sleep, scheduler-backed `Io.async` / `Io.concurrent` / await,
-  and immediate non-blocking `Io.Queue` operations today, plus an in-memory TCP
-  stream subset for `std.Io.net` and a flat `std.Io.File` subset over
-  `SimDisk`, including delete and rename. It fails closed for full
+  scheduler-backed `Io.Group`, and immediate non-blocking `Io.Queue`
+  operations today, plus an in-memory TCP stream subset for `std.Io.net` and a
+  directory-aware `std.Io.File`/`Dir` subset over `SimDisk`, including delete
+  and rename. It fails closed for full
   directory/filesystem behavior, process operations, datagrams, DNS, and real
   external network access not yet routed through the simulator.
 - `Env.disk`: low-level simulation disk view exposing sector-oriented `read`,
@@ -511,21 +512,24 @@ Acceptance criteria:
 
 The first external-storage compatibility gap has mostly been closed:
 Marionette now has file size metadata, EOF-aware reads, truncate/clear,
-delete, rename, directory sync modeling, a flat `std.Io.File` subset over
-`SimDisk`, and pinned xitdb validation coverage. The remaining work is no
+delete, rename, directory sync modeling, a directory-aware `std.Io.File`/`Dir`
+subset over `SimDisk`, and pinned xitdb and Ochi validation coverage. The remaining work is no
 longer the base disk lifecycle surface; it is confidence-building around
 external storage engines and crash profiles.
 
 Current partial progress: `Disk` now exposes path-level `stat`, EOF-aware
 `readSome`, `setLength`, `delete`, `rename`, and `syncDir`, backed by both
 `SimDisk` and `RealDisk`. Simulation `Env.io()` exposes the corresponding flat
-`std.Io.File` subset over `SimDisk`: create/open, access/statFile, positional
-and streaming read/write, length/stat, setLength, sync, close, delete, and
-rename. A pinned external xitdb validation target now exercises a real
+`std.Io.File`/`Dir` subset over `SimDisk`: create/open, access/statFile,
+positional and streaming read/write, length/stat, setLength, sync, close,
+delete, rename, directory creation/open/stat/iteration, and advisory locks. A
+pinned external xitdb validation target exercises a real
 `std.Io.File` database workload with `zig build validate-xitdb` without adding
-xitdb to the default test path. This is still not a complete filesystem model:
-directory metadata/iteration, full `std.Io.Dir` sync plumbing, and richer
-directory APIs remain deferred.
+xitdb to the default test path. The lazy Ochi target starts the unmodified
+store, ingests and queries a line, flushes its tables, atomically replaces
+catalogs, then crashes, reopens, and verifies the recovered line.
+This is still not a complete filesystem model: directory deletion/rename,
+permissions, symlinks, and richer directory APIs remain deferred.
 
 Acceptance criteria:
 
@@ -902,8 +906,9 @@ model behavior. That belongs to tools in the Shuttle/Loom family, not to
 Marionette's DST contract.
 
 Current status: the single-future cooperative path is implemented and used by
-the Mailbox, bounded-queue, and `std.Io.net` KV validations. Remaining work is
-cooperative cancellation points, `Io.Group`, queue suspension, broader I/O
+the Mailbox, bounded-queue, and `std.Io.net` KV validations. `Io.Group` is also
+scheduler-backed and exercised by Ochi. Remaining work is cooperative
+cancellation points, queue suspension, broader I/O
 suspension, and production-runtime parity. This remains cooperative scheduling,
 not preemptive thread or memory-model simulation.
 
@@ -931,8 +936,9 @@ Design references that informed this item:
 
 The implemented answers are deliberately narrow:
 
-- The task primitive is the single-future `std.Io` async/concurrent/await path;
-  cooperative cancellation points and `Io.Group` remain open.
+- The task primitives are the single-future `std.Io` async/concurrent/await
+  path and scheduler-backed `Io.Group`; cooperative cancellation points remain
+  open.
 - Yield points are modeled waits such as sleep, futex, network blocking, and
   scheduled disk-operation latency, with scheduler decisions and suspension
   outcomes recorded in the trace.

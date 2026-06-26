@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Adds scheduler-backed `Io.Group` async/concurrent/await/cancel behavior with
+  deterministic task ownership, reuse, and process-kill cleanup.
+- Adds the simulated directory operations needed by ordinary storage engines:
+  absolute and handle-relative paths, create/open/access/stat, iteration,
+  directory syncing through `File.sync`, and process-coordinated blocking and
+  non-blocking advisory file locks. Directory namespace state now lives in
+  `SimDisk`, so processes share it and crash metadata faults apply to it.
+- Adds a pinned lazy Ochi validation that starts the unmodified store, ingests
+  a line, flushes index/data tables, queries the line, crashes and reopens the
+  store, and verifies the same line through recovery.
+- Fixes a same-directory `SimDisk.rename` metadata allocation leak.
+- Fixes sector read-modify-write handling so short `std.Io` writes retain their
+  logical file length across crashes, and atomic rename discards pending writes
+  belonging to the replaced destination.
 - Adds process-scoped simulation `std.Io` backends with stable per-node
   identity, shared listener/connection registration, and process-local futex
   namespaces.

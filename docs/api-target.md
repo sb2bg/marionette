@@ -104,16 +104,18 @@ current deterministic backend. Use `sim.envForNode(node).io()` when separate
 `std.Io.net` participants should run as distinct logical processes. That
 backend supports deterministic
 clock, sleep, random, `randomSecure`, scheduler-backed `Io.async` /
-`Io.concurrent` / await, immediate non-blocking `Io.Queue` operations, and an
+`Io.concurrent` / await, scheduler-backed `Io.Group`, immediate non-blocking
+`Io.Queue` operations, and an
 in-memory TCP stream subset for `std.Io.net`. Cancellation currently awaits
-completion; cooperative cancellation points and `Io.Group` are not implemented.
-It also supports a flat file subset over `SimDisk`:
+completion; cooperative cancellation points are not implemented.
+It also supports a directory-aware file subset over `SimDisk`:
 `Dir.createFile`, `Dir.openFile`, `Dir.statFile`, `Dir.access`, positional and
 streaming file reads and writes, `File.length`, `File.stat`, `File.setLength`,
-`File.sync`, `File.close`, `Dir.deleteFile`, and `Dir.rename`. Streaming cursor
-state is per open file handle and advances only by bytes actually transferred.
-Full directory/filesystem behavior, process operations, datagrams, DNS, and
-real external network access still fail closed. See
+`File.sync`, `File.close`, `Dir.deleteFile`, `Dir.rename`, directory
+create/open/stat/iteration, and advisory locks. Streaming cursor state is per
+open file handle and advances only by bytes actually transferred. Full
+filesystem behavior, process operations, datagrams, DNS, and real external
+network access still fail closed. See
 [Marionette as Deterministic std.Io](std-io-direction.md).
 
 `Env.recorder()` returns a narrow structured recording capability. Code that is

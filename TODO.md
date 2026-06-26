@@ -398,10 +398,11 @@ probes were removed after verification.
       backends keep the old semantics (eager async,
       `error.ConcurrencyUnavailable` for concurrent). `runUntilIdle` was
       refactored into a shared `stepOnce` (verified under ReleaseSafe).
-- [ ] `Io.Group` (`groupAsync`/`groupConcurrent`/`groupAwait`/`groupCancel`)
-      still fails closed, matching the current state of Zig's own
-      fiber-backed backends. Implement once the single-future path has
-      mileage.
+- [x] `Io.Group` (`groupAsync`/`groupConcurrent`/`groupAwait`/`groupCancel`)
+      now uses scheduler-owned group state. Await parks in-task or drives the
+      scheduler from the scenario context; groups can be reused after await;
+      process kill completes owned groups. Cancel still drains cooperatively,
+      matching the current single-future cancellation boundary.
 - [ ] Cooperative cancellation points: `cancel` currently awaits; a real
       implementation needs cancel-request state surfaced through
       `checkCancel` at suspension points.

@@ -57,8 +57,9 @@ cooperative scheduler, so `io.async` and `io.concurrent` spawn deterministic
 scheduler tasks with seeded, replay-visible interleaving: `future.await`
 parks the awaiting task, or drives the scheduler when awaited from the
 scenario itself. Cancellation runs the task to completion (cooperative tasks
-cannot be preempted); `Io.Group` operations still fail closed, matching the
-current state of Zig's own fiber-backed backends. Without a task runtime
+cannot be preempted). `Io.Group` uses the same scheduler and supports
+async/concurrent task ownership, await, reuse, and process-kill cleanup;
+`Group.cancel` currently drains cooperatively. Without a task runtime
 attached (bare `Backend`), `async` runs eagerly on the caller and
 `concurrent` returns `error.ConcurrencyUnavailable`. The backend also
 supports `Io.Queue` operations and a small in-memory TCP stream subset for
@@ -99,24 +100,27 @@ inject byte-stream reordering because the modeled transport is TCP; message
 reordering remains an `Endpoint(Message)`-altitude fault where message
 boundaries exist.
 
-The backend also supports a flat file subset over
-`SimDisk`: `Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
+The backend also supports a directory-aware file subset over `SimDisk`:
+`Dir.createFile`, `Dir.openFile`, `Dir.statFile`,
 `Dir.access`, positional file read/write, streaming file read/write,
 `File.length`, `File.stat`, `File.setLength`, `File.sync`, `File.close`,
 `Dir.deleteFile`, and `Dir.rename`. Streaming files keep a cursor per open
 file handle; `seekTo`/`seekBy` update that cursor, successful operations advance
 only by bytes actually transferred, and failed streaming operations leave the
 cursor unchanged. This subset gives
-byte-oriented `std.Io.File` behavior over the sector-oriented disk simulator
-without modeling a complete filesystem. File stats track `mtime` for successful
-content mutations; `atime` and `ctime` remain zero. `Dir.createFile` routes
-new empty files through the disk authority, but directory-entry durability is
-currently exposed as `Disk.syncDir` rather than a standard `std.Io.Dir` sync
-hook.
-`Io.Group`, blocking queue waits, directory metadata and iteration,
-chmod/chown, symlinks, memory maps, process operations, datagrams, DNS, and
-real external network access fail closed until they are routed through
-simulator-owned state.
+byte-oriented `std.Io.File` behavior over the sector-oriented disk simulator.
+The backend also supports a narrow directory namespace: absolute and
+handle-relative paths, create/open/access/stat, direct-child iteration,
+directory syncing through `File.sync`, and process-coordinated advisory file
+locks with blocking and non-blocking acquisition. Directory state is owned by
+`SimDisk`, so all simulated processes observe one namespace and crash metadata
+faults affect unsynced directory entries. It does not model a complete host
+filesystem. File stats track `mtime` for successful content mutations; `atime`
+and `ctime` remain zero. `Dir.createFile` routes new empty files through the
+disk authority.
+Blocking queue waits, directory deletion/rename, chmod/chown, symlinks, memory
+maps, process operations, datagrams, DNS, and real external network access
+fail closed until they are routed through simulator-owned state.
 
 The eventual target is for simulation envs to return a fuller deterministic
 `std.Io` that routes time, files, network, queues, and concurrency through
@@ -358,7 +362,7 @@ The experimental deterministic `std.Io` foundation is implemented:
   an `Endpoint(Message)`-altitude fault.
 
 Remaining deterministic `std.Io` work includes queue suspension, cooperative
-cancellation points, `Io.Group`, richer stream reset/node-down behavior, and
+cancellation points, richer stream reset/node-down behavior, and
 continued validation against real `std.Io`-native libraries.
 
 The next maturity phase is production readiness and ecosystem leverage:

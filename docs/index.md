@@ -227,12 +227,12 @@ guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
 `Recorder`, and the app-facing `Endpoint(Message)` shape. Everything else may
 change as the simulator grows.
 
-The simulator currently models clock, deterministic randomness, disk, a flat
-`std.Io.File` subset, typed endpoint networking, a narrow scheduler-backed
+The simulator currently models clock, deterministic randomness, disk, a
+directory-aware `std.Io.File`/`Dir` subset, typed endpoint networking, a narrow scheduler-backed
 `std.Io.net` stream subset with deterministic latency, timeout, partition, and
-healing behavior, and cooperative `std.Io` tasks and futex waits for
+healing behavior, and cooperative `std.Io` tasks, groups, and futex waits for
 `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
-target and the internal bounded-queue capability demo. Simulated disk
+target, the internal bounded-queue capability demo, and pinned Ochi storage. Simulated disk
 operations park scheduler tasks until their completion deadlines rather than
 skipping earlier timers. When network simulation is configured, each node also
 has a process-scoped `std.Io` backend; `killProcess` and registered restart
@@ -241,7 +241,7 @@ It does not model arbitrary OS thread scheduling or memory-level concurrency;
 code that depends on those needs separate testing. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths
 exist, but cross-process production transport is still roadmap work. Allocator
-simulation, cooperative cancellation, `Io.Group`, and broader scheduler parity
+simulation, cooperative cancellation, and broader scheduler parity
 are planned.
 
 Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows

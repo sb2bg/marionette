@@ -239,6 +239,22 @@ it as an external SUT finding. This is cooperative `std.Io` concurrency, not
 preemptive OS thread or memory-model testing; see
 [Std.Io Direction](docs/std-io-direction.md) for the exact boundary.
 
+## Ochi storage validation
+
+The optional `validate-ochi` target composes the pinned, unmodified
+[`ochi-team/ochi`](https://github.com/ochi-team/ochi) storage implementation
+with `mar.SimCase`. It starts the store, ingests a line, flushes index and data
+tables, queries the inserted data, exercises atomic catalog replacement,
+crashes the simulated disk, reopens Ochi, and queries the data again through
+Marionette's deterministic `std.Io`. Ochi is a lazy dependency and this target
+is not part of the default test step. The validation runs one simulation per
+process because Ochi's private temporary-file counter intentionally persists
+across in-process runs.
+
+```sh
+zig build validate-ochi
+```
+
 ## Traces
 
 Every run produces a structured trace. When a check fails, you get the full sequence of events that led to the violation, plus the seed to reproduce it.
@@ -289,18 +305,18 @@ guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
 `Recorder`, and the app-facing `Endpoint(Message)` shape. Everything else may
 change as the simulator grows.
 
-The simulator currently models clock, deterministic randomness, disk, a flat
-`std.Io.File` subset, typed endpoint networking, a narrow scheduler-backed
+The simulator currently models clock, deterministic randomness, disk, a
+directory-aware `std.Io.File`/`Dir` subset, typed endpoint networking, a narrow scheduler-backed
 `std.Io.net` stream subset with accept/read suspension plus latency and
 send-time loss, delivery-time partitions, and deterministic healing, and
-cooperative `std.Io` tasks and futex waits for `Mutex` / `Condition` code,
+cooperative `std.Io` tasks, groups, and futex waits for `Mutex` / `Condition` code,
 validated against the pinned `g41797/mailbox` target and the internal
-bounded-queue capability demo. It does not model
+bounded-queue capability demo, plus the pinned Ochi storage target. It does not model
 arbitrary OS thread scheduling or memory-level concurrency; code that depends on
 those needs separate testing. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths
 exist, but cross-process production transport is still roadmap work. Allocator
-simulation, cooperative cancellation points, `Io.Group`, queue suspension, and
+simulation, cooperative cancellation points, queue suspension, and
 broader scheduler parity are planned.
 
 Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows

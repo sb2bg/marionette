@@ -275,17 +275,18 @@ that same host `std.Io`. Simulation envs return Marionette's current
 deterministic `std.Io` backend; `sim.envForNode(node).io()` returns the
 process-scoped backend for a specific simulated node. The backend supports
 deterministic clock/random operations, scheduler-backed `Io.async` /
-`Io.concurrent` / await, immediate
-non-blocking `Io.Queue` operations, and an in-memory TCP stream subset today.
-Cancellation currently waits for completion; cooperative cancellation points
-and `Io.Group` remain future work. The backend also supports a flat file subset
-over `SimDisk`: create/open, access/statFile, positional and streaming
-read/write, length/stat/setLength, sync, close, delete, and rename. Streaming
-cursor state is per open file handle, advances only by bytes actually
-transferred, and is left unchanged by failed streaming operations. Full
-directory/filesystem behavior, process operations, datagrams, DNS, and real
-external network access still fail
-closed. See
+`Io.concurrent` / await, scheduler-backed `Io.Group`, immediate non-blocking
+`Io.Queue` operations, and an in-memory TCP stream subset today. Cancellation
+currently waits for completion; cooperative cancellation points remain future
+work. The backend also supports a directory-aware file subset over `SimDisk`:
+create/open, access/statFile, positional and streaming read/write,
+length/stat/setLength, sync, close, delete, rename, directory
+create/open/stat/iteration, and process-coordinated blocking and non-blocking
+advisory locks. Directory namespace state is shared by all simulated processes
+through `SimDisk`. Streaming cursor state is per open file handle, advances
+only by bytes actually transferred, and is left unchanged by failed streaming
+operations. Full filesystem behavior, process operations, datagrams, DNS, and
+real external network access still fail closed. See
 [`std.Io` Direction](std-io-direction.md).
 Simulated file stats report deterministic size, kind, and mutation-time
 information. `mtime` updates on successful content mutations; access and change
