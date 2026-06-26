@@ -39,6 +39,7 @@ pub const SimDisk = struct {
     pub const Restart = DiskRestart;
 
     const FileId = u64;
+    const DirId = u64;
 
     const File = struct {
         id: FileId,
@@ -66,11 +67,24 @@ pub const SimDisk = struct {
         }
     };
 
+    const Directory = struct {
+        id: DirId,
+        path: []u8,
+        mtime_ns: u64,
+        metadata_durable: bool = true,
+
+        fn deinit(self: *Directory, allocator: std.mem.Allocator) void {
+            allocator.free(self.path);
+            self.* = undefined;
+        }
+    };
+
     const PendingWrite = struct {
         op_id: u64,
         path: []u8,
         offset: u64,
         bytes: []u8,
+        logical_len: ?u64,
 
         fn deinit(self: *PendingWrite, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
@@ -89,6 +103,7 @@ pub const SimDisk = struct {
 
         const Kind = union(enum) {
             create: FileId,
+            create_dir: DirId,
             delete: ?File,
             rename: RenameUndo,
         };
@@ -109,7 +124,7 @@ pub const SimDisk = struct {
             allocator.free(self.dir);
             if (self.other_dir) |dir| allocator.free(dir);
             switch (self.kind) {
-                .create => {},
+                .create, .create_dir => {},
                 .delete => |*file| if (file.*) |*owned| owned.deinit(allocator),
                 .rename => |*undo| undo.deinit(allocator),
             }
@@ -130,10 +145,12 @@ pub const SimDisk = struct {
     options: ResolvedOptions,
     faults: DiskFaultOptions = .{},
     files: std.ArrayList(File) = .empty,
+    directories: std.ArrayList(Directory) = .empty,
     pending_writes: std.ArrayList(PendingWrite) = .empty,
     pending_metadata: std.ArrayList(PendingMetadata) = .empty,
     next_op_id: u64 = 0,
     next_file_id: FileId = 1,
+    next_dir_id: DirId = 1,
     crashed: bool = false,
     crash_observer: ?CrashObserver = null,
     latency_runtime: ?DiskLatencyRuntime = null,
@@ -172,6 +189,8 @@ pub const SimDisk = struct {
     pub fn deinit(self: *Self) void {
         for (self.files.items) |*file| file.deinit(self.world.allocator);
         self.files.deinit(self.world.allocator);
+        for (self.directories.items) |*directory| directory.deinit(self.world.allocator);
+        self.directories.deinit(self.world.allocator);
         for (self.pending_writes.items) |*pending| pending.deinit(self.world.allocator);
         self.pending_writes.deinit(self.world.allocator);
         for (self.pending_metadata.items) |*pending| pending.deinit(self.world.allocator);
@@ -271,7 +290,13 @@ pub const SimDisk = struct {
             return error.WriteError;
         }
 
-        try self.appendPendingWrite(op_id, options.path, options.offset, options.bytes);
+        try self.appendPendingWrite(
+            op_id,
+            options.path,
+            options.offset,
+            options.bytes,
+            options.logical_len,
+        );
 
         try self.recordRangeOp(
             "disk.write",
@@ -328,6 +353,7 @@ pub const SimDisk = struct {
             try self.recordPathOp("disk.stat", op_id, options.path, "not_found", latency_ns);
             return error.FileNotFound;
         };
+        const inode = self.visibleInode(options.path) orelse unreachable;
 
         try self.world.recordFields("disk.stat", &.{
             traceField("op", .{ .uint = op_id }),
@@ -335,8 +361,126 @@ pub const SimDisk = struct {
             traceField("status", .{ .literal = "ok" }),
             traceField("size", .{ .uint = size }),
             traceField("latency_ns", .{ .uint = latency_ns }),
+            traceField("inode", .{ .uint = inode }),
         });
-        return .{ .size = size };
+        return .{ .inode = inode, .size = size };
+    }
+
+    fn createDir(self: *Self, options: Disk.CreateDir) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        if (std.mem.eql(u8, options.path, ".")) return error.PathAlreadyExists;
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        if (self.findDirectory(options.path) != null or self.visibleLength(options.path) != null) {
+            try self.recordPathOp("disk.create_dir", op_id, options.path, "exists", latency_ns);
+            return error.PathAlreadyExists;
+        }
+        const parent = std.fs.path.dirname(options.path) orelse ".";
+        if (!std.mem.eql(u8, parent, ".") and self.findDirectory(parent) == null) {
+            try self.recordPathOp("disk.create_dir", op_id, options.path, "parent_not_found", latency_ns);
+            return error.FileNotFound;
+        }
+
+        const owned_path = try self.world.allocator.dupe(u8, options.path);
+        errdefer self.world.allocator.free(owned_path);
+        const owned_parent = try self.world.allocator.dupe(u8, parent);
+        errdefer self.world.allocator.free(owned_parent);
+        try self.directories.ensureUnusedCapacity(self.world.allocator, 1);
+        try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
+
+        const id = self.next_dir_id;
+        self.next_dir_id += 1;
+        self.directories.appendAssumeCapacity(.{
+            .id = id,
+            .path = owned_path,
+            .mtime_ns = self.world.now(),
+            .metadata_durable = false,
+        });
+        self.pending_metadata.appendAssumeCapacity(.{
+            .op_id = op_id,
+            .dir = owned_parent,
+            .kind = .{ .create_dir = id },
+        });
+        try self.recordPathOp("disk.create_dir", op_id, options.path, "ok", latency_ns);
+    }
+
+    fn statDir(self: *Self, options: Disk.StatDir) DiskError!Disk.StatDirResult {
+        try validateLogicalPath(options.path, .directory);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        if (std.mem.eql(u8, options.path, ".")) {
+            try self.recordPathOp("disk.stat_dir", op_id, options.path, "ok", latency_ns);
+            return .{ .inode = 1, .mtime_ns = 0 };
+        }
+        const directory = self.findDirectory(options.path) orelse {
+            try self.recordPathOp("disk.stat_dir", op_id, options.path, "not_found", latency_ns);
+            return error.FileNotFound;
+        };
+        try self.recordPathOp("disk.stat_dir", op_id, options.path, "ok", latency_ns);
+        return .{
+            .inode = directoryInode(directory.id),
+            .mtime_ns = directory.mtime_ns,
+        };
+    }
+
+    fn readDir(self: *Self, options: Disk.ReadDir) DiskError!Disk.DirList {
+        try validateLogicalPath(options.path, .directory);
+        try self.ensureRunning();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        if (!std.mem.eql(u8, options.path, ".") and self.findDirectory(options.path) == null) {
+            try self.recordPathOp("disk.read_dir", op_id, options.path, "not_found", latency_ns);
+            return error.FileNotFound;
+        }
+
+        var entries: std.ArrayList(Disk.DirEntry) = .empty;
+        errdefer {
+            for (entries.items) |entry| options.allocator.free(entry.name);
+            entries.deinit(options.allocator);
+        }
+        for (self.directories.items) |directory| {
+            const name = directChildName(options.path, directory.path) orelse continue;
+            try entries.append(options.allocator, .{
+                .name = try options.allocator.dupe(u8, name),
+                .kind = .directory,
+                .inode = directoryInode(directory.id),
+            });
+        }
+        for (self.files.items) |file| {
+            const name = directChildName(options.path, file.path) orelse continue;
+            try entries.append(options.allocator, .{
+                .name = try options.allocator.dupe(u8, name),
+                .kind = .file,
+                .inode = file.id + 1,
+            });
+        }
+        for (self.pending_writes.items) |pending| {
+            if (self.findFile(pending.path) != null) continue;
+            const name = directChildName(options.path, pending.path) orelse continue;
+            var already_listed = false;
+            for (entries.items) |entry| {
+                if (entry.kind == .file and std.mem.eql(u8, entry.name, name)) {
+                    already_listed = true;
+                    break;
+                }
+            }
+            if (already_listed) continue;
+            try entries.append(options.allocator, .{
+                .name = try options.allocator.dupe(u8, name),
+                .kind = .file,
+                .inode = pendingFileInode(pending.path),
+            });
+        }
+        try self.recordPathOp("disk.read_dir", op_id, options.path, "ok", latency_ns);
+        return .{
+            .allocator = options.allocator,
+            .entries = try entries.toOwnedSlice(options.allocator),
+        };
     }
 
     fn readSome(self: *Self, options: Disk.ReadSome) DiskError!usize {
@@ -481,6 +625,8 @@ pub const SimDisk = struct {
         errdefer if (new_dir_owned) self.world.allocator.free(new_dir);
         try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
 
+        self.clearPendingWritesFor(options.new_path);
+
         var file_id: FileId = self.files.items[old_index].id;
         var replaced: ?File = null;
         if (self.findFileIndex(options.new_path)) |new_index| {
@@ -488,7 +634,6 @@ pub const SimDisk = struct {
                 var old_index_adjusted = old_index;
                 replaced = self.files.orderedRemove(new_index);
                 if (new_index < old_index_adjusted) old_index_adjusted -= 1;
-                self.clearPendingWritesFor(options.new_path);
                 file_id = self.files.items[old_index_adjusted].id;
                 self.world.allocator.free(self.files.items[old_index_adjusted].path);
                 self.files.items[old_index_adjusted].path = owned_new_path;
@@ -512,7 +657,10 @@ pub const SimDisk = struct {
         });
         old_path_owned = false;
         old_dir_owned = false;
-        new_dir_owned = std.mem.eql(u8, old_dir, new_dir);
+        if (std.mem.eql(u8, old_dir, new_dir)) {
+            self.world.allocator.free(new_dir);
+        }
+        new_dir_owned = false;
 
         try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "ok", latency_ns);
     }
@@ -746,6 +894,20 @@ pub const SimDisk = struct {
         return null;
     }
 
+    fn findDirectory(self: *Self, path: []const u8) ?*Directory {
+        for (self.directories.items) |*directory| {
+            if (std.mem.eql(u8, directory.path, path)) return directory;
+        }
+        return null;
+    }
+
+    fn findDirectoryIndexById(self: *Self, id: DirId) ?usize {
+        for (self.directories.items, 0..) |directory, index| {
+            if (directory.id == id) return index;
+        }
+        return null;
+    }
+
     fn findFileIndex(self: *Self, path: []const u8) ?usize {
         for (self.files.items, 0..) |*file, index| {
             if (std.mem.eql(u8, file.path, path)) return index;
@@ -787,7 +949,7 @@ pub const SimDisk = struct {
         if (file.metadata_durable) return;
         for (self.pending_metadata.items) |pending| switch (pending.kind) {
             .create => |id| if (id == file.id) return,
-            .delete, .rename => {},
+            .create_dir, .delete, .rename => {},
         };
 
         const dir = try self.ownedParentDir(file.path);
@@ -805,6 +967,7 @@ pub const SimDisk = struct {
         path: []const u8,
         offset: u64,
         bytes: []const u8,
+        logical_len: ?u64,
     ) DiskError!void {
         const owned_path = try self.world.allocator.dupe(u8, path);
         errdefer self.world.allocator.free(owned_path);
@@ -817,6 +980,7 @@ pub const SimDisk = struct {
             .path = owned_path,
             .offset = offset,
             .bytes = owned_bytes,
+            .logical_len = logical_len,
         });
     }
 
@@ -907,6 +1071,11 @@ pub const SimDisk = struct {
             .create => |id| {
                 if (self.findFileById(id)) |file| file.metadata_durable = true;
             },
+            .create_dir => |id| {
+                if (self.findDirectoryIndexById(id)) |index| {
+                    self.directories.items[index].metadata_durable = true;
+                }
+            },
             .delete => {},
             .rename => |rename_undo| {
                 if (self.findFileById(rename_undo.file_id)) |file| file.metadata_durable = true;
@@ -920,6 +1089,16 @@ pub const SimDisk = struct {
                 if (self.findFileIndexById(id)) |index| {
                     var file = self.files.orderedRemove(index);
                     file.deinit(self.world.allocator);
+                }
+            },
+            .create_dir => |id| {
+                if (self.findDirectoryIndexById(id)) |index| {
+                    const path = try self.world.allocator.dupe(
+                        u8,
+                        self.directories.items[index].path,
+                    );
+                    defer self.world.allocator.free(path);
+                    self.removeDirectoryTree(path);
                 }
             },
             .delete => |*deleted| {
@@ -944,11 +1123,59 @@ pub const SimDisk = struct {
         }
     }
 
+    fn removeDirectoryTree(self: *Self, path: []const u8) void {
+        var file_index: usize = 0;
+        while (file_index < self.files.items.len) {
+            if (!isDescendantOrSelf(path, self.files.items[file_index].path)) {
+                file_index += 1;
+                continue;
+            }
+            var file = self.files.orderedRemove(file_index);
+            file.deinit(self.world.allocator);
+        }
+
+        var dir_index: usize = 0;
+        while (dir_index < self.directories.items.len) {
+            if (!isDescendantOrSelf(path, self.directories.items[dir_index].path)) {
+                dir_index += 1;
+                continue;
+            }
+            var directory = self.directories.orderedRemove(dir_index);
+            directory.deinit(self.world.allocator);
+        }
+    }
+
+    fn directChildName(base: []const u8, path: []const u8) ?[]const u8 {
+        const relative = if (std.mem.eql(u8, base, "."))
+            path
+        else relative: {
+            if (!std.mem.startsWith(u8, path, base)) return null;
+            if (path.len <= base.len or path[base.len] != '/') return null;
+            break :relative path[base.len + 1 ..];
+        };
+        if (relative.len == 0 or std.mem.indexOfScalar(u8, relative, '/') != null) return null;
+        return relative;
+    }
+
+    fn isDescendantOrSelf(parent: []const u8, path: []const u8) bool {
+        return std.mem.eql(u8, parent, path) or
+            (std.mem.startsWith(u8, path, parent) and path.len > parent.len and path[parent.len] == '/');
+    }
+
+    fn directoryInode(id: DirId) u64 {
+        return std.math.maxInt(u64) - id;
+    }
+
+    fn pendingFileInode(path: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, path);
+    }
+
     fn applyFullWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
         const file = try self.getOrCreateFile(pending.path);
         try self.ensurePendingCreate(pending.op_id, file);
         try self.writeBytes(file, pending.offset, pending.bytes);
-        file.len = @max(file.len, try endOffset(pending.offset, pending.bytes.len));
+        const physical_end = try endOffset(pending.offset, pending.bytes.len);
+        file.len = @max(file.len, pending.logical_len orelse physical_end);
     }
 
     fn applyTornWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
@@ -958,7 +1185,12 @@ pub const SimDisk = struct {
         const file = try self.getOrCreateFile(pending.path);
         try self.ensurePendingCreate(pending.op_id, file);
         try self.writeBytes(file, pending.offset, pending.bytes[0..torn_len]);
-        file.len = @max(file.len, try endOffset(pending.offset, torn_len));
+        const torn_end = try endOffset(pending.offset, torn_len);
+        const logical_end = if (pending.logical_len) |logical_len|
+            @min(logical_len, torn_end)
+        else
+            torn_end;
+        file.len = @max(file.len, logical_end);
     }
 
     fn findSector(_: *Self, file: *File, index: u64) ?*Sector {
@@ -1060,9 +1292,21 @@ pub const SimDisk = struct {
         for (self.pending_writes.items) |*pending| {
             if (!std.mem.eql(u8, pending.path, path)) continue;
             found = true;
-            len = @max(len, endOffset(pending.offset, pending.bytes.len) catch std.math.maxInt(u64));
+            const physical_end = endOffset(
+                pending.offset,
+                pending.bytes.len,
+            ) catch std.math.maxInt(u64);
+            len = @max(len, pending.logical_len orelse physical_end);
         }
         return if (found) len else null;
+    }
+
+    fn visibleInode(self: *Self, path: []const u8) ?u64 {
+        if (self.findFile(path)) |file| return file.id + 1;
+        for (self.pending_writes.items) |*pending| {
+            if (std.mem.eql(u8, pending.path, path)) return pendingFileInode(path);
+        }
+        return null;
     }
 
     fn overlayPendingWrites(self: *Self, path: []const u8, offset: u64, buffer: []u8) void {
@@ -1256,6 +1500,9 @@ pub const SimDisk = struct {
         .set_length = diskSetLength,
         .delete = diskDelete,
         .rename = diskRename,
+        .create_dir = diskCreateDir,
+        .stat_dir = diskStatDir,
+        .read_dir = diskReadDir,
     };
 
     const control_vtable: DiskControl.VTable = .{
@@ -1304,6 +1551,18 @@ pub const SimDisk = struct {
 
     fn diskRename(ptr: *anyopaque, options: Disk.Rename) DiskError!void {
         try fromOpaque(ptr).rename(options);
+    }
+
+    fn diskCreateDir(ptr: *anyopaque, options: Disk.CreateDir) DiskError!void {
+        try fromOpaque(ptr).createDir(options);
+    }
+
+    fn diskStatDir(ptr: *anyopaque, options: Disk.StatDir) DiskError!Disk.StatDirResult {
+        return try fromOpaque(ptr).statDir(options);
+    }
+
+    fn diskReadDir(ptr: *anyopaque, options: Disk.ReadDir) DiskError!Disk.DirList {
+        return try fromOpaque(ptr).readDir(options);
     }
 
     fn controlSetFaults(ptr: *anyopaque, faults: DiskFaultOptions) DiskError!void {

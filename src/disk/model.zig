@@ -8,6 +8,9 @@ const env_module = @import("../env.zig");
 pub const DiskError = error{
     DiskUnavailable,
     FileNotFound,
+    PathAlreadyExists,
+    NotDir,
+    IsDir,
     InvalidAlignment,
     InvalidDuration,
     InvalidPath,
@@ -70,6 +73,13 @@ pub const Disk = struct {
     pub const SetLength = DiskSetLength;
     pub const Delete = DiskDelete;
     pub const Rename = DiskRename;
+    pub const CreateDir = DiskCreateDir;
+    pub const StatDir = DiskStatDir;
+    pub const StatDirResult = DiskStatDirResult;
+    pub const ReadDir = DiskReadDir;
+    pub const DirEntry = DiskDirEntry;
+    pub const DirEntryKind = DiskDirEntryKind;
+    pub const DirList = DiskDirList;
 
     pub const VTable = struct {
         read: *const fn (*anyopaque, Read) DiskError!void,
@@ -81,6 +91,9 @@ pub const Disk = struct {
         set_length: *const fn (*anyopaque, SetLength) DiskError!void,
         delete: *const fn (*anyopaque, Delete) DiskError!void,
         rename: *const fn (*anyopaque, Rename) DiskError!void,
+        create_dir: *const fn (*anyopaque, CreateDir) DiskError!void,
+        stat_dir: *const fn (*anyopaque, StatDir) DiskError!StatDirResult,
+        read_dir: *const fn (*anyopaque, ReadDir) DiskError!DirList,
     };
 
     pub fn read(self: Disk, options: Read) DiskError!void {
@@ -127,6 +140,18 @@ pub const Disk = struct {
         try self.vtable.rename(self.ptr, options);
     }
 
+    pub fn createDir(self: Disk, options: CreateDir) DiskError!void {
+        try self.vtable.create_dir(self.ptr, options);
+    }
+
+    pub fn statDir(self: Disk, options: StatDir) DiskError!StatDirResult {
+        return try self.vtable.stat_dir(self.ptr, options);
+    }
+
+    pub fn readDir(self: Disk, options: ReadDir) DiskError!DirList {
+        return try self.vtable.read_dir(self.ptr, options);
+    }
+
     pub fn unavailable() Disk {
         return .{ .ptr = &unavailable_disk_ctx, .vtable = &unavailable_disk_vtable };
     }
@@ -144,6 +169,9 @@ const unavailable_disk_vtable: Disk.VTable = .{
     .set_length = unavailableSetLength,
     .delete = unavailableDelete,
     .rename = unavailableRename,
+    .create_dir = unavailableCreateDir,
+    .stat_dir = unavailableStatDir,
+    .read_dir = unavailableReadDir,
 };
 
 fn unavailableRead(_: *anyopaque, _: Disk.Read) DiskError!void {
@@ -182,6 +210,18 @@ fn unavailableRename(_: *anyopaque, _: Disk.Rename) DiskError!void {
     return error.DiskUnavailable;
 }
 
+fn unavailableCreateDir(_: *anyopaque, _: Disk.CreateDir) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableStatDir(_: *anyopaque, _: Disk.StatDir) DiskError!Disk.StatDirResult {
+    return error.DiskUnavailable;
+}
+
+fn unavailableReadDir(_: *anyopaque, _: Disk.ReadDir) DiskError!Disk.DirList {
+    return error.DiskUnavailable;
+}
+
 pub const DiskRead = struct {
     path: []const u8,
     offset: u64,
@@ -192,6 +232,10 @@ pub const DiskWrite = struct {
     path: []const u8,
     offset: u64,
     bytes: []const u8,
+    /// Logical file length after this physical write. Sector adapters use
+    /// this when a short application write is represented by a full-sector
+    /// read-modify-write.
+    logical_len: ?u64 = null,
 };
 
 pub const DiskSync = struct {
@@ -207,6 +251,7 @@ pub const DiskStat = struct {
 };
 
 pub const DiskStatResult = struct {
+    inode: u64,
     size: u64,
 };
 
@@ -228,6 +273,46 @@ pub const DiskDelete = struct {
 pub const DiskRename = struct {
     old_path: []const u8,
     new_path: []const u8,
+};
+
+pub const DiskCreateDir = struct {
+    path: []const u8,
+};
+
+pub const DiskStatDir = struct {
+    path: []const u8,
+};
+
+pub const DiskStatDirResult = struct {
+    inode: u64,
+    mtime_ns: u64,
+};
+
+pub const DiskReadDir = struct {
+    allocator: std.mem.Allocator,
+    path: []const u8,
+};
+
+pub const DiskDirEntryKind = enum {
+    file,
+    directory,
+};
+
+pub const DiskDirEntry = struct {
+    name: []u8,
+    kind: DiskDirEntryKind,
+    inode: u64,
+};
+
+pub const DiskDirList = struct {
+    allocator: std.mem.Allocator,
+    entries: []DiskDirEntry,
+
+    pub fn deinit(self: *DiskDirList) void {
+        for (self.entries) |entry| self.allocator.free(entry.name);
+        self.allocator.free(self.entries);
+        self.* = undefined;
+    }
 };
 
 pub const DiskCrash = struct {};

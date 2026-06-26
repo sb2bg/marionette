@@ -85,6 +85,11 @@ pub const RealDisk = struct {
         file.writePositionalAll(self.io, options.bytes, options.offset) catch |err| {
             return mapWriteError(err);
         };
+        if (options.logical_len) |logical_len| {
+            file.setLength(self.io, logical_len) catch |err| {
+                return mapSetLengthError(err);
+            };
+        }
     }
 
     fn sync(self: *Self, options: Disk.Sync) DiskError!void {
@@ -118,7 +123,7 @@ pub const RealDisk = struct {
         const file_stat = self.root.statFile(self.io, options.path, .{}) catch |err| {
             return mapStatError(err);
         };
-        return .{ .size = file_stat.size };
+        return .{ .inode = file_stat.inode, .size = file_stat.size };
     }
 
     fn readSome(self: *Self, options: Disk.ReadSome) DiskError!usize {
@@ -172,6 +177,62 @@ pub const RealDisk = struct {
         };
     }
 
+    fn createDir(self: *Self, options: Disk.CreateDir) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        if (std.mem.eql(u8, options.path, ".")) return error.PathAlreadyExists;
+        self.root.createDir(self.io, options.path, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.PathAlreadyExists,
+            error.FileNotFound => return error.FileNotFound,
+            error.NotDir => return error.NotDir,
+            else => return mapCreateDirError(err),
+        };
+    }
+
+    fn statDir(self: *Self, options: Disk.StatDir) DiskError!Disk.StatDirResult {
+        try validateLogicalPath(options.path, .directory);
+        const dir_stat = self.root.statFile(self.io, options.path, .{}) catch |err| {
+            return mapStatError(err);
+        };
+        if (dir_stat.kind != .directory) return error.NotDir;
+        return .{
+            .inode = dir_stat.inode,
+            .mtime_ns = 0,
+        };
+    }
+
+    fn readDir(self: *Self, options: Disk.ReadDir) DiskError!Disk.DirList {
+        try validateLogicalPath(options.path, .directory);
+        var dir = self.root.openDir(self.io, options.path, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            error.NotDir => return error.NotDir,
+            else => return mapOpenReadError(err),
+        };
+        defer dir.close(self.io);
+
+        var entries: std.ArrayList(Disk.DirEntry) = .empty;
+        errdefer {
+            for (entries.items) |entry| options.allocator.free(entry.name);
+            entries.deinit(options.allocator);
+        }
+        var iterator = dir.iterate();
+        while (iterator.next(self.io) catch return error.ReadError) |entry| {
+            const kind: Disk.DirEntryKind = switch (entry.kind) {
+                .file => .file,
+                .directory => .directory,
+                else => continue,
+            };
+            try entries.append(options.allocator, .{
+                .name = try options.allocator.dupe(u8, entry.name),
+                .kind = kind,
+                .inode = entry.inode,
+            });
+        }
+        return .{
+            .allocator = options.allocator,
+            .entries = try entries.toOwnedSlice(options.allocator),
+        };
+    }
+
     fn ensureParentDirs(self: *Self, path: []const u8) DiskError!void {
         const parent = std.fs.path.dirname(path) orelse return;
         if (parent.len == 0) return;
@@ -201,6 +262,9 @@ pub const RealDisk = struct {
         .set_length = diskSetLength,
         .delete = diskDelete,
         .rename = diskRename,
+        .create_dir = diskCreateDir,
+        .stat_dir = diskStatDir,
+        .read_dir = diskReadDir,
     };
 
     fn fromOpaque(ptr: *anyopaque) *Self {
@@ -241,6 +305,18 @@ pub const RealDisk = struct {
 
     fn diskRename(ptr: *anyopaque, options: Disk.Rename) DiskError!void {
         try fromOpaque(ptr).rename(options);
+    }
+
+    fn diskCreateDir(ptr: *anyopaque, options: Disk.CreateDir) DiskError!void {
+        try fromOpaque(ptr).createDir(options);
+    }
+
+    fn diskStatDir(ptr: *anyopaque, options: Disk.StatDir) DiskError!Disk.StatDirResult {
+        return try fromOpaque(ptr).statDir(options);
+    }
+
+    fn diskReadDir(ptr: *anyopaque, options: Disk.ReadDir) DiskError!Disk.DirList {
+        return try fromOpaque(ptr).readDir(options);
     }
 };
 

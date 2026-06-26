@@ -952,8 +952,14 @@ fn processTaskControlKillProcess(ptr: *anyopaque, process_id: io_internal.Proces
     scheduler.killProcess(process_id);
 }
 
+fn processTaskControlTaskActive(ptr: *const anyopaque, task_id: u64) bool {
+    const scheduler: *const TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.findTask(task_id) != null;
+}
+
 const process_task_control_vtable: io_internal.ProcessTaskControl.VTable = .{
     .kill_process = processTaskControlKillProcess,
+    .task_active = processTaskControlTaskActive,
 };
 
 fn taskRuntimeSpawn(

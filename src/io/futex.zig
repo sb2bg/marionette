@@ -14,6 +14,10 @@ pub const WaitKeyTag = enum(usize) {
     task = 4,
     /// Simulated disk operation completion deadline.
     disk = 5,
+    /// `Io.Group` completion, keyed by backend-local group id.
+    group = 6,
+    /// Advisory file-lock availability, keyed by registry-local lock id.
+    file_lock = 7,
 };
 
 pub const FutexWaitResult = enum {

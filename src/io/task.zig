@@ -65,10 +65,15 @@ pub const ProcessTaskControl = struct {
 
     pub const VTable = struct {
         kill_process: *const fn (ptr: *anyopaque, process_id: ProcessId) void,
+        task_active: *const fn (ptr: *const anyopaque, task_id: u64) bool,
     };
 
     pub fn killProcess(self: ProcessTaskControl, process_id: ProcessId) void {
         self.vtable.kill_process(self.ptr, process_id);
+    }
+
+    pub fn taskActive(self: ProcessTaskControl, task_id: u64) bool {
+        return self.vtable.task_active(self.ptr, task_id);
     }
 };
 

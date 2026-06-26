@@ -41,20 +41,7 @@ pub fn mapDiskWriteError(err: disk_module.DiskError) Io.File.WritePositionalErro
 
 pub fn mapDiskSyncError(err: disk_module.DiskError) Io.File.SyncError {
     return switch (err) {
-        error.DiskUnavailable,
-        error.FileNotFound,
-        error.DiskCrashed,
-        error.WriteError,
-        error.ReadError,
-        error.InvalidAlignment,
-        error.InvalidDuration,
-        error.InvalidPath,
-        error.InvalidRate,
-        error.InvalidRange,
-        error.DirectorySyncUnsupported,
-        error.OutOfMemory,
-        error.InvalidTracePayload,
-        => error.InputOutput,
+        else => error.InputOutput,
     };
 }
 

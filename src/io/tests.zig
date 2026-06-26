@@ -141,6 +141,96 @@ test "io: world simulation runs async tasks deterministically" {
     try std.testing.expectEqualStrings(first_trace, second_trace);
 }
 
+test "io: task groups await deterministic completion and can be reused" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn appendAfter(
+            io: Io,
+            delay_ns: u64,
+            output: *[3]u8,
+            output_len: *usize,
+            value: u8,
+        ) void {
+            Io.sleep(io, .fromNanoseconds(delay_ns), .awake) catch unreachable;
+            output[output_len.*] = value;
+            output_len.* += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5B, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var output: [3]u8 = undefined;
+    var output_len: usize = 0;
+    var group: Io.Group = .init;
+    try group.concurrent(io, Helper.appendAfter, .{ io, 30, &output, &output_len, 'a' });
+    try group.concurrent(io, Helper.appendAfter, .{ io, 10, &output, &output_len, 'b' });
+    try group.await(io);
+    try std.testing.expectEqualStrings("ba", output[0..output_len]);
+
+    group.async(io, Helper.appendAfter, .{ io, 10, &output, &output_len, 'c' });
+    try group.await(io);
+    try std.testing.expectEqualStrings("bac", output[0..output_len]);
+}
+
+test "io: process kill completes owned task groups" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn delayedWrite(io: Io, completed: *bool) void {
+            Io.sleep(io, .fromNanoseconds(100), .awake) catch unreachable;
+            completed.* = true;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5C, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var completed = false;
+    var group: Io.Group = .init;
+    try group.concurrent(io, Helper.delayedWrite, .{ io, &completed });
+    try sim.killProcess(0);
+    try group.await(io);
+    try std.testing.expect(!completed);
+    const backend = try sim.io_runtime.backendForNode(0);
+    try std.testing.expectEqual(@as(usize, 0), backend.group_closures.items.len);
+}
+
+test "io: task group completion keys are unique across processes" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn delayedNoop(io: Io) void {
+            Io.sleep(io, .fromNanoseconds(100), .awake) catch unreachable;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5D, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+
+    var first: Io.Group = .init;
+    var second: Io.Group = .init;
+    try first.concurrent(node_zero_io, Helper.delayedNoop, .{node_zero_io});
+    try second.concurrent(node_one_io, Helper.delayedNoop, .{node_one_io});
+
+    const first_backend = try sim.io_runtime.backendForNode(0);
+    const second_backend = try sim.io_runtime.backendForNode(1);
+    try std.testing.expectEqual(@as(usize, 1), first_backend.group_states.items.len);
+    try std.testing.expectEqual(@as(usize, 1), second_backend.group_states.items.len);
+    try std.testing.expect(first_backend.group_states.items[0].id != second_backend.group_states.items[0].id);
+
+    try first.await(node_zero_io);
+    try second.await(node_one_io);
+}
+
 test "io: async tasks can await other async tasks" {
     if (!fiber_supported) return error.SkipZigTest;
 
@@ -1577,6 +1667,7 @@ test "io: simulation files delete and rename through disk authority" {
     }
 
     try std.testing.expectEqual(@as(u64, 4), (try cwd.statFile(io, "wal.log", .{})).size);
+    try cwd.createDir(io, "archive", .default_dir);
     try cwd.rename("wal.log", cwd, "archive/wal.log", io);
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "wal.log", .{}));
     try std.testing.expectEqual(@as(u64, 4), (try cwd.statFile(io, "archive/wal.log", .{})).size);
@@ -1605,6 +1696,384 @@ test "io: simulation files delete and rename through disk authority" {
     try std.testing.expectError(error.FileNotFound, cwd.openFile(io, "replace.log", .{}));
 }
 
+test "io: atomic replace preserves logical length across crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4096 } });
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var old = try cwd.createFile(io, "catalog.json", .{});
+    try old.writeStreamingAll(io, "old");
+    old.close(io);
+
+    var replacement = try cwd.createFile(io, "catalog.json.tmp", .{});
+    try replacement.writeStreamingAll(io, "[]");
+    try replacement.sync(io);
+    replacement.close(io);
+
+    try cwd.rename("catalog.json.tmp", cwd, "catalog.json", io);
+    try sim.env.disk.syncDir(.{ .path = "." });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    var reopened = try cwd.openFile(io, "catalog.json", .{ .mode = .read_only });
+    defer reopened.close(io);
+    try std.testing.expectEqual(@as(u64, 2), try reopened.length(io));
+    var buffer: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try reopened.readPositionalAll(io, &buffer, 0));
+    try std.testing.expectEqualStrings("[]", &buffer);
+}
+
+test "io: failed multi-sector write only publishes completed logical length" {
+    var reproduced = false;
+    var seed: u64 = 1;
+    while (seed < 256) : (seed += 1) {
+        {
+            var world = try World.init(std.testing.allocator, .{ .seed = seed });
+            defer world.deinit();
+            const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+            const io = sim.env.io();
+
+            var file = try Io.Dir.cwd().createFile(io, "multi-sector", .{});
+            defer file.close(io);
+            try sim.control.disk.setFaults(.{ .write_error_rate = .oneIn(2) });
+            file.writeStreamingAll(io, "abcdefgh") catch |err| switch (err) {
+                error.InputOutput => {
+                    const stat = try sim.env.disk.stat(.{ .path = "multi-sector" });
+                    if (stat.size == 0) continue;
+                    try std.testing.expectEqual(@as(u64, 4), stat.size);
+                    reproduced = true;
+                    break;
+                },
+                else => return err,
+            };
+        }
+    }
+    try std.testing.expect(reproduced);
+}
+
+test "io: simulated directories support Ochi layout operations" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4096 } });
+    const io = sim.env.io();
+
+    try Io.Dir.createDirAbsolute(io, "/ochi", .default_dir);
+    try Io.Dir.createDirAbsolute(io, "/ochi/partitions", .default_dir);
+    try Io.Dir.accessAbsolute(io, "/ochi", .{});
+
+    var ochi_dir = try Io.Dir.openDirAbsolute(io, "/ochi", .{ .iterate = true });
+    defer ochi_dir.close(io);
+
+    var lock_file = try ochi_dir.createFile(io, "lock", .{
+        .read = true,
+        .lock = .exclusive,
+    });
+    defer lock_file.close(io);
+
+    const lock_stat = try ochi_dir.statFile(io, "lock", .{});
+    try std.testing.expectEqual(Io.File.Kind.file, lock_stat.kind);
+    const partitions_stat = try ochi_dir.statFile(io, "partitions", .{});
+    try std.testing.expectEqual(Io.File.Kind.directory, partitions_stat.kind);
+
+    var iterator = ochi_dir.iterate();
+    var saw_lock = false;
+    var saw_partitions = false;
+    while (try iterator.next(io)) |entry| {
+        if (std.mem.eql(u8, entry.name, "lock")) {
+            saw_lock = true;
+            try std.testing.expectEqual(Io.File.Kind.file, entry.kind);
+        } else if (std.mem.eql(u8, entry.name, "partitions")) {
+            saw_partitions = true;
+            try std.testing.expectEqual(Io.File.Kind.directory, entry.kind);
+        } else {
+            return error.UnexpectedDirectoryEntry;
+        }
+    }
+    try std.testing.expect(saw_lock);
+    try std.testing.expect(saw_partitions);
+
+    var directory_file = try Io.Dir.openFileAbsolute(io, "/ochi", .{ .allow_directory = true });
+    defer directory_file.close(io);
+    try directory_file.sync(io);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.sync_dir op=",
+    ) != null);
+}
+
+test "io: simulated directory iteration returns direct children only" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    try Io.Dir.cwd().createDirPath(io, "root/nested");
+    var nested_file = try Io.Dir.cwd().createFile(io, "root/nested/value", .{});
+    nested_file.close(io);
+
+    var root_dir = try Io.Dir.cwd().openDir(io, "root", .{ .iterate = true });
+    defer root_dir.close(io);
+    var iterator = root_dir.iterate();
+    const entry = (try iterator.next(io)).?;
+    try std.testing.expectEqualStrings("nested", entry.name);
+    try std.testing.expectEqual(Io.File.Kind.directory, entry.kind);
+    try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try iterator.next(io));
+}
+
+test "io: directories are shared across processes and obey metadata durability" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+
+    try Io.Dir.cwd().createDir(node_zero_io, "shared", .default_dir);
+    try Io.Dir.cwd().access(node_one_io, "shared", .{});
+
+    try Io.Dir.cwd().createDir(node_zero_io, "ephemeral", .default_dir);
+    try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        Io.Dir.cwd().access(node_one_io, "ephemeral", .{}),
+    );
+}
+
+test "io: directory iteration excludes crash-lost file metadata" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    try Io.Dir.cwd().createDir(io, "root", .default_dir);
+    try sim.env.disk.syncDir(.{ .path = "." });
+    var ghost = try Io.Dir.cwd().createFile(io, "root/ghost", .{});
+    ghost.close(io);
+
+    try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+
+    var root = try Io.Dir.cwd().openDir(io, "root", .{ .iterate = true });
+    defer root.close(io);
+    var iterator = root.iterate();
+    try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try iterator.next(io));
+}
+
+test "io: file creation and rename enforce directory namespace invariants" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        cwd.createFile(io, "missing/file", .{}),
+    );
+
+    var source = try cwd.createFile(io, "source", .{});
+    source.close(io);
+    try cwd.createDir(io, "destination", .default_dir);
+    try std.testing.expectError(
+        error.IsDir,
+        cwd.rename("source", cwd, "destination", io),
+    );
+    try cwd.access(io, "source", .{});
+    try cwd.access(io, "destination", .{});
+}
+
+test "io: pending empty file creation prevents directory creation at the same path" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+
+    var file = try Io.Dir.cwd().createFile(node_zero_io, "catalog", .{});
+    defer file.close(node_zero_io);
+
+    try std.testing.expectError(
+        error.PathAlreadyExists,
+        Io.Dir.cwd().createDir(node_one_io, "catalog", .default_dir),
+    );
+}
+
+test "io: file stat and directory iteration report the same inode" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var file = try cwd.createFile(io, "identity", .{});
+    file.close(io);
+
+    const stat = try cwd.statFile(io, "identity", .{});
+    var dir = try cwd.openDir(io, ".", .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    var saw_identity = false;
+    while (try iterator.next(io)) |entry| {
+        if (!std.mem.eql(u8, entry.name, "identity")) continue;
+        saw_identity = true;
+        try std.testing.expectEqual(Io.File.Kind.file, entry.kind);
+        try std.testing.expectEqual(stat.inode, entry.inode);
+    }
+    try std.testing.expect(saw_identity);
+}
+
+test "io: world teardown releases outstanding file locks after scheduler teardown" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    errdefer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    const held = try Io.Dir.cwd().createFile(io, "lock", .{
+        .lock = .exclusive,
+    });
+    _ = held;
+
+    world.deinit();
+}
+
+test "io: simulated exclusive file locks release on close" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var first = try cwd.createFile(io, "lock", .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    try first.writeStreamingAll(io, "data");
+    try std.testing.expectError(error.WouldBlock, cwd.createFile(io, "lock", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }));
+    var buffer: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try first.readPositionalAll(io, &buffer, 0));
+    try std.testing.expectEqualStrings("data", &buffer);
+    first.close(io);
+
+    var second = try cwd.openFile(io, "lock", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    second.close(io);
+}
+
+test "io: file locks follow file rename" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var holder = try cwd.createFile(node_zero_io, "locked", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    try cwd.rename("locked", cwd, "renamed", node_zero_io);
+
+    try std.testing.expectError(error.WouldBlock, cwd.openFile(node_one_io, "renamed", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }));
+
+    holder.close(node_zero_io);
+    var reopened = try cwd.openFile(node_one_io, "renamed", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    reopened.close(node_one_io);
+}
+
+test "io: file locks coordinate processes and blocking acquisition waits" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn closeAfter(io: Io, file: Io.File) void {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            file.close(io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    const first = try cwd.createFile(node_zero_io, "lock", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    try std.testing.expectError(error.WouldBlock, cwd.openFile(node_one_io, "lock", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }));
+
+    var close_future = Io.async(node_zero_io, Helper.closeAfter, .{ node_zero_io, first });
+    var second = try cwd.openFile(node_one_io, "lock", .{
+        .lock = .exclusive,
+        .lock_nonblocking = false,
+    });
+    second.close(node_one_io);
+    close_future.await(node_zero_io);
+}
+
+test "io: process kill retires blocked file lock waiters" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn waitForLock(io: Io, started: *u32) void {
+            started.* = 1;
+            io.futexWake(u32, started, std.math.maxInt(u32));
+            var file = Io.Dir.cwd().openFile(io, "lock", .{
+                .lock = .exclusive,
+                .lock_nonblocking = false,
+            }) catch @panic("blocking lock failed");
+            file.close(io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+
+    var holder = try Io.Dir.cwd().createFile(node_zero_io, "lock", .{
+        .lock = .exclusive,
+    });
+    var started: u32 = 0;
+    var waiter = Io.async(node_one_io, Helper.waitForLock, .{ node_one_io, &started });
+    while (started == 0) {
+        node_one_io.futexWait(u32, &started, 0) catch unreachable;
+    }
+    try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
+    try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
+
+    try sim.killProcess(1);
+    waiter.await(node_zero_io);
+    holder.close(node_zero_io);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+}
+
 test "io: logical path validation matches simulated and real disks" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
@@ -1617,6 +2086,7 @@ test "io: logical path validation matches simulated and real disks" {
 
     try sim.env.disk.write(.{ .path = "sim/valid.log", .offset = 0, .bytes = &.{} });
     try real.disk().write(.{ .path = "real/valid.log", .offset = 0, .bytes = &.{} });
+    try Io.Dir.cwd().createDir(sim.env.io(), "io", .default_dir);
     var valid_file = try Io.Dir.cwd().createFile(sim.env.io(), "io/valid.log", .{});
     valid_file.close(sim.env.io());
     try sim.env.disk.syncDir(.{ .path = "." });
@@ -1647,11 +2117,15 @@ test "io: logical path validation matches simulated and real disks" {
             error.InvalidPath,
             real.disk().write(.{ .path = path, .offset = 0, .bytes = &.{} }),
         );
+        if (std.mem.eql(u8, path, "/wal.log")) continue;
         try std.testing.expectError(
             error.FileNotFound,
             Io.Dir.cwd().createFile(sim.env.io(), path, .{}),
         );
     }
+
+    var absolute_file = try Io.Dir.createFileAbsolute(sim.env.io(), "/wal.log", .{});
+    absolute_file.close(sim.env.io());
 }
 
 test "io: simulation tcp stream connects, accepts, reads, and writes" {

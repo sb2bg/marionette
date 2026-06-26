@@ -157,7 +157,7 @@ test "examples: kv store recovery scenario is replayable" {
     defer std.testing.allocator.free(b);
 
     try std.testing.expectEqualStrings(a, b);
-    try std.testing.expect(std.mem.indexOf(u8, a, "disk.fault op=4 path=kv.wal kind=crash_lost_write rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "disk.fault op=5 path=kv.wal kind=crash_lost_write rate=1/1 roll=0 fired=true") != null);
     // The lost write shrinks the WAL to one durable record, so recovery
     // rejects the second slot at end-of-file without reading it.
     try std.testing.expect(std.mem.indexOf(u8, a, "kv.reopen path=kv.wal") != null);
@@ -175,7 +175,7 @@ test "examples: kv store checker catches torn record recovery" {
             try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
             try std.testing.expectEqualStrings("synced records recover and unsynced records are rejected", failure.check_name.?);
             try std.testing.expectEqualStrings("UnsyncedRecordRecovered", failure.error_name.?);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "disk.crash_write op=4 path=kv.wal offset=16 len=16 result=torn") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "disk.crash_write op=5 path=kv.wal offset=16 len=16 result=torn") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "kv.recover.record offset=16 key=2 value=0 mode=buggy_accept_magic_only") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "kv.invariant_violation reason=unsynced_record_recovered") != null);
         },
