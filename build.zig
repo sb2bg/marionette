@@ -111,6 +111,49 @@ pub fn build(b: *std.Build) void {
         validate_mailbox_step.dependOn(&run_validate_mailbox.step);
     }
 
+    if (b.lazyDependency("ochi", .{
+        .target = target,
+        .optimize = optimize,
+    })) |ochi_dep| {
+        const ochi_root_mod = ochi_dep.artifact("Ochi").root_module;
+        const ochi_store_mod = b.createModule(.{
+            .root_source_file = ochi_dep.path("src/Store.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const ochi_imports = [_][]const u8{
+            "zeit",
+            "zint",
+            "metrics",
+            "logz",
+            "logging",
+            "tracy",
+            "c",
+            "encoding",
+        };
+        for (ochi_imports) |name| {
+            ochi_store_mod.addImport(name, ochi_root_mod.import_table.get(name).?);
+        }
+
+        const validate_ochi_mod = b.createModule(.{
+            .root_source_file = b.path("validation/ochi_store.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validate_ochi_mod.addImport("marionette", mod);
+        validate_ochi_mod.addImport("ochi_store", ochi_store_mod);
+        validate_ochi_mod.addImport("ochi_logging", ochi_root_mod.import_table.get("logging").?);
+
+        const validate_ochi_tests = b.addTest(.{ .root_module = validate_ochi_mod });
+        const run_validate_ochi = b.addRunArtifact(validate_ochi_tests);
+
+        const validate_ochi_step = b.step(
+            "validate-ochi",
+            "Run Ochi's unmodified storage path under Marionette",
+        );
+        validate_ochi_step.dependOn(&run_validate_ochi.step);
+    }
+
     const validate_bounded_queue_mod = b.createModule(.{
         .root_source_file = b.path("validation/bounded_queue_concurrency.zig"),
         .target = target,

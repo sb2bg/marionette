@@ -14,6 +14,11 @@
             .hash = "mailbox-0.0.15-8ABL0kt8AADKxnp3BayHaNX3niZ0mR3lsHc1R4x6npnn",
             .lazy = true,
         },
+        .ochi = .{
+            .url = "git+https://github.com/ochi-team/ochi.git#f8b2e9c804571e4d2203658589123e974feac4c2",
+            .hash = "Ochi-0.0.0-rhYy0sGhDgBuFe6ZguYWa0XONU_rUHEQXWYTlTy6CACG",
+            .lazy = true,
+        },
     },
     .paths = .{
         "README.md",
