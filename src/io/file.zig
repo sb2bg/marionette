@@ -165,6 +165,12 @@ pub fn Ops(comptime Backend: type) type {
                     return errors.mapDiskOpenError(err);
                 };
                 const index = backend.createFileMeta(path) catch return error.SystemResources;
+                const stat_result = backend.disk.stat(.{ .path = path }) catch |err| {
+                    backend.discardFileMeta(index);
+                    return errors.mapDiskOpenError(err);
+                };
+                backend.files.items[index].len = stat_result.size;
+                backend.files.items[index].inode = stat_result.inode;
                 backend.allocator.free(path);
                 path_owned = false;
                 break :b index;
@@ -375,7 +381,13 @@ pub fn Ops(comptime Backend: type) type {
             const new_index = backend.findFileMetaIndex(new_path);
             const owned_path = backend.allocator.dupe(u8, new_path) catch return error.SystemResources;
             errdefer backend.allocator.free(owned_path);
-            var prepared_locks = backend.prepareFileLockRekey(old_index, old_path, new_path) catch {
+            backend.reserveFileLockPath(new_path) catch |err| switch (err) {
+                error.OutOfMemory => return error.SystemResources,
+                error.WouldBlock => return error.FileBusy,
+            };
+            var destination_reserved = true;
+            defer if (destination_reserved) backend.releaseFileLockPathReservation(new_path);
+            var prepared_locks = backend.prepareFileLockRekey(old_path, new_path) catch {
                 return error.SystemResources;
             };
             defer prepared_locks.deinit(backend.allocator);
@@ -392,6 +404,8 @@ pub fn Ops(comptime Backend: type) type {
                 backend.files.items[index].deleted = true;
                 backend.files.items[index].len = 0;
             }
+            backend.releaseFileLockPathReservation(new_path);
+            destination_reserved = false;
             backend.commitFileLockRekey(old_path, &prepared_locks);
 
             backend.allocator.free(backend.files.items[old_index].path);

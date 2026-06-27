@@ -43,6 +43,7 @@ pub const SimDisk = struct {
 
     const File = struct {
         id: FileId,
+        inode: u64,
         path: []u8,
         len: u64 = 0,
         metadata_durable: bool = true,
@@ -81,6 +82,7 @@ pub const SimDisk = struct {
 
     const PendingWrite = struct {
         op_id: u64,
+        inode: u64,
         path: []u8,
         offset: u64,
         bytes: []u8,
@@ -150,6 +152,7 @@ pub const SimDisk = struct {
     pending_metadata: std.ArrayList(PendingMetadata) = .empty,
     next_op_id: u64 = 0,
     next_file_id: FileId = 1,
+    next_file_inode: u64 = 2,
     next_dir_id: DirId = 1,
     crashed: bool = false,
     crash_observer: ?CrashObserver = null,
@@ -213,7 +216,7 @@ pub const SimDisk = struct {
         try self.validatePath(path);
         try self.validateRange(offset, @intCast(self.options.sector_size));
 
-        const file = try self.getOrCreateFile(path);
+        const file = try self.getOrCreateFile(path, null);
         const sector = try self.getOrCreateSector(file, offset / self.options.sector_size);
         sector.corrupt = true;
 
@@ -456,7 +459,7 @@ pub const SimDisk = struct {
             try entries.append(options.allocator, .{
                 .name = try options.allocator.dupe(u8, name),
                 .kind = .file,
-                .inode = file.id + 1,
+                .inode = file.inode,
             });
         }
         for (self.pending_writes.items) |pending| {
@@ -473,7 +476,7 @@ pub const SimDisk = struct {
             try entries.append(options.allocator, .{
                 .name = try options.allocator.dupe(u8, name),
                 .kind = .file,
-                .inode = pendingFileInode(pending.path),
+                .inode = pending.inode,
             });
         }
         try self.recordPathOp("disk.read_dir", op_id, options.path, "ok", latency_ns);
@@ -929,7 +932,7 @@ pub const SimDisk = struct {
         return null;
     }
 
-    fn getOrCreateFile(self: *Self, path: []const u8) DiskError!*File {
+    fn getOrCreateFile(self: *Self, path: []const u8, inode: ?u64) DiskError!*File {
         if (self.findFile(path)) |file| return file;
 
         const owned_path = try self.world.allocator.dupe(u8, path);
@@ -939,10 +942,17 @@ pub const SimDisk = struct {
         self.next_file_id += 1;
         try self.files.append(self.world.allocator, .{
             .id = id,
+            .inode = inode orelse self.allocateFileInode(),
             .path = owned_path,
             .metadata_durable = false,
         });
         return &self.files.items[self.files.items.len - 1];
+    }
+
+    fn allocateFileInode(self: *Self) u64 {
+        const inode = self.next_file_inode;
+        self.next_file_inode += 1;
+        return inode;
     }
 
     fn ensurePendingCreate(self: *Self, op_id: u64, file: *const File) DiskError!void {
@@ -969,6 +979,8 @@ pub const SimDisk = struct {
         bytes: []const u8,
         logical_len: ?u64,
     ) DiskError!void {
+        const existing_inode = self.visibleInode(path);
+        const inode = existing_inode orelse self.next_file_inode;
         const owned_path = try self.world.allocator.dupe(u8, path);
         errdefer self.world.allocator.free(owned_path);
 
@@ -977,11 +989,13 @@ pub const SimDisk = struct {
 
         try self.pending_writes.append(self.world.allocator, .{
             .op_id = op_id,
+            .inode = inode,
             .path = owned_path,
             .offset = offset,
             .bytes = owned_bytes,
             .logical_len = logical_len,
         });
+        if (existing_inode == null) self.next_file_inode += 1;
     }
 
     fn clearPendingWritesFor(self: *Self, path: []const u8) void {
@@ -1166,12 +1180,8 @@ pub const SimDisk = struct {
         return std.math.maxInt(u64) - id;
     }
 
-    fn pendingFileInode(path: []const u8) u64 {
-        return std.hash.Wyhash.hash(0, path);
-    }
-
     fn applyFullWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
-        const file = try self.getOrCreateFile(pending.path);
+        const file = try self.getOrCreateFile(pending.path, pending.inode);
         try self.ensurePendingCreate(pending.op_id, file);
         try self.writeBytes(file, pending.offset, pending.bytes);
         const physical_end = try endOffset(pending.offset, pending.bytes.len);
@@ -1182,7 +1192,7 @@ pub const SimDisk = struct {
         const torn_len = pending.bytes.len / 2;
         if (torn_len == 0) return;
 
-        const file = try self.getOrCreateFile(pending.path);
+        const file = try self.getOrCreateFile(pending.path, pending.inode);
         try self.ensurePendingCreate(pending.op_id, file);
         try self.writeBytes(file, pending.offset, pending.bytes[0..torn_len]);
         const torn_end = try endOffset(pending.offset, torn_len);
@@ -1302,9 +1312,9 @@ pub const SimDisk = struct {
     }
 
     fn visibleInode(self: *Self, path: []const u8) ?u64 {
-        if (self.findFile(path)) |file| return file.id + 1;
+        if (self.findFile(path)) |file| return file.inode;
         for (self.pending_writes.items) |*pending| {
-            if (std.mem.eql(u8, pending.path, path)) return pendingFileInode(path);
+            if (std.mem.eql(u8, pending.path, path)) return pending.inode;
         }
         return null;
     }

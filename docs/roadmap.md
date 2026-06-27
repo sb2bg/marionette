@@ -62,7 +62,8 @@ The current disk surface is:
 - `mar.DiskControl`: harness-facing fault, scripted corruption, crash, and
   restart authority over the same `SimDisk` backing state.
 - `World.simulate(...)`: constructs world-owned simulator resources and
-  returns `{ env: Env, control: Control, io_runtime, process_supervisor }`.
+  returns a narrow `{ env: Env, control: Control }` app/harness view with
+  methods for per-node environments, endpoints, and process lifecycle hooks.
 - `Env.io()`: returns the host `std.Io` in production envs and Marionette's
   current deterministic `std.Io` backend in simulation envs. `sim.envForNode`
   returns per-node `Env` values backed by process-scoped `std.Io` backends.

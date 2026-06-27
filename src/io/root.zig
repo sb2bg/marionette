@@ -3,10 +3,6 @@
 const backend = @import("backend.zig");
 const task = @import("task.zig");
 
-/// Process-scoped deterministic `std.Io` runtime exposed through
-/// `World.Simulation.io_runtime`.
-pub const ProcessRuntime = backend.ProcessRuntime;
-
 /// Internal composition hooks for Marionette's world, scheduler, and backend.
 pub const internal = struct {
     pub const FutexWaitResult = backend.FutexWaitResult;

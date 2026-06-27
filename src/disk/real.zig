@@ -81,14 +81,21 @@ pub const RealDisk = struct {
             return mapOpenWriteError(err);
         };
         defer file.close(self.io);
+        const size_before = if (options.logical_len != null)
+            (file.stat(self.io) catch return error.ReadError).size
+        else
+            0;
 
         file.writePositionalAll(self.io, options.bytes, options.offset) catch |err| {
             return mapWriteError(err);
         };
         if (options.logical_len) |logical_len| {
-            file.setLength(self.io, logical_len) catch |err| {
-                return mapSetLengthError(err);
-            };
+            const stat_result = file.stat(self.io) catch return error.ReadError;
+            if (logical_len > stat_result.size or (logical_len < stat_result.size and size_before <= logical_len)) {
+                file.setLength(self.io, logical_len) catch |err| {
+                    return mapSetLengthError(err);
+                };
+            }
         }
     }
 
@@ -510,4 +517,44 @@ test "disk: real disk supports lifecycle operations" {
     try std.testing.expectEqual(@as(u64, 1), (try app_disk.stat(.{ .path = "compact/wal.log" })).size);
     try app_disk.delete(.{ .path = "compact/wal.log" });
     try std.testing.expectError(error.FileNotFound, app_disk.stat(.{ .path = "compact/wal.log" }));
+}
+
+test "disk: real disk logical_len trims padding without truncating existing bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    try app_disk.write(.{
+        .path = "short.bin",
+        .offset = 0,
+        .bytes = "abcd",
+        .logical_len = 2,
+    });
+    try std.testing.expectEqual(@as(u64, 2), (try app_disk.stat(.{ .path = "short.bin" })).size);
+
+    try app_disk.write(.{
+        .path = "data.bin",
+        .offset = 0,
+        .bytes = "abcdefgh",
+    });
+    try std.testing.expectEqual(@as(u64, 8), (try app_disk.stat(.{ .path = "data.bin" })).size);
+
+    try app_disk.write(.{
+        .path = "data.bin",
+        .offset = 0,
+        .bytes = "WXYZ",
+        .logical_len = 4,
+    });
+    try std.testing.expectEqual(@as(u64, 8), (try app_disk.stat(.{ .path = "data.bin" })).size);
+
+    try app_disk.write(.{
+        .path = "data.bin",
+        .offset = 8,
+        .bytes = "ijkl",
+        .logical_len = 12,
+    });
+    try std.testing.expectEqual(@as(u64, 12), (try app_disk.stat(.{ .path = "data.bin" })).size);
 }

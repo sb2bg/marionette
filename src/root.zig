@@ -61,11 +61,6 @@ pub const DiskError = disk_module.DiskError;
 /// Concrete app-facing environment capability bundle.
 pub const Env = env_module.Env;
 
-/// Minimal deterministic `std.Io` backend helpers.
-pub const SimIo = struct {
-    pub const ProcessRuntime = io_module.ProcessRuntime;
-};
-
 /// Production capability composition root.
 pub const Production = env_module.Production;
 
@@ -276,12 +271,12 @@ test "public roots hide internal wiring" {
     try std.testing.expect(!@hasDecl(public_api, "MessagePool"));
     try std.testing.expect(!@hasDecl(public_api, "NetworkFrame"));
 
-    try std.testing.expect(!@hasDecl(public_api.SimIo, "Backend"));
-    try std.testing.expect(!@hasDecl(public_api.SimIo, "TaskRuntime"));
-    try std.testing.expect(!@hasDecl(public_api.SimIo, "TaskControl"));
-    try std.testing.expect(!@hasDecl(public_api.SimIo, "FutexWaitSet"));
+    try std.testing.expect(!@hasDecl(public_api, "SimIo"));
+    try std.testing.expect(!@hasField(public_api.Sim, "io_runtime"));
+    try std.testing.expect(!@hasField(public_api.Sim, "process_supervisor"));
 
     try std.testing.expect(!@hasDecl(io_module, "Backend"));
+    try std.testing.expect(!@hasDecl(io_module, "ProcessRuntime"));
     try std.testing.expect(!@hasDecl(io_module, "TaskRuntime"));
     try std.testing.expect(!@hasDecl(io_module, "TaskControl"));
     try std.testing.expect(!@hasDecl(io_module, "FutexWaitSet"));

@@ -4,12 +4,82 @@ const Backend = @import("backend.zig").Backend;
 const clock_module = @import("../clock.zig");
 const disk_module = @import("../disk/root.zig");
 const env_module = @import("../env.zig");
-const World = @import("../world.zig").World;
+const world_module = @import("../world.zig");
+const World = world_module.World;
 const Io = std.Io;
 
 fn testIo(world: *World) Backend {
     return .init(std.testing.allocator, world, disk_module.Disk.unavailable(), 4096);
 }
+
+const PostCreateStatFailDisk = struct {
+    fn disk(self: *@This()) disk_module.Disk {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: disk_module.Disk.VTable = .{
+        .read = read,
+        .write = write,
+        .sync = sync,
+        .sync_dir = syncDir,
+        .stat = stat,
+        .read_some = readSome,
+        .set_length = setLength,
+        .delete = delete,
+        .rename = rename,
+        .create_dir = createDir,
+        .stat_dir = statDir,
+        .read_dir = readDir,
+    };
+
+    fn read(_: *anyopaque, _: disk_module.Disk.Read) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn write(_: *anyopaque, _: disk_module.Disk.Write) disk_module.DiskError!void {}
+
+    fn sync(_: *anyopaque, _: disk_module.Disk.Sync) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn syncDir(_: *anyopaque, _: disk_module.Disk.SyncDir) disk_module.DiskError!void {}
+
+    fn stat(_: *anyopaque, _: disk_module.Disk.Stat) disk_module.DiskError!disk_module.Disk.StatResult {
+        return error.FileNotFound;
+    }
+
+    fn readSome(_: *anyopaque, _: disk_module.Disk.ReadSome) disk_module.DiskError!usize {
+        return error.FileNotFound;
+    }
+
+    fn setLength(_: *anyopaque, _: disk_module.Disk.SetLength) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn delete(_: *anyopaque, _: disk_module.Disk.Delete) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn rename(_: *anyopaque, _: disk_module.Disk.Rename) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn createDir(_: *anyopaque, _: disk_module.Disk.CreateDir) disk_module.DiskError!void {}
+
+    fn statDir(_: *anyopaque, options: disk_module.Disk.StatDir) disk_module.DiskError!disk_module.Disk.StatDirResult {
+        if (std.mem.eql(u8, options.path, ".")) {
+            return .{ .inode = 1, .mtime_ns = 0 };
+        }
+        return error.FileNotFound;
+    }
+
+    fn readDir(_: *anyopaque, options: disk_module.Disk.ReadDir) disk_module.DiskError!disk_module.Disk.DirList {
+        return .{
+            .allocator = options.allocator,
+            .entries = try options.allocator.alloc(disk_module.Disk.DirEntry, 0),
+        };
+    }
+};
 
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     var count: usize = 0;
@@ -98,6 +168,32 @@ test "io: simulation async completes synchronously" {
     var future = Io.async(io, Helper.addOne, .{41});
     try std.testing.expectEqual(@as(u32, 42), future.await(io));
     try std.testing.expectError(error.ConcurrencyUnavailable, Io.concurrent(io, Helper.addOne, .{41}));
+}
+
+test "io: failed post-create stat does not publish file metadata" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    var disk = PostCreateStatFailDisk{};
+    var backend = Backend.init(std.testing.allocator, &world, disk.disk(), 4096);
+    defer backend.deinit();
+    const io = backend.io();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        Io.Dir.cwd().createFile(io, "ghost", .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), backend.files.items.len);
+    try std.testing.expect(backend.files.items[0].deleted);
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        Io.Dir.cwd().statFile(io, "ghost", .{}),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        Io.Dir.cwd().openFile(io, "ghost", .{}),
+    );
 }
 
 const fiber_supported = @import("../fiber.zig").supported;
@@ -197,7 +293,7 @@ test "io: process kill completes owned task groups" {
     try sim.killProcess(0);
     try group.await(io);
     try std.testing.expect(!completed);
-    const backend = try sim.io_runtime.backendForNode(0);
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
     try std.testing.expectEqual(@as(usize, 0), backend.group_closures.items.len);
 }
 
@@ -221,8 +317,8 @@ test "io: task group completion keys are unique across processes" {
     try first.concurrent(node_zero_io, Helper.delayedNoop, .{node_zero_io});
     try second.concurrent(node_one_io, Helper.delayedNoop, .{node_one_io});
 
-    const first_backend = try sim.io_runtime.backendForNode(0);
-    const second_backend = try sim.io_runtime.backendForNode(1);
+    const first_backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+    const second_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
     try std.testing.expectEqual(@as(usize, 1), first_backend.group_states.items.len);
     try std.testing.expectEqual(@as(usize, 1), second_backend.group_states.items.len);
     try std.testing.expect(first_backend.group_states.items[0].id != second_backend.group_states.items[0].id);
@@ -511,18 +607,18 @@ test "io: process futex keys are namespaced by backend" {
     var future = Io.async(client_io, Helper.waitForFlag, .{ client_io, &flag });
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 1), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 
     flag = 1;
     server_io.futexWake(u32, &flag, 1);
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 1), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 
     client_io.futexWake(u32, &flag, 1);
     future.await(client_io);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 }
 
 test "io: completed futex waits retire process key records" {
@@ -547,23 +643,23 @@ test "io: completed futex waits retire process key records" {
     var second = Io.async(io, Helper.waitForFlag, .{ io, &flag });
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 2), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 1), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 
     flag = 1;
     io.futexWake(u32, &flag, 1);
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 1), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 
     io.futexWake(u32, &flag, 1);
     try sim.control.runTasksUntilIdle();
     first.await(io);
     second.await(io);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 
     io.futexWake(u32, &flag, 1);
-    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 }
 
 test "io: process kill retires futex keys for killed waiters" {
@@ -587,12 +683,12 @@ test "io: process kill retires futex keys for killed waiters" {
     var future = Io.async(io, Helper.waitForFlag, .{ io, &flag });
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 1), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 1), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 
     try sim.killProcess(0);
     future.await(io);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-    try std.testing.expectEqual(@as(usize, 0), sim.io_runtime.registry.futex_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 }
 
 test "io: disk crash closes process-local std.Io.net listeners" {
@@ -602,7 +698,7 @@ test "io: disk crash closes process-local std.Io.net listeners" {
     const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
-    const server_backend = try sim.io_runtime.backendForNode(0);
+    const server_backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
 
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4573) catch unreachable;
     var server = try address.listen(server_io, .{});
@@ -857,8 +953,8 @@ test "io: cross-process await releases the spawning backend closure" {
     var future = Io.async(server_io, Helper.addOne, .{41});
     try std.testing.expectEqual(@as(u32, 42), future.await(client_io));
 
-    const server_backend = try sim.io_runtime.backendForNode(0);
-    const client_backend = try sim.io_runtime.backendForNode(1);
+    const server_backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+    const client_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
     try std.testing.expectEqual(@as(usize, 0), server_backend.async_closures.items.len);
     try std.testing.expectEqual(@as(usize, 0), client_backend.async_closures.items.len);
 
@@ -1397,7 +1493,7 @@ test "io: closed file handles retire backend state" {
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
     const io = sim.env.io();
-    const backend = try sim.io_runtime.backendForNode(0);
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
 
     var file = try Io.Dir.cwd().createFile(io, "retire-file.bin", .{ .read = true });
     try std.testing.expectEqual(@as(usize, 1), backend.handles.items.len);
@@ -1906,6 +2002,22 @@ test "io: pending empty file creation prevents directory creation at the same pa
     );
 }
 
+test "io: createDirPath rejects an existing file at the target path" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var file = try cwd.createFile(io, "leaf", .{});
+    file.close(io);
+
+    try std.testing.expectError(
+        error.PathAlreadyExists,
+        cwd.createDirPathStatus(io, "leaf", .default_dir),
+    );
+}
+
 test "io: file stat and directory iteration report the same inode" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
@@ -1928,6 +2040,44 @@ test "io: file stat and directory iteration report the same inode" {
         try std.testing.expectEqual(stat.inode, entry.inode);
     }
     try std.testing.expect(saw_identity);
+}
+
+test "io: pending file inode stays stable after another process discovers synced metadata" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var file = try cwd.createFile(node_zero_io, "identity", .{});
+    file.close(node_zero_io);
+    const pending_stat = try cwd.statFile(node_zero_io, "identity", .{});
+
+    try sim.env.disk.sync(.{ .path = "identity" });
+    try sim.env.disk.syncDir(.{ .path = "." });
+
+    const discovered_stat = try cwd.statFile(node_one_io, "identity", .{});
+    try std.testing.expectEqual(pending_stat.inode, discovered_stat.inode);
+}
+
+test "io: atomic replace preserves unique live file inodes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var replacement = try cwd.createFile(io, "catalog.tmp", .{});
+    replacement.close(io);
+    try cwd.rename("catalog.tmp", cwd, "catalog.json", io);
+
+    var next_replacement = try cwd.createFile(io, "catalog.tmp", .{});
+    next_replacement.close(io);
+
+    const catalog_stat = try cwd.statFile(io, "catalog.json", .{});
+    const tmp_stat = try cwd.statFile(io, "catalog.tmp", .{});
+    try std.testing.expect(catalog_stat.inode != tmp_stat.inode);
 }
 
 test "io: world teardown releases outstanding file locks after scheduler teardown" {
@@ -1972,6 +2122,206 @@ test "io: simulated exclusive file locks release on close" {
         .lock_nonblocking = true,
     });
     second.close(io);
+}
+
+test "io: rename over an actively locked destination fails without panicking" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var source = try cwd.createFile(node_zero_io, "source", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    defer source.close(node_zero_io);
+    var dest = try cwd.createFile(node_one_io, "dest", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    defer dest.close(node_one_io);
+
+    try std.testing.expectError(
+        error.FileBusy,
+        cwd.rename("source", cwd, "dest", node_zero_io),
+    );
+    try cwd.access(node_zero_io, "source", .{});
+    try cwd.access(node_one_io, "dest", .{});
+}
+
+test "io: cross-process source lock holders release renamed lock path" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var created = try cwd.createFile(node_zero_io, "shared", .{});
+    created.close(node_zero_io);
+
+    var shared = try cwd.openFile(node_one_io, "shared", .{
+        .lock = .shared,
+        .lock_nonblocking = true,
+    });
+
+    try cwd.rename("shared", cwd, "renamed", node_zero_io);
+    shared.close(node_one_io);
+
+    var renamed = try cwd.openFile(node_zero_io, "renamed", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    renamed.close(node_zero_io);
+}
+
+test "io: rename preserves source and destination lock waiters" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn waitOpen(io: Io, path: []const u8, started: *u32, acquired: *u32) void {
+            started.* = 1;
+            io.futexWake(u32, started, std.math.maxInt(u32));
+            var file = Io.Dir.cwd().openFile(io, path, .{
+                .lock = .exclusive,
+                .lock_nonblocking = false,
+            }) catch @panic("lock wait failed");
+            acquired.* = 1;
+            io.futexWake(u32, acquired, std.math.maxInt(u32));
+            file.close(io);
+        }
+
+        fn waitSource(io: Io, started: *u32, acquired: *u32) void {
+            waitOpen(io, "source", started, acquired);
+        }
+
+        fn waitDest(io: Io, started: *u32, acquired: *u32) void {
+            waitOpen(io, "dest", started, acquired);
+        }
+
+        fn renameSourceToDest(io: Io, started: *u32) void {
+            started.* = 1;
+            io.futexWake(u32, started, std.math.maxInt(u32));
+            Io.Dir.cwd().rename("source", Io.Dir.cwd(), "dest", io) catch @panic("rename failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{
+        .disk = .{ .min_latency_ns = 100 },
+        .network = .{ .nodes = 2 },
+    });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var source_holder = try cwd.createFile(node_zero_io, "source", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    var dest = try cwd.createFile(node_zero_io, "dest", .{});
+    dest.close(node_zero_io);
+
+    var source_started: u32 = 0;
+    var source_acquired: u32 = 0;
+    var source_future = Io.async(node_one_io, Helper.waitSource, .{ node_one_io, &source_started, &source_acquired });
+    while (source_started == 0) {
+        node_one_io.futexWait(u32, &source_started, 0) catch unreachable;
+    }
+
+    var rename_started: u32 = 0;
+    var rename_future = Io.async(node_zero_io, Helper.renameSourceToDest, .{ node_zero_io, &rename_started });
+    while (rename_started == 0) {
+        node_zero_io.futexWait(u32, &rename_started, 0) catch unreachable;
+    }
+    try sim.control.runFor(10);
+
+    var dest_started: u32 = 0;
+    var dest_acquired: u32 = 0;
+    var dest_future = Io.async(node_one_io, Helper.waitDest, .{ node_one_io, &dest_started, &dest_acquired });
+    while (dest_started == 0) {
+        node_one_io.futexWait(u32, &dest_started, 0) catch unreachable;
+    }
+    try sim.control.runFor(10);
+    try std.testing.expectEqual(@as(u32, 0), dest_acquired);
+
+    try sim.control.runFor(90);
+    rename_future.await(node_zero_io);
+
+    source_holder.close(node_zero_io);
+    source_future.await(node_one_io);
+    dest_future.await(node_one_io);
+
+    try std.testing.expectEqual(@as(u32, 1), source_acquired);
+    try std.testing.expectEqual(@as(u32, 1), dest_acquired);
+}
+
+test "io: rename reserves destination lock across disk latency" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn renameOverDest(io: Io, started: *u32) void {
+            started.* = 1;
+            io.futexWake(u32, started, std.math.maxInt(u32));
+            Io.Dir.cwd().rename("source", Io.Dir.cwd(), "dest", io) catch @panic("rename failed");
+        }
+
+        fn lockDest(io: Io, started: *u32, acquired: *u32) void {
+            started.* = 1;
+            io.futexWake(u32, started, std.math.maxInt(u32));
+            var file = Io.Dir.cwd().openFile(io, "dest", .{
+                .lock = .exclusive,
+                .lock_nonblocking = false,
+            }) catch @panic("lock failed");
+            acquired.* = 1;
+            io.futexWake(u32, acquired, std.math.maxInt(u32));
+            file.close(io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{
+        .disk = .{ .min_latency_ns = 100 },
+        .network = .{ .nodes = 2 },
+    });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var source = try cwd.createFile(node_zero_io, "source", .{
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    var dest = try cwd.createFile(node_zero_io, "dest", .{});
+    dest.close(node_zero_io);
+
+    var rename_started: u32 = 0;
+    var rename_future = Io.async(node_zero_io, Helper.renameOverDest, .{ node_zero_io, &rename_started });
+    while (rename_started == 0) {
+        node_zero_io.futexWait(u32, &rename_started, 0) catch unreachable;
+    }
+    try sim.control.runFor(10);
+
+    var lock_started: u32 = 0;
+    var lock_acquired: u32 = 0;
+    var lock_future = Io.async(node_one_io, Helper.lockDest, .{ node_one_io, &lock_started, &lock_acquired });
+    while (lock_started == 0) {
+        node_one_io.futexWait(u32, &lock_started, 0) catch unreachable;
+    }
+    try sim.control.runFor(10);
+    try std.testing.expectEqual(@as(u32, 0), lock_acquired);
+
+    try sim.control.runFor(80);
+    rename_future.await(node_zero_io);
+    try std.testing.expectEqual(@as(u32, 0), lock_acquired);
+
+    source.close(node_zero_io);
+    lock_future.await(node_one_io);
+    try std.testing.expectEqual(@as(u32, 1), lock_acquired);
 }
 
 test "io: file locks follow file rename" {

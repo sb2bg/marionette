@@ -27,6 +27,7 @@ const FileLockRegistry = struct {
         key: usize,
         shared: usize = 0,
         exclusive: bool = false,
+        reservations: usize = 0,
         waiters: std.ArrayList(*Waiter) = .empty,
 
         fn deinit(self: *LockState, allocator: std.mem.Allocator) void {
@@ -67,13 +68,6 @@ const FileLockRegistry = struct {
         return null;
     }
 
-    fn findByKey(self: *FileLockRegistry, key: usize) ?*LockState {
-        for (self.locks.items) |*lock| {
-            if (lock.key == key) return lock;
-        }
-        return null;
-    }
-
     fn getOrCreate(self: *FileLockRegistry, path: []const u8) std.mem.Allocator.Error!*LockState {
         if (self.find(path)) |lock| return lock;
         const owned_path = try self.allocator.dupe(u8, path);
@@ -101,8 +95,8 @@ const FileLockRegistry = struct {
             const lock = try self.getOrCreate(path);
             const available = switch (lock_mode) {
                 .none => true,
-                .shared => !lock.exclusive,
-                .exclusive => !lock.exclusive and lock.shared == 0,
+                .shared => lock.reservations == 0 and !lock.exclusive,
+                .exclusive => lock.reservations == 0 and !lock.exclusive and lock.shared == 0,
             };
             if (available) {
                 switch (lock_mode) {
@@ -129,7 +123,7 @@ const FileLockRegistry = struct {
             } else {
                 task_runtime.runUntilDone(&waiter.ready);
             }
-            self.removeWaiter(self.findByKey(key).?, waiter);
+            self.removeWaiter(waiter);
         }
     }
 
@@ -154,7 +148,7 @@ const FileLockRegistry = struct {
         }
         for (lock.waiters.items) |waiter| waiter.ready = true;
         const key = lock.key;
-        const empty = lock.shared == 0 and !lock.exclusive and lock.waiters.items.len == 0;
+        const empty = lock.shared == 0 and !lock.exclusive and lock.reservations == 0 and lock.waiters.items.len == 0;
         if (runtime) |task_runtime| {
             _ = task_runtime.wake(
                 futex_module.waitKey(.file_lock, key),
@@ -170,10 +164,11 @@ const FileLockRegistry = struct {
 
     fn rekey(
         self: *FileLockRegistry,
+        runtime: ?TaskRuntime,
         old_path: []const u8,
         new_path: []u8,
     ) void {
-        var lock_index = self.findIndex(old_path) orelse {
+        const lock_index = self.findIndex(old_path) orelse {
             self.allocator.free(new_path);
             return;
         };
@@ -182,10 +177,21 @@ const FileLockRegistry = struct {
                 const existing = &self.locks.items[existing_index];
                 std.debug.assert(existing.shared == 0);
                 std.debug.assert(!existing.exclusive);
-                std.debug.assert(existing.waiters.items.len == 0);
-                var removed = self.locks.orderedRemove(existing_index);
-                removed.deinit(self.allocator);
-                if (existing_index < lock_index) lock_index -= 1;
+                std.debug.assert(existing.reservations == 0);
+                const source = &self.locks.items[lock_index];
+                std.debug.assert(source.reservations == 0);
+                existing.shared = source.shared;
+                existing.exclusive = source.exclusive;
+                source.shared = 0;
+                source.exclusive = false;
+                self.wakeLockWaiters(runtime, existing);
+                self.wakeLockWaiters(runtime, source);
+                self.allocator.free(new_path);
+                if (source.waiters.items.len == 0) {
+                    var removed = self.locks.orderedRemove(lock_index);
+                    removed.deinit(self.allocator);
+                }
+                return;
             }
         }
         const lock = &self.locks.items[lock_index];
@@ -193,14 +199,73 @@ const FileLockRegistry = struct {
         lock.path = new_path;
     }
 
-    fn removeWaiter(self: *FileLockRegistry, lock: *LockState, waiter: *Waiter) void {
-        for (lock.waiters.items, 0..) |candidate, index| {
-            if (candidate == waiter) {
-                _ = lock.waiters.swapRemove(index);
-                break;
+    fn wakeLockWaiters(
+        _: *FileLockRegistry,
+        runtime: ?TaskRuntime,
+        lock: *LockState,
+    ) void {
+        for (lock.waiters.items) |waiter| waiter.ready = true;
+        if (runtime) |task_runtime| {
+            _ = task_runtime.wake(
+                futex_module.waitKey(.file_lock, lock.key),
+                std.math.maxInt(usize),
+            );
+        }
+    }
+
+    fn reservePath(
+        self: *FileLockRegistry,
+        path: []const u8,
+    ) (std.mem.Allocator.Error || error{WouldBlock})!void {
+        const lock = try self.getOrCreate(path);
+        if (lock.shared != 0 or lock.exclusive or lock.reservations != 0) return error.WouldBlock;
+        lock.reservations += 1;
+    }
+
+    fn releasePathReservation(
+        self: *FileLockRegistry,
+        runtime: ?TaskRuntime,
+        path: []const u8,
+    ) void {
+        const lock = self.find(path) orelse unreachable;
+        std.debug.assert(lock.reservations > 0);
+        lock.reservations -= 1;
+        for (lock.waiters.items) |waiter| waiter.ready = true;
+        const key = lock.key;
+        const empty = lock.shared == 0 and !lock.exclusive and lock.reservations == 0 and lock.waiters.items.len == 0;
+        if (runtime) |task_runtime| {
+            _ = task_runtime.wake(
+                futex_module.waitKey(.file_lock, key),
+                std.math.maxInt(usize),
+            );
+        }
+        if (empty) {
+            const index = self.findIndex(path) orelse unreachable;
+            var removed = self.locks.orderedRemove(index);
+            removed.deinit(self.allocator);
+        }
+    }
+
+    fn removeWaiter(self: *FileLockRegistry, waiter: *Waiter) void {
+        for (self.locks.items, 0..) |*lock, lock_index| {
+            for (lock.waiters.items, 0..) |candidate, waiter_index| {
+                if (candidate != waiter) continue;
+                _ = lock.waiters.swapRemove(waiter_index);
+                self.allocator.destroy(waiter);
+                self.removeLockIfEmpty(lock_index);
+                return;
             }
         }
-        self.allocator.destroy(waiter);
+        unreachable;
+    }
+
+    fn removeLockIfEmpty(self: *FileLockRegistry, index: usize) void {
+        const lock = &self.locks.items[index];
+        if (lock.shared != 0 or lock.exclusive or lock.reservations != 0 or lock.waiters.items.len != 0) {
+            return;
+        }
+        var removed = self.locks.orderedRemove(index);
+        removed.deinit(self.allocator);
     }
 
     fn retireWaiters(self: *FileLockRegistry, owner: *anyopaque) void {
@@ -251,7 +316,6 @@ pub const Backend = struct {
     directory_handles: std.ArrayList(DirectoryHandle) = .empty,
     handles: std.ArrayList(HandleEntry) = .empty,
     next_handle: SocketHandle = 1000,
-    next_inode: Io.File.INode = 2,
     locks: FileLockRegistry,
 
     pub const HandleEntry = struct {
@@ -358,13 +422,14 @@ pub const Backend = struct {
         handle_paths: std.ArrayList(HandlePath) = .empty,
 
         pub const HandlePath = struct {
+            backend: *Backend,
             state: *FileState,
             path: []u8,
         };
 
         pub fn deinit(self: *FileLockRekey, allocator: std.mem.Allocator) void {
             if (self.registry_path) |path| allocator.free(path);
-            for (self.handle_paths.items) |entry| allocator.free(entry.path);
+            for (self.handle_paths.items) |entry| entry.backend.allocator.free(entry.path);
             self.handle_paths.deinit(allocator);
             self.* = undefined;
         }
@@ -821,7 +886,10 @@ pub const Backend = struct {
             try prefix.appendSlice(self.allocator, component);
             if (try self.directoryExists(prefix.items)) continue;
             self.createDirectory(prefix.items) catch |err| switch (err) {
-                error.PathAlreadyExists => continue,
+                error.PathAlreadyExists => {
+                    if (try self.directoryExists(prefix.items)) continue;
+                    return error.PathAlreadyExists;
+                },
                 else => return err,
             };
             created = true;
@@ -882,28 +950,33 @@ pub const Backend = struct {
     pub fn createFileMeta(self: *Backend, path: []const u8) std.mem.Allocator.Error!usize {
         const owned_path = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned_path);
+        const inode = fileInodeForPath(path);
 
         for (self.files.items, 0..) |*file_meta, index| {
             if (!file_meta.deleted) continue;
             self.allocator.free(file_meta.path);
             file_meta.* = .{
                 .path = owned_path,
-                .inode = self.allocateInode(),
+                .inode = inode,
             };
             return index;
         }
 
         try self.files.append(self.allocator, .{
             .path = owned_path,
-            .inode = self.allocateInode(),
+            .inode = inode,
         });
         return self.files.items.len - 1;
     }
 
-    fn allocateInode(self: *Backend) Io.File.INode {
-        const inode = self.next_inode;
-        self.next_inode += 1;
-        return inode;
+    pub fn discardFileMeta(self: *Backend, index: usize) void {
+        self.files.items[index].deleted = true;
+        self.files.items[index].stale = false;
+        self.files.items[index].len = 0;
+    }
+
+    fn fileInodeForPath(path: []const u8) Io.File.INode {
+        return @intCast(std.hash.Wyhash.hash(0, path));
     }
 
     pub fn nowTimestamp(self: *const Backend) Io.Timestamp {
@@ -1055,9 +1128,16 @@ pub const Backend = struct {
         return &self.locks;
     }
 
+    pub fn reserveFileLockPath(self: *Backend, path: []const u8) (std.mem.Allocator.Error || error{WouldBlock})!void {
+        try self.fileLockRegistry().reservePath(path);
+    }
+
+    pub fn releaseFileLockPathReservation(self: *Backend, path: []const u8) void {
+        self.fileLockRegistry().releasePathReservation(self.task_runtime, path);
+    }
+
     pub fn prepareFileLockRekey(
         self: *Backend,
-        file_index: usize,
         old_path: []const u8,
         new_path: []const u8,
     ) std.mem.Allocator.Error!FileLockRekey {
@@ -1068,30 +1148,41 @@ pub const Backend = struct {
             prepared.registry_path = try self.allocator.dupe(u8, new_path);
         }
 
+        if (self.process_registry) |registry| {
+            for (registry.backends) |*backend| {
+                try backend.prepareFileLockHandlePaths(self.allocator, &prepared, old_path, new_path);
+            }
+        } else {
+            try self.prepareFileLockHandlePaths(self.allocator, &prepared, old_path, new_path);
+        }
+
+        return prepared;
+    }
+
+    fn prepareFileLockHandlePaths(
+        self: *Backend,
+        list_allocator: std.mem.Allocator,
+        prepared: *FileLockRekey,
+        old_path: []const u8,
+        new_path: []const u8,
+    ) std.mem.Allocator.Error!void {
         for (self.handles.items) |entry| {
             const file_state = switch (entry.state) {
                 .file => |state| state,
                 .listener, .connection => continue,
             };
-            switch (file_state.target) {
-                .file => |target_index| {
-                    if (target_index != file_index) continue;
-                },
-                .directory => continue,
-            }
             const lock_path = file_state.lock_path orelse continue;
             if (!std.mem.eql(u8, lock_path, old_path)) continue;
             const owned_path = try self.allocator.dupe(u8, new_path);
             var path_owned = true;
             errdefer if (path_owned) self.allocator.free(owned_path);
-            try prepared.handle_paths.append(self.allocator, .{
+            try prepared.handle_paths.append(list_allocator, .{
+                .backend = self,
                 .state = file_state,
                 .path = owned_path,
             });
             path_owned = false;
         }
-
-        return prepared;
     }
 
     pub fn commitFileLockRekey(
@@ -1100,12 +1191,12 @@ pub const Backend = struct {
         prepared: *FileLockRekey,
     ) void {
         if (prepared.registry_path) |path| {
-            self.fileLockRegistry().rekey(old_path, path);
+            self.fileLockRegistry().rekey(self.task_runtime, old_path, path);
             prepared.registry_path = null;
         }
         for (prepared.handle_paths.items) |entry| {
             const old_lock_path = entry.state.lock_path orelse unreachable;
-            self.allocator.free(old_lock_path);
+            entry.backend.allocator.free(old_lock_path);
             entry.state.lock_path = entry.path;
         }
         prepared.handle_paths.clearRetainingCapacity();
@@ -1136,6 +1227,7 @@ pub const Backend = struct {
 
 pub const ProcessRegistry = struct {
     allocator: std.mem.Allocator,
+    backends: []Backend = &.{},
     listeners: std.ArrayList(ListenerRegistration) = .empty,
     futex_keys: std.ArrayList(FutexKeyRegistration) = .empty,
     next_futex_key: usize = 1,
@@ -1309,6 +1401,7 @@ pub const ProcessRuntime = struct {
             .registry = .init(allocator),
             .backends = backends,
         };
+        self.registry.backends = backends;
 
         for (self.backends, 0..) |*backend, index| {
             backend.* = Backend.init(allocator, world, disk, sector_size);

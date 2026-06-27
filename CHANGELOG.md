@@ -16,6 +16,8 @@
 - Fixes sector read-modify-write handling so short `std.Io` writes retain their
   logical file length across crashes, and atomic rename discards pending writes
   belonging to the replaced destination.
+- Fixes cross-process file-lock rekeying on rename so open lock holders release
+  the renamed path and source/destination waiters are preserved.
 - Adds process-scoped simulation `std.Io` backends with stable per-node
   identity, shared listener/connection registration, and process-local futex
   namespaces.
@@ -29,7 +31,8 @@
 - Retires completed scheduler task records after completion while preserving
   stable task counts.
 - Narrows the public/internal module boundary so backend coordinators, task
-  runtimes, and teardown hooks are kept under explicit internal roots.
+  runtimes, process runtimes, and teardown hooks are kept under explicit
+  internal roots.
 - Adds a release-symbol readiness check that verifies simulation-only symbols
   are absent from release binaries.
 - Adds a contributor-facing repository layout guide.

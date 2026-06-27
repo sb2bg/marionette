@@ -61,12 +61,19 @@ pub const ProcessLifecycle = struct {
     restart: *const fn (*anyopaque, env_module.Env) anyerror!void,
 };
 
+/// Internal hooks for white-box simulator tests.
+pub const internal = struct {
+    pub fn ioRuntime(sim: World.Simulation) *io_module.internal.ProcessRuntime {
+        return sim.ioRuntime();
+    }
+};
+
 /// World-owned logical-process lifecycle supervisor.
 pub const ProcessSupervisor = struct {
     allocator: std.mem.Allocator,
     world: *World,
     base_env: env_module.Env,
-    io_runtime: *io_module.ProcessRuntime,
+    io_runtime: *io_module.internal.ProcessRuntime,
     lifecycles: []?ProcessLifecycle,
     states: []ProcessState,
     dynamics: []env_module.ProcessDynamicsOptions,
@@ -83,7 +90,7 @@ pub const ProcessSupervisor = struct {
         allocator: std.mem.Allocator,
         world: *World,
         base_env: env_module.Env,
-        io_runtime: *io_module.ProcessRuntime,
+        io_runtime: *io_module.internal.ProcessRuntime,
     ) std.mem.Allocator.Error!ProcessSupervisor {
         const process_count = io_runtime.processCount();
         const lifecycles = try allocator.alloc(?ProcessLifecycle, process_count);
@@ -542,12 +549,10 @@ pub const World = struct {
     pub const Simulation = struct {
         env: env_module.Env,
         control: env_module.SimControl,
-        io_runtime: *io_module.ProcessRuntime,
-        process_supervisor: *ProcessSupervisor,
 
         pub fn envForNode(self: Simulation, node: network_module.NodeId) !env_module.Env {
             var env = self.env;
-            env.io_backend = try self.io_runtime.io(node);
+            env.io_backend = try self.ioRuntime().io(node);
             return env;
         }
 
@@ -586,13 +591,13 @@ pub const World = struct {
 
         /// Register lifecycle callbacks for one logical process.
         pub fn registerProcess(self: Simulation, node: network_module.NodeId, lifecycle: ProcessLifecycle) !void {
-            try self.process_supervisor.registerProcess(node, lifecycle);
+            try self.processSupervisor().registerProcess(node, lifecycle);
         }
 
         /// Kill one logical process: cancel its scheduler tasks, close its
         /// process-local handles, and run its `on_kill` callback once.
         pub fn killProcess(self: Simulation, node: network_module.NodeId) !void {
-            try self.process_supervisor.killProcess(node);
+            try self.processSupervisor().killProcess(node);
         }
 
         /// Restart one logical process by rerunning its registered initializer.
@@ -600,7 +605,15 @@ pub const World = struct {
         /// If the process is still alive, it is killed first so restart always
         /// creates a fresh incarnation.
         pub fn restartProcess(self: Simulation, node: network_module.NodeId) !void {
-            try self.process_supervisor.restartProcess(node);
+            try self.processSupervisor().restartProcess(node);
+        }
+
+        fn processSupervisor(self: Simulation) *ProcessSupervisor {
+            return @ptrCast(@alignCast(self.control.process.ptr));
+        }
+
+        fn ioRuntime(self: Simulation) *io_module.internal.ProcessRuntime {
+            return self.processSupervisor().io_runtime;
         }
     };
 
@@ -632,7 +645,7 @@ pub const World = struct {
             network_module.AnyNetworkControl.unavailable();
         const process_count = network_module.internal.processCountFromControl(network_control) orelse 1;
 
-        const sim_io = try self.allocator.create(io_module.ProcessRuntime);
+        const sim_io = try self.allocator.create(io_module.internal.ProcessRuntime);
         var sim_io_registered = false;
         errdefer if (!sim_io_registered) self.allocator.destroy(sim_io);
 
@@ -695,8 +708,6 @@ pub const World = struct {
                 .tasks = scheduler_module.taskControl(scheduler),
                 .world = self,
             },
-            .io_runtime = sim_io,
-            .process_supervisor = process_supervisor,
         };
     }
 

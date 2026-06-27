@@ -48,13 +48,11 @@ pub const Env = struct {
 };
 
 pub const Control = SimControl;
-pub const SimIo = ...;
 pub const ProcessLifecycle = struct {
     ptr: *anyopaque,
     on_kill: ?*const fn (*anyopaque) void = null,
     restart: *const fn (*anyopaque, Env) anyerror!void,
 };
-pub const ProcessSupervisor = opaque {};
 
 pub fn Endpoint(comptime Message: type) type;
 pub fn CodecTransport(comptime Codec: type) type;
@@ -73,8 +71,6 @@ pub const SimNetworkOptions = struct {
 pub const Sim = struct {
     env: Env,
     control: Control,
-    io_runtime: *SimIo.ProcessRuntime,
-    process_supervisor: *ProcessSupervisor,
     pub fn envForNode(self: Sim, node: NodeId) !Env;
     pub fn registerProcess(self: Sim, node: NodeId, lifecycle: ProcessLifecycle) !void;
     pub fn killProcess(self: Sim, node: NodeId) !void;
