@@ -313,6 +313,7 @@ pub const Backend = struct {
     futex_keys: std.ArrayList(FutexKeyEntry) = .empty,
     next_futex_key: usize = 1,
     files: std.ArrayList(FileMeta) = .empty,
+    retired_file_paths: std.ArrayList([]u8) = .empty,
     directory_handles: std.ArrayList(DirectoryHandle) = .empty,
     handles: std.ArrayList(HandleEntry) = .empty,
     next_handle: SocketHandle = 1000,
@@ -435,6 +436,22 @@ pub const Backend = struct {
         }
     };
 
+    pub const FileMetaRename = struct {
+        entries: std.ArrayList(Entry) = .empty,
+
+        pub const Entry = struct {
+            backend: *Backend,
+            index: usize,
+            path: []u8,
+        };
+
+        pub fn deinit(self: *FileMetaRename, allocator: std.mem.Allocator) void {
+            for (self.entries.items) |entry| entry.backend.allocator.free(entry.path);
+            self.entries.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
     pub fn init(allocator: std.mem.Allocator, world: *World, disk: disk_module.Disk, sector_size: u64) Backend {
         return .{
             .allocator = allocator,
@@ -457,6 +474,8 @@ pub const Backend = struct {
         self.group_states.deinit(self.allocator);
         for (self.files.items) |*file_meta| file_meta.deinit(self.allocator);
         self.files.deinit(self.allocator);
+        for (self.retired_file_paths.items) |path| self.allocator.free(path);
+        self.retired_file_paths.deinit(self.allocator);
         for (self.directory_handles.items) |*handle| handle.deinit(self.allocator);
         self.directory_handles.deinit(self.allocator);
         self.locks.deinit();
@@ -975,6 +994,23 @@ pub const Backend = struct {
         self.files.items[index].len = 0;
     }
 
+    pub fn discardFileMetaForPathAcrossProcesses(self: *Backend, path: []const u8) void {
+        if (self.process_registry) |registry| {
+            for (registry.backends) |*backend| {
+                backend.discardFileMetaForPath(path);
+            }
+            return;
+        }
+
+        self.discardFileMetaForPath(path);
+    }
+
+    fn discardFileMetaForPath(self: *Backend, path: []const u8) void {
+        const index = self.findFileMetaIndex(path) orelse return;
+        self.closeFileHandlesForIndex(index);
+        self.discardFileMeta(index);
+    }
+
     fn fileInodeForPath(path: []const u8) Io.File.INode {
         return @intCast(std.hash.Wyhash.hash(0, path));
     }
@@ -1084,22 +1120,23 @@ pub const Backend = struct {
         lock: Io.File.Lock,
         lock_nonblocking: bool,
     ) (std.mem.Allocator.Error || error{WouldBlock})!Io.File {
+        const lock_acquire_path = self.files.items[file_index].path;
         try self.fileLockRegistry().acquire(
             self,
             self.task_runtime,
-            self.files.items[file_index].path,
+            lock_acquire_path,
             lock,
             lock_nonblocking,
         );
         errdefer self.fileLockRegistry().release(
             self.task_runtime,
-            self.files.items[file_index].path,
+            lock_acquire_path,
             lock,
         );
         const lock_path = if (lock == .none)
             null
         else
-            try self.allocator.dupe(u8, self.files.items[file_index].path);
+            try self.allocator.dupe(u8, lock_acquire_path);
         errdefer if (lock_path) |path| self.allocator.free(path);
         const file_state = try self.allocator.create(FileState);
         errdefer self.allocator.destroy(file_state);
@@ -1134,6 +1171,69 @@ pub const Backend = struct {
 
     pub fn releaseFileLockPathReservation(self: *Backend, path: []const u8) void {
         self.fileLockRegistry().releasePathReservation(self.task_runtime, path);
+    }
+
+    pub fn prepareFileMetaRename(
+        self: *Backend,
+        old_path: []const u8,
+        new_path: []const u8,
+    ) std.mem.Allocator.Error!FileMetaRename {
+        var prepared: FileMetaRename = .{};
+        errdefer prepared.deinit(self.allocator);
+
+        if (self.process_registry) |registry| {
+            for (registry.backends) |*backend| {
+                try backend.prepareFileMetaPath(self.allocator, &prepared, old_path, new_path);
+            }
+        } else {
+            try self.prepareFileMetaPath(self.allocator, &prepared, old_path, new_path);
+        }
+
+        return prepared;
+    }
+
+    fn prepareFileMetaPath(
+        self: *Backend,
+        list_allocator: std.mem.Allocator,
+        prepared: *FileMetaRename,
+        old_path: []const u8,
+        new_path: []const u8,
+    ) std.mem.Allocator.Error!void {
+        const index = self.findFileMetaIndex(old_path) orelse return;
+        try self.retired_file_paths.ensureUnusedCapacity(self.allocator, 1);
+        const owned_path = try self.allocator.dupe(u8, new_path);
+        var path_owned = true;
+        errdefer if (path_owned) self.allocator.free(owned_path);
+        try prepared.entries.append(list_allocator, .{
+            .backend = self,
+            .index = index,
+            .path = owned_path,
+        });
+        path_owned = false;
+    }
+
+    pub fn commitFileMetaRename(
+        self: *Backend,
+        new_path: []const u8,
+        prepared: *FileMetaRename,
+    ) void {
+        self.discardFileMetaForPathAcrossProcesses(new_path);
+
+        for (prepared.entries.items) |entry| {
+            const old_path = entry.backend.files.items[entry.index].path;
+            if (entry.backend.fileLockPathHasWaiters(old_path)) {
+                entry.backend.retired_file_paths.appendAssumeCapacity(old_path);
+            } else {
+                entry.backend.allocator.free(old_path);
+            }
+            entry.backend.files.items[entry.index].path = entry.path;
+        }
+        prepared.entries.clearRetainingCapacity();
+    }
+
+    fn fileLockPathHasWaiters(self: *Backend, path: []const u8) bool {
+        const lock = self.fileLockRegistry().find(path) orelse return false;
+        return lock.waiters.items.len != 0;
     }
 
     pub fn prepareFileLockRekey(

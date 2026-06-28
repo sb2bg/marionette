@@ -340,7 +340,7 @@ pub fn Ops(comptime Backend: type) type {
             const path = resolvePath(backend, dir, sub_path, .file) catch |err| return err;
             defer backend.allocator.free(path);
             if (backend.directoryExists(path) catch return error.FileNotFound) return error.IsDir;
-            const file_index = (findOrDiscoverFileMeta(backend, path) catch |err| {
+            _ = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskDeleteError(err);
             }) orelse return error.FileNotFound;
             backend.disk.delete(.{ .path = path }) catch |err| switch (err) {
@@ -348,9 +348,7 @@ pub fn Ops(comptime Backend: type) type {
                 else => return errors.mapDiskDeleteError(err),
             };
 
-            backend.closeFileHandlesForIndex(file_index);
-            backend.files.items[file_index].deleted = true;
-            backend.files.items[file_index].len = 0;
+            backend.discardFileMetaForPathAcrossProcesses(path);
         }
 
         pub fn simDirRename(
@@ -378,15 +376,16 @@ pub fn Ops(comptime Backend: type) type {
             }) orelse return error.FileNotFound;
             if (std.mem.eql(u8, old_path, new_path)) return;
 
-            const new_index = backend.findFileMetaIndex(new_path);
-            const owned_path = backend.allocator.dupe(u8, new_path) catch return error.SystemResources;
-            errdefer backend.allocator.free(owned_path);
             backend.reserveFileLockPath(new_path) catch |err| switch (err) {
                 error.OutOfMemory => return error.SystemResources,
                 error.WouldBlock => return error.FileBusy,
             };
             var destination_reserved = true;
             defer if (destination_reserved) backend.releaseFileLockPathReservation(new_path);
+            var prepared_meta = backend.prepareFileMetaRename(old_path, new_path) catch {
+                return error.SystemResources;
+            };
+            defer prepared_meta.deinit(backend.allocator);
             var prepared_locks = backend.prepareFileLockRekey(old_path, new_path) catch {
                 return error.SystemResources;
             };
@@ -399,17 +398,10 @@ pub fn Ops(comptime Backend: type) type {
                 else => return errors.mapDiskRenameError(err),
             };
 
-            if (new_index) |index| {
-                backend.closeFileHandlesForIndex(index);
-                backend.files.items[index].deleted = true;
-                backend.files.items[index].len = 0;
-            }
+            backend.commitFileMetaRename(new_path, &prepared_meta);
             backend.releaseFileLockPathReservation(new_path);
             destination_reserved = false;
             backend.commitFileLockRekey(old_path, &prepared_locks);
-
-            backend.allocator.free(backend.files.items[old_index].path);
-            backend.files.items[old_index].path = owned_path;
         }
 
         pub fn simFileStat(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {

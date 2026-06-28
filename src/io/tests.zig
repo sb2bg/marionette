@@ -2177,6 +2177,66 @@ test "io: cross-process source lock holders release renamed lock path" {
     renamed.close(node_zero_io);
 }
 
+test "io: rename updates file metadata caches across processes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var source = try cwd.createFile(node_zero_io, "source", .{ .read = true });
+    try source.writePositionalAll(node_zero_io, "new!", 0);
+    try source.sync(node_zero_io);
+    source.close(node_zero_io);
+
+    var dest = try cwd.createFile(node_one_io, "dest", .{ .read = true });
+    defer dest.close(node_one_io);
+    try dest.writePositionalAll(node_one_io, "old?", 0);
+    try dest.sync(node_one_io);
+
+    try cwd.access(node_one_io, "source", .{});
+    var source_reader = try cwd.openFile(node_one_io, "source", .{ .mode = .read_only });
+    defer source_reader.close(node_one_io);
+
+    try cwd.rename("source", cwd, "dest", node_zero_io);
+
+    try std.testing.expectError(error.FileNotFound, cwd.access(node_one_io, "source", .{}));
+    try std.testing.expectError(error.AccessDenied, dest.length(node_one_io));
+
+    var buffer: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try source_reader.readPositionalAll(node_one_io, &buffer, 0));
+    try std.testing.expectEqualStrings("new!", &buffer);
+
+    var reopened = try cwd.openFile(node_one_io, "dest", .{ .mode = .read_only });
+    defer reopened.close(node_one_io);
+    try std.testing.expectEqual(@as(usize, 4), try reopened.readPositionalAll(node_one_io, &buffer, 0));
+    try std.testing.expectEqualStrings("new!", &buffer);
+}
+
+test "io: delete invalidates file metadata caches across processes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+    const cwd = Io.Dir.cwd();
+
+    var file = try cwd.createFile(node_zero_io, "victim", .{ .read = true });
+    try file.writePositionalAll(node_zero_io, "gone", 0);
+    try file.sync(node_zero_io);
+    file.close(node_zero_io);
+
+    try cwd.access(node_one_io, "victim", .{});
+    var reader = try cwd.openFile(node_one_io, "victim", .{ .mode = .read_only });
+    defer reader.close(node_one_io);
+
+    try cwd.deleteFile(node_zero_io, "victim");
+
+    try std.testing.expectError(error.FileNotFound, cwd.access(node_one_io, "victim", .{}));
+    try std.testing.expectError(error.AccessDenied, reader.length(node_one_io));
+}
+
 test "io: rename preserves source and destination lock waiters" {
     if (!fiber_supported) return error.SkipZigTest;
 
