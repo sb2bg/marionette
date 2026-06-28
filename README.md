@@ -1,7 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/transparent_logo_dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/transparent_logo.png">
-  <img src="assets/transparent_logo.png" alt="Marionette" width="126px" align="left">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/transparent_logo_dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/transparent_logo.svg">
+  <img src="assets/transparent_logo.svg" alt="Marionette" width="126px" align="left">
 </picture>
 
 ### Marionette

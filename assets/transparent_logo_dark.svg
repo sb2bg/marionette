@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 235 235" role="img" aria-labelledby="title desc">
+  <title id="title">Marionette logo</title>
+  <desc id="desc">A marionette controller with three hanging blocks.</desc>
+  <defs>
+    <linearGradient id="bar" x1="34" y1="1" x2="198" y2="29" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#df9b42"/>
+      <stop offset="1" stop-color="#d9933d"/>
+    </linearGradient>
+  </defs>
+  <g fill="#fff">
+    <rect x="46" y="37" width="9" height="88" rx="1.5"/>
+    <rect x="112" y="37" width="9" height="147" rx="1.5"/>
+    <rect x="179" y="37" width="9" height="88" rx="1.5"/>
+    <rect x="23" y="122" width="53" height="52" rx="5"/>
+    <rect x="89" y="182" width="53" height="52" rx="5"/>
+    <rect x="155" y="122" width="52" height="52" rx="5"/>
+  </g>
+  <rect x="34" y="1" width="164" height="28" rx="5" fill="url(#bar)"/>
+</svg>
