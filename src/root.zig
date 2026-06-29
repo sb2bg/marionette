@@ -11,12 +11,14 @@ const fiber_module = @import("fiber.zig");
 const io_module = @import("io/root.zig");
 const codec_module = @import("codec.zig");
 const network_module = @import("network/root.zig");
+const profile_module = @import("profile.zig");
 const run_module = @import("run.zig");
 const seed_module = @import("seed.zig");
 const trace_summary_module = @import("trace_summary.zig");
 
 test {
     _ = fiber_module;
+    _ = profile_module;
 }
 
 /// Duration in nanoseconds.
@@ -171,6 +173,12 @@ pub const default_byte_pool_options = network_module.default_byte_pool_options;
 
 /// Simulator-control network capability.
 pub const NetworkControl = network_module.AnyNetworkControl;
+
+/// Named simulation profile expansion helpers.
+pub const SimProfile = profile_module.SimProfile;
+
+/// Namespace for profile helpers.
+pub const profile = profile_module;
 
 /// Configuration for `run`.
 pub const RunOptions = run_module.RunOptions;
