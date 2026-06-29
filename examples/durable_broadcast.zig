@@ -37,6 +37,37 @@ const MessagePayload = struct {
 
 const Endpoint = mar.Endpoint(MessagePayload);
 
+fn replayProfile(runtime: mar.SimProfile.RuntimeOptions) mar.SimProfile.Expanded {
+    return mar.SimProfile.replay(.{
+        .tick_ns = tick_ns,
+        .disk = .{
+            .sector_size = record_size,
+            .min_latency_ns = tick_ns,
+        },
+        .network = .{
+            .nodes = replica_count + 1,
+            .service_nodes = replica_count,
+            .path_capacity = max_messages,
+        },
+        .disk_faults = runtime.disk_faults,
+        .network_loss = runtime.network_loss,
+        .network_latency = runtime.network_latency,
+        .network_clogs = runtime.network_clogs,
+        .network_partitions = runtime.network_partitions,
+        .process_dynamics = runtime.process_dynamics,
+    }).expand();
+}
+
+fn baselineProfile() mar.SimProfile.Expanded {
+    return replayProfile(.{});
+}
+
+fn probabilisticBugSearchProfile() mar.SimProfile.Expanded {
+    return replayProfile(.{
+        .disk_faults = .{ .crash_lost_write_rate = .percent(25) },
+    });
+}
+
 pub const checks = [_]mar.StateCheck(Harness){
     .{ .name = "quorum acknowledgements are durable", .check = quorumAcknowledgementsAreDurable },
 };
@@ -59,6 +90,11 @@ pub fn runMultiRecordScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 
 pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
     return runReport(allocator, seed, "durable-broadcast-bug", buggyScenario);
+}
+
+pub fn runProbabilisticBugScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    const profile = probabilisticBugSearchProfile();
+    return runReportWithProfile(allocator, seed, "durable-broadcast-bug-search", &profile, probabilisticBugScenario);
 }
 
 fn runTrace(
@@ -96,22 +132,33 @@ fn runReport(
     });
 }
 
+fn runReportWithProfile(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    name: []const u8,
+    profile: *const mar.SimProfile.Expanded,
+    comptime scenario_fn: fn (*Harness) anyerror!void,
+) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = tick_ns,
+        .name = name,
+        .tags = profile.runTags(),
+        .attributes = profile.runAttributes(),
+        .init = Harness.init,
+        .scenario = scenario_fn,
+        .checks = &checks,
+    });
+}
+
 pub const Harness = struct {
     service: DurableBroadcast,
     control: mar.Control,
 
     pub fn init(world: *mar.World) !Harness {
-        const sim = try world.simulate(.{
-            .disk = .{
-                .sector_size = record_size,
-                .min_latency_ns = tick_ns,
-            },
-            .network = .{
-                .nodes = replica_count + 1,
-                .service_nodes = replica_count,
-                .path_capacity = max_messages,
-            },
-        });
+        const profile = baselineProfile();
+        const sim = try world.simulate(profile.simulateOptions());
 
         return .{
             .service = DurableBroadcast.init(
@@ -186,6 +233,20 @@ fn configureNetworkFaults(harness: *Harness) !void {
 
 pub fn buggyScenario(harness: *Harness) !void {
     try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try harness.service.submit(.{
+        .op = .{ .id = 1, .value = 99 },
+        .retry_limit = 1,
+        .sync_before_broadcast = false,
+    });
+
+    try harness.control.disk.crash();
+    try harness.control.disk.restart();
+    try harness.service.recover();
+}
+
+pub fn probabilisticBugScenario(harness: *Harness) !void {
+    const profile = probabilisticBugSearchProfile();
+    try profile.apply(harness.control);
     try harness.service.submit(.{
         .op = .{ .id = 1, .value = 99 },
         .retry_limit = 1,

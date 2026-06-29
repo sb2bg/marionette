@@ -150,6 +150,48 @@ test "examples: durable broadcast checker catches broadcast before sync" {
     }
 }
 
+test "examples: durable broadcast bug search finds probabilistic crash loss" {
+    var found_failure = false;
+
+    for (0..64) |iteration| {
+        const seed = 0xD00D_BA5E + @as(u64, @intCast(iteration));
+        var report = try durable_broadcast.runProbabilisticBugScenarioReport(std.testing.allocator, seed);
+        defer report.deinit();
+
+        switch (report) {
+            .passed => {},
+            .failed => |failure| {
+                try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
+                try std.testing.expectEqualStrings("quorum acknowledgements are durable", failure.check_name.?);
+                try std.testing.expectEqualStrings("QuorumWithoutDurableRecord", failure.error_name.?);
+                try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "durable.broadcast.quorum op=1 value=99") != null);
+                try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "disk.crash_write op=0 path=durable_broadcast.wal offset=0 len=24 result=lost") != null);
+                try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "run.tag value=profile:replay") != null);
+                try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "run.attribute key=profile.disk.crash_lost_write_rate.numerator value=uint:25") != null);
+
+                var buffer: [8192]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(&buffer);
+                try failure.writeSummary(&writer);
+                const summary = writer.buffered();
+                var seed_buffer: [64]u8 = undefined;
+                const seed_text = try std.fmt.bufPrint(&seed_buffer, "seed={}", .{seed});
+                try std.testing.expect(std.mem.indexOf(u8, summary, seed_text) != null);
+                try std.testing.expect(std.mem.indexOf(u8, summary, "name=durable-broadcast-bug-search") != null);
+                try std.testing.expect(std.mem.indexOf(u8, summary, "tag=profile:replay") != null);
+                try std.testing.expect(std.mem.indexOf(u8, summary, "profile.name=string:replay") != null);
+                try std.testing.expect(std.mem.indexOf(u8, summary, "profile.network.nodes=uint:4") != null);
+                try std.testing.expect(std.mem.indexOf(u8, summary, "profile.disk.crash_lost_write_rate.numerator=uint:25") != null);
+                try std.testing.expect(std.mem.indexOf(u8, summary, "profile.disk.crash_lost_write_rate.denominator=uint:100") != null);
+
+                found_failure = true;
+                break;
+            },
+        }
+    }
+
+    try std.testing.expect(found_failure);
+}
+
 test "examples: kv store recovery scenario is replayable" {
     const a = try runKvStoreTrace(std.testing.allocator, 0xC0FFEE, kv_store.scenario);
     defer std.testing.allocator.free(a);
