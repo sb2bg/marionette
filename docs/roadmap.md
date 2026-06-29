@@ -442,6 +442,21 @@ the seeded random stream even across deterministic clog expiries.
 same-seed replay, traced transition boundaries, large quiet jumps, and
 tick-versus-runFor RNG equivalence at clog expiry.
 
+### Completed: Named simulation profiles
+
+**Status:** Done. `mar.SimProfile` ships `baseline`, `swarm`, `replay`, and
+`performance`. Expanding a profile yields run tags/attributes, static
+`World.SimulateOptions`, and an explicit `apply(control)` runtime-control step.
+
+**Why it mattered:** Profile names are now reproducibility data rather than
+test comments. Failure summaries include the profile name and expanded topology,
+disk latency, network loss/latency/clog/partition rates, stability windows,
+disk fault rates, and process dynamics.
+
+**Coverage:** Unit tests cover profile expansion and replay overrides, and the
+replicated-register swarm fuzz test uses the shared `swarm` profile while
+keeping its 100-seed coverage.
+
 ---
 
 ## Active Work Queue
@@ -449,30 +464,14 @@ tick-versus-runFor RNG equivalence at clog expiry.
 0.4 should make the current simulator feel coherent rather than merely broad:
 seeded faults evolve at stable control boundaries, common scenarios can select
 named profiles, and examples prove bug discoverability with small fuzz/search
-sweeps.
+sweeps. The named-profile slice is complete, so the active queue now starts
+with bug-search confidence.
 
 Pick from the top unless coordinating otherwise. Code work belongs in these
 items; docs-only edits should keep the story current without claiming future
 implementation as done.
 
-### 1. Named simulation profiles
-
-Lift the hand-built scenario settings into named profiles so examples and CI
-can say what kind of run they are performing without rewriting rates and
-budgets at every call site.
-
-Acceptance criteria:
-
-- Ship at least `baseline`, `swarm`, `replay`, and `performance` profiles.
-- Profiles expand into `RunOptions`, simulator topology defaults, and runtime
-  fault controls without hiding the fully expanded values from traces or
-  failure summaries.
-- Keep `replay` exact: a seed plus expanded profile should be enough to
-  reproduce a failure.
-- Port the replicated-register swarm setup to the shared profile mechanism
-  without weakening its current coverage.
-
-### 2. Fuzz/search confidence for known-bug examples
+### 1. Fuzz/search confidence for known-bug examples
 
 The suite has strong single-seed demonstrations. 0.4 should add modest
 fuzz/search coverage where the bug is probabilistic, so CI proves the fault
@@ -636,12 +635,14 @@ and item 5.
 
 ### 9. Named simulation profiles
 
-**Moved to the active 0.4 queue.**
+**Completed in the 0.4 queue.**
 
 Ship `baseline`, `swarm`, `replay`, `performance` as first-class named
 profiles that expand into `RunOptions`, `SimNetworkOptions`, and runtime
-network fault controls. The replicated register example already manually
-constructs these; lift them into the library. Depends on item 4.
+network fault controls. `mar.SimProfile` now expands profiles into run
+metadata, `World.SimulateOptions`, and an explicit runtime-control application
+step. The replicated-register swarm fuzz test uses the shared `swarm` profile.
+Keep this section as historical context.
 
 ### 10. Deterministic allocation authority and allocation-fault model
 
@@ -1234,8 +1235,7 @@ become confusing.
 
 ---
 
-Last meaningful update: scalable seeded fault evolution and process
-crash/restart probabilities are complete. The active 0.4 queue now centers on
-named profiles and fuzz/search confidence.
+Last meaningful update: named simulation profiles are complete. The active 0.4
+queue now centers on fuzz/search confidence for known-bug examples.
 Update this roadmap in the same PR as any substantive code change.
 Contributors should expect the roadmap to reflect the true state of the code.

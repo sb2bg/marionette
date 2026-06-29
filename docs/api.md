@@ -598,6 +598,52 @@ run without forcing tools to parse presentation strings. Use
 metadata names never silently track internal field renames. Runtime behavior
 should read from the config, not from derived attributes.
 
+Named simulation profiles package common run metadata, static simulator setup,
+and runtime fault controls. A profile must still be expanded and applied
+explicitly: `simulateOptions()` configures `World.simulate`, `runTags()` and
+`runAttributes()` make the expanded values visible in traces and failure
+summaries, and `apply(control)` sets runtime controls such as network loss,
+latency, clogs, and partition dynamics.
+
+```zig
+fn swarmProfile() mar.SimProfile.Expanded {
+    return mar.SimProfile.swarm(.{
+        .tick_ns = tick_ns,
+        .network = .{
+            .nodes = replica_count + 1,
+            .service_nodes = replica_count,
+            .path_capacity = max_messages,
+        },
+    }).expand();
+}
+
+fn scenario(case: *Case) !void {
+    const profile = swarmProfile();
+    try profile.apply(case.control());
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 6 });
+}
+
+const profile = swarmProfile();
+var report = try mar.runSimCase(.{
+    .allocator = std.testing.allocator,
+    .seed = 0x1234,
+    .name = "replicated-register-swarm",
+    .tags = profile.runTags(),
+    .attributes = profile.runAttributes(),
+    .simulate = profile.simulateOptions(),
+    .init = initReplicas,
+    .scenario = scenario,
+    .checks = &checks,
+});
+```
+
+The built-in profile names are `baseline`, `swarm`, `replay`, and
+`performance`. `replay` is intentionally just an exact carrier for explicit
+values; pass the values from a failure summary back into the profile options
+rather than relying on hidden generation. Network runtime controls are reported
+as nonzero metadata only when a network topology is present. `performance`
+defaults disk latency to zero and runtime faults to off.
+
 World-only checks can be attached to the run options:
 
 ```zig

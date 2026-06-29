@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Adds named simulation profiles (`baseline`, `swarm`, `replay`, and
+  `performance`) that expand into run metadata, simulator options, and explicit
+  runtime-control application. The replicated-register swarm now uses the
+  shared profile and reports the expanded profile values in traces and failure
+  summaries.
 - Adds scheduler-backed `Io.Group` async/concurrent/await/cancel behavior with
   deterministic task ownership, reuse, and process-kill cleanup.
 - Adds the simulated directory operations needed by ordinary storage engines:

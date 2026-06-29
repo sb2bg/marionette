@@ -155,6 +155,59 @@ exported trace keys never silently track internal field renames. Runtime
 behavior should read from the config, not from derived attributes. Do not put pointers,
 addresses, unordered dumps, or machine-local paths in run metadata.
 
+## Profiles
+
+Use `mar.SimProfile` when a scenario should run under a named configuration
+such as `baseline`, `swarm`, `replay`, or `performance`. Profiles expand into
+three explicit pieces:
+
+- `simulateOptions()` for `runSimCase(.simulate = ...)`;
+- `runTags()` and `runAttributes()` for replay-visible metadata;
+- `apply(control)` for runtime fault controls inside the scenario.
+
+This keeps profiles reproducible without hiding the final values from traces
+or failure summaries.
+
+```zig
+fn swarmProfile() mar.SimProfile.Expanded {
+    return mar.SimProfile.swarm(.{
+        .tick_ns = tick_ns,
+        .network = .{
+            .nodes = replica_count + 1,
+            .service_nodes = replica_count,
+            .path_capacity = max_messages,
+        },
+    }).expand();
+}
+
+fn scenario(case: *Case) !void {
+    const profile = swarmProfile();
+    try profile.apply(case.control());
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 6 });
+}
+
+const profile = swarmProfile();
+try mar.expectSimFuzz(.{
+    .allocator = std.testing.allocator,
+    .seed = 0xC0FFEE,
+    .seeds = 100,
+    .tick_ns = tick_ns,
+    .name = "replicated-register-swarm",
+    .tags = profile.runTags(),
+    .attributes = profile.runAttributes(),
+    .simulate = profile.simulateOptions(),
+    .init = initReplicas,
+    .scenario = scenario,
+    .checks = &checks,
+});
+```
+
+The `replay` profile has no hidden generator. It is for rehydrating the exact
+expanded values from a failure report with the same seed. Network runtime
+controls are effective, and reported as nonzero metadata, only when the profile
+also includes a network topology. The `performance` profile is a low-noise
+starting point with zero default disk latency and no default runtime faults.
+
 ## Checks
 
 Checks are the post-scenario invariant hook. A world check is a named function that
