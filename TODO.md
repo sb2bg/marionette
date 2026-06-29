@@ -377,8 +377,9 @@ probes were removed after verification.
         cross-compiled.
   - [ ] Full Windows execution remains blocked on broader socket-handle and
         Win64 fiber work.
-- [ ] Nightly long-running seed-sweep job (`expectFuzz` over examples with
-      thousands of seeds).
+- [x] Nightly long-running seed-sweep job (`expectFuzz` over examples with
+      thousands of seeds): `.github/workflows/nightly-seed-sweep.yml` runs
+      `zig build seed-sweep -Doptimize=ReleaseSafe` on cron and manually.
 - [x] Add and maintain a contributor-facing repository layout guide covering
       `src/io/`, `src/network/`, `src/disk/`, `validation/`, `docs/`, and the
       current example set (`08cb67a`).
