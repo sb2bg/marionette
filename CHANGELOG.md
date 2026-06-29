@@ -7,6 +7,9 @@
   runtime-control application. The replicated-register swarm now uses the
   shared profile and reports the expanded profile values in traces and failure
   summaries.
+- Adds a durable-broadcast bug-search test that finds the planted
+  broadcast-before-sync bug under probabilistic crash-loss faults while keeping
+  the deterministic single-seed failure for readable traces.
 - Adds scheduler-backed `Io.Group` async/concurrent/await/cancel behavior with
   deterministic task ownership, reuse, and process-kill cleanup.
 - Adds the simulated directory operations needed by ordinary storage engines:

@@ -457,6 +457,26 @@ disk fault rates, and process dynamics.
 replicated-register swarm fuzz test uses the shared `swarm` profile while
 keeping its 100-seed coverage.
 
+### Completed: Fuzz/search confidence for known-bug examples
+
+**Status:** Done. Durable broadcast now keeps its deterministic
+`crash_lost_write_rate = .always()` planted-bug failure and adds a bounded
+probabilistic search where crash loss is 25%. The search verifies that the
+failure summary includes the discovered seed, profile tag/name, expanded
+network topology, and crash-loss rate.
+
+**Why it mattered:** The suite now proves at least one known durable-storage
+bug is discoverable under probabilistic faults, not only under scripted
+always-on corruption. The single-seed failure remains the readable trace for
+docs and debugging.
+
+**0.4 decisions for other examples:** Replicated register already has swarm
+fuzz over network loss/latency/clogs/partitions, and its planted divergence is
+a deterministic checker demonstration rather than a probabilistic fault-profile
+bug. KV keeps the deterministic torn-record recovery failure for 0.4; a
+probabilistic recovery search should wait for the recovery-window and disk
+fault-budget work so destructive disk outcomes can be scoped deliberately.
+
 ---
 
 ## Active Work Queue
@@ -464,27 +484,13 @@ keeping its 100-seed coverage.
 0.4 should make the current simulator feel coherent rather than merely broad:
 seeded faults evolve at stable control boundaries, common scenarios can select
 named profiles, and examples prove bug discoverability with small fuzz/search
-sweeps. The named-profile slice is complete, so the active queue now starts
-with bug-search confidence.
+sweeps. The named-profile and bug-search slices are complete, so the active
+queue is drained; unless a release blocker appears, pick the next item from the
+near-term backlog.
 
 Pick from the top unless coordinating otherwise. Code work belongs in these
 items; docs-only edits should keep the story current without claiming future
 implementation as done.
-
-### 1. Fuzz/search confidence for known-bug examples
-
-The suite has strong single-seed demonstrations. 0.4 should add modest
-fuzz/search coverage where the bug is probabilistic, so CI proves the fault
-profiles can discover known failures rather than only replay scripted failures.
-
-Acceptance criteria:
-
-- Add a durable-broadcast buggy fuzz/search variant where crash loss is
-  probabilistic instead of `.always()`.
-- Keep stable single-seed failure tests for readable traces.
-- Decide whether replicated-register and KV need matching bug-search tests, or
-  document why their deterministic demonstrations are enough for 0.4.
-- Failure reports must include seed, profile name, and expanded profile values.
 
 ---
 
@@ -601,8 +607,7 @@ Design notes:
 
 ### 5. Bug-detection fuzz coverage
 
-**Moved to the active 0.4 queue.** Keep this section only as historical
-context until the active item lands.
+**Completed in the 0.4 queue.** Keep this section only as historical context.
 
 Most deliberately buggy examples are single-seed demonstrations. Add a small
 fuzz/search layer where the bug is probabilistic, so the suite proves failures
@@ -616,6 +621,10 @@ Acceptance criteria:
 - Keep the existing deterministic buggy smoke test for stable failure traces.
 - Decide whether replicated-register and KV should also get bug-search tests,
   or document why single-seed demonstration is enough for those cases.
+
+Durable broadcast now has that probabilistic search. Replicated-register and KV
+stay with their current coverage for the reasons recorded in the completed 0.4
+section above.
 
 ### 7. Crash / restart simulation
 
@@ -1235,7 +1244,8 @@ become confusing.
 
 ---
 
-Last meaningful update: named simulation profiles are complete. The active 0.4
-queue now centers on fuzz/search confidence for known-bug examples.
+Last meaningful update: named simulation profiles and bug-search confidence are
+complete. The active 0.4 queue is drained; near-term follow-ups start with
+recovery windows and disk fault budgets.
 Update this roadmap in the same PR as any substantive code change.
 Contributors should expect the roadmap to reflect the true state of the code.
