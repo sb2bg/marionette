@@ -38,6 +38,17 @@ const simulate_options = .{ .network = .{
     .path_capacity = max_messages,
 } };
 
+fn swarmProfile() mar.SimProfile.Expanded {
+    return mar.SimProfile.swarm(.{
+        .tick_ns = tick_ns,
+        .network = .{
+            .nodes = replica_count + 1,
+            .service_nodes = replica_count,
+            .path_capacity = max_messages,
+        },
+    }).expand();
+}
+
 pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "committed register is safe", .check = committedRegisterIsSafe },
 };
@@ -145,21 +156,8 @@ pub fn conflictScenario(case: *Case) !void {
 }
 
 pub fn swarmScenario(case: *Case) !void {
-    try case.control().network.setLossiness(.{ .drop_rate = .percent(10) });
-    try case.control().network.setLatency(.{
-        .min_latency_ns = tick_ns,
-        .latency_jitter_ns = 2 * tick_ns,
-    });
-    try case.control().network.setClogs(.{
-        .path_clog_rate = .percent(10),
-        .path_clog_duration_ns = 2 * tick_ns,
-    });
-    try case.control().network.setPartitionDynamics(.{
-        .partition_rate = .percent(5),
-        .unpartition_rate = .percent(20),
-        .partition_stability_min_ns = 3 * tick_ns,
-        .unpartition_stability_min_ns = 3 * tick_ns,
-    });
+    const profile = swarmProfile();
+    try profile.apply(case.control());
 
     try case.control().runFor(4 * tick_ns);
     try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 6 });
@@ -490,12 +488,16 @@ test "register: conflict" {
 }
 
 test "register: swarm fuzz" {
+    const profile = swarmProfile();
     try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 100,
         .tick_ns = tick_ns,
-        .simulate = simulate_options,
+        .name = "replicated-register-swarm",
+        .tags = profile.runTags(),
+        .attributes = profile.runAttributes(),
+        .simulate = profile.simulateOptions(),
         .init = initReplicas,
         .scenario = swarmScenario,
         .checks = &checks,
@@ -507,11 +509,15 @@ test "register: swarm fuzz exercises tick-evolved network faults" {
     var saw_auto_clog = false;
 
     for (0..100) |iteration| {
+        const profile = swarmProfile();
         var report = try mar.runSimCase(.{
             .allocator = std.testing.allocator,
             .seed = 0xC0FFEE + @as(u64, @intCast(iteration)),
             .tick_ns = tick_ns,
-            .simulate = simulate_options,
+            .name = "replicated-register-swarm",
+            .tags = profile.runTags(),
+            .attributes = profile.runAttributes(),
+            .simulate = profile.simulateOptions(),
             .init = initReplicas,
             .scenario = swarmScenario,
             .checks = &checks,
