@@ -59,6 +59,7 @@ jobs:
         target:
           - validate-xitdb
           - validate-mailbox
+          - validate-ochi
         optimize:
           - Debug
           - ReleaseSafe
