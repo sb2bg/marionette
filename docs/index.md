@@ -255,7 +255,7 @@ directory is the best place to start.
 ## Install
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.3.0.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.4.0.tar.gz
 ```
 
 Requires Zig 0.16.x.

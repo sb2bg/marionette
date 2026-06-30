@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 - Unreleased
 
 - Adds named simulation profiles (`baseline`, `swarm`, `replay`, and
   `performance`) that expand into run metadata, simulator options, and explicit
