@@ -133,44 +133,53 @@ small isolated patches:
 
 ---
 
-## Next Target: 0.6 - Production Transport Parity
+## Next Target: 0.6 - Deterministic std.Io.net Depth
 
-**Theme:** close the cross-process gap so the same `Endpoint(Message)`
-application path runs in simulation and across real OS processes.
+**Theme:** grow the simulated `std.Io.net` surface until a pinned, unmodified
+external network SUT runs, fails meaningfully, and shuts down cleanly under
+simulation.
 
-**Done-signal:** `Endpoint(Message)` supports real multi-process socket
-transport with bounded queues, reconnect, silent-drop convergence, and CI
-coverage through a cross-process replicated-register parity test.
+**Done-signal:** the pinned dusty HTTP validation runs its unmodified client
+and server through the real `Server.listen` accept loop, exercises keep-alive
+reuse, chunked transfer, and graceful shutdown under deterministic latency,
+partition, and heal scenarios with an exact response oracle, and runs in CI
+alongside the other external validations.
 
-The architecture source of truth is `docs/network-production.md`. Keep that
-document detailed; keep this roadmap focused on the sequence.
+Rationale: for `std.Io.net` code, production parity is free because the host
+`std.Io` is the production implementation. Every sim-side gap closed here buys
+compatibility with any Zig code written against the standard interface. This
+replaces the previous 0.6 target (production `Endpoint(Message)` transport),
+which moves to 0.7 until a user needs cross-process endpoint parity.
 
-Steps 15a-15f are already started. Finish the chain:
+The first slice exists: `validate-dusty` runs the pinned, unmodified
+`lalinsky/dusty` HTTP client/server pair through simulated streams with
+byte-identical same-seed replay. Finish the chain:
 
-- **15g. Production-bus fake IO tests.** Exercise partial frame reads/writes,
-  EOF mid-frame, reconnect timing, and close discipline against the production
-  bus machinery without replacing normal `World` simulation.
-- **15h. Multi-peer connection management.** Add lazy outbound connect,
-  inbound listener, and peer identity resolution from the first valid frame.
-- **15i. Reconnect with seeded jittered backoff.** Test connection drop and
-  recovery end to end. Jitter seed comes from the local `NodeId`.
-- **15j. Bounded send and recv queues.** Converge sim/prod send semantics:
-  `error.EventQueueFull` becomes a trace-visible
-  `network.drop reason=queue_full` event in both implementations, and `send`
-  no longer surfaces transient errors.
-- **15k. Cross-process parity test.** Run the replicated-register example on N
-  OS processes, same source, same scenario, real sockets. This closes roadmap
-  item 15.
+- **16a. Cooperative cancellation points.** `simCancel` and `simGroupCancel`
+  currently run canceled tasks to completion, so canceling a task parked in
+  `accept` or a stream read cannot terminate it. Deliver `error.Canceled` at
+  scheduler suspension points with a deterministic cancellation order.
+- **16b. Run the real accept loop.** Switch the dusty validation from
+  harness-driven `handleConnection` to `Server.listen` plus graceful shutdown
+  once 16a lands, covering multi-connection accept and
+  `Io.Event.waitTimeout` drain behavior.
+- **16c. HTTP fault scenarios with an oracle.** Partition mid-response, heal,
+  retry. Assert the client surfaces the failure deterministically and a retry
+  converges. Reuse the 0.5 recovery vocabulary where it applies.
+- **16d. Keep-alive and connection churn.** Sequential connections, pooled
+  reuse across requests, and close/shutdown discipline, including
+  `netShutdown` semantics under partition.
+- **16e. Larger transfers.** Chunked bodies and payloads spanning many
+  simulated packets, exercising partial reads and writes through the
+  `Io.Reader`/`Io.Writer` adapters.
+- **16f. Fiber stack accounting.** The dusty client needs more than 640 KiB
+  of Debug-mode task stack; the default is now 1 MiB. Decide whether stack
+  size becomes a `simulate` option, and whether guard regions should grow
+  beyond one page so frames larger than a page cannot skip the guard and
+  corrupt neighboring mappings silently.
 
-Supporting scheduler/runtime work belongs in 0.6 only when transport
-correctness needs it:
-
-- cooperative cancellation points,
-- queue suspension,
-- close discipline.
-
-Broader production event-loop or thread-per-core runtime parity is not part of
-the 0.6 done-signal unless the transport test forces it.
+Supporting scheduler/runtime work belongs in 0.6 only when the SUT forces it;
+16a is already forced.
 
 ---
 
@@ -178,6 +187,27 @@ the 0.6 done-signal unless the transport test forces it.
 
 Promote later items only when they have a concrete example, compatibility
 target, or user-facing proof.
+
+### Production Endpoint Transport (deferred from 0.6)
+
+The architecture source of truth remains `docs/network-production.md`. Steps
+15a-15f produced framing and buffer-pool code that stays. Finish 15g-15k
+(fake-IO bus tests, multi-peer connection management, seeded reconnect,
+bounded queues, cross-process parity test) when a user or example needs
+cross-process `Endpoint(Message)` parity.
+
+Two notes recorded now so they are not relitigated later:
+
+- When the production bus is built, prefer implementing its socket layer on
+  host `std.Io.net` so the simulator's own deterministic backend can exercise
+  partial reads, EOF mid-frame, and reconnect timing, instead of building a
+  bespoke fake-IO backend. This resolves the internal-seam decision that
+  `docs/network-production.md` deferred until 15d.
+- The 15j send-semantics convergence (silent drop plus a trace-visible
+  `network.drop reason=queue_full` event, `send` no longer surfacing
+  transient errors) is an app-facing contract change independent of sockets.
+  If endpoint usage grows before this section is promoted, land the contract
+  change on the simulation side first.
 
 ### Production Runtime Parity
 

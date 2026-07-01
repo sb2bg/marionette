@@ -16,6 +16,9 @@
   client/server library through simulated `std.Io.net` streams: routed GET
   and POST echo over one keep-alive connection, an exact response oracle,
   and byte-identical same-seed replay.
+- Re-scopes the 0.6 roadmap target from production `Endpoint(Message)`
+  transport to SUT-driven deterministic `std.Io.net` depth, and defers the
+  production transport chain to 0.7.
 
 ## v0.4.0 - 2026-06-30
 
