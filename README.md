@@ -291,7 +291,7 @@ have.
 - [API](docs/api.md)
 - [Determinism](docs/determinism.md)
 - [Examples](docs/examples.md)
-- [Roadmap](docs/roadmap.md)
+- [Roadmap](ROADMAP.md)
 - [Prior art](docs/prior-art.md)
 - [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
 - [Releasing](docs/releasing.md)

@@ -22,6 +22,7 @@
     },
     .paths = .{
         "README.md",
+        "ROADMAP.md",
         "CHANGELOG.md",
         "FOUND_BUGS.md",
         "LICENSE",
