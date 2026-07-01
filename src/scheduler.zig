@@ -25,7 +25,12 @@ pub const TaskId = u64;
 ///
 /// Scheduler tasks run normal Marionette code, including trace formatting and
 /// allocator calls, so they need more room than the primitive fiber smoke test.
-pub const default_task_stack_size = 256 * 1024;
+/// Real SUT code paths can be deep: the dusty HTTP validation's Debug-mode
+/// client `fetch` needs just over 640 KiB. Stacks are lazily paged mmap
+/// regions on guard-page targets, so this size costs address space, not
+/// resident memory. Note that a frame larger than the single guard page can
+/// still skip past it silently; keep headroom generous.
+pub const default_task_stack_size = 1024 * 1024;
 
 /// Errors returned by the experimental cooperative scheduler itself.
 pub const TaskSchedulerError = error{

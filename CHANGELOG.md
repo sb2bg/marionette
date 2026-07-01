@@ -8,6 +8,10 @@
   faults configured through `control.allocation`, and allocation decisions
   are traced without raw addresses. Production envs return the caller-provided
   backing allocator with no faults.
+- Raises the default scheduler task stack from 256 KiB to 1 MiB. dusty's
+  Debug-mode client fetch path needs more than 640 KiB, and fiber stacks are
+  lazily paged mmap regions on guard-page targets, so the increase costs
+  address space rather than resident memory.
 
 ## v0.4.0 - 2026-06-30
 
