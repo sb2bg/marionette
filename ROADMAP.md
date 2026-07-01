@@ -28,44 +28,6 @@ maintainer-readable repros.
 
 Pick from this section first unless a later release item is blocking it.
 
-### Deterministic Allocation Authority
-
-Allocation is explicit in Marionette examples, but it is not yet a simulated
-authority. User code can still silently reach for process-global allocators,
-and Marionette cannot yet model deterministic OOM, quotas, or
-allocation-pressure bugs.
-
-Do this before allocator behavior becomes baked into more examples and before
-the scheduler grows more long-lived dynamic state.
-
-Acceptance criteria:
-
-- Add an app-facing `std.mem.Allocator` wrapper returned from `Env` or
-  alongside `Env`.
-- Add a production adapter that wraps a caller-provided backing allocator with
-  no faults by default.
-- Add harness-side controls for deterministic fail-after,
-  quota/max-live-bytes, and optional `BuggifyRate` allocation failures.
-- Keep allocation fault configuration on `control`, not at each allocation call
-  site.
-- Trace allocation decisions without raw addresses: allocation id, requested
-  length/alignment, result, live bytes, and failure reason.
-- Decide whether frees/reallocs are always traced or only traced in a verbose
-  profile. The default should catch leaks and OOM behavior without making every
-  trace unreadable.
-- Add a tidy default or documented project rule for global allocators such as
-  `std.heap.page_allocator` in simulated code once the replacement API exists.
-- Add or extend an example so allocation failure is a real modeled branch, not
-  only a unit test of the allocator wrapper.
-
-Design constraints:
-
-- Prefer Zig's `std.mem.Allocator` interface over a Marionette-specific
-  allocation API.
-- Model failure timing and resource pressure, not address determinism.
-- Keep modeled application allocations separate from Marionette's internal
-  bookkeeping allocations at first.
-
 ### Recovery Windows And Disk Fault Budgets
 
 The KV example currently encodes recoverability in its checker. Reusable disk
