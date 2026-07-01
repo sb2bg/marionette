@@ -154,6 +154,29 @@ pub fn build(b: *std.Build) void {
         validate_ochi_step.dependOn(&run_validate_ochi.step);
     }
 
+    if (b.lazyDependency("dusty", .{
+        .target = target,
+        .optimize = optimize,
+        .use_tls = false,
+    })) |dusty_dep| {
+        const validate_dusty_mod = b.createModule(.{
+            .root_source_file = b.path("validation/dusty_http.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validate_dusty_mod.addImport("marionette", mod);
+        validate_dusty_mod.addImport("dusty", dusty_dep.module("dusty"));
+
+        const validate_dusty_tests = b.addTest(.{ .root_module = validate_dusty_mod });
+        const run_validate_dusty = b.addRunArtifact(validate_dusty_tests);
+
+        const validate_dusty_step = b.step(
+            "validate-dusty",
+            "Run the unmodified dusty HTTP client/server under Marionette",
+        );
+        validate_dusty_step.dependOn(&run_validate_dusty.step);
+    }
+
     const validate_bounded_queue_mod = b.createModule(.{
         .root_source_file = b.path("validation/bounded_queue_concurrency.zig"),
         .target = target,

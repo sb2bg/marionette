@@ -255,6 +255,24 @@ across in-process runs.
 zig build validate-ochi
 ```
 
+## HTTP library validation
+
+The optional `validate-dusty` target runs the pinned, unmodified
+[`lalinsky/dusty`](https://github.com/lalinsky/dusty) HTTP client/server
+library through Marionette's deterministic `std.Io`. dusty's router, llhttp
+parser, and connection pool serve a routed GET and a POST echo over simulated
+`std.Io.net` streams with injected latency, on one keep-alive connection, and
+the exchange replays byte-identically from the same seed. dusty is a lazy
+dependency and this target is not part of the default test step.
+
+```sh
+zig build validate-dusty
+```
+
+This is an external-style capability demonstration of the `std.Io.net`
+boundary, not a third-party SUT finding. Growing this validation into the real
+`Server.listen` accept loop and fault scenarios is the 0.6 roadmap target.
+
 ## Traces
 
 Every run produces a structured trace. When a check fails, you get the full sequence of events that led to the violation, plus the seed to reproduce it.

@@ -12,6 +12,10 @@
   Debug-mode client fetch path needs more than 640 KiB, and fiber stacks are
   lazily paged mmap regions on guard-page targets, so the increase costs
   address space rather than resident memory.
+- Adds a pinned lazy dusty validation that runs the unmodified HTTP
+  client/server library through simulated `std.Io.net` streams: routed GET
+  and POST echo over one keep-alive connection, an exact response oracle,
+  and byte-identical same-seed replay.
 
 ## v0.4.0 - 2026-06-30
 

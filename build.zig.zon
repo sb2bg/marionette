@@ -19,6 +19,11 @@
             .hash = "Ochi-0.0.0-rhYy0sGhDgBuFe6ZguYWa0XONU_rUHEQXWYTlTy6CACG",
             .lazy = true,
         },
+        .dusty = .{
+            .url = "git+https://github.com/lalinsky/dusty#fd78c7e569508ad4d3efe882ef573d9e98706bc1",
+            .hash = "dusty-0.1.0-Qdw7Rj5bGwAU7Hfb70_6Ck9PJ3zYYxB8YxSibQT04PYx",
+            .lazy = true,
+        },
     },
     .paths = .{
         "README.md",
