@@ -10,6 +10,7 @@ pub const kv_store = @import("kv_store.zig");
 pub const idempotency_bug = @import("idempotency_bug.zig");
 pub const toy_sql_db = @import("toy_sql_db.zig");
 pub const std_io_net_kv = @import("std_io_net_kv.zig");
+pub const memtable_pressure = @import("memtable_pressure.zig");
 
 test {
     _ = @import("wal_record.zig");
@@ -220,6 +221,38 @@ test "examples: kv store checker catches torn record recovery" {
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "disk.crash_write op=6 path=kv.wal offset=16 len=16 result=torn") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "kv.recover.record offset=16 key=2 value=0 mode=buggy_accept_magic_only") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "kv.invariant_violation reason=unsynced_record_recovered") != null);
+        },
+    }
+}
+
+test "examples: memtable allocation pressure scenario is replayable" {
+    const a = try memtable_pressure.runScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(a);
+    const b = try memtable_pressure.runScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(b);
+
+    try std.testing.expectEqualStrings(a, b);
+    try std.testing.expect(std.mem.indexOf(u8, a, "run.name value=memtable-allocation-pressure") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "status=fail reason=fail_after") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "memtable.put key=2 accepted=false reason=allocation_rejected committed=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "memtable.put key=3 accepted=true committed=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a, "memtable.check commit_integrity=ok committed=2 rejected=1") != null);
+    // Allocation traces stay address-free.
+    try std.testing.expect(std.mem.indexOf(u8, a, "0x") == null);
+}
+
+test "examples: memtable checker catches phantom commit under OOM" {
+    var report = try memtable_pressure.runBuggyScenarioReport(std.testing.allocator, 0xC0FFEE);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
+            try std.testing.expectEqualStrings("committed puts match stored entries", failure.check_name.?);
+            try std.testing.expectEqualStrings("PhantomCommit", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "memtable.put key=2 accepted=false reason=allocation_rejected committed=2") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "memtable.invariant_violation reason=phantom_commit committed=3 entries=2") != null);
         },
     }
 }

@@ -273,6 +273,32 @@ disk.crash_write op=0 path=durable_broadcast.wal offset=0 len=24 result=lost
 durable.invariant_violation reason=quorum_without_durable
 ```
 
+## Memtable Pressure
+
+Source: [`examples/memtable_pressure.zig`](https://github.com/sb2bg/marionette/blob/main/examples/memtable_pressure.zig)
+
+The memtable makes allocation failure a real modeled branch. Every `put`
+copies its value through `env.allocator()`, so a deterministic OOM injected
+via `control.allocation` must be rejected without mutating table state:
+
+- Put key 1, then set `fail_after = 0` so every later allocation fails.
+- Put key 2, which is rejected cleanly.
+- Heal the faults and put key 3.
+
+The checker asserts the committed count matches the stored entries exactly.
+The planted bug counts an insert as committed before its allocations succeed,
+so the injected OOM leaves a phantom commit:
+
+```text
+memtable.put key=1 accepted=true committed=1
+allocation.alloc op=4 len=7 align=1 status=fail reason=fail_after roll=none ...
+memtable.put key=2 accepted=false reason=allocation_rejected committed=2
+memtable.invariant_violation reason=phantom_commit committed=3 entries=2
+```
+
+A third scenario fuzzes `buggify_rate` allocation faults across seeds and
+asserts the table never records a commit it did not store.
+
 ## Example Rules
 
 - Keep examples focused and readable.
