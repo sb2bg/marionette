@@ -5,6 +5,7 @@
 
 const std = @import("std");
 
+const allocation_module = @import("allocation.zig");
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
@@ -357,6 +358,16 @@ fn processControl(ptr: *anyopaque) *ProcessSupervisor {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn allocationTraceRecord(ptr: *anyopaque, payload: []const u8) !void {
+    const world: *World = @ptrCast(@alignCast(ptr));
+    try world.recordPayload(payload);
+}
+
+fn allocationRandomIntLessThan(ptr: *anyopaque, less_than: u32) !u32 {
+    const world: *World = @ptrCast(@alignCast(ptr));
+    return try world.randomIntLessThan(u32, less_than);
+}
+
 fn processControlSetDynamics(
     ptr: *anyopaque,
     node: network_module.NodeId,
@@ -542,6 +553,7 @@ pub const World = struct {
     }
 
     pub const SimulateOptions = struct {
+        allocation: allocation_module.FaultOptions = .{},
         disk: disk_module.DiskOptions = .{},
         network: ?network_module.SimNetworkOptions = null,
     };
@@ -623,6 +635,8 @@ pub const World = struct {
     /// registered resources and leaves the world available for another attempt.
     pub fn simulate(self: *World, options: SimulateOptions) !Simulation {
         if (self.simulation_created) return error.SimulationAlreadyCreated;
+        try options.allocation.validate();
+
         self.simulation_created = true;
         errdefer self.simulation_created = false;
 
@@ -638,6 +652,19 @@ pub const World = struct {
 
         try self.registerTeardown(sim_disk, deinitSimDisk);
         sim_disk_registered = true;
+
+        const sim_allocation = try self.allocator.create(allocation_module.Authority);
+        var sim_allocation_registered = false;
+        errdefer if (!sim_allocation_registered) self.allocator.destroy(sim_allocation);
+
+        sim_allocation.* = allocation_module.Authority.init(self.allocator, .{
+            .faults = options.allocation,
+            .trace = .{ .ptr = self, .record = allocationTraceRecord },
+            .random = .{ .ptr = self, .int_less_than = allocationRandomIntLessThan },
+        });
+
+        try self.registerTeardown(sim_allocation, deinitAllocationAuthority);
+        sim_allocation_registered = true;
 
         const network_control = if (options.network) |network_options|
             try network_module.internal.initSimControl(self, network_options)
@@ -677,6 +704,7 @@ pub const World = struct {
 
         const base_env: env_module.Env = .{
             .io_backend = (try sim_io.io(0)),
+            .memory = sim_allocation.allocator(),
             .disk = sim_disk.disk(),
             .clock = env_module.Clock.fromWorld(self),
             .random = env_module.Random.fromWorld(self),
@@ -702,6 +730,7 @@ pub const World = struct {
         return .{
             .env = base_env,
             .control = .{
+                .allocation = sim_allocation.control(),
                 .disk = sim_disk.control(),
                 .network = network_control,
                 .process = process_supervisor.control(),
@@ -709,6 +738,11 @@ pub const World = struct {
                 .world = self,
             },
         };
+    }
+
+    fn deinitAllocationAuthority(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const authority: *allocation_module.Authority = @ptrCast(@alignCast(ptr));
+        allocator.destroy(authority);
     }
 
     fn deinitSimDisk(ptr: *anyopaque, allocator: std.mem.Allocator) void {
@@ -807,6 +841,21 @@ pub const World = struct {
         if (!isValidTracePayload(self.trace_log.items[payload_start..])) {
             return error.InvalidTracePayload;
         }
+        try self.trace_log.append(self.allocator, '\n');
+        self.event_index += 1;
+    }
+
+    /// Append one preformatted line to the world's trace.
+    ///
+    /// This is for type-erased callbacks that cannot take a comptime format
+    /// string. The payload still uses the same trace validation as `record`.
+    pub fn recordPayload(self: *World, payload: []const u8) (std.mem.Allocator.Error || TraceError)!void {
+        const start_len = self.trace_log.items.len;
+        errdefer self.trace_log.shrinkRetainingCapacity(start_len);
+
+        if (!isValidTracePayload(payload)) return error.InvalidTracePayload;
+        try self.trace_log.print(self.allocator, "event={} ", .{self.event_index});
+        try self.trace_log.appendSlice(self.allocator, payload);
         try self.trace_log.append(self.allocator, '\n');
         self.event_index += 1;
     }

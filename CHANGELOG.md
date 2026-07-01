@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Adds the deterministic allocation authority core: `Env.allocator()` returns
+  an app-facing `std.mem.Allocator`, simulation wraps the harness allocator
+  with deterministic fail-after, live-byte quota, and BUGGIFY allocation
+  faults configured through `control.allocation`, and allocation decisions
+  are traced without raw addresses. Production envs return the caller-provided
+  backing allocator with no faults.
+
 ## v0.4.0 - 2026-06-30
 
 - Adds named simulation profiles (`baseline`, `swarm`, `replay`, and

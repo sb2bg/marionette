@@ -4,9 +4,11 @@
 
 const std = @import("std");
 
+const allocation_module = @import("allocation.zig");
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
+const fault_module = @import("fault.zig");
 const fiber_module = @import("fiber.zig");
 const io_module = @import("io/root.zig");
 const codec_module = @import("codec.zig");
@@ -17,6 +19,8 @@ const seed_module = @import("seed.zig");
 const trace_summary_module = @import("trace_summary.zig");
 
 test {
+    _ = allocation_module;
+    _ = fault_module;
     _ = fiber_module;
     _ = profile_module;
 }
@@ -106,10 +110,19 @@ pub const ProcessControl = env_module.ProcessControl;
 pub const ProcessDynamicsOptions = env_module.ProcessDynamicsOptions;
 
 /// Probability that a BUGGIFY hook fires in simulation.
-pub const BuggifyRate = env_module.BuggifyRate;
+pub const BuggifyRate = fault_module.BuggifyRate;
 
 /// Errors returned by BUGGIFY runtime validation.
-pub const BuggifyError = env_module.BuggifyError;
+pub const BuggifyError = fault_module.BuggifyError;
+
+/// Runtime allocation-fault configuration.
+pub const AllocationFaultOptions = env_module.AllocationFaultOptions;
+
+/// Address-free allocation counters exposed to harnesses.
+pub const AllocationStats = env_module.AllocationStats;
+
+/// Simulator-control allocation capability.
+pub const AllocationControl = env_module.AllocationControl;
 
 /// Seeded deterministic random number generator.
 pub const Random = @import("random.zig").Random;

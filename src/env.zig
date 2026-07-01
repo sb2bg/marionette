@@ -5,8 +5,10 @@
 
 const std = @import("std");
 
+const allocation_module = @import("allocation.zig");
 const clock_module = @import("clock.zig");
 const disk_module = @import("disk/root.zig");
+const fault_module = @import("fault.zig");
 const fault_evolution_module = @import("fault_evolution.zig");
 const io_task_module = @import("io/task.zig");
 const network_io_module = @import("network/io.zig");
@@ -18,42 +20,11 @@ pub const ClockError = std.mem.Allocator.Error || world_module.TraceError;
 pub const RandomError = std.mem.Allocator.Error || world_module.TraceError;
 pub const TracerError = std.mem.Allocator.Error || world_module.TraceError;
 
-pub const BuggifyError = error{
-    InvalidRate,
-};
-
-/// Probability that a BUGGIFY hook fires in simulation.
-pub const BuggifyRate = struct {
-    numerator: u32,
-    denominator: u32,
-
-    /// Disabled hook.
-    pub fn never() BuggifyRate {
-        return .{ .numerator = 0, .denominator = 1 };
-    }
-
-    /// Always-on hook.
-    pub fn always() BuggifyRate {
-        return .{ .numerator = 1, .denominator = 1 };
-    }
-
-    /// Percentage chance in the closed range `0..100`.
-    pub fn percent(value: u8) BuggifyRate {
-        std.debug.assert(value <= 100);
-        return .{ .numerator = value, .denominator = 100 };
-    }
-
-    /// One-in-N chance.
-    pub fn oneIn(denominator: u32) BuggifyRate {
-        std.debug.assert(denominator > 0);
-        return .{ .numerator = 1, .denominator = denominator };
-    }
-
-    pub fn validate(self: BuggifyRate) BuggifyError!void {
-        if (self.denominator == 0) return error.InvalidRate;
-        if (self.numerator > self.denominator) return error.InvalidRate;
-    }
-};
+pub const BuggifyError = fault_module.BuggifyError;
+pub const BuggifyRate = fault_module.BuggifyRate;
+pub const AllocationFaultOptions = allocation_module.FaultOptions;
+pub const AllocationStats = allocation_module.Stats;
+pub const AllocationControl = allocation_module.Control;
 
 pub const ProcessDynamicsOptions = struct {
     crash_rate: BuggifyRate = .never(),
@@ -258,15 +229,7 @@ pub const Tracer = struct {
     }
 
     fn worldTracerRecordPayload(ptr: *anyopaque, payload: []const u8) TracerError!void {
-        const world = worldTracer(ptr);
-        const start_len = world.trace_log.items.len;
-        errdefer world.trace_log.shrinkRetainingCapacity(start_len);
-
-        if (!world_module.isValidTracePayload(payload)) return error.InvalidTracePayload;
-        try world.trace_log.print(world.allocator, "event={} ", .{world.event_index});
-        try world.trace_log.appendSlice(world.allocator, payload);
-        try world.trace_log.append(world.allocator, '\n');
-        world.event_index += 1;
+        try worldTracer(ptr).recordPayload(payload);
     }
 
     fn noopTracerShouldRecord(_: *anyopaque) bool {
@@ -296,6 +259,7 @@ var noop_tracer_ctx: u8 = 0;
 
 pub const Env = struct {
     io_backend: std.Io = .failing,
+    memory: std.mem.Allocator,
     disk: disk_module.Disk,
     clock: Clock,
     random: Random,
@@ -308,6 +272,15 @@ pub const Env = struct {
     /// Marionette's current deterministic `std.Io` backend.
     pub fn io(self: Env) std.Io {
         return self.io_backend;
+    }
+
+    /// Return the app-facing allocator backing this environment.
+    ///
+    /// Production envs return the caller-provided allocator. Simulation envs
+    /// return a deterministic allocation authority that can inject and trace
+    /// modeled app OOMs without using addresses in the trace.
+    pub fn allocator(self: Env) std.mem.Allocator {
+        return self.memory;
     }
 
     pub fn recorder(self: Env) Recorder {
@@ -422,6 +395,7 @@ pub const Production = struct {
     pub fn env(self: *Production) Env {
         return .{
             .io_backend = self.io_backend,
+            .memory = self.allocator,
             .disk = self.disk.disk(),
             .clock = .fromProduction(&self.clock),
             .random = .fromProduction(&self.random_source),
@@ -478,6 +452,7 @@ pub const ProcessControl = struct {
 };
 
 pub const SimControl = struct {
+    allocation: allocation_module.Control,
     disk: disk_module.DiskControl,
     network: network_module.AnyNetworkControl,
     process: ProcessControl,
@@ -612,6 +587,55 @@ test "env: recorder is a narrow trace capability" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "recorder.message value=42") != null);
 }
 
+test "env: simulation exposes allocation authority" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .allocation = .{ .fail_after = 1 } });
+    const allocator = sim.env.allocator();
+
+    const first = try allocator.alloc(u8, 16);
+    defer allocator.free(first);
+
+    try std.testing.expectError(error.OutOfMemory, allocator.alloc(u8, 1));
+    const stats = sim.control.allocation.stats();
+
+    try std.testing.expectEqual(@as(usize, 1), stats.successful_allocations);
+    try std.testing.expectEqual(@as(usize, 16), stats.live_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "allocation.alloc op=0 len=16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "allocation.alloc op=1 len=1 align=1 status=fail reason=fail_after") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "0x") == null);
+}
+
+test "env: allocation control updates runtime fault options" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const allocator = sim.env.allocator();
+
+    const first = try allocator.alloc(u8, 4);
+    allocator.free(first);
+
+    try sim.control.allocation.setFaults(.{ .quota_bytes = 4 });
+    const second = try allocator.alloc(u8, 4);
+    defer allocator.free(second);
+
+    try std.testing.expectError(error.OutOfMemory, allocator.alloc(u8, 1));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=fail reason=quota") != null);
+}
+
+test "env: simulation rejects invalid allocation buggify rates" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    try std.testing.expectError(
+        error.InvalidRate,
+        world.simulate(.{ .allocation = .{ .buggify_rate = .{ .numerator = 1, .denominator = 0 } } }),
+    );
+    try std.testing.expect(!world.simulation_created);
+}
+
 test "env: simulation exposes app-facing disk operations" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
@@ -653,6 +677,8 @@ test "env: production exposes production authorities" {
     const env = production.env();
 
     _ = env.io();
+    const memory = try env.allocator().alloc(u8, 4);
+    defer env.allocator().free(memory);
     _ = env.clock.now();
     _ = try env.random.intLessThan(u8, 10);
     try env.disk.write(.{ .path = "prod/wal.log", .offset = 0, .bytes = "abcd" });
