@@ -60,6 +60,7 @@ jobs:
           - validate-xitdb
           - validate-mailbox
           - validate-ochi
+          - validate-dusty
         optimize:
           - Debug
           - ReleaseSafe
