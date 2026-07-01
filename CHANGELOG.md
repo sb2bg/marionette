@@ -12,6 +12,9 @@
   modeled branch with a clean-rejection oracle, a planted commit-before-
   allocate bug the checker catches under deterministic OOM, and a
   `buggify_rate` fuzz scenario.
+- Documents the allocation authority in the API and trace-format docs,
+  including the decision that all allocation operations are traced by
+  default.
 - Raises the default scheduler task stack from 256 KiB to 1 MiB. dusty's
   Debug-mode client fetch path needs more than 640 KiB, and fiber stacks are
   lazily paged mmap regions on guard-page targets, so the increase costs

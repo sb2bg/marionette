@@ -172,6 +172,58 @@ whole `World`:
 const latency_ns = try env.random.intLessThan(u64, 1_000_000);
 ```
 
+## Allocation
+
+`env.allocator()` returns the app-facing `std.mem.Allocator`. Production envs
+return the backing allocator passed to `Production.init`, with no added
+faults. Simulation envs return a deterministic allocation authority that
+wraps the harness allocator with modeled failures and address-free tracing.
+
+Configure faults at simulation setup:
+
+```zig
+const sim = try world.simulate(.{ .allocation = .{
+    .fail_after = 32,
+} });
+```
+
+Or from scenario code through the control surface:
+
+```zig
+try control.allocation.setFaults(.{ .quota_bytes = 4096 });
+try control.allocation.setFaults(.{ .buggify_rate = .percent(25) });
+try control.allocation.setFaults(.{}); // heal
+```
+
+Fault semantics:
+
+- `fail_after` counts successful allocation and growth requests over the
+  whole simulation, not since the last `setFaults` call. `fail_after = 0`
+  fails every subsequent growth request.
+- `quota_bytes` bounds modeled live bytes. Growth requests that would exceed
+  the quota fail; frees and shrinks return budget.
+- `buggify_rate` draws a seeded roll per growth request and fails the request
+  when the roll fires. Shrinking operations and frees never fail.
+
+`control.allocation.stats()` returns address-free counters: operation index,
+successful allocations, live bytes, and total allocated and freed bytes.
+
+Allocation faults model failure timing and resource pressure, not address
+determinism. The addresses returned by the backing allocator are not part of
+the deterministic contract and never appear in traces.
+
+Every allocation operation is traced by default, including frees, resizes,
+and remaps: leak diagnosis needs the free events, and OOM diagnosis needs the
+operation sequence. Modeled app allocations are expected to be deliberate and
+scarce, so this is the readable default; if a real workload floods traces, a
+quieter profile can be added later without changing what the default records.
+
+Modeled application allocations stay separate from Marionette's internal
+bookkeeping: this surface cannot inject harness OOM, and a modeled app OOM
+does not corrupt simulator state. The tidy linter rejects
+`std.heap.page_allocator` in simulated code; pass an allocator explicitly
+instead.
+
 ## Disk
 
 `mar.Disk` is the lower-level disk capability beneath Marionette's `std.Io`
