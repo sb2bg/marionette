@@ -24,6 +24,17 @@ pub const checks = [_]mar.StateCheck(Harness){
     .{ .name = "synced records recover and unsynced records are rejected", .check = recoveredStateIsSafe },
 };
 
+/// The store's recovery window, checked under probabilistic crash faults.
+///
+/// Durable truth: the synced record crossed a durability boundary before the
+/// crash, so it must recover exactly as written under every crash profile.
+/// Allowed damage: the unsynced record was still inside the window, so it may
+/// be absent (lost or torn and rejected) or present exactly as written; a
+/// recovered record with any other value means recovery accepted damage.
+pub const window_checks = [_]mar.StateCheck(Harness){
+    .{ .name = "recovered state is within the recovery window", .check = recoveredStateIsWithinWindow },
+};
+
 pub fn scenario(harness: *Harness) !void {
     try harness.store.put(committed_key, committed_value, .sync);
     try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
@@ -45,6 +56,55 @@ pub fn buggyScenario(harness: *Harness) !void {
     try harness.store.recover(.buggy_accept_magic_only);
 }
 
+/// Probabilistic crash faults against the unsynced write only: the synced
+/// record is durable truth and stays out of every crash fault's reach.
+fn runProbabilisticCrash(harness: *Harness, mode: RecoveryMode) !void {
+    try harness.store.put(committed_key, committed_value, .sync);
+    try harness.control.disk.setFaults(.{
+        .crash_lost_write_rate = .percent(25),
+        .crash_torn_write_rate = .percent(25),
+    });
+    try harness.store.put(volatile_key, volatile_value, .no_sync);
+    try harness.control.disk.crash();
+    try harness.control.disk.restart();
+    try harness.store.reopen();
+    try harness.store.recover(mode);
+}
+
+pub fn probabilisticScenario(harness: *Harness) !void {
+    try runProbabilisticCrash(harness, .strict);
+}
+
+pub fn probabilisticBuggyScenario(harness: *Harness) !void {
+    try runProbabilisticCrash(harness, .buggy_accept_magic_only);
+}
+
+pub fn runRecoveryWindowReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = tick_ns,
+        .name = "kv-recovery-window",
+        .init = Harness.init,
+        .deinit = Harness.deinit,
+        .scenario = probabilisticScenario,
+        .checks = &window_checks,
+    });
+}
+
+pub fn runRecoveryWindowBugReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return mar.runCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = tick_ns,
+        .name = "kv-recovery-window-bug",
+        .init = Harness.init,
+        .deinit = Harness.deinit,
+        .scenario = probabilisticBuggyScenario,
+        .checks = &window_checks,
+    });
+}
+
 fn recoveredStateIsSafe(harness: *const Harness) !void {
     const store = &harness.store;
 
@@ -61,6 +121,31 @@ fn recoveredStateIsSafe(harness: *const Harness) !void {
     try store.recorder.record(
         "kv.check recovery=ok committed_key={} committed_value={} recovered_records={}",
         .{ committed_key, committed_value, store.recovered_count },
+    );
+}
+
+fn recoveredStateIsWithinWindow(harness: *const Harness) !void {
+    const store = &harness.store;
+
+    if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
+        try store.recorder.record("kv.invariant_violation reason=durable_truth_lost", .{});
+        return error.DurableTruthLost;
+    }
+
+    const volatile_count = store.countKey(volatile_key);
+    if (volatile_count > 1) {
+        try store.recorder.record("kv.invariant_violation reason=duplicate_recovered", .{});
+        return error.DuplicateRecovered;
+    }
+    const volatile_survived = volatile_count == 1;
+    if (volatile_survived and store.valueFor(volatile_key) != volatile_value) {
+        try store.recorder.record("kv.invariant_violation reason=damaged_record_accepted", .{});
+        return error.DamagedRecordAccepted;
+    }
+
+    try store.recorder.record(
+        "kv.check recovery_window=ok committed_recovered=true volatile_survived={}",
+        .{volatile_survived},
     );
 }
 
@@ -251,6 +336,19 @@ test "kv store: recovery fuzz smoke" {
         .deinit = Harness.deinit,
         .scenario = scenario,
         .checks = &checks,
+    });
+}
+
+test "kv store: recovery window holds across probabilistic crash fault seeds" {
+    try mar.expectFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .seeds = 32,
+        .tick_ns = tick_ns,
+        .init = Harness.init,
+        .deinit = Harness.deinit,
+        .scenario = probabilisticScenario,
+        .checks = &window_checks,
     });
 }
 

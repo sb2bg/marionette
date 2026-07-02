@@ -165,28 +165,65 @@ the basic model is traceable and tested. Misdirected writes should be a named
 fault type rather than being collapsed into generic corruption, because they
 test whether user code validates record identity and location.
 
-## Recoverability
+## Recovery Windows
 
 Fault injection needs budgets. A simulator that can corrupt every copy of
 truth in one seed is not useful unless the test explicitly asked for a
-destructive profile.
+destructive profile. This section defines the vocabulary Marionette's storage
+examples and checkers use; enforcement deliberately stays in checkers until a
+second storage example justifies a generic API.
 
-The first profiles should be conservative:
+**Durability boundary.** The operation after which the application may claim
+data survives a crash: a successful `sync` for file bytes, a successful
+`syncDir` for creates, deletes, and renames. Acknowledged writes that have not
+crossed a boundary are pending.
 
-- Single-node default: at most one destructive disk fault per recovery window.
-- Single-node aggressive: allow repeated failures, but keep them traceable.
-- Replicated default: allow per-replica faults only while at least one quorum
-  path remains recoverable.
-- Destructive: no recoverability guard, intended for negative tests.
+**Durable truth.** Everything behind a durability boundary at crash time.
+The crash fault classes (`crash_lost_write`, `crash_torn_write`,
+`crash_reordered_write`, `crash_lost_metadata`) apply only to pending writes
+and pending metadata; no probabilistic crash profile, at any rate, may damage
+durable truth. Damaging durable truth requires an explicitly destructive
+fault: scripted `corruptSector` or a `corrupt_read_rate` profile.
 
-The exact recovery-window API is undecided. Users may need to declare durable
-regions, replicas, checkpoints, or commit points before Marionette can enforce
-strong budgets.
+**Recovery window.** The set of states a correct system may legally present
+after crash and recovery, given where its durability boundaries were. Synced
+data must recover exactly as written. Each pending write may be absent
+(lost, or torn and rejected by recovery) or present exactly as written;
+recovery accepting a damaged record is outside every window.
 
-For Phase 1, the append-only WAL example should define its own recovery window
-in the checker: flushed records are durable truth; unflushed records may be
-lost, torn, or corrupted according to the profile. A later generic fault atlas
-can lift that pattern out of examples.
+**Budget.** A bound on destructive faults per window. The conservative
+single-node default is at most one destructive fault against durable truth
+per recovery window, explicitly scoped (one sector, one path). Profiles that
+exceed it are negative tests and should say so.
+
+### Worked case: the KV example
+
+`examples/kv_store.zig` is the reference shape:
+
+- `put(committed_key, ..., .sync)` crosses a durability boundary: this
+  record is durable truth for every scenario that follows.
+- `put(volatile_key, ..., .no_sync)` stays pending: it defines the window's
+  allowed damage.
+- The probabilistic scenarios crash with `crash_lost_write_rate` and
+  `crash_torn_write_rate` at 25% each, so the pending record's fate varies by
+  seed while durable truth may not.
+- The `recovered state is within the recovery window` checker encodes the
+  window exactly: the committed record must recover with its exact value
+  (`error.DurableTruthLost` otherwise); the volatile record may be absent or
+  exact (`error.DamagedRecordAccepted` when recovery admits a mangled
+  record).
+- The deterministic `scenario` additionally spends a destructive budget of
+  exactly one scripted `corruptSector` against a known sector after restart,
+  which strict recovery must reject.
+
+The planted `buggy_accept_magic_only` recovery validates the checker: it
+accepts a torn record on magic alone, and the seed search in
+`examples/root.zig` finds the resulting `DamagedRecordAccepted` within a
+bounded seed range.
+
+Replicated windows (per-replica faults bounded so at least one quorum path
+stays recoverable) remain future work tracked with the multi-replica fault
+atlas.
 
 ## Trace Events
 

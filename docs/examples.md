@@ -90,6 +90,17 @@ kv.recover.record offset=16 key=2 value=0 mode=buggy_accept_magic_only
 kv.invariant_violation reason=unsynced_record_recovered
 ```
 
+The KV store is also the worked case for Marionette's recovery-window
+vocabulary (see the Recovery Windows section of the
+[disk fault model](disk-fault-model.md)). The probabilistic scenarios crash
+with 25% lost-write and 25% torn-write rates, so the unsynced record's fate
+varies by seed, and the `recovered state is within the recovery window`
+checker asserts the window rather than one outcome: the synced record must
+recover exactly, and the unsynced record may be absent or exact but never
+damaged. A fuzz test holds the window across seeds, and a seed search finds
+the planted magic-only recovery accepting a torn record as
+`DamagedRecordAccepted`.
+
 ## Idempotency Bug
 
 Source: [`examples/idempotency_bug.zig`](https://github.com/sb2bg/marionette/blob/main/examples/idempotency_bug.zig)

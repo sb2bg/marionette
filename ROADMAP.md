@@ -28,22 +28,6 @@ maintainer-readable repros.
 
 Pick from this section first unless a later release item is blocking it.
 
-### Recovery Windows And Disk Fault Budgets
-
-The KV example currently encodes recoverability in its checker. Reusable disk
-profiles need explicit vocabulary for "durable truth" and "allowed damage."
-
-Acceptance criteria:
-
-- Document a minimal recovery-window concept using the KV example as the worked
-  case.
-- Define how destructive disk fault budgets interact with synced and unsynced
-  writes.
-- Keep generic enforcement out of `mar.Disk` until at least one more storage
-  example exists.
-- Add the probabilistic KV recovery search that was held until this vocabulary
-  existed.
-
 ### External Storage Compatibility And Shrinking
 
 The base disk lifecycle surface exists. The remaining storage work is about

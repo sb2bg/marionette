@@ -225,6 +225,31 @@ test "examples: kv store checker catches torn record recovery" {
     }
 }
 
+test "examples: kv recovery-window search finds the torn-accepting recovery bug" {
+    var found_failure = false;
+
+    for (0..64) |iteration| {
+        const seed = 0x111D0 + @as(u64, @intCast(iteration));
+        var report = try kv_store.runRecoveryWindowBugReport(std.testing.allocator, seed);
+        defer report.deinit();
+
+        switch (report) {
+            .passed => {},
+            .failed => |failure| {
+                try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
+                try std.testing.expectEqualStrings("recovered state is within the recovery window", failure.check_name.?);
+                try std.testing.expectEqualStrings("DamagedRecordAccepted", failure.error_name.?);
+                try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "result=torn") != null);
+                try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "kv.invariant_violation reason=damaged_record_accepted") != null);
+                found_failure = true;
+                break;
+            },
+        }
+    }
+
+    try std.testing.expect(found_failure);
+}
+
 test "examples: memtable allocation pressure scenario is replayable" {
     const a = try memtable_pressure.runScenario(std.testing.allocator, 0xC0FFEE);
     defer std.testing.allocator.free(a);

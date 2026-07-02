@@ -44,6 +44,15 @@
 - Fixes closed-handle retirement when a canceled net wait loses a race with
   a concurrent close: the canceled accept/read paths now retire closed idle
   handles exactly like the woken paths.
+- Defines the recovery-window vocabulary (durability boundary, durable truth,
+  recovery window, destructive budget) in the disk fault model, with the KV
+  example as the worked case: crash fault classes apply only to pending
+  writes, and damaging durable truth requires an explicitly destructive
+  fault. Adds the probabilistic KV recovery search: a window checker that
+  asserts synced records recover exactly while unsynced records may be
+  absent or exact but never damaged, held across a 32-seed fuzz, plus a
+  seed search that finds the planted magic-only recovery bug as
+  `DamagedRecordAccepted`.
 - Widens the fiber stack guard from one page to a 256 KiB PROT_NONE region,
   so Debug-mode stack frames larger than a page fault at the overflow
   instead of silently corrupting neighboring mappings. The widened guard
