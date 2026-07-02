@@ -23,6 +23,9 @@ pub const WaitKeyTag = enum(usize) {
 pub const FutexWaitResult = enum {
     woken,
     timed_out,
+    /// The wait was interrupted by a consumed cancellation request. Only
+    /// cancelable waits resume with this result.
+    canceled,
 };
 
 pub const FutexWaitSet = struct {
@@ -32,6 +35,10 @@ pub const FutexWaitSet = struct {
     pub const VTable = struct {
         block: *const fn (ptr: *anyopaque, key: usize) void,
         block_until: *const fn (ptr: *anyopaque, key: usize, deadline_ns: ?u64) FutexWaitResult,
+        /// Park as a cancellation point: an armed cancellation request is
+        /// consumed and delivered as `.canceled`, either at entry or by
+        /// interrupting the wait.
+        block_until_cancelable: *const fn (ptr: *anyopaque, key: usize, deadline_ns: ?u64) FutexWaitResult,
         wake: *const fn (ptr: *anyopaque, key: usize, max_count: usize) usize,
     };
 
@@ -41,6 +48,10 @@ pub const FutexWaitSet = struct {
 
     pub fn blockUntil(self: FutexWaitSet, key: usize, deadline_ns: ?u64) FutexWaitResult {
         return self.vtable.block_until(self.ptr, key, deadline_ns);
+    }
+
+    pub fn blockUntilCancelable(self: FutexWaitSet, key: usize, deadline_ns: ?u64) FutexWaitResult {
+        return self.vtable.block_until_cancelable(self.ptr, key, deadline_ns);
     }
 
     pub fn wake(self: FutexWaitSet, key: usize, max_count: usize) usize {
@@ -72,6 +83,11 @@ pub fn Ops(comptime Backend: type) type {
             timeout: Io.Timeout,
         ) Io.Cancelable!void {
             const backend = backendFromUserdata(userdata);
+            // A cancellation point delivers an armed request even when the
+            // wait would otherwise complete without parking.
+            if (backend.task_runtime) |runtime| {
+                if (runtime.takeCancelRequest()) return error.Canceled;
+            }
             if (@atomicLoad(u32, ptr, .monotonic) != expected) return;
             const deadline_ns = simFutexDeadline(backend, timeout);
             if (deadline_ns != null and deadline_ns.? <= backend.world.now()) return;
@@ -81,9 +97,10 @@ pub fn Ops(comptime Backend: type) type {
             const wait_set = backend.futex_wait_set orelse @panic("sim futex wait requires an attached scheduler");
             const key = backend.beginFutexWait(ptr);
             defer backend.endFutexWait(ptr);
-            switch (wait_set.blockUntil(key, deadline_ns)) {
+            switch (wait_set.blockUntilCancelable(key, deadline_ns)) {
                 .woken => {},
                 .timed_out => {},
+                .canceled => return error.Canceled,
             }
         }
 
@@ -107,9 +124,17 @@ pub fn Ops(comptime Backend: type) type {
         }
 
         pub fn simFutexWaitUncancelable(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {
-            simFutexWait(userdata, ptr, expected, .none) catch |err| switch (err) {
-                error.Canceled => unreachable,
-            };
+            const backend = backendFromUserdata(userdata);
+            if (@atomicLoad(u32, ptr, .monotonic) != expected) return;
+
+            const wait_set = backend.futex_wait_set orelse @panic("sim futex wait requires an attached scheduler");
+            const key = backend.beginFutexWait(ptr);
+            defer backend.endFutexWait(ptr);
+            switch (wait_set.blockUntil(key, null)) {
+                .woken => {},
+                .timed_out => {},
+                .canceled => unreachable,
+            }
         }
 
         pub fn simFutexWake(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {

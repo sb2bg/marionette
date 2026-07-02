@@ -1457,6 +1457,191 @@ test "io: cancel protection defers delivery until unblocked" {
     try std.testing.expect(state.delivered_after_unprotect);
 }
 
+const FutexCancelState = struct {
+    futex: u32 = 0,
+    parked_canceled: bool = false,
+    cancel_result_canceled: bool = false,
+};
+
+fn futexCancelParker(io: Io, state: *FutexCancelState) Io.Cancelable!void {
+    io.futexWait(u32, &state.futex, 0) catch |err| {
+        state.parked_canceled = true;
+        return err;
+    };
+}
+
+fn futexCancelCanceler(
+    io: Io,
+    future: *Io.Future(Io.Cancelable!void),
+    state: *FutexCancelState,
+) void {
+    // Sleep before canceling: ready tasks run before timers advance, so the
+    // parker is guaranteed parked on its futex by the time this resumes.
+    Io.sleep(io, .fromNanoseconds(50), .awake) catch unreachable;
+    future.cancel(io) catch {
+        state.cancel_result_canceled = true;
+    };
+}
+
+fn runFutexCancelTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    var world = try World.init(task_world_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state = FutexCancelState{};
+    var park_future = try Io.concurrent(io, futexCancelParker, .{ io, &state });
+    var cancel_future = try Io.concurrent(io, futexCancelCanceler, .{ io, &park_future, &state });
+    cancel_future.await(io);
+
+    try std.testing.expect(state.parked_canceled);
+    try std.testing.expect(state.cancel_result_canceled);
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "io: cancel unparks a task blocked in futexWait" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const first = try runFutexCancelTrace(std.testing.allocator, 0xFA7E);
+    defer std.testing.allocator.free(first);
+    const second = try runFutexCancelTrace(std.testing.allocator, 0xFA7E);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.cancel_request task=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.cancel_deliver task=0") != null);
+}
+
+test "io: cancel unparks a sleeping task before its deadline" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        sleep_canceled: bool = false,
+    };
+    const Helper = struct {
+        fn sleeper(io: Io, state: *State) Io.Cancelable!void {
+            Io.sleep(io, .fromNanoseconds(1_000_000), .awake) catch |err| {
+                state.sleep_canceled = true;
+                return err;
+            };
+        }
+
+        fn canceler(io: Io, future: *Io.Future(Io.Cancelable!void)) void {
+            Io.sleep(io, .fromNanoseconds(50), .awake) catch unreachable;
+            _ = future.cancel(io) catch {};
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x51EE9, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state = State{};
+    var sleep_future = try Io.concurrent(io, Helper.sleeper, .{ io, &state });
+    var cancel_future = try Io.concurrent(io, Helper.canceler, .{ io, &sleep_future });
+    cancel_future.await(io);
+
+    try std.testing.expect(state.sleep_canceled);
+    // The sleeper was interrupted, not timed out: the million-nanosecond
+    // deadline is still far in the simulated future.
+    try std.testing.expect(world.now() < 1_000_000);
+}
+
+test "io: uncancelable futex waits defer delivery to the next cancellation point" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        futex: u32 = 0,
+        woken_normally: bool = false,
+        canceled_at_check: bool = false,
+    };
+    const Helper = struct {
+        fn parker(io: Io, state: *State) Io.Cancelable!void {
+            io.futexWaitUncancelable(u32, &state.futex, 0);
+            state.woken_normally = true;
+            Io.checkCancel(io) catch |err| {
+                state.canceled_at_check = true;
+                return err;
+            };
+        }
+
+        fn canceler(io: Io, future: *Io.Future(Io.Cancelable!void)) void {
+            Io.sleep(io, .fromNanoseconds(50), .awake) catch unreachable;
+            // The parker is in an uncancelable wait: this arms the request
+            // and blocks awaiting; it must not interrupt the wait.
+            _ = future.cancel(io) catch {};
+        }
+
+        fn waker(io: Io, state: *State) void {
+            Io.sleep(io, .fromNanoseconds(200), .awake) catch unreachable;
+            state.futex = 1;
+            io.futexWake(u32, &state.futex, 1);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x0DDF, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state = State{};
+    var park_future = try Io.concurrent(io, Helper.parker, .{ io, &state });
+    var cancel_future = try Io.concurrent(io, Helper.canceler, .{ io, &park_future });
+    var wake_future = try Io.concurrent(io, Helper.waker, .{ io, &state });
+    cancel_future.await(io);
+    wake_future.await(io);
+
+    try std.testing.expect(state.woken_normally);
+    try std.testing.expect(state.canceled_at_check);
+}
+
+test "io: cancel unparks a task blocked in net accept" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        accept_canceled: bool = false,
+    };
+    const Helper = struct {
+        fn acceptor(io: Io, server: *Io.net.Server, state: *State) Io.Cancelable!void {
+            const stream = server.accept(io) catch |err| switch (err) {
+                error.Canceled => {
+                    state.accept_canceled = true;
+                    return error.Canceled;
+                },
+                else => return,
+            };
+            stream.close(io);
+        }
+
+        fn canceler(io: Io, future: *Io.Future(Io.Cancelable!void)) void {
+            Io.sleep(io, .fromNanoseconds(50), .awake) catch unreachable;
+            _ = future.cancel(io) catch {};
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xACC7, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const server_io = (try sim.envForNode(0)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4590) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    var state = State{};
+    var accept_future = try Io.concurrent(server_io, Helper.acceptor, .{ server_io, &server, &state });
+    var cancel_future = try Io.concurrent(server_io, Helper.canceler, .{ server_io, &accept_future });
+    cancel_future.await(server_io);
+
+    try std.testing.expect(state.accept_canceled);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver task=0") != null);
+}
+
 test "io: cancel of a task without cancellation points runs it to completion" {
     if (!fiber_supported) return error.SkipZigTest;
 

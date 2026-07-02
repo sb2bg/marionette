@@ -998,6 +998,15 @@ fn waitSetBlockUntil(ptr: *anyopaque, key: usize, deadline_ns: ?u64) io_internal
     };
 }
 
+fn waitSetBlockUntilCancelable(ptr: *anyopaque, key: usize, deadline_ns: ?u64) io_internal.FutexWaitResult {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return switch (scheduler.blockCurrentCancelableUntil(key, deadline_ns)) {
+        .woken => .woken,
+        .timed_out => .timed_out,
+        .canceled => .canceled,
+    };
+}
+
 fn waitSetWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     return scheduler.wake(key, max_count) catch @panic("scheduler wake failed");
@@ -1006,6 +1015,7 @@ fn waitSetWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
 const futex_wait_set_vtable: io_internal.FutexWaitSet.VTable = .{
     .block = waitSetBlock,
     .block_until = waitSetBlockUntil,
+    .block_until_cancelable = waitSetBlockUntilCancelable,
     .wake = waitSetWake,
 };
 

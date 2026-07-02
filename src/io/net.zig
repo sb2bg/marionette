@@ -14,6 +14,12 @@ pub fn Ops(comptime Backend: type) type {
             return @ptrCast(@alignCast(userdata.?));
         }
 
+        /// Deliver an armed cancellation request at a net cancellation point.
+        fn takeCancel(backend: *Backend) Io.Cancelable!void {
+            const runtime = backend.task_runtime orelse return;
+            if (runtime.takeCancelRequest()) return error.Canceled;
+        }
+
         /// Append a writev-style payload to `list`: the header, then each data
         /// slice, then `splat` repetitions of the final slice. Mirrors std.Io's
         /// scatter/splat write encoding.
@@ -185,16 +191,19 @@ pub fn Ops(comptime Backend: type) type {
             _ = options;
 
             const backend = backendFromUserdata(userdata);
+            try takeCancel(backend);
             const state = backend.listener(server) orelse return error.SocketNotListening;
             if (state.closed) return error.SocketNotListening;
             while (state.pending.items.len == 0) {
                 const wait_set = backend.futex_wait_set orelse return error.WouldBlock;
                 state.waiters += 1;
-                switch (wait_set.blockUntil(backend.listenerWaitKey(server), null)) {
+                const wait_result = wait_set.blockUntilCancelable(backend.listenerWaitKey(server), null);
+                state.waiters -= 1;
+                switch (wait_result) {
                     .woken => {},
                     .timed_out => unreachable,
+                    .canceled => return error.Canceled,
                 }
-                state.waiters -= 1;
                 if (state.closed) {
                     backend.retireClosedNetHandleIfIdle(server);
                     return error.SocketNotListening;
@@ -210,6 +219,7 @@ pub fn Ops(comptime Backend: type) type {
 
         pub fn simNetRead(userdata: ?*anyopaque, src: SocketHandle, data: [][]u8) Io.net.Stream.Reader.Error!usize {
             const backend = backendFromUserdata(userdata);
+            try takeCancel(backend);
             const connection = backend.connection(src) orelse return error.SocketUnconnected;
             if (connection.closed) {
                 backend.retireClosedNetHandleIfIdle(src);
@@ -229,11 +239,13 @@ pub fn Ops(comptime Backend: type) type {
                 if (peer_closed and deadline_ns == null) return 0;
                 const wait_set = backend.futex_wait_set orelse return error.Timeout;
                 connection.waiters += 1;
-                switch (wait_set.blockUntil(backend.connectionWaitKey(src), deadline_ns)) {
+                const wait_result = wait_set.blockUntilCancelable(backend.connectionWaitKey(src), deadline_ns);
+                connection.waiters -= 1;
+                switch (wait_result) {
                     .woken => {},
                     .timed_out => {},
+                    .canceled => return error.Canceled,
                 }
-                connection.waiters -= 1;
                 if (connection.closed) {
                     backend.retireClosedNetHandleIfIdle(src);
                     return error.SocketUnconnected;
@@ -262,6 +274,7 @@ pub fn Ops(comptime Backend: type) type {
             splat: usize,
         ) Io.net.Stream.Writer.Error!usize {
             const backend = backendFromUserdata(userdata);
+            try takeCancel(backend);
             const connection = backend.connection(dest) orelse return error.SocketUnconnected;
             if (connection.closed) return error.SocketUnconnected;
             const peer_ref = connection.peer orelse return error.SocketUnconnected;

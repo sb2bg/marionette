@@ -2227,6 +2227,11 @@ fn simClockResolution(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.Resolutio
 
 fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     const backend = backendFromUserdata(userdata);
+    // A cancellation point delivers an armed request even for zero-length
+    // sleeps that would return without parking.
+    if (backend.task_runtime) |runtime| {
+        if (runtime.takeCancelRequest()) return error.Canceled;
+    }
     const world = backend.world;
     const deadline_ns = switch (timeout) {
         .none => return,
@@ -2252,7 +2257,11 @@ fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
         // deadline has actually passed; the scheduler returns `timed_out`
         // immediately once it has.
         while (world.now() < deadline_ns) {
-            _ = wait_set.blockUntil(backend.sleepWaitKey(), deadline_ns);
+            switch (wait_set.blockUntilCancelable(backend.sleepWaitKey(), deadline_ns)) {
+                .woken => {},
+                .timed_out => {},
+                .canceled => return error.Canceled,
+            }
         }
         return;
     }
