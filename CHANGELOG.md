@@ -74,7 +74,7 @@
   validation that the single-page guard had missed. Adds
   `SimulateOptions.task_stack_size` so a simulation can raise the
   scheduler task stack for deep SUT call chains; the dusty validation now
-  uses 2 MiB.
+  uses 8 MiB.
 
 ## v0.4.0 - 2026-06-30
 
