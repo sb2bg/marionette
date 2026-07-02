@@ -4,6 +4,8 @@
 //! interface so the scheduler can depend on the io module without a cycle.
 //! `TaskScheduler.taskRuntime` provides the deterministic implementation.
 
+const std = @import("std");
+
 /// Logical process identifier used by the task/runtime seam.
 ///
 /// This intentionally mirrors `network.NodeId` without importing the network
@@ -31,6 +33,16 @@ pub const TaskRuntime = struct {
         /// Drive the scheduler from the main context until `done.*` is true.
         /// Panics on deterministic deadlock (no runnable work, flag unset).
         run_until_done: *const fn (ptr: *anyopaque, done: *const bool) void,
+        /// Arm a cancellation request against `task_id`. Idempotent;
+        /// unknown/completed ids are no-ops.
+        request_cancel: *const fn (ptr: *anyopaque, task_id: u64) void,
+        /// Consume a deliverable cancellation request on the calling task.
+        /// Returns true when the caller must surface `error.Canceled`.
+        take_cancel_request: *const fn (ptr: *anyopaque) bool,
+        /// Re-arm the cancellation request after a delivered cancellation.
+        recancel: *const fn (ptr: *anyopaque) void,
+        /// Swap the calling context's cancel-protection state.
+        swap_cancel_protection: *const fn (ptr: *anyopaque, new: std.Io.CancelProtection) std.Io.CancelProtection,
     };
 
     pub fn spawn(self: TaskRuntime, entry: *const fn (*anyopaque) void, arg: *anyopaque) SpawnError!u64 {
@@ -51,6 +63,22 @@ pub const TaskRuntime = struct {
 
     pub fn runUntilDone(self: TaskRuntime, done: *const bool) void {
         self.vtable.run_until_done(self.ptr, done);
+    }
+
+    pub fn requestCancel(self: TaskRuntime, task_id: u64) void {
+        self.vtable.request_cancel(self.ptr, task_id);
+    }
+
+    pub fn takeCancelRequest(self: TaskRuntime) bool {
+        return self.vtable.take_cancel_request(self.ptr);
+    }
+
+    pub fn recancel(self: TaskRuntime) void {
+        self.vtable.recancel(self.ptr);
+    }
+
+    pub fn swapCancelProtection(self: TaskRuntime, new: std.Io.CancelProtection) std.Io.CancelProtection {
+        return self.vtable.swap_cancel_protection(self.ptr, new);
     }
 };
 

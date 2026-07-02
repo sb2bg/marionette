@@ -1615,9 +1615,9 @@ const sim_vtable: Io.VTable = .{
     .groupAwait = simGroupAwait,
     .groupCancel = simGroupCancel,
 
-    .recancel = noRecancel,
-    .swapCancelProtection = noSwapCancelProtection,
-    .checkCancel = noCheckCancel,
+    .recancel = simRecancel,
+    .swapCancelProtection = simSwapCancelProtection,
+    .checkCancel = simCheckCancel,
 
     .futexWait = futex_ops.simFutexWait,
     .futexWaitUncancelable = futex_ops.simFutexWaitUncancelable,
@@ -2107,9 +2107,14 @@ fn simCancel(
     result: []u8,
     result_alignment: std.mem.Alignment,
 ) void {
-    // Cooperative tasks cannot be preempted, and the deterministic model has
-    // no external event that could interrupt them mid-run: cancellation runs
-    // the task to completion, exactly like `await`.
+    const closure: *AsyncClosure = @ptrCast(@alignCast(any_future));
+    if (!closure.done) {
+        // The awaited task receives `error.Canceled` at its next cancellation
+        // point; cooperative tasks cannot be preempted mid-run, so a task
+        // that never reaches one runs to completion.
+        const runtime = closure.backend.task_runtime orelse unreachable;
+        runtime.requestCancel(closure.task_id);
+    }
     simAwait(userdata, any_future, result, result_alignment);
 }
 
@@ -2176,18 +2181,24 @@ fn simRandomSecure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!voi
     simRandom(userdata, buffer);
 }
 
-fn noRecancel(userdata: ?*anyopaque) void {
-    _ = userdata;
+fn simRecancel(userdata: ?*anyopaque) void {
+    const backend = backendFromUserdata(userdata);
+    // Without a scheduler there are no cancelable tasks, so cancellation
+    // checks stay inert instead of asserting.
+    const runtime = backend.task_runtime orelse return;
+    runtime.recancel();
 }
 
-fn noSwapCancelProtection(userdata: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
-    _ = userdata;
-    _ = new;
-    return .unblocked;
+fn simSwapCancelProtection(userdata: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
+    const backend = backendFromUserdata(userdata);
+    const runtime = backend.task_runtime orelse return .unblocked;
+    return runtime.swapCancelProtection(new);
 }
 
-fn noCheckCancel(userdata: ?*anyopaque) Io.Cancelable!void {
-    _ = userdata;
+fn simCheckCancel(userdata: ?*anyopaque) Io.Cancelable!void {
+    const backend = backendFromUserdata(userdata);
+    const runtime = backend.task_runtime orelse return;
+    if (runtime.takeCancelRequest()) return error.Canceled;
 }
 
 fn simOperate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {

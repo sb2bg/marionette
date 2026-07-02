@@ -1354,7 +1354,7 @@ test "io: unawaited async tasks are reclaimed at world teardown" {
     _ = try Io.concurrent(io, Helper.noop, .{});
 }
 
-test "io: simulation cancellation checks are inert before fibers" {
+test "io: simulation cancellation checks are inert without a scheduler" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
 
@@ -1364,6 +1364,118 @@ test "io: simulation cancellation checks are inert before fibers" {
     try Io.checkCancel(io);
     try std.testing.expectEqual(Io.CancelProtection.unblocked, Io.swapCancelProtection(io, .blocked));
     Io.recancel(io);
+}
+
+const CancelCheckState = struct {
+    first_canceled: bool = false,
+    second_ok: bool = false,
+    rearmed_canceled: bool = false,
+};
+
+fn cancelCheckTask(io: Io, state: *CancelCheckState) Io.Cancelable!u32 {
+    Io.checkCancel(io) catch {
+        state.first_canceled = true;
+        // Delivery is one-shot: the next point must not re-signal.
+        try Io.checkCancel(io);
+        state.second_ok = true;
+        // `recancel` re-arms the request for the next point.
+        Io.recancel(io);
+        Io.checkCancel(io) catch {
+            state.rearmed_canceled = true;
+            return error.Canceled;
+        };
+        return 0;
+    };
+    return 41;
+}
+
+fn runCancelCheckTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    var world = try World.init(task_world_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state = CancelCheckState{};
+    var future = try Io.concurrent(io, cancelCheckTask, .{ io, &state });
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+    try std.testing.expect(state.first_canceled);
+    try std.testing.expect(state.second_ok);
+    try std.testing.expect(state.rearmed_canceled);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "io: cancel delivers once at checkCancel and recancel re-arms" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const first = try runCancelCheckTrace(std.testing.allocator, 0xCA9CE1);
+    defer std.testing.allocator.free(first);
+    const second = try runCancelCheckTrace(std.testing.allocator, 0xCA9CE1);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.cancel_request task=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.cancel_deliver task=0") != null);
+}
+
+test "io: cancel protection defers delivery until unblocked" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        leaked_through_protection: bool = false,
+        delivered_after_unprotect: bool = false,
+    };
+    const Helper = struct {
+        fn protected(io: Io, state: *State) Io.Cancelable!u32 {
+            const old = Io.swapCancelProtection(io, .blocked);
+            if (old != .unblocked) return 1;
+            Io.checkCancel(io) catch {
+                state.leaked_through_protection = true;
+                return error.Canceled;
+            };
+            const swapped = Io.swapCancelProtection(io, .unblocked);
+            if (swapped != .blocked) return 2;
+            Io.checkCancel(io) catch {
+                state.delivered_after_unprotect = true;
+                return error.Canceled;
+            };
+            return 3;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xB10CED, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state = State{};
+    var future = try Io.concurrent(io, Helper.protected, .{ io, &state });
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+    try std.testing.expect(!state.leaked_through_protection);
+    try std.testing.expect(state.delivered_after_unprotect);
+}
+
+test "io: cancel of a task without cancellation points runs it to completion" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn plain(value: u32) u32 {
+            return value + 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xF11715, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var future = try Io.concurrent(io, Helper.plain, .{40});
+    try std.testing.expectEqual(@as(u32, 41), future.cancel(io));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_request task=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver") == null);
 }
 
 test "io: simulation futex wait returns immediately when value changed" {

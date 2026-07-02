@@ -50,6 +50,9 @@ pub const WaitKey = usize;
 pub const WaitResult = enum {
     woken,
     timed_out,
+    /// The wait was interrupted by a consumed cancellation request. Only
+    /// cancelable waits resume with this result.
+    canceled,
 };
 
 /// Experimental seeded cooperative scheduler.
@@ -72,6 +75,10 @@ pub const TaskScheduler = struct {
     main_wait: ?MainWait = null,
     next_task_id: TaskId = 0,
     completed_task_count: usize = 0,
+    /// Cancel-protection state for the main (non-task) context. Nothing can
+    /// cancel the main context, but `swapCancelProtection` must round-trip
+    /// the previous value faithfully regardless of caller context.
+    main_cancel_protection: Io.CancelProtection = .unblocked,
 
     const MainWait = struct {
         key: WaitKey,
@@ -107,6 +114,7 @@ pub const TaskScheduler = struct {
         reason: SwitchReason,
         key: WaitKey = 0,
         deadline_ns: ?u64 = null,
+        cancelable: bool = false,
         wait_result: WaitResult = .woken,
     };
 
@@ -123,8 +131,19 @@ pub const TaskScheduler = struct {
         state: TaskState = .ready,
         blocked_key: ?WaitKey = null,
         blocked_deadline_ns: ?u64 = null,
+        /// Whether the active blocked wait is a cancellation point that a
+        /// `requestCancel` may interrupt. Only meaningful while blocked.
+        blocked_cancelable: bool = false,
         wait_result: WaitResult = .woken,
         kill_requested: bool = false,
+        /// An armed cancellation request. Consumed (reset to false) when
+        /// `error.Canceled` is delivered at a cancellation point; `recancel`
+        /// re-arms it.
+        cancel_requested: bool = false,
+        /// Whether a cancellation was delivered and not yet re-armed. Backs
+        /// the `recancel` precondition assert.
+        cancel_delivered: bool = false,
+        cancel_protection: Io.CancelProtection = .unblocked,
 
         fn run(arg: *anyopaque) void {
             const task: *Task = @ptrCast(@alignCast(arg));
@@ -141,15 +160,29 @@ pub const TaskScheduler = struct {
             self.state = state;
             self.blocked_key = null;
             self.blocked_deadline_ns = null;
+            self.blocked_cancelable = false;
             self.wait_result = result;
         }
 
         /// Park the task on `key`, optionally with a timeout deadline.
-        fn block(self: *Task, key: WaitKey, deadline_ns: ?u64) void {
+        fn block(self: *Task, key: WaitKey, deadline_ns: ?u64, cancelable: bool) void {
             self.state = .blocked;
             self.blocked_key = key;
             self.blocked_deadline_ns = deadline_ns;
+            self.blocked_cancelable = cancelable;
             self.wait_result = .woken;
+        }
+
+        /// Whether an armed cancellation request can be delivered right now.
+        fn cancelDeliverable(self: *const Task) bool {
+            return self.cancel_requested and self.cancel_protection == .unblocked;
+        }
+
+        /// Consume the armed cancellation request: one delivery per request.
+        fn consumeCancel(self: *Task) void {
+            std.debug.assert(self.cancelDeliverable());
+            self.cancel_requested = false;
+            self.cancel_delivered = true;
         }
     };
 
@@ -287,6 +320,29 @@ pub const TaskScheduler = struct {
 
     // Same optimizer boundary rule as `yieldCurrent`.
     pub noinline fn blockCurrentUntil(self: *Self, key: WaitKey, deadline_ns: ?u64) WaitResult {
+        return self.blockCurrentImpl(key, deadline_ns, false);
+    }
+
+    /// Park the current task on `key` as a cancellation point.
+    ///
+    /// If a deliverable cancellation request is already armed, it is consumed
+    /// and `.canceled` is returned without parking. A `requestCancel` against
+    /// the parked task consumes the request and resumes the wait with
+    /// `.canceled`. Main-context waits are never cancelable.
+    // Same optimizer boundary rule as `yieldCurrent`.
+    pub noinline fn blockCurrentCancelableUntil(self: *Self, key: WaitKey, deadline_ns: ?u64) WaitResult {
+        if (self.current) |task| {
+            if (task.cancelDeliverable()) {
+                task.consumeCancel();
+                self.recordCancelDeliver(task.id) catch @panic("failed to record cancel delivery");
+                return .canceled;
+            }
+        }
+        return self.blockCurrentImpl(key, deadline_ns, true);
+    }
+
+    // Same optimizer boundary rule as `yieldCurrent`.
+    noinline fn blockCurrentImpl(self: *Self, key: WaitKey, deadline_ns: ?u64, cancelable: bool) WaitResult {
         const task = self.current orelse return self.driveMainUntil(key, deadline_ns);
         if (task.state != .running) @panic("block from a non-running task");
         const effective_deadline_ns = if (deadline_ns) |deadline| b: {
@@ -307,9 +363,68 @@ pub const TaskScheduler = struct {
             .reason = .blocked,
             .key = key,
             .deadline_ns = effective_deadline_ns,
+            .cancelable = cancelable,
         };
         const resume_message = fiber.contextSwitchMessage(SwitchMessage, &message);
         return resume_message.wait_result;
+    }
+
+    /// Arm a cancellation request against `task_id`.
+    ///
+    /// Unknown ids (completed and retired tasks) and repeat requests are
+    /// idempotent no-ops. A task parked in a cancelable wait with delivery
+    /// unprotected is resumed immediately with `.canceled` and the request is
+    /// consumed; otherwise the request stays armed until the task reaches its
+    /// next cancellation point.
+    pub fn requestCancel(self: *Self, task_id: TaskId) void {
+        const task = self.findTask(task_id) orelse return;
+        if (task.state == .completed) return;
+        if (task.cancel_requested) return;
+
+        task.cancel_requested = true;
+        self.recordCancelRequest(task.id) catch @panic("failed to record cancel request");
+
+        if (task.state != .blocked) return;
+        if (!task.blocked_cancelable) return;
+        if (task.cancel_protection != .unblocked) return;
+
+        task.consumeCancel();
+        task.clearBlock(.ready, .canceled);
+        self.ready.append(self.allocator, task.id) catch @panic("failed to ready canceled task");
+        self.recordCancelDeliver(task.id) catch @panic("failed to record cancel delivery");
+    }
+
+    /// Consume a deliverable cancellation request on the current task.
+    ///
+    /// Returns true when the caller must surface `error.Canceled`. Main-context
+    /// callers are never canceled.
+    pub fn takeCancelRequest(self: *Self) bool {
+        const task = self.current orelse return false;
+        if (!task.cancelDeliverable()) return false;
+        task.consumeCancel();
+        self.recordCancelDeliver(task.id) catch @panic("failed to record cancel delivery");
+        return true;
+    }
+
+    /// Re-arm the cancellation request after a delivered `error.Canceled`.
+    pub fn recancelCurrent(self: *Self) void {
+        const task = self.current orelse
+            @panic("recancel outside a scheduled task: the main context cannot be canceled");
+        std.debug.assert(task.cancel_delivered); // recancel requires a prior delivered cancellation
+        task.cancel_delivered = false;
+        task.cancel_requested = true;
+    }
+
+    /// Swap the cancel-protection state of the calling context.
+    pub fn swapCancelProtection(self: *Self, new: Io.CancelProtection) Io.CancelProtection {
+        if (self.current) |task| {
+            const old = task.cancel_protection;
+            task.cancel_protection = new;
+            return old;
+        }
+        const old = self.main_cancel_protection;
+        self.main_cancel_protection = new;
+        return old;
     }
 
     /// Service a wait-set block issued from the main (non-task) context by
@@ -513,7 +628,11 @@ pub const TaskScheduler = struct {
                 if (returned_task.kill_requested) {
                     try scheduler.completeKilledTask(returned_task);
                 } else {
-                    returned_task.block(returned_message.key, returned_message.deadline_ns);
+                    returned_task.block(
+                        returned_message.key,
+                        returned_message.deadline_ns,
+                        returned_message.cancelable,
+                    );
                     try scheduler.recordBlock(returned_task.id, returned_message.key, returned_message.deadline_ns);
                 }
             },
@@ -829,6 +948,18 @@ pub const TaskScheduler = struct {
         });
     }
 
+    fn recordCancelRequest(self: *Self, task_id: TaskId) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.cancel_request", &.{
+            traceField("task", .{ .uint = task_id }),
+        });
+    }
+
+    fn recordCancelDeliver(self: *Self, task_id: TaskId) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.cancel_deliver", &.{
+            traceField("task", .{ .uint = task_id }),
+        });
+    }
+
     fn recordCensus(self: *Self, event: []const u8) (std.mem.Allocator.Error || world_module.TraceError)!void {
         try self.world.recordFields(event, &.{
             traceField("tasks", .{ .uint = @intCast(self.next_task_id) }),
@@ -862,6 +993,8 @@ fn waitSetBlockUntil(ptr: *anyopaque, key: usize, deadline_ns: ?u64) io_internal
     return switch (scheduler.blockCurrentUntil(key, deadline_ns)) {
         .woken => .woken,
         .timed_out => .timed_out,
+        // Only cancelable parks resume with `.canceled`.
+        .canceled => unreachable,
     };
 }
 
@@ -912,6 +1045,8 @@ fn diskLatencyWaitUntil(ptr: *anyopaque, deadline_ns: u64) void {
         switch (scheduler.blockCurrentUntil(disk_latency_wait_key, deadline_ns)) {
             .timed_out => {},
             .woken => continue,
+            // Only cancelable parks resume with `.canceled`.
+            .canceled => unreachable,
         }
     }
 }
@@ -1000,12 +1135,36 @@ fn taskRuntimeRunUntilDone(ptr: *anyopaque, done: *const bool) void {
     };
 }
 
+fn taskRuntimeRequestCancel(ptr: *anyopaque, task_id: u64) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.requestCancel(task_id);
+}
+
+fn taskRuntimeTakeCancelRequest(ptr: *anyopaque) bool {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.takeCancelRequest();
+}
+
+fn taskRuntimeRecancel(ptr: *anyopaque) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.recancelCurrent();
+}
+
+fn taskRuntimeSwapCancelProtection(ptr: *anyopaque, new: Io.CancelProtection) Io.CancelProtection {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.swapCancelProtection(new);
+}
+
 const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .spawn = taskRuntimeSpawn,
     .in_task = taskRuntimeInTask,
     .block = taskRuntimeBlock,
     .wake = taskRuntimeWake,
     .run_until_done = taskRuntimeRunUntilDone,
+    .request_cancel = taskRuntimeRequestCancel,
+    .take_cancel_request = taskRuntimeTakeCancelRequest,
+    .recancel = taskRuntimeRecancel,
+    .swap_cancel_protection = taskRuntimeSwapCancelProtection,
 };
 
 /// Fixed-capacity deterministic event queue.
@@ -1390,6 +1549,7 @@ const TimeoutScenario = struct {
         switch (scheduler.blockCurrentUntil(self.key, self.deadline_ns)) {
             .woken => self.woken += 1,
             .timed_out => self.timed_out += 1,
+            .canceled => unreachable,
         }
     }
 
