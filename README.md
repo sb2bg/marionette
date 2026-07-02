@@ -263,11 +263,14 @@ library through Marionette's deterministic `std.Io`. dusty's real
 `Server.listen` accept loop runs as a simulated task: its router, llhttp
 parser, and connection pool serve a keep-alive GET/POST pair plus a second
 connection over simulated `std.Io.net` streams with injected latency, and the
-harness then shuts the server down through cooperative cancellation —
-`error.Canceled` lands in dusty's `accept` park, the server drains its
-connections, and its deferred `Group.cancel` sweeps the handlers. The whole
-exchange replays byte-identically from the same seed. dusty is a lazy
-dependency and this target is not part of the default test step.
+harness then shuts the server down through cooperative cancellation. Two
+shutdown shapes are validated: a clean shutdown where `error.Canceled` lands
+in dusty's `accept` park and the drain finds no active connections, and a
+hung-connection shutdown where a keep-alive handler is still parked in a
+read, dusty's drain times out, and its deferred `Group.cancel` sweeps the
+parked handler on the way out. Both replay byte-identically from the same
+seed. dusty is a lazy dependency and this target is not part of the default
+test step.
 
 ```sh
 zig build validate-dusty

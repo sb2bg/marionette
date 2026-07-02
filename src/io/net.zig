@@ -202,7 +202,13 @@ pub fn Ops(comptime Backend: type) type {
                 switch (wait_result) {
                     .woken => {},
                     .timed_out => unreachable,
-                    .canceled => return error.Canceled,
+                    .canceled => {
+                        // The listener may have been closed between the
+                        // cancel unpark and this task resuming; a closed
+                        // handle with no remaining waiters must still retire.
+                        if (state.closed) backend.retireClosedNetHandleIfIdle(server);
+                        return error.Canceled;
+                    },
                 }
                 if (state.closed) {
                     backend.retireClosedNetHandleIfIdle(server);
@@ -244,7 +250,12 @@ pub fn Ops(comptime Backend: type) type {
                 switch (wait_result) {
                     .woken => {},
                     .timed_out => {},
-                    .canceled => return error.Canceled,
+                    .canceled => {
+                        // Same closed-while-canceled race as the accept park:
+                        // never skip retiring a closed idle handle.
+                        if (connection.closed) backend.retireClosedNetHandleIfIdle(src);
+                        return error.Canceled;
+                    },
                 }
                 if (connection.closed) {
                     backend.retireClosedNetHandleIfIdle(src);

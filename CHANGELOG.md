@@ -35,9 +35,15 @@
   in ascending task order. Requests and deliveries are trace-visible as
   `scheduler.cancel_request` / `scheduler.cancel_deliver`.
 - Runs the dusty validation through dusty's real `Server.listen` accept loop:
-  multi-connection accept, keep-alive reuse, and cancel-driven graceful
-  shutdown where the listener drains and its deferred group cancel sweeps
-  parked connection handlers, all with byte-identical same-seed replay.
+  multi-connection accept, keep-alive reuse, and two cancel-driven shutdown
+  shapes, both with byte-identical same-seed replay. A clean shutdown
+  delivers `error.Canceled` in the accept park with nothing left to drain;
+  a hung-connection shutdown leaves a keep-alive handler parked in a read,
+  so dusty's drain times out and its deferred group cancel sweeps the parked
+  handler.
+- Fixes closed-handle retirement when a canceled net wait loses a race with
+  a concurrent close: the canceled accept/read paths now retire closed idle
+  handles exactly like the woken paths.
 
 ## v0.4.0 - 2026-06-30
 
