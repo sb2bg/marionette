@@ -26,6 +26,9 @@ pub const TaskRuntime = struct {
         /// Whether the caller is currently running inside a scheduled task
         /// (as opposed to the harness/main context driving the scheduler).
         in_task: *const fn (ptr: *anyopaque) bool,
+        /// The stable id of the current scheduled task, or null from the
+        /// harness/main context.
+        current_task_id: *const fn (ptr: *anyopaque) ?u64,
         /// Park the current task on `key`. Must only be called in-task.
         block: *const fn (ptr: *anyopaque, key: usize) void,
         /// Wake up to `max_count` tasks parked on `key`.
@@ -51,6 +54,10 @@ pub const TaskRuntime = struct {
 
     pub fn inTask(self: TaskRuntime) bool {
         return self.vtable.in_task(self.ptr);
+    }
+
+    pub fn currentTaskId(self: TaskRuntime) ?u64 {
+        return self.vtable.current_task_id(self.ptr);
     }
 
     pub fn block(self: TaskRuntime, key: usize) void {

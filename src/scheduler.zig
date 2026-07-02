@@ -1132,6 +1132,11 @@ fn taskRuntimeInTask(ptr: *anyopaque) bool {
     return scheduler.current != null;
 }
 
+fn taskRuntimeCurrentTaskId(ptr: *anyopaque) ?u64 {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return if (scheduler.current) |task| task.id else null;
+}
+
 fn taskRuntimeBlock(ptr: *anyopaque, key: usize) void {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     scheduler.blockCurrent(key);
@@ -1173,6 +1178,7 @@ fn taskRuntimeSwapCancelProtection(ptr: *anyopaque, new: Io.CancelProtection) Io
 const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .spawn = taskRuntimeSpawn,
     .in_task = taskRuntimeInTask,
+    .current_task_id = taskRuntimeCurrentTaskId,
     .block = taskRuntimeBlock,
     .wake = taskRuntimeWake,
     .run_until_done = taskRuntimeRunUntilDone,

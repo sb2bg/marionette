@@ -65,7 +65,8 @@
 - Fixes operation-scoped buffer leaks when a task is killed while parked in
   a disk-latency wait: sector scratch and resolved-path buffers held across
   `std.Io` file-operation suspension points now register with the backend
-  and are swept at teardown, since a killed fiber never runs its defers.
+  and killed-task survivors are swept after task retirement, since a killed
+  fiber never runs its defers.
 - Widens the fiber stack guard from one page to a 256 KiB PROT_NONE region,
   so Debug-mode stack frames larger than a page fault at the overflow
   instead of silently corrupting neighboring mappings. The widened guard

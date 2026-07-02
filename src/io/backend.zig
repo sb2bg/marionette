@@ -321,8 +321,8 @@ pub const Backend = struct {
     /// Live operation-scoped buffers (sector scratch, path copies) held
     /// across disk-latency suspension points. A task killed while parked
     /// mid-operation never runs its defers, so these register here and any
-    /// survivors are swept at backend deinit instead of leaking.
-    op_scratch: std.ArrayList([]u8) = .empty,
+    /// killed-task survivors are swept after task retirement.
+    op_scratch: std.ArrayList(OpScratch) = .empty,
 
     pub const HandleEntry = struct {
         handle: SocketHandle,
@@ -361,6 +361,11 @@ pub const Backend = struct {
             allocator.free(self.path);
             self.* = undefined;
         }
+    };
+
+    const OpScratch = struct {
+        buffer: []u8,
+        task_id: ?u64,
     };
 
     const FutexKeyEntry = struct {
@@ -484,7 +489,7 @@ pub const Backend = struct {
         for (self.directory_handles.items) |*handle| handle.deinit(self.allocator);
         self.directory_handles.deinit(self.allocator);
         self.locks.deinit();
-        for (self.op_scratch.items) |buffer| self.allocator.free(buffer);
+        for (self.op_scratch.items) |entry| self.allocator.free(entry.buffer);
         self.op_scratch.deinit(self.allocator);
         self.* = undefined;
     }
@@ -494,14 +499,20 @@ pub const Backend = struct {
     pub fn allocOpScratch(self: *Backend, len: usize) std.mem.Allocator.Error![]u8 {
         const buffer = try self.allocator.alloc(u8, len);
         errdefer self.allocator.free(buffer);
-        try self.op_scratch.append(self.allocator, buffer);
+        try self.op_scratch.append(self.allocator, .{
+            .buffer = buffer,
+            .task_id = self.currentTaskId(),
+        });
         return buffer;
     }
 
     /// Register an externally allocated operation-scoped buffer for
     /// kill-safe cleanup. On failure the caller still owns the buffer.
     pub fn registerOpScratch(self: *Backend, buffer: []u8) std.mem.Allocator.Error!void {
-        try self.op_scratch.append(self.allocator, buffer);
+        try self.op_scratch.append(self.allocator, .{
+            .buffer = buffer,
+            .task_id = self.currentTaskId(),
+        });
     }
 
     pub fn freeOpScratch(self: *Backend, buffer: []const u8) void {
@@ -513,12 +524,36 @@ pub const Backend = struct {
     /// `FileMeta`) without freeing it.
     pub fn releaseOpScratch(self: *Backend, buffer: []const u8) void {
         for (self.op_scratch.items, 0..) |candidate, index| {
-            if (candidate.ptr == buffer.ptr) {
+            if (candidate.buffer.ptr == buffer.ptr) {
                 _ = self.op_scratch.swapRemove(index);
                 return;
             }
         }
         unreachable; // released a buffer that was never registered
+    }
+
+    fn currentTaskId(self: *Backend) ?u64 {
+        const runtime = self.task_runtime orelse return null;
+        return runtime.currentTaskId();
+    }
+
+    fn sweepInactiveOpScratch(self: *Backend, task_control: ?ProcessTaskControl) void {
+        const control = task_control orelse return;
+
+        var index: usize = 0;
+        while (index < self.op_scratch.items.len) {
+            const entry = self.op_scratch.items[index];
+            const task_id = entry.task_id orelse {
+                index += 1;
+                continue;
+            };
+            if (control.taskActive(task_id)) {
+                index += 1;
+                continue;
+            }
+            self.allocator.free(entry.buffer);
+            _ = self.op_scratch.swapRemove(index);
+        }
     }
 
     pub fn io(self: *Backend) Io {
@@ -1598,16 +1633,22 @@ pub const ProcessRuntime = struct {
             backend.retireFutexKeysForBackend();
             backend.retireClosedNetHandlesAfterTaskKill();
         }
+        self.sweepInactiveOpScratch();
     }
 
     pub fn kill(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!void {
         const backend = try self.backendForNode(node);
         backend.killProcess(.{});
         self.killProcessTasks(@intCast(node));
+        self.sweepInactiveOpScratch();
         retireKilledGroupClosures(backend, self.task_control);
         backend.retireFileLockWaiters();
         backend.retireFutexKeysForBackend();
         backend.retireClosedNetHandlesAfterTaskKill();
+    }
+
+    fn sweepInactiveOpScratch(self: *ProcessRuntime) void {
+        for (self.backends) |*backend| backend.sweepInactiveOpScratch(self.task_control);
     }
 
     fn killProcessTasks(self: *ProcessRuntime, process_id: ProcessId) void {

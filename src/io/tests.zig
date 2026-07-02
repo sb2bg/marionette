@@ -297,6 +297,49 @@ test "io: process kill completes owned task groups" {
     try std.testing.expectEqual(@as(usize, 0), backend.group_closures.items.len);
 }
 
+test "io: process kill sweeps disk op scratch from killed tasks" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        sim: World.Simulation,
+        io: Io,
+        started: u32 = 0,
+        scratch_before_kill: usize = 0,
+        scratch_after_kill: usize = std.math.maxInt(usize),
+
+        fn writer(self: *@This()) void {
+            self.started = 1;
+            self.io.futexWake(u32, &self.started, std.math.maxInt(u32));
+            _ = Io.Dir.cwd().openFile(self.io, "missing.txt", .{}) catch {};
+        }
+
+        fn killer(self: *@This()) void {
+            while (self.started == 0) {
+                self.io.futexWait(u32, &self.started, 0) catch @panic("futex wait failed");
+            }
+            const backend = world_module.internal.ioRuntime(self.sim).backendForNode(0) catch
+                @panic("missing process backend");
+            self.scratch_before_kill = backend.op_scratch.items.len;
+            self.sim.killProcess(0) catch @panic("process kill failed");
+            self.scratch_after_kill = backend.op_scratch.items.len;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA66, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var scenario: Scenario = .{ .sim = sim, .io = io };
+    var writer = Io.async(io, Scenario.writer, .{&scenario});
+    var killer = Io.async(io, Scenario.killer, .{&scenario});
+
+    killer.await(io);
+    writer.await(io);
+    try std.testing.expect(scenario.scratch_before_kill > 0);
+    try std.testing.expectEqual(@as(usize, 0), scenario.scratch_after_kill);
+}
+
 test "io: task group completion keys are unique across processes" {
     if (!fiber_supported) return error.SkipZigTest;
 
