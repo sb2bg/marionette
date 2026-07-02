@@ -318,6 +318,11 @@ pub const Backend = struct {
     handles: std.ArrayList(HandleEntry) = .empty,
     next_handle: SocketHandle = 1000,
     locks: FileLockRegistry,
+    /// Live operation-scoped buffers (sector scratch, path copies) held
+    /// across disk-latency suspension points. A task killed while parked
+    /// mid-operation never runs its defers, so these register here and any
+    /// survivors are swept at backend deinit instead of leaking.
+    op_scratch: std.ArrayList([]u8) = .empty,
 
     pub const HandleEntry = struct {
         handle: SocketHandle,
@@ -479,7 +484,41 @@ pub const Backend = struct {
         for (self.directory_handles.items) |*handle| handle.deinit(self.allocator);
         self.directory_handles.deinit(self.allocator);
         self.locks.deinit();
+        for (self.op_scratch.items) |buffer| self.allocator.free(buffer);
+        self.op_scratch.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Allocate an operation-scoped buffer that survives task kill without
+    /// leaking. Pair with `freeOpScratch` on the normal path.
+    pub fn allocOpScratch(self: *Backend, len: usize) std.mem.Allocator.Error![]u8 {
+        const buffer = try self.allocator.alloc(u8, len);
+        errdefer self.allocator.free(buffer);
+        try self.op_scratch.append(self.allocator, buffer);
+        return buffer;
+    }
+
+    /// Register an externally allocated operation-scoped buffer for
+    /// kill-safe cleanup. On failure the caller still owns the buffer.
+    pub fn registerOpScratch(self: *Backend, buffer: []u8) std.mem.Allocator.Error!void {
+        try self.op_scratch.append(self.allocator, buffer);
+    }
+
+    pub fn freeOpScratch(self: *Backend, buffer: []const u8) void {
+        self.releaseOpScratch(buffer);
+        self.allocator.free(buffer);
+    }
+
+    /// Unregister a buffer whose ownership moved elsewhere (for example into
+    /// `FileMeta`) without freeing it.
+    pub fn releaseOpScratch(self: *Backend, buffer: []const u8) void {
+        for (self.op_scratch.items, 0..) |candidate, index| {
+            if (candidate.ptr == buffer.ptr) {
+                _ = self.op_scratch.swapRemove(index);
+                return;
+            }
+        }
+        unreachable; // released a buffer that was never registered
     }
 
     pub fn io(self: *Backend) Io {

@@ -18,11 +18,19 @@ pub fn Ops(comptime Backend: type) type {
             sub_path: []const u8,
             kind: disk_module.LogicalPathKind,
         ) ![]u8 {
-            return backend.resolvePathAlloc(dir, sub_path, kind) catch |err| switch (err) {
+            const path = backend.resolvePathAlloc(dir, sub_path, kind) catch |err| switch (err) {
                 error.OutOfMemory => return error.SystemResources,
                 error.InvalidDirHandle => return error.AccessDenied,
                 error.InvalidPath => return error.FileNotFound,
             };
+            // Registered as operation scratch: these paths are held across
+            // disk-latency suspension points, and a task killed while parked
+            // never runs the caller's defer.
+            backend.registerOpScratch(path) catch {
+                backend.allocator.free(path);
+                return error.SystemResources;
+            };
+            return path;
         }
 
         fn buildDirectoryStat(backend: *Backend, stat: disk_module.DiskStatDirResult) Io.File.Stat {
@@ -65,7 +73,7 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.CreateDirError!void {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
-            defer backend.allocator.free(path);
+            defer backend.freeOpScratch(path);
             backend.createDirectory(path) catch |err| return mapCreateDirError(err);
         }
 
@@ -77,7 +85,7 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
-            defer backend.allocator.free(path);
+            defer backend.freeOpScratch(path);
             return backend.createDirectoryPath(path) catch |err| switch (err) {
                 error.OutOfMemory => error.SystemResources,
                 error.PathAlreadyExists => error.PathAlreadyExists,
@@ -108,7 +116,7 @@ pub fn Ops(comptime Backend: type) type {
             _ = options.follow_symlinks;
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
-            defer backend.allocator.free(path);
+            defer backend.freeOpScratch(path);
             return backend.openDirectoryHandle(path, options.iterate) catch |err| switch (err) {
                 error.OutOfMemory => error.SystemResources,
                 error.FileNotFound => error.FileNotFound,
@@ -126,7 +134,7 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .file) catch |err| return err;
             var path_owned = true;
-            defer if (path_owned) backend.allocator.free(path);
+            defer if (path_owned) backend.freeOpScratch(path);
             if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) return error.IsDir;
             try requireParentDirectory(backend, path);
             const existing_index = findOrDiscoverFileMeta(backend, path) catch |err| {
@@ -134,7 +142,7 @@ pub fn Ops(comptime Backend: type) type {
             };
             const file_index = if (existing_index) |index| {
                 if (options.exclusive) return error.PathAlreadyExists;
-                backend.allocator.free(path);
+                backend.freeOpScratch(path);
                 path_owned = false;
                 const file = backend.openFileHandle(
                     index,
@@ -171,7 +179,7 @@ pub fn Ops(comptime Backend: type) type {
                 };
                 backend.files.items[index].len = stat_result.size;
                 backend.files.items[index].inode = stat_result.inode;
-                backend.allocator.free(path);
+                backend.freeOpScratch(path);
                 path_owned = false;
                 break :b index;
             };
@@ -198,7 +206,7 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             var path_owned = true;
-            defer if (path_owned) backend.allocator.free(path);
+            defer if (path_owned) backend.freeOpScratch(path);
             if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) {
                 if (!options.allow_directory or options.isWrite()) return error.IsDir;
                 return backend.openDirectoryFileHandle(path) catch return error.SystemResources;
@@ -206,7 +214,7 @@ pub fn Ops(comptime Backend: type) type {
             const file_index = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskOpenError(err);
             }) orelse return error.FileNotFound;
-            backend.allocator.free(path);
+            backend.freeOpScratch(path);
             path_owned = false;
             return backend.openFileHandle(
                 file_index,
@@ -244,7 +252,7 @@ pub fn Ops(comptime Backend: type) type {
             _ = options.follow_symlinks;
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
-            defer backend.allocator.free(path);
+            defer backend.freeOpScratch(path);
             if (backend.disk.statDir(.{ .path = path })) |stat| {
                 return buildDirectoryStat(backend, stat);
             } else |err| switch (err) {
@@ -269,7 +277,7 @@ pub fn Ops(comptime Backend: type) type {
             if (options.execute) return error.AccessDenied;
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
-            defer backend.allocator.free(path);
+            defer backend.freeOpScratch(path);
             if (backend.directoryExists(path) catch return error.FileNotFound) return;
             _ = (findOrDiscoverFileMeta(backend, path) catch {
                 return error.FileNotFound;
@@ -338,7 +346,7 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.DeleteFileError!void {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .file) catch |err| return err;
-            defer backend.allocator.free(path);
+            defer backend.freeOpScratch(path);
             if (backend.directoryExists(path) catch return error.FileNotFound) return error.IsDir;
             _ = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskDeleteError(err);
@@ -360,9 +368,9 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.RenameError!void {
             const backend = backendFromUserdata(userdata);
             const old_path = resolvePath(backend, old_dir, old_sub_path, .file) catch |err| return err;
-            defer backend.allocator.free(old_path);
+            defer backend.freeOpScratch(old_path);
             const new_path = resolvePath(backend, new_dir, new_sub_path, .file) catch |err| return err;
-            defer backend.allocator.free(new_path);
+            defer backend.freeOpScratch(new_path);
             if (backend.directoryExists(old_path) catch return error.FileNotFound) return error.IsDir;
             if (backend.directoryExists(new_path) catch return error.FileNotFound) return error.IsDir;
             const new_parent = std.fs.path.dirname(new_path) orelse ".";
@@ -751,8 +759,8 @@ pub fn Ops(comptime Backend: type) type {
         ) disk_module.DiskError!void {
             if (dest.len == 0) return;
             const sector_size = try sectorSizeUsize(backend);
-            var sector = try backend.allocator.alloc(u8, sector_size);
-            defer backend.allocator.free(sector);
+            const sector = try backend.allocOpScratch(sector_size);
+            defer backend.freeOpScratch(sector);
 
             var remaining = dest;
             var cursor = offset;
@@ -783,8 +791,8 @@ pub fn Ops(comptime Backend: type) type {
         ) disk_module.DiskError!void {
             if (src.len == 0) return;
             const sector_size = try sectorSizeUsize(backend);
-            var sector = try backend.allocator.alloc(u8, sector_size);
-            defer backend.allocator.free(sector);
+            const sector = try backend.allocOpScratch(sector_size);
+            defer backend.freeOpScratch(sector);
 
             var remaining = src;
             var cursor = offset;
@@ -828,8 +836,8 @@ pub fn Ops(comptime Backend: type) type {
         ) disk_module.DiskError!void {
             if (len == 0) return;
             const sector_size = try sectorSizeUsize(backend);
-            var zeros = try backend.allocator.alloc(u8, sector_size);
-            defer backend.allocator.free(zeros);
+            const zeros = try backend.allocOpScratch(sector_size);
+            defer backend.freeOpScratch(zeros);
             @memset(zeros, 0);
 
             var remaining = len;
