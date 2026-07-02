@@ -651,6 +651,393 @@ fn expectTraceContains(trace: []const u8, needle: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, trace, needle) != null);
 }
 
+// --- Crash-fault fuzzer with shrinking -------------------------------------
+//
+// Fuzz cases are explicit operation plans generated from a host PRNG, not
+// from the world's random stream: shrinking then removes transactions and
+// operations without disturbing anything else the case does. Each case runs
+// a warmup prefix of acknowledged transactions, then runs the final (victim)
+// transaction as a cooperative scheduler task and crashes the disk at a
+// seed-varied simulated time while that transaction is mid-commit. Pending
+// writes at the crash get exactly one active fault class; every acknowledged
+// transaction must survive recovery.
+
+const FuzzFault = enum {
+    lost,
+    torn,
+    reordered,
+
+    fn diskFaults(self: FuzzFault) mar.DiskFaultOptions {
+        return switch (self) {
+            .lost => .{ .crash_lost_write_rate = .always() },
+            .torn => .{ .crash_torn_write_rate = .always() },
+            .reordered => .{ .crash_reordered_write_rate = .always() },
+        };
+    }
+};
+
+const fuzz_tick_ns: u64 = 10;
+
+const FuzzParams = struct {
+    seed: u64,
+    sector_size: u64,
+    fault: FuzzFault,
+    /// Simulated ticks between spawning the victim transaction and crashing
+    /// the disk. Disk operations cost at least one tick each, so this is the
+    /// crash point expressed as victim commit progress. Callers pick it
+    /// inside the measured victim duration so the crash lands mid-commit.
+    crash_after_ticks: u64,
+};
+
+/// Measure how many simulated ticks the victim transaction takes when run
+/// undisturbed, so crash points can be placed inside its commit path.
+fn measureVictimTicks(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    sector_size: u64,
+    plan: []const Transaction,
+) !u64 {
+    std.debug.assert(plan.len >= 1);
+
+    var world = try mar.World.init(allocator, .{
+        .seed = seed,
+        .tick_ns = fuzz_tick_ns,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{
+        .sector_size = sector_size,
+        .min_latency_ns = fuzz_tick_ns,
+    } });
+    const io = sim.env.io();
+
+    var file = try std.Io.Dir.cwd().createFile(io, "xit-fuzz.db", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var db = try DB.init(.{ .io = io, .file = file });
+    for (plan[0 .. plan.len - 1]) |transaction| {
+        try applyTransaction(&db, transaction.slice());
+    }
+    try file.sync(io);
+
+    const victim = plan[plan.len - 1];
+    var victim_task = VictimTask{ .db = &db, .ops = victim.slice() };
+    const started_at = world.now();
+    var victim_future = try std.Io.concurrent(io, VictimTask.run, .{ &victim_task, io });
+    victim_future.await(io);
+    if (!victim_task.completed) return error.VictimFailedUndisturbed;
+    return (world.now() - started_at) / fuzz_tick_ns;
+}
+
+const FuzzOutcome = enum {
+    /// The victim transaction committed before the crash point, so no
+    /// unacknowledged window opened.
+    passed_no_window,
+    /// The crash interrupted the victim mid-commit and acknowledged history
+    /// survived.
+    passed_with_window,
+    /// Acknowledged history failed to verify after crash recovery.
+    failed,
+};
+
+const VictimTask = struct {
+    db: *DB,
+    ops: []const Operation,
+    completed: bool = false,
+
+    fn run(self: *VictimTask, io: std.Io) void {
+        _ = io;
+        applyTransaction(self.db, self.ops) catch return;
+        self.completed = true;
+    }
+};
+
+fn makeFuzzPlan(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    max_warmup: usize,
+) !std.ArrayList(Transaction) {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+
+    var plan = std.ArrayList(Transaction).empty;
+    errdefer plan.deinit(allocator);
+
+    // Warmup prefix plus one victim transaction at the end.
+    const warmup = random.intRangeLessThan(usize, 0, max_warmup + 1);
+    for (0..warmup + 1) |tx_index| {
+        var transaction = Transaction{};
+        transaction.op_count = 1 + random.intRangeLessThan(usize, 0, MaxOpsPerTransaction);
+        for (transaction.ops[0..transaction.op_count]) |*op| {
+            op.* = hostRandomOperation(random, tx_index);
+        }
+        try plan.append(allocator, transaction);
+    }
+    return plan;
+}
+
+/// Run one planned crash-fault case. The last transaction in `plan` is the
+/// victim: it runs as a cooperative task while the main context sleeps to
+/// the crash point, so the crash can land mid-commit with pending writes.
+fn runFuzzCase(
+    allocator: std.mem.Allocator,
+    params: FuzzParams,
+    plan: []const Transaction,
+) !FuzzOutcome {
+    std.debug.assert(plan.len >= 1);
+
+    var world = try mar.World.init(allocator, .{
+        .seed = params.seed,
+        .tick_ns = fuzz_tick_ns,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{
+        .sector_size = params.sector_size,
+        .min_latency_ns = fuzz_tick_ns,
+    } });
+    const io = sim.env.io();
+
+    var file = try std.Io.Dir.cwd().createFile(io, "xit-fuzz.db", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var db = try DB.init(.{ .io = io, .file = file });
+    var model = std.ArrayList(Snapshot).empty;
+    defer model.deinit(allocator);
+
+    for (plan[0 .. plan.len - 1]) |transaction| {
+        try applyTransaction(&db, transaction.slice());
+        try appendModelTransaction(allocator, &model, transaction.slice());
+    }
+
+    // Setup crosses a durability boundary before the fault window opens:
+    // with no warmup transactions the database header written by DB.init is
+    // otherwise still pending, and the crash destroys initialization state
+    // the scenario never acknowledged. (Crash-during-first-init is a real
+    // scenario, but it needs its own characterized case, not a fuzz sweep
+    // that conflates it with committed-history loss.)
+    try file.sync(io);
+
+    const victim = plan[plan.len - 1];
+    var victim_task = VictimTask{ .db = &db, .ops = victim.slice() };
+    var victim_future = try std.Io.concurrent(io, VictimTask.run, .{ &victim_task, io });
+
+    // The main-context sleep drives the scheduler: the victim transaction
+    // makes progress through its disk-latency parks until the crash point.
+    try std.Io.sleep(io, .fromNanoseconds(params.crash_after_ticks * fuzz_tick_ns), .awake);
+
+    try sim.control.disk.setFaults(params.fault.diskFaults());
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    victim_future.await(io);
+
+    const window_opened = !victim_task.completed;
+    if (victim_task.completed) {
+        try appendModelTransaction(allocator, &model, victim.slice());
+    }
+
+    // Any failure from reopen onward means acknowledged history did not
+    // recover; the classification does not distinguish how it failed.
+    const recovered_ok = blk: {
+        var recovered_file = std.Io.Dir.cwd().openFile(io, "xit-fuzz.db", .{ .mode = .read_write }) catch
+            break :blk false;
+        defer recovered_file.close(io);
+        var recovered = DB.init(.{ .io = io, .file = recovered_file }) catch break :blk false;
+        verifyHistory(allocator, &recovered, model.items) catch break :blk false;
+        break :blk true;
+    };
+
+    if (!recovered_ok) return .failed;
+    return if (window_opened) .passed_with_window else .passed_no_window;
+}
+
+/// Greedy plan shrinking: repeatedly try removing one transaction, then one
+/// operation at a time, keeping any candidate that still fails. The result
+/// is 1-minimal: removing any single remaining transaction or operation
+/// makes the failure disappear.
+fn shrinkFuzzPlan(
+    allocator: std.mem.Allocator,
+    params: FuzzParams,
+    plan: *std.ArrayList(Transaction),
+) !void {
+    var made_progress = true;
+    while (made_progress) {
+        made_progress = false;
+
+        // Try removing whole transactions.
+        var tx_index: usize = 0;
+        while (tx_index < plan.items.len) {
+            if (plan.items.len <= 1) break;
+            const removed = plan.orderedRemove(tx_index);
+            if (try runFuzzCase(allocator, params, plan.items) == .failed) {
+                made_progress = true;
+                continue;
+            }
+            try plan.insert(allocator, tx_index, removed);
+            tx_index += 1;
+        }
+
+        // Try removing single operations within transactions.
+        for (plan.items) |*transaction| {
+            var op_index: usize = 0;
+            while (op_index < transaction.op_count) {
+                if (transaction.op_count <= 1) break;
+                const removed = transaction.ops[op_index];
+                std.mem.copyForwards(
+                    Operation,
+                    transaction.ops[op_index .. transaction.op_count - 1],
+                    transaction.ops[op_index + 1 .. transaction.op_count],
+                );
+                transaction.op_count -= 1;
+                if (try runFuzzCase(allocator, params, plan.items) == .failed) {
+                    made_progress = true;
+                    continue;
+                }
+                std.mem.copyBackwards(
+                    Operation,
+                    transaction.ops[op_index + 1 .. transaction.op_count + 1],
+                    transaction.ops[op_index..transaction.op_count],
+                );
+                transaction.ops[op_index] = removed;
+                transaction.op_count += 1;
+                op_index += 1;
+            }
+        }
+    }
+}
+
+/// Render a shrunk failing case as a maintainer-readable repro.
+fn writeRepro(
+    writer: *std.Io.Writer,
+    params: FuzzParams,
+    plan: []const Transaction,
+) !void {
+    try writer.print(
+        "xitdb crash-fault repro: seed=0x{x} sector_size={} fault={s} crash_after_ticks={}\n",
+        .{ params.seed, params.sector_size, @tagName(params.fault), params.crash_after_ticks },
+    );
+    for (plan, 0..) |transaction, tx_index| {
+        const role: []const u8 = if (tx_index == plan.len - 1) "victim (crashed mid-commit)" else "acknowledged";
+        try writer.print("  tx{}: {s}\n", .{ tx_index, role });
+        for (transaction.slice()) |op| {
+            switch (op) {
+                .put_bytes => |put| try writer.print(
+                    "    put {s} = bytes:{s}\n",
+                    .{ keys[put.key_index], put.value },
+                ),
+                .put_uint => |put| try writer.print(
+                    "    put {s} = uint:{}\n",
+                    .{ keys[put.key_index], put.value },
+                ),
+                .remove => |remove| try writer.print(
+                    "    remove {s}\n",
+                    .{keys[remove.key_index]},
+                ),
+            }
+        }
+    }
+    try writer.print(
+        "  crash with {s} faults on pending writes, restart, reopen, verify acknowledged history\n",
+        .{@tagName(params.fault)},
+    );
+}
+
+test "xitdb crash-fault fuzz holds acknowledged history at realistic sectors" {
+    const allocator = std.testing.allocator;
+    const sector_sizes = [_]u64{ 512, 4096 };
+    const faults = [_]FuzzFault{ .lost, .torn, .reordered };
+    const seeds_per_case = 8;
+
+    for (faults) |fault| {
+        for (sector_sizes) |sector_size| {
+            var windows: usize = 0;
+            for (0..seeds_per_case) |i| {
+                const seed = 0xF022_0000 +
+                    @as(u64, @intCast(@intFromEnum(fault))) * 0x10000 +
+                    sector_size * 0x10 +
+                    @as(u64, @intCast(i));
+                var plan = try makeFuzzPlan(allocator, seed, 6);
+                defer plan.deinit(allocator);
+
+                const victim_ticks = try measureVictimTicks(allocator, seed, sector_size, plan.items);
+                const params = FuzzParams{
+                    .seed = seed,
+                    .sector_size = sector_size,
+                    .fault = fault,
+                    .crash_after_ticks = 1 + seed % @max(victim_ticks, 1),
+                };
+                const outcome = try runFuzzCase(allocator, params, plan.items);
+                if (outcome == .failed) {
+                    try shrinkFuzzPlan(allocator, params, &plan);
+                    var buffer: [4096]u8 = undefined;
+                    var writer: std.Io.Writer = .fixed(&buffer);
+                    try writeRepro(&writer, params, plan.items);
+                    std.debug.print("{s}", .{writer.buffered()});
+                    return error.AcknowledgedHistoryLost;
+                }
+                if (outcome == .passed_with_window) windows += 1;
+            }
+            // The sweep must actually exercise unacknowledged windows, not
+            // just clean shutdowns.
+            try std.testing.expect(windows > 0);
+        }
+    }
+}
+
+test "xitdb fuzzer shrinks the sub-field torn header failure to a readable repro" {
+    const allocator = std.testing.allocator;
+
+    // Sector size 7 is the characterized XITDB-001 simulator boundary: the
+    // 8-byte committed-size header spans sectors, so a torn crash write can
+    // cut inside the field and corrupt recovery. The fuzzer must find it and
+    // reduce it to a minimal, readable operation sequence.
+    try std.testing.expect(committedSizeHeaderCrossesSector(7));
+
+    var found = false;
+    seeds: for (0..4) |i| {
+        const seed = 0x5421_0000 + @as(u64, @intCast(i));
+        var plan = try makeFuzzPlan(allocator, seed, 2);
+        defer plan.deinit(allocator);
+
+        // Scan every crash point in the victim's commit path: the torn
+        // header window is only a slice of the commit, and the scan is the
+        // fuzzer's crash-point dimension made exhaustive.
+        const victim_ticks = try measureVictimTicks(allocator, seed, 7, plan.items);
+        var crash_after: u64 = 1;
+        while (crash_after <= victim_ticks) : (crash_after += 1) {
+            const params = FuzzParams{
+                .seed = seed,
+                .sector_size = 7,
+                .fault = .torn,
+                .crash_after_ticks = crash_after,
+            };
+            if (try runFuzzCase(allocator, params, plan.items) != .failed) continue;
+
+            const original_len = plan.items.len;
+            try shrinkFuzzPlan(allocator, params, &plan);
+            try std.testing.expect(plan.items.len <= original_len);
+            // The known counterexample needs almost nothing: at most the
+            // victim plus a couple of acknowledged transactions.
+            try std.testing.expect(plan.items.len <= 3);
+            // The shrunk plan must still reproduce.
+            try std.testing.expectEqual(FuzzOutcome.failed, try runFuzzCase(allocator, params, plan.items));
+
+            var buffer: [4096]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try writeRepro(&writer, params, plan.items);
+            const repro = writer.buffered();
+            try std.testing.expect(std.mem.indexOf(u8, repro, "sector_size=7") != null);
+            try std.testing.expect(std.mem.indexOf(u8, repro, "fault=torn") != null);
+            try std.testing.expect(std.mem.indexOf(u8, repro, "victim") != null);
+
+            found = true;
+            break :seeds;
+        }
+    }
+
+    try std.testing.expect(found);
+}
+
 fn hashInt(buffer: []const u8) HashInt {
     var hash: [@bitSizeOf(HashInt) / 8]u8 = undefined;
     std.crypto.hash.Sha1.hash(buffer, &hash, .{});

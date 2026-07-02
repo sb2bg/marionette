@@ -53,6 +53,15 @@
   absent or exact but never damaged, held across a 32-seed fuzz, plus a
   seed search that finds the planted magic-only recovery bug as
   `DamagedRecordAccepted`.
+- Expands the xitdb crash-fault profile into a fuzzer with shrinking. Each
+  case runs a seed-planned transaction workload, commits a durable setup
+  boundary, then crashes the disk at a seed-varied simulated time while the
+  final transaction runs mid-commit as a cooperative task, applying exactly
+  one crash fault class (lost, torn, or reordered) to pending writes across
+  512/4096-byte sectors. Failures shrink greedily to a 1-minimal transaction
+  and operation sequence rendered as a readable repro. The shrinker
+  demonstrably reduces the characterized XITDB-001 sub-field torn-header
+  boundary (7-byte sectors) to at most three transactions.
 - Fixes operation-scoped buffer leaks when a task is killed while parked in
   a disk-latency wait: sector scratch and resolved-path buffers held across
   `std.Io` file-operation suspension points now register with the backend

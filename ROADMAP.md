@@ -28,17 +28,14 @@ maintainer-readable repros.
 
 Pick from this section first unless a later release item is blocking it.
 
-### External Storage Compatibility And Shrinking
+### External Storage Compatibility
 
-The base disk lifecycle surface exists. The remaining storage work is about
-confidence, compatibility, and readable repros.
+The xitdb crash-fault fuzzer with shrinking landed: seed-planned workloads,
+mid-commit crash points, one fault class at a time across sector sizes, and
+greedy 1-minimal reduction to a maintainer-readable operation sequence
+(`validation/xitdb_durability.zig`). The remaining storage work is
+compatibility:
 
-Acceptance criteria:
-
-- Expand the xitdb crash-fault profile into a real fuzzer with shrinking.
-- Vary sector size, crash point, workload length, and one active fault class at
-  a time.
-- Reduce failures to a maintainer-readable operation sequence.
 - Add a small compatibility scenario that ports the storage-facing slice of
   `kvdb` or a local surrogate:
   open database, append WAL records, commit, reopen/recover, compact via
