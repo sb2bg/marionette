@@ -1366,6 +1366,31 @@ test "io: simulation cancellation checks are inert without a scheduler" {
     Io.recancel(io);
 }
 
+test "io: task_stack_size option carries tasks past the default stack" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn deepStack() u64 {
+            // A frame deeper than the default 1 MiB task stack: this only
+            // completes when the configured 4 MiB stack actually reached
+            // the spawned task.
+            var buffer: [2 * 1024 * 1024]u8 = undefined;
+            @memset(&buffer, 0xAB);
+            std.mem.doNotOptimizeAway(&buffer);
+            return buffer[buffer.len - 1];
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x57AC, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .task_stack_size = 4 * 1024 * 1024 });
+    const io = sim.env.io();
+
+    var future = try Io.concurrent(io, Helper.deepStack, .{});
+    try std.testing.expectEqual(@as(u64, 0xAB), future.await(io));
+}
+
 const CancelCheckState = struct {
     first_canceled: bool = false,
     second_ok: bool = false,

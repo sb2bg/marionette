@@ -556,6 +556,10 @@ pub const World = struct {
         allocation: allocation_module.FaultOptions = .{},
         disk: disk_module.DiskOptions = .{},
         network: ?network_module.SimNetworkOptions = null,
+        /// Stack size for scheduler-backed `std.Io` tasks. Raise this when a
+        /// simulated SUT's call chains outgrow the default; stacks cost
+        /// address space, not resident memory, on guard-page targets.
+        task_stack_size: usize = scheduler_module.default_task_stack_size,
     };
 
     pub const Simulation = struct {
@@ -692,6 +696,7 @@ pub const World = struct {
         errdefer if (!scheduler_registered) self.allocator.destroy(scheduler);
 
         scheduler.* = scheduler_module.TaskScheduler.init(self.allocator, self);
+        scheduler.task_stack_size = options.task_stack_size;
         errdefer if (!scheduler_registered) scheduler.deinit();
 
         try self.registerTeardown(scheduler, scheduler_module.deinitTaskSchedulerOpaque);

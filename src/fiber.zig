@@ -20,7 +20,7 @@ pub const Switch = std_fiber.Switch;
 pub const default_stack_size = 64 * 1024;
 pub const stack_alignment = 16;
 
-/// Whether fiber stacks come from mmap with a PROT_NONE guard page below
+/// Whether fiber stacks come from mmap with a PROT_NONE guard region below
 /// the usable region. An overflow then faults at the offending write
 /// instead of corrupting adjacent heap and masquerading as nondeterminism.
 /// Stacks on these targets bypass the user-passed allocator; this is a
@@ -29,6 +29,21 @@ const use_guard_pages = switch (builtin.os.tag) {
     .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => true,
     else => false,
 };
+
+/// Minimum guard region below each fiber stack, rounded up to the page size.
+///
+/// A single page is not enough: one stack-frame adjustment larger than the
+/// page (easy to hit in Debug builds with large locals) steps straight over
+/// it and corrupts whatever is mapped below, which then presents as heap
+/// corruption or nondeterminism far from the overflow. The region is
+/// PROT_NONE and never committed, so widening it costs address space only.
+/// A frame larger than the whole region can still escape; 256 KiB makes that
+/// require a quarter-megabyte local, which is a deliberate act.
+const guard_region_size = 256 * 1024;
+
+fn guardLength() usize {
+    return std.mem.alignForward(usize, guard_region_size, std.heap.pageSize());
+}
 
 /// Sentinel written at the low end of every fiber stack, checked by the
 /// scheduler after every switch. Best-effort diagnostics only: it catches
@@ -66,7 +81,7 @@ pub const Fiber = struct {
     finished: bool = false,
 
     const Memory = union(enum) {
-        /// mmap'd region laid out as [guard page][usable stack].
+        /// mmap'd region laid out as [guard region][usable stack].
         mapped: []align(std.heap.page_size_min) u8,
         /// Plain allocation with canary-only protection.
         heap: []align(stack_alignment) u8,
@@ -84,20 +99,21 @@ pub const Fiber = struct {
         const memory: Memory = if (use_guard_pages) memory: {
             const page_size = std.heap.pageSize();
             const usable_len = std.mem.alignForward(usize, options.stack_size, page_size);
+            const guard_len = guardLength();
             const mapping = std.posix.mmap(
                 null,
-                usable_len + page_size,
+                usable_len + guard_len,
                 .{ .READ = true, .WRITE = true },
                 .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
                 -1,
                 0,
             ) catch return error.OutOfMemory;
             errdefer std.posix.munmap(mapping);
-            // std.posix has no mprotect wrapper, so replace the lowest page
+            // std.posix has no mprotect wrapper, so replace the lowest pages
             // with an inaccessible mapping via MAP_FIXED to form the guard.
             _ = std.posix.mmap(
                 @alignCast(mapping.ptr),
-                page_size,
+                guard_len,
                 .{},
                 .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true },
                 -1,
@@ -160,7 +176,7 @@ pub const Fiber = struct {
 
     fn usableStack(self: *const Fiber) []align(stack_alignment) u8 {
         return switch (self.memory) {
-            .mapped => |mapping| @alignCast(mapping[std.heap.pageSize()..]),
+            .mapped => |mapping| @alignCast(mapping[guardLength()..]),
             .heap => |stack| stack,
         };
     }

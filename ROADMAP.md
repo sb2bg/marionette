@@ -129,11 +129,6 @@ the chain:
 - **16e. Larger transfers.** Chunked bodies and payloads spanning many
   simulated packets, exercising partial reads and writes through the
   `Io.Reader`/`Io.Writer` adapters.
-- **16f. Fiber stack accounting.** The dusty client needs more than 640 KiB
-  of Debug-mode task stack; the default is now 1 MiB. Decide whether stack
-  size becomes a `simulate` option, and whether guard regions should grow
-  beyond one page so frames larger than a page cannot skip the guard and
-  corrupt neighboring mappings silently.
 
 Deferred cancellation follow-ups, promoted when a SUT forces them: a
 cancelable `Group.await` park (a canceled awaiter should propagate to members

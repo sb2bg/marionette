@@ -79,6 +79,11 @@ fn scenario(world: *mar.World) !void {
 `sim.env` supplies the handles passed to application code. `sim.control` is
 kept by the harness for simulator-only actions such as advancing time or
 crashing disk.
+`simulate` options also include `task_stack_size` for scheduler-backed
+`std.Io` tasks (default 1 MiB). Raise it when a simulated SUT's call chains
+run deep; on guard-page targets stacks cost address space, not resident
+memory, and overflow faults at a 256 KiB guard region instead of corrupting
+neighboring memory.
 `env.buggify` draws through the env's random capability only when the env was
 built by simulation; production envs construct the same composition bundle with
 production adapters such as `mar.RealDisk`.

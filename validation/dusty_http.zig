@@ -187,11 +187,16 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) !Outcome {
     });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{
-        .nodes = 2,
-        .service_nodes = 1,
-        .path_capacity = 32,
-    } });
+    const sim = try world.simulate(.{
+        .network = .{
+            .nodes = 2,
+            .service_nodes = 1,
+            .path_capacity = 32,
+        },
+        // dusty's Debug-mode fetch frames are deep; the widened fiber guard
+        // region caught the default 1 MiB stack silently overflowing here.
+        .task_stack_size = 2 * 1024 * 1024,
+    });
     const server_env = try sim.envForNode(0);
     const client_env = try sim.envForNode(1);
     const server_io = server_env.io();
@@ -257,11 +262,16 @@ pub fn runHungShutdownScenario(allocator: std.mem.Allocator, seed: u64) !HungOut
     });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{
-        .nodes = 2,
-        .service_nodes = 1,
-        .path_capacity = 32,
-    } });
+    const sim = try world.simulate(.{
+        .network = .{
+            .nodes = 2,
+            .service_nodes = 1,
+            .path_capacity = 32,
+        },
+        // dusty's Debug-mode fetch frames are deep; the widened fiber guard
+        // region caught the default 1 MiB stack silently overflowing here.
+        .task_stack_size = 2 * 1024 * 1024,
+    });
     const server_env = try sim.envForNode(0);
     const client_env = try sim.envForNode(1);
     const server_io = server_env.io();

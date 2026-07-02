@@ -44,6 +44,14 @@
 - Fixes closed-handle retirement when a canceled net wait loses a race with
   a concurrent close: the canceled accept/read paths now retire closed idle
   handles exactly like the woken paths.
+- Widens the fiber stack guard from one page to a 256 KiB PROT_NONE region,
+  so Debug-mode stack frames larger than a page fault at the overflow
+  instead of silently corrupting neighboring mappings. The widened guard
+  immediately caught a latent overflow in the dusty hung-shutdown
+  validation that the single-page guard had missed. Adds
+  `SimulateOptions.task_stack_size` so a simulation can raise the
+  scheduler task stack for deep SUT call chains; the dusty validation now
+  uses 2 MiB.
 
 ## v0.4.0 - 2026-06-30
 

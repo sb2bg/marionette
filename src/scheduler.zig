@@ -21,15 +21,16 @@ pub const EventQueueError = error{
 /// Stable task identifier assigned by the deterministic scheduler.
 pub const TaskId = u64;
 
-/// Default stack for scheduled tasks.
+/// Default stack for scheduled tasks. Overridable per simulation through
+/// `SimulateOptions.task_stack_size`.
 ///
 /// Scheduler tasks run normal Marionette code, including trace formatting and
 /// allocator calls, so they need more room than the primitive fiber smoke test.
 /// Real SUT code paths can be deep: the dusty HTTP validation's Debug-mode
 /// client `fetch` needs just over 640 KiB. Stacks are lazily paged mmap
 /// regions on guard-page targets, so this size costs address space, not
-/// resident memory. Note that a frame larger than the single guard page can
-/// still skip past it silently; keep headroom generous.
+/// resident memory, and overflows land in a 256 KiB PROT_NONE guard region
+/// below the stack instead of corrupting neighboring mappings.
 pub const default_task_stack_size = 1024 * 1024;
 
 /// Errors returned by the experimental cooperative scheduler itself.
@@ -79,6 +80,9 @@ pub const TaskScheduler = struct {
     /// cancel the main context, but `swapCancelProtection` must round-trip
     /// the previous value faithfully regardless of caller context.
     main_cancel_protection: Io.CancelProtection = .unblocked,
+    /// Stack size for tasks spawned through the type-erased `std.Io` runtime
+    /// seam. Direct `spawn` callers can still override per task.
+    task_stack_size: usize = default_task_stack_size,
 
     const MainWait = struct {
         key: WaitKey,
@@ -232,6 +236,7 @@ pub const TaskScheduler = struct {
         errdefer _ = self.opaque_entries.pop();
 
         return try self.spawn(.{
+            .stack_size = self.task_stack_size,
             .entry = OpaqueEntry.run,
             .arg = adapter,
             .process_id = process_id,
