@@ -27,6 +27,7 @@ const Io = std.Io;
 const hello_body = "hello from the simulation\n";
 const echo_payload = "determinism";
 const base_url = "http://127.0.0.1:4580";
+const dusty_task_stack_size = 8 * 1024 * 1024;
 
 fn handleHello(req: *http.Request, res: *http.Response) !void {
     _ = req;
@@ -193,9 +194,9 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) !Outcome {
             .service_nodes = 1,
             .path_capacity = 32,
         },
-        // dusty's Debug-mode fetch frames are deep; the widened fiber guard
-        // region caught the default 1 MiB stack silently overflowing here.
-        .task_stack_size = 2 * 1024 * 1024,
+        // dusty's Debug-mode fetch frames are platform-sensitive and deep;
+        // Linux/x86_64 needs more than the default stack to enter fetchInternal.
+        .task_stack_size = dusty_task_stack_size,
     });
     const server_env = try sim.envForNode(0);
     const client_env = try sim.envForNode(1);
@@ -268,9 +269,9 @@ pub fn runHungShutdownScenario(allocator: std.mem.Allocator, seed: u64) !HungOut
             .service_nodes = 1,
             .path_capacity = 32,
         },
-        // dusty's Debug-mode fetch frames are deep; the widened fiber guard
-        // region caught the default 1 MiB stack silently overflowing here.
-        .task_stack_size = 2 * 1024 * 1024,
+        // dusty's Debug-mode fetch frames are platform-sensitive and deep;
+        // Linux/x86_64 needs more than the default stack to enter fetchInternal.
+        .task_stack_size = dusty_task_stack_size,
     });
     const server_env = try sim.envForNode(0);
     const client_env = try sim.envForNode(1);
