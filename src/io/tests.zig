@@ -1642,6 +1642,57 @@ test "io: cancel unparks a task blocked in net accept" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver task=0") != null);
 }
 
+const GroupCancelState = struct {
+    futex: u32 = 0,
+    canceled_members: u8 = 0,
+};
+
+fn groupCancelMember(io: Io, state: *GroupCancelState) Io.Cancelable!void {
+    io.futexWait(u32, &state.futex, 0) catch |err| {
+        state.canceled_members += 1;
+        return err;
+    };
+}
+
+fn runGroupCancelTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
+    var world = try World.init(task_world_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state = GroupCancelState{};
+    var group: Io.Group = .init;
+    try group.concurrent(io, groupCancelMember, .{ io, &state });
+    try group.concurrent(io, groupCancelMember, .{ io, &state });
+
+    // Park both members on the futex before canceling. The main-context
+    // sleep drives the scheduler until only the timer remains.
+    try Io.sleep(io, .fromNanoseconds(50), .awake);
+
+    group.cancel(io);
+    try std.testing.expectEqual(@as(u8, 2), state.canceled_members);
+
+    return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "io: group cancel delivers to parked members in deterministic order" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const first = try runGroupCancelTrace(std.testing.allocator, 0x96C4);
+    defer std.testing.allocator.free(first);
+    const second = try runGroupCancelTrace(std.testing.allocator, 0x96C4);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    // Members are requested in ascending task order.
+    const first_request = std.mem.indexOf(u8, first, "scheduler.cancel_request task=0").?;
+    const second_request = std.mem.indexOf(u8, first, "scheduler.cancel_request task=1").?;
+    try std.testing.expect(first_request < second_request);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.cancel_deliver task=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.cancel_deliver task=1") != null);
+}
+
 test "io: cancel of a task without cancellation points runs it to completion" {
     if (!fiber_supported) return error.SkipZigTest;
 

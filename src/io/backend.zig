@@ -2040,9 +2040,32 @@ fn simGroupAwait(
 }
 
 fn simGroupCancel(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) void {
-    // Cooperative cancellation matches single-future cancellation for now:
-    // tasks run until their own stop condition reaches a suspension point.
+    const backend = backendFromUserdata(userdata);
+    const state: *GroupState = @ptrCast(@alignCast(token));
+    std.debug.assert(state.backend == backend);
+    std.debug.assert(state.group == group);
+
+    if (!state.done) requestGroupCancel(backend, state);
+    // The group-await park is not itself a cancellation point, so this cannot
+    // surface `error.Canceled`.
     simGroupAwait(userdata, group, token) catch unreachable;
+}
+
+/// Arm cancellation requests on every live member of `state`, in ascending
+/// task order so delivery is deterministic regardless of spawn interleaving.
+fn requestGroupCancel(backend: *Backend, state: *GroupState) void {
+    const runtime = backend.task_runtime orelse return;
+
+    var member_ids: std.ArrayList(u64) = .empty;
+    defer member_ids.deinit(backend.allocator);
+    for (backend.group_closures.items) |closure| {
+        if (closure.state == state) {
+            member_ids.append(backend.allocator, closure.task_id) catch
+                @panic("failed to collect group members for cancellation");
+        }
+    }
+    std.mem.sort(u64, member_ids.items, {}, std.sort.asc(u64));
+    for (member_ids.items) |task_id| runtime.requestCancel(task_id);
 }
 
 fn simConcurrent(
