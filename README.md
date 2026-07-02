@@ -259,10 +259,14 @@ zig build validate-ochi
 
 The optional `validate-dusty` target runs the pinned, unmodified
 [`lalinsky/dusty`](https://github.com/lalinsky/dusty) HTTP client/server
-library through Marionette's deterministic `std.Io`. dusty's router, llhttp
-parser, and connection pool serve a routed GET and a POST echo over simulated
-`std.Io.net` streams with injected latency, on one keep-alive connection, and
-the exchange replays byte-identically from the same seed. dusty is a lazy
+library through Marionette's deterministic `std.Io`. dusty's real
+`Server.listen` accept loop runs as a simulated task: its router, llhttp
+parser, and connection pool serve a keep-alive GET/POST pair plus a second
+connection over simulated `std.Io.net` streams with injected latency, and the
+harness then shuts the server down through cooperative cancellation —
+`error.Canceled` lands in dusty's `accept` park, the server drains its
+connections, and its deferred `Group.cancel` sweeps the handlers. The whole
+exchange replays byte-identically from the same seed. dusty is a lazy
 dependency and this target is not part of the default test step.
 
 ```sh
@@ -270,8 +274,8 @@ zig build validate-dusty
 ```
 
 This is an external-style capability demonstration of the `std.Io.net`
-boundary, not a third-party SUT finding. Growing this validation into the real
-`Server.listen` accept loop and fault scenarios is the 0.6 roadmap target.
+boundary, not a third-party SUT finding. Fault scenarios against this SUT are
+the remaining 0.6 roadmap work.
 
 ## Traces
 
@@ -331,11 +335,14 @@ cooperative `std.Io` tasks, groups, and futex waits for `Mutex` / `Condition` co
 validated against the pinned `g41797/mailbox` target and the internal
 bounded-queue capability demo, plus the pinned Ochi storage target. It does not model
 arbitrary OS thread scheduling or memory-level concurrency; code that depends on
-those needs separate testing. The production network path
+those needs separate testing. The simulator also models
+deterministic allocation faults through `Env.allocator()` and cooperative
+cancellation: `Future.cancel` and `Group.cancel` deliver `error.Canceled` at
+futex, sleep, and net suspension points following `std.Io`'s one-shot
+protocol. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths
-exist, but cross-process production transport is still roadmap work. Allocator
-simulation, cooperative cancellation points, queue suspension, and
-broader scheduler parity are planned.
+exist, but cross-process production transport is still roadmap work. Queue
+suspension and broader scheduler parity are planned.
 
 Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows
 fiber path is deliberately disabled until its Win64 entry ABI has execution

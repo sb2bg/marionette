@@ -26,6 +26,18 @@
 - Re-scopes the 0.6 roadmap target from production `Endpoint(Message)`
   transport to SUT-driven deterministic `std.Io.net` depth, and defers the
   production transport chain to 0.7.
+- Adds cooperative cancellation following `std.Io`'s protocol: `Future.cancel`
+  and `Group.cancel` arm a one-shot request that delivers `error.Canceled` at
+  the task's next cancellation point (`checkCancel`, `futexWait`, `sleep`,
+  `netAccept`, `netRead`, `netWrite`), interrupting cancelable parks
+  immediately. `recancel` re-arms, `swapCancelProtection` defers delivery,
+  uncancelable waits defer to the next point, and group members are canceled
+  in ascending task order. Requests and deliveries are trace-visible as
+  `scheduler.cancel_request` / `scheduler.cancel_deliver`.
+- Runs the dusty validation through dusty's real `Server.listen` accept loop:
+  multi-connection accept, keep-alive reuse, and cancel-driven graceful
+  shutdown where the listener drains and its deferred group cancel sweeps
+  parked connection handlers, all with byte-identical same-seed replay.
 
 ## v0.4.0 - 2026-06-30
 

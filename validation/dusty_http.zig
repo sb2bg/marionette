@@ -6,11 +6,11 @@
 //! Marionette owns the harness side: world, seed, simulated network, latency,
 //! trace, and the response oracle.
 //!
-//! The harness drives `Server.handleConnection` on an accepted stream instead
-//! of `Server.listen` because ending the listen loop requires cancellation of
-//! a task parked in `accept`, and the simulator's cooperative cancellation
-//! currently runs canceled tasks to completion. That gap is tracked in the
-//! roadmap's 0.6 target.
+//! The harness runs dusty's real `Server.listen` accept loop as a simulated
+//! task and shuts it down through cooperative cancellation: canceling the
+//! listen task delivers `error.Canceled` inside `accept`, dusty drains active
+//! connections, and its deferred `Group.cancel` unparks any handler still
+//! blocked in a read.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -40,6 +40,8 @@ pub const Outcome = struct {
     hello_body: []u8,
     echo_status: u32,
     echo_body: []u8,
+    second_hello_status: u32,
+    graceful_shutdown: bool,
 
     pub fn deinit(self: *Outcome) void {
         self.allocator.free(self.trace);
@@ -54,59 +56,91 @@ const Scenario = struct {
     world: *mar.World,
     server_io: Io,
     client_io: Io,
-    listener: *Io.net.Server,
     server: *http.Server(void),
     hello_status: u32 = 0,
     hello_body_copy: []u8 = &.{},
     echo_status: u32 = 0,
     echo_body_copy: []u8 = &.{},
+    second_hello_status: u32 = 0,
+    graceful_shutdown: bool = false,
 
     fn record(self: *Scenario, comptime fmt: []const u8, args: anytype) void {
         self.world.record(fmt, args) catch @panic("dusty_http trace record failed");
     }
 
     fn serverTask(self: *Scenario) void {
-        self.record("dusty_http.server.accept_waiting", .{});
-        const stream = self.listener.accept(self.server_io) catch @panic("dusty_http accept failed");
-        self.record("dusty_http.server.accepted", .{});
-        self.server.handleConnection(stream) catch |err| {
-            std.debug.panic("dusty_http handleConnection failed: {}", .{err});
+        self.record("dusty_http.server.listen_start", .{});
+        const address: http.Address = .{
+            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
         };
-        self.record("dusty_http.server.connection_closed", .{});
+        self.server.listen(address) catch |err| switch (err) {
+            error.Canceled => {
+                self.graceful_shutdown = true;
+                self.record("dusty_http.server.graceful_shutdown", .{});
+                return;
+            },
+            else => std.debug.panic("dusty_http listen failed: {}", .{err}),
+        };
+        @panic("dusty_http listen returned without a shutdown request");
     }
 
     fn clientTask(self: *Scenario) void {
-        var client = http.Client.init(self.allocator, self.client_io, .{});
-        defer client.deinit();
+        // The ready event lives in the server process's futex namespace, so
+        // the harness waits on it with the server's io handle.
+        self.server.ready.wait(self.server_io) catch @panic("dusty_http ready wait failed");
+        self.record("dusty_http.client.server_ready", .{});
 
+        // First connection: two requests over dusty's keep-alive pool.
         {
-            var response = client.fetch(base_url ++ "/hello", .{}) catch |err| {
-                std.debug.panic("dusty_http GET /hello failed: {}", .{err});
-            };
-            defer response.deinit();
-            self.hello_status = @intFromEnum(response.status());
-            const payload = (response.body() catch @panic("hello body read failed")) orelse "";
-            self.hello_body_copy = self.allocator.dupe(u8, payload) catch @panic("dusty_http oom");
-            self.record(
-                "dusty_http.client.hello status={} bytes={}",
-                .{ self.hello_status, payload.len },
-            );
+            var client = http.Client.init(self.allocator, self.client_io, .{});
+            defer client.deinit();
+
+            {
+                var response = client.fetch(base_url ++ "/hello", .{}) catch |err| {
+                    std.debug.panic("dusty_http GET /hello failed: {}", .{err});
+                };
+                defer response.deinit();
+                self.hello_status = @intFromEnum(response.status());
+                const payload = (response.body() catch @panic("hello body read failed")) orelse "";
+                self.hello_body_copy = self.allocator.dupe(u8, payload) catch @panic("dusty_http oom");
+                self.record(
+                    "dusty_http.client.hello status={} bytes={}",
+                    .{ self.hello_status, payload.len },
+                );
+            }
+
+            {
+                var response = client.fetch(base_url ++ "/echo", .{
+                    .method = .post,
+                    .body = echo_payload,
+                }) catch |err| {
+                    std.debug.panic("dusty_http POST /echo failed: {}", .{err});
+                };
+                defer response.deinit();
+                self.echo_status = @intFromEnum(response.status());
+                const payload = (response.body() catch @panic("echo body read failed")) orelse "";
+                self.echo_body_copy = self.allocator.dupe(u8, payload) catch @panic("dusty_http oom");
+                self.record(
+                    "dusty_http.client.echo status={} bytes={}",
+                    .{ self.echo_status, payload.len },
+                );
+            }
         }
 
+        // Second connection: proves the accept loop serves more than one
+        // connection before shutdown.
         {
-            var response = client.fetch(base_url ++ "/echo", .{
-                .method = .post,
-                .body = echo_payload,
-            }) catch |err| {
-                std.debug.panic("dusty_http POST /echo failed: {}", .{err});
+            var client = http.Client.init(self.allocator, self.client_io, .{});
+            defer client.deinit();
+
+            var response = client.fetch(base_url ++ "/hello", .{}) catch |err| {
+                std.debug.panic("dusty_http second GET /hello failed: {}", .{err});
             };
             defer response.deinit();
-            self.echo_status = @intFromEnum(response.status());
-            const payload = (response.body() catch @panic("echo body read failed")) orelse "";
-            self.echo_body_copy = self.allocator.dupe(u8, payload) catch @panic("dusty_http oom");
+            self.second_hello_status = @intFromEnum(response.status());
             self.record(
-                "dusty_http.client.echo status={} bytes={}",
-                .{ self.echo_status, payload.len },
+                "dusty_http.client.second_hello status={}",
+                .{self.second_hello_status},
             );
         }
     }
@@ -131,10 +165,6 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) !Outcome {
 
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
 
-    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable;
-    var listener = try address.listen(server_io, .{});
-    defer listener.deinit(server_io);
-
     var server = http.Server(void).init(allocator, server_io, .{}, {});
     defer server.deinit();
     server.router.get("/hello", handleHello);
@@ -145,15 +175,16 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) !Outcome {
         .world = &world,
         .server_io = server_io,
         .client_io = client_io,
-        .listener = &listener,
         .server = &server,
     };
 
-    var server_future = Io.async(server_io, Scenario.serverTask, .{&scenario});
-    var client_future = Io.async(client_io, Scenario.clientTask, .{&scenario});
+    var server_future = try Io.concurrent(server_io, Scenario.serverTask, .{&scenario});
+    var client_future = try Io.concurrent(client_io, Scenario.clientTask, .{&scenario});
 
     client_future.await(client_io);
-    server_future.await(server_io);
+    // Graceful shutdown: cancellation lands in dusty's accept park, the
+    // server drains its connections, and its group cancel sweeps handlers.
+    server_future.cancel(server_io);
     if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
 
     const trace = try allocator.dupe(u8, world.traceBytes());
@@ -166,10 +197,12 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) !Outcome {
         .hello_body = scenario.hello_body_copy,
         .echo_status = scenario.echo_status,
         .echo_body = scenario.echo_body_copy,
+        .second_hello_status = scenario.second_hello_status,
+        .graceful_shutdown = scenario.graceful_shutdown,
     };
 }
 
-test "dusty HTTP request/response works under simulated std.Io.net" {
+test "dusty HTTP serves requests through its real listen loop under simulation" {
     var outcome = try runScenario(std.testing.allocator, 0xC0FFEE);
     defer outcome.deinit();
 
@@ -177,6 +210,8 @@ test "dusty HTTP request/response works under simulated std.Io.net" {
     try std.testing.expectEqualStrings(hello_body, outcome.hello_body);
     try std.testing.expectEqual(@as(u32, 200), outcome.echo_status);
     try std.testing.expectEqualStrings("echo:" ++ echo_payload, outcome.echo_body);
+    try std.testing.expectEqual(@as(u32, 200), outcome.second_hello_status);
+    try std.testing.expect(outcome.graceful_shutdown);
 }
 
 test "dusty HTTP scenario replays byte-identically from the same seed" {
@@ -186,7 +221,8 @@ test "dusty HTTP scenario replays byte-identically from the same seed" {
     defer second.deinit();
 
     try std.testing.expectEqualStrings(first.trace, second.trace);
-    try std.testing.expect(std.mem.indexOf(u8, first.trace, "dusty_http.server.accepted") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.trace, "dusty_http.client.echo status=200") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.trace, "dusty_http.server.connection_closed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.trace, "scheduler.cancel_request") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.trace, "scheduler.cancel_deliver") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.trace, "dusty_http.server.graceful_shutdown") != null);
 }

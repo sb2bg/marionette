@@ -113,18 +113,13 @@ compatibility with any Zig code written against the standard interface. This
 replaces the previous 0.6 target (production `Endpoint(Message)` transport),
 which moves to 0.7 until a user needs cross-process endpoint parity.
 
-The first slice exists: `validate-dusty` runs the pinned, unmodified
-`lalinsky/dusty` HTTP client/server pair through simulated streams with
-byte-identical same-seed replay. Finish the chain:
+The first two slices exist: cooperative cancellation (16a) delivers
+`error.Canceled` at futex, sleep, and net suspension points with deterministic
+group ordering, and `validate-dusty` (16b) runs the pinned, unmodified
+`lalinsky/dusty` server through its real `Server.listen` accept loop with
+cancel-driven graceful shutdown and byte-identical same-seed replay. Finish
+the chain:
 
-- **16a. Cooperative cancellation points.** `simCancel` and `simGroupCancel`
-  currently run canceled tasks to completion, so canceling a task parked in
-  `accept` or a stream read cannot terminate it. Deliver `error.Canceled` at
-  scheduler suspension points with a deterministic cancellation order.
-- **16b. Run the real accept loop.** Switch the dusty validation from
-  harness-driven `handleConnection` to `Server.listen` plus graceful shutdown
-  once 16a lands, covering multi-connection accept and
-  `Io.Event.waitTimeout` drain behavior.
 - **16c. HTTP fault scenarios with an oracle.** Partition mid-response, heal,
   retry. Assert the client surfaces the failure deterministically and a retry
   converges. Reuse the 0.5 recovery vocabulary where it applies.
@@ -140,8 +135,12 @@ byte-identical same-seed replay. Finish the chain:
   beyond one page so frames larger than a page cannot skip the guard and
   corrupt neighboring mappings silently.
 
-Supporting scheduler/runtime work belongs in 0.6 only when the SUT forces it;
-16a is already forced.
+Deferred cancellation follow-ups, promoted when a SUT forces them: a
+cancelable `Group.await` park (a canceled awaiter should propagate to members
+and resurface `error.Canceled`), and cancellation points on disk-latency and
+file-lock waits.
+
+Supporting scheduler/runtime work belongs in 0.6 only when the SUT forces it.
 
 ---
 

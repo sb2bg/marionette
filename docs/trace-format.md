@@ -68,6 +68,9 @@ Rules:
   `allocation.remap`, and `allocation.free` with `op`, length, `align`,
   `status`, `reason`, `roll`, `live_bytes`, and `successful_allocations`
   fields. They never contain addresses.
+- Cooperative cancellation records `scheduler.cancel_request task=<u64>` when
+  a request is armed and `scheduler.cancel_deliver task=<u64>` when
+  `error.Canceled` is delivered at a cancellation point.
 - Time-evolved simulator faults are preceded by
   `fault_evolution.boundary now_ns=<u64>`. Seeded scheduling draws and any
   network or process state transitions caused at that timestamp follow the
