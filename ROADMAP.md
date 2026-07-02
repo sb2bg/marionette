@@ -101,6 +101,14 @@ group ordering, and `validate-dusty` (16b) runs the pinned, unmodified
 cancel-driven graceful shutdown and byte-identical same-seed replay. Finish
 the chain:
 
+- **16c-prereq. Guarded fiber overflow diagnostics.** Make POSIX guard-page
+  stack faults legible before expanding dusty fault coverage: register guarded
+  fiber ranges with task/process metadata, emit a Marionette-specific
+  diagnostic on guard hits, then chain to Zig's existing signal handler so
+  Debug traces still show the fault site. Done when a subprocess test
+  deliberately overflows a fiber and stderr names the task id, process id,
+  configured stack size, and `task_stack_size`; non-guard faults keep their
+  existing behavior, and embedders can opt out.
 - **16c. HTTP fault scenarios with an oracle.** Partition mid-response, heal,
   retry. Assert the client surfaces the failure deterministically and a retry
   converges. Reuse the 0.5 recovery vocabulary where it applies.
