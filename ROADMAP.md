@@ -28,22 +28,6 @@ maintainer-readable repros.
 
 Pick from this section first unless a later release item is blocking it.
 
-### External Storage Compatibility
-
-The xitdb crash-fault fuzzer with shrinking landed: seed-planned workloads,
-mid-commit crash points, one fault class at a time across sector sizes, and
-greedy 1-minimal reduction to a maintainer-readable operation sequence
-(`validation/xitdb_durability.zig`). The remaining storage work is
-compatibility:
-
-- Add a small compatibility scenario that ports the storage-facing slice of
-  `kvdb` or a local surrogate:
-  open database, append WAL records, commit, reopen/recover, compact via
-  rename, and clear/delete the WAL.
-- Keep filesystem modeling scoped. Directory deletion/rename, permissions,
-  symlinks, and richer directory APIs remain deferred until a compatibility
-  target forces them.
-
 ### Liveness Mode Transition
 
 Add a one-shot `sim.transitionToLiveness(core: []const NodeId)` that:
@@ -54,8 +38,8 @@ Add a one-shot `sim.transitionToLiveness(core: []const NodeId)` that:
 - leaves non-core failures permanent.
 
 This follows the VOPR `transition_to_liveness_mode` shape. It depends on the
-recovery-window and external-storage work above so storage examples have a
-durable-truth vocabulary.
+recovery-window vocabulary and storage compatibility validation, which are now
+met by `docs/disk-fault-model.md` and `validation/kv_compat.zig`.
 
 ### Opportunistic 0.5 Cleanup
 
@@ -65,14 +49,11 @@ small isolated patches:
 - Replace `SimNetworkOptions.service_nodes: usize` with
   `partitionable_nodes: []const NodeId` when a third caller sets
   `service_nodes`, or when a real example needs a non-prefix subset.
-- Pick one misuse contract for `runFor`: `SimControl.runFor` currently returns
-  `error.InvalidDuration`, while `World.runFor` / `SimClock.runFor` assert.
-- Pick one disabled-fault random-consumption convention: disk `rollFault`
-  skips the draw when `numerator == 0`, while `Env.buggify` always draws.
-- Document complete host filename parity as deferred. The current guarantee is
-  rooted, non-traversing logical syntax, not identical behavior across case
-  sensitivity, Unicode normalization, Windows reserved names/streams,
-  trailing-dot/space handling, or host path limits.
+
+Settled in 0.5: misaligned `runFor` durations assert as harness misuse
+everywhere; disabled faults (zero rates) consume no randomness and emit no
+trace (see the determinism doc's conventions section); and deferred host
+filename parity is documented in the API doc's logical-path section.
 
 ---
 
@@ -94,30 +75,30 @@ compatibility with any Zig code written against the standard interface. This
 replaces the previous 0.6 target (production `Endpoint(Message)` transport),
 which moves to 0.7 until a user needs cross-process endpoint parity.
 
-The first two slices exist: cooperative cancellation (16a) delivers
+The first three slices exist: cooperative cancellation (16a) delivers
 `error.Canceled` at futex, sleep, and net suspension points with deterministic
-group ordering, and `validate-dusty` (16b) runs the pinned, unmodified
+group ordering, `validate-dusty` (16b) runs the pinned, unmodified
 `lalinsky/dusty` server through its real `Server.listen` accept loop with
-cancel-driven graceful shutdown and byte-identical same-seed replay. Finish
-the chain:
+cancel-driven graceful shutdown and byte-identical same-seed replay, and the
+dusty fault scenarios (16c) partition before and during responses, pin the
+observed `error.Timeout` contract, heal, retry with an exact body oracle, and
+reject short-success partial responses. Finish the chain:
 
-- **16c-prereq. Guarded fiber overflow diagnostics.** Make POSIX guard-page
-  stack faults legible before expanding dusty fault coverage: register guarded
-  fiber ranges with task/process metadata, emit a Marionette-specific
-  diagnostic on guard hits, then chain to Zig's existing signal handler so
-  Debug traces still show the fault site. Done when a subprocess test
-  deliberately overflows a fiber and stderr names the task id, process id,
-  configured stack size, and `task_stack_size`; non-guard faults keep their
-  existing behavior, and embedders can opt out.
-- **16c. HTTP fault scenarios with an oracle.** Partition mid-response, heal,
-  retry. Assert the client surfaces the failure deterministically and a retry
-  converges. Reuse the 0.5 recovery vocabulary where it applies.
 - **16d. Keep-alive and connection churn.** Sequential connections, pooled
   reuse across requests, and close/shutdown discipline, including
   `netShutdown` semantics under partition.
 - **16e. Larger transfers.** Chunked bodies and payloads spanning many
   simulated packets, exercising partial reads and writes through the
   `Io.Reader`/`Io.Writer` adapters.
+- **16f. Randomized task start jitter.** Readiness races are structurally
+  masked today: virtual time advances only when every task blocks, so a
+  server with no suspension point before `listen` always beats a client that
+  sleeps first, and no seed can find the race. Add an opt-in simulate option
+  that draws a small per-task initial delay from the seed so the scheduler
+  explores those orderings for the whole class of SUTs instead of one
+  hand-written delay per scenario. Done when a validation deterministically
+  reproduces a connect-before-listen race with same-seed replay, and the
+  option defaults off so existing traces and snapshots are unchanged.
 
 Deferred cancellation follow-ups, promoted when a SUT forces them: a
 cancelable `Group.await` park (a canceled awaiter should propagate to members

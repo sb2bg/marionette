@@ -333,7 +333,9 @@ change as the simulator grows.
 The simulator currently models clock, deterministic randomness, disk, a
 directory-aware `std.Io.File`/`Dir` subset, typed endpoint networking, a narrow scheduler-backed
 `std.Io.net` stream subset with accept/read suspension plus latency and
-send-time loss, delivery-time partitions, and deterministic healing, and
+send-time loss, delivery-time partitions, deterministic healing, and
+literal-only host lookup (an unmodified `std.http.Client` runs against
+simulated servers; real DNS stays unsupported), and
 cooperative `std.Io` tasks, groups, and futex waits for `Mutex` / `Condition` code,
 validated against the pinned `g41797/mailbox` target and the internal
 bounded-queue capability demo, plus the pinned Ochi storage target. It does not model

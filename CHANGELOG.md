@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Adds simulated `netLookup` for address literals: IPv4/IPv6 literals and
+  RFC 6761 `localhost` names resolve deterministically through the std
+  queue protocol (trace event `io.net.lookup`), so an unmodified
+  `std.http.Client` request against a simulated server succeeds, including
+  the `localhost` two-candidate `connectMany` race where the v6 loopback
+  attempt fails cleanly and v4 wins. Real DNS, `/etc/hosts`, and search
+  domains remain explicitly unsupported (`error.UnknownHostName`), and the
+  fetch replays byte-identically from the same seed.
+- Settles two simulator-wide conventions and documents them in the
+  determinism doc: a disabled fault (zero rate) consumes no randomness and
+  emits no trace, so `Env.buggify` at `.never()` no longer draws or records;
+  and misaligned `runFor` durations assert as harness misuse across
+  `SimControl` and network control instead of returning
+  `error.InvalidDuration`. The buggify change can shift seed streams for
+  workloads that rolled zero-rate hooks, which is why it lands inside the
+  0.5 release boundary.
+- Adds the structural disk crash trigger `control.disk.crashAfterOps(n)`:
+  the disk crashes at the operation boundary after `n` more data/metadata
+  operations, trace-visible as `disk.fault kind=armed_crash`. The xitdb
+  crash-fault fuzzer now arms the trigger instead of measuring an
+  undisturbed victim run and sleeping to a tick offset: `measureVictimTicks`
+  is gone, each fuzz case runs once instead of twice, and the shrink test's
+  crash-point scan is self-bounding via the `passed_no_window` outcome.
+- Adds guarded fiber stack-overflow diagnostics on POSIX guard-page targets:
+  task fibers register their guard regions with task/process metadata, and a
+  `SIGSEGV`/`SIGBUS` handler on the alternate signal stack writes a targeted
+  stderr diagnostic (task id, owning process, configured stack size, the
+  `task_stack_size` fix) when a fault lands in a registered guard, then
+  chains to the previously installed handler so Zig's Debug trace still
+  shows the fault site. Non-guard faults chain through unchanged. Subprocess
+  tests cover both the overflow diagnostic and the non-fiber fall-through;
+  embedders opt out with `simulate(.{ .fiber_overflow_diagnostics = false })`.
 - Adds the deterministic allocation authority core: `Env.allocator()` returns
   an app-facing `std.mem.Allocator`, simulation wraps the harness allocator
   with deterministic fail-after, live-byte quota, and BUGGIFY allocation
@@ -41,6 +73,11 @@
   a hung-connection shutdown leaves a keep-alive handler parked in a read,
   so dusty's drain times out and its deferred group cancel sweeps the parked
   handler.
+- Adds dusty HTTP fault scenarios with an oracle: partition before response
+  and mid-response through futex handshakes, pin dusty's observed
+  `error.Timeout` contract under a severed link, heal and retry with a fresh
+  client, require exact response bodies, reject short-success partial chunked
+  responses, and sweep every chunk cut point across deterministic seeds.
 - Fixes closed-handle retirement when a canceled net wait loses a race with
   a concurrent close: the canceled accept/read paths now retire closed idle
   handles exactly like the woken paths.
@@ -53,6 +90,12 @@
   absent or exact but never damaged, held across a 32-seed fuzz, plus a
   seed search that finds the planted magic-only recovery bug as
   `DamagedRecordAccepted`.
+- Adds the KV compatibility validation, a local storage surrogate that uses
+  `std.Io` WAL appends, file sync, tmp-file compaction through rename,
+  directory sync, WAL clear/delete, and crash-point fuzzing across aligned and
+  misaligned sectors. Its oracle accepts either physical incarnation around
+  pending metadata while requiring recovered key/value durable truth to
+  converge exactly.
 - Expands the xitdb crash-fault profile into a fuzzer with shrinking. Each
   case runs a seed-planned transaction workload, commits a durable setup
   boundary, then crashes the disk at a seed-varied simulated time while the
