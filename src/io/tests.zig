@@ -3085,3 +3085,169 @@ test "io: world simulation exposes tcp backend through env" {
     const accepted = try server.accept(io);
     defer accepted.close(io);
 }
+
+const SimHttpServerTask = struct {
+    server: *Io.net.Server,
+    io: Io,
+    served: bool = false,
+
+    fn run(self: *SimHttpServerTask) void {
+        self.serve() catch |err| std.debug.panic("simulated http server failed: {}", .{err});
+        self.served = true;
+    }
+
+    fn serve(self: *SimHttpServerTask) !void {
+        const stream = try self.server.accept(self.io);
+        defer stream.close(self.io);
+
+        var in_buffer: [4096]u8 = undefined;
+        var out_buffer: [1024]u8 = undefined;
+        var stream_reader = stream.reader(self.io, &in_buffer);
+        var stream_writer = stream.writer(self.io, &out_buffer);
+
+        var http_server = std.http.Server.init(&stream_reader.interface, &stream_writer.interface);
+        var request = try http_server.receiveHead();
+        try request.respond(sim_http_body, .{});
+    }
+};
+
+const sim_http_body = "hello from simulated std.http\n";
+
+fn fetchSimHttp(
+    client_io: Io,
+    url: []const u8,
+    body_buffer: []u8,
+) !usize {
+    var client = std.http.Client{
+        .allocator = std.testing.allocator,
+        .io = client_io,
+    };
+    defer client.deinit();
+
+    const uri = try std.Uri.parse(url);
+    var request = try client.request(.GET, uri, .{});
+    defer request.deinit();
+    try request.sendBodiless();
+
+    var redirect_buffer: [1024]u8 = undefined;
+    var response = try request.receiveHead(&redirect_buffer);
+    try std.testing.expectEqual(std.http.Status.ok, response.head.status);
+
+    var transfer_buffer: [1024]u8 = undefined;
+    var body_reader = response.reader(&transfer_buffer);
+    return try body_reader.readSliceShort(body_buffer);
+}
+
+test "io: unmodified std.http.Client fetches an IPv4 literal URL under simulation" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xD05, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .path_capacity = 8 },
+        .task_stack_size = 8 * 1024 * 1024,
+    });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 8080) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    var server_task = SimHttpServerTask{ .server = &server, .io = server_io };
+    var server_future = try Io.concurrent(server_io, SimHttpServerTask.run, .{&server_task});
+
+    var body_buffer: [256]u8 = undefined;
+    const body_len = try fetchSimHttp(client_io, "http://127.0.0.1:8080/", &body_buffer);
+
+    server_future.await(server_io);
+    try std.testing.expect(server_task.served);
+    try std.testing.expectEqualStrings(sim_http_body, body_buffer[0..body_len]);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "io.net.lookup host=127.0.0.1 port=8080 results=1",
+    ) != null);
+}
+
+test "io: std.http.Client localhost URL races loopback candidates and v4 wins" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xD06, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .path_capacity = 8 },
+        .task_stack_size = 8 * 1024 * 1024,
+    });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 8081) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    var server_task = SimHttpServerTask{ .server = &server, .io = server_io };
+    var server_future = try Io.concurrent(server_io, SimHttpServerTask.run, .{&server_task});
+
+    // `localhost` resolves to [::1, 127.0.0.1]; `connectMany` races both
+    // through the cancellation machinery. The v6 attempt finds no simulated
+    // listener and fails cleanly, the v4 attempt wins.
+    var body_buffer: [256]u8 = undefined;
+    const body_len = try fetchSimHttp(client_io, "http://localhost:8081/", &body_buffer);
+
+    server_future.await(server_io);
+    try std.testing.expect(server_task.served);
+    try std.testing.expectEqualStrings(sim_http_body, body_buffer[0..body_len]);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "io.net.lookup host=localhost port=8081 results=",
+    ) != null);
+}
+
+test "io: netLookup rejects non-literal host names as unknown" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xD07, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 1 } });
+    const client_io = (try sim.envForNode(0)).io();
+
+    // Real DNS, /etc/hosts, and search domains are host state and stay
+    // unsupported under simulation: any non-literal name is unknown.
+    const host = try Io.net.HostName.init("registry.example");
+    try std.testing.expectError(
+        error.UnknownHostName,
+        host.connect(client_io, 80, .{ .mode = .stream }),
+    );
+}
+
+fn simHttpFetchTrace(seed: u64) ![]u8 {
+    var world = try World.init(task_world_allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .path_capacity = 8 },
+        .task_stack_size = 8 * 1024 * 1024,
+    });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 8080) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    var server_task = SimHttpServerTask{ .server = &server, .io = server_io };
+    var server_future = try Io.concurrent(server_io, SimHttpServerTask.run, .{&server_task});
+
+    var body_buffer: [256]u8 = undefined;
+    _ = try fetchSimHttp(client_io, "http://127.0.0.1:8080/", &body_buffer);
+    server_future.await(server_io);
+
+    return try std.testing.allocator.dupe(u8, world.traceBytes());
+}
+
+test "io: std.http.Client fetch replays byte-identically from the same seed" {
+    const first = try simHttpFetchTrace(0xD05);
+    defer std.testing.allocator.free(first);
+    const second = try simHttpFetchTrace(0xD05);
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+}

@@ -121,10 +121,17 @@ TCP-like, so intra-stream reordering would violate the application-facing
 contract. Message reordering remains available through
 `Endpoint(Message)`, where independent message boundaries exist.
 
-The current boundary does not include DNS, datagrams, Unix sockets, external
-host access, TLS, `sendmsg` / `recvmsg`, full connection-reset behavior, or
-preemptive OS-thread scheduling. Unsupported vtable regions fail closed rather
-than silently using host I/O.
+Host-name lookup resolves address literals only: `netLookup` handles
+IPv4/IPv6 literals and RFC 6761 `localhost` names deterministically (trace
+event `io.net.lookup`), which is enough to run an unmodified
+`std.http.Client` against a simulated server via `http://127.0.0.1:<port>/`
+or `http://localhost:<port>/`. Real DNS, `/etc/hosts`, and search domains
+are host state and fail with `error.UnknownHostName`.
+
+The current boundary does not include real DNS, datagrams, Unix sockets,
+external host access, TLS, `sendmsg` / `recvmsg`, full connection-reset
+behavior, or preemptive OS-thread scheduling. Unsupported vtable regions fail
+closed rather than silently using host I/O.
 
 Listener and connection allocation is process-scoped rather than
 socket-scoped. Use `sim.envForNode(node).io()` to give each server or client a

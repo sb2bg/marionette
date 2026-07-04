@@ -141,6 +141,115 @@ pub fn Ops(comptime Backend: type) type {
             };
         }
 
+        /// Deterministic host-name lookup for address literals only.
+        ///
+        /// Resolves IPv4/IPv6 literals and RFC 6761 `localhost` names
+        /// without consulting any host state; real DNS, `/etc/hosts`, and
+        /// search domains are host behavior and stay explicitly
+        /// unsupported (`error.UnknownHostName`). The result protocol
+        /// mirrors `std.Io.Threaded.netLookup`: push `.address` results
+        /// (plus `.canonical_name` when a buffer is supplied), then close
+        /// the queue.
+        pub fn simNetLookup(
+            userdata: ?*anyopaque,
+            host_name: Io.net.HostName,
+            resolved: *Io.Queue(Io.net.HostName.LookupResult),
+            options: Io.net.HostName.LookupOptions,
+        ) Io.net.HostName.LookupError!void {
+            const backend = backendFromUserdata(userdata);
+            const backend_io = backend.io();
+            defer resolved.close(backend_io);
+            lookupLiterals(backend, backend_io, host_name, resolved, options) catch |err| switch (err) {
+                error.Closed => unreachable, // `resolved` must not be closed until lookup returns
+                else => |other| return other,
+            };
+        }
+
+        const LookupPutError = Io.net.HostName.LookupError || error{Closed};
+
+        fn lookupLiterals(
+            backend: *Backend,
+            backend_io: Io,
+            host_name: Io.net.HostName,
+            resolved: *Io.Queue(Io.net.HostName.LookupResult),
+            options: Io.net.HostName.LookupOptions,
+        ) LookupPutError!void {
+            const name = host_name.bytes;
+
+            if (Io.net.IpAddress.parseIp6(name, options.port)) |address| {
+                if (options.family == .ip4) return error.UnknownHostName;
+                try putLiteral(backend, backend_io, resolved, options, address, name);
+                return;
+            } else |_| {}
+
+            if (Io.net.IpAddress.parseIp4(name, options.port)) |address| {
+                if (options.family == .ip6) return error.UnknownHostName;
+                try putLiteral(backend, backend_io, resolved, options, address, name);
+                return;
+            } else |_| {}
+
+            // RFC 6761 Section 6.3.3: `localhost` names resolve to loopback
+            // without consulting DNS. IPv6 loopback goes first, matching
+            // the host resolver's ordering; a v6 connect attempt finds no
+            // simulated listener and fails cleanly while v4 wins.
+            const suffix = if (name.len > 0 and name[name.len - 1] == '.') "localhost." else "localhost";
+            if (std.mem.endsWith(u8, name, suffix) and
+                (name.len == suffix.len or name[name.len - suffix.len] == '.'))
+            {
+                var results: [3]Io.net.HostName.LookupResult = undefined;
+                var count: usize = 0;
+                if (options.family != .ip4) {
+                    results[count] = .{ .address = .{ .ip6 = .loopback(options.port) } };
+                    count += 1;
+                }
+                if (options.family != .ip6) {
+                    results[count] = .{ .address = .{ .ip4 = .loopback(options.port) } };
+                    count += 1;
+                }
+                if (copyCanonicalName(options.canonical_name_buffer, "localhost")) |canonical| {
+                    results[count] = .{ .canonical_name = canonical };
+                    count += 1;
+                }
+                backend.world.record(
+                    "io.net.lookup host={s} port={} results={}",
+                    .{ name, options.port, count },
+                ) catch return error.NameServerFailure;
+                try resolved.putAll(backend_io, results[0..count]);
+                return;
+            }
+
+            return error.UnknownHostName;
+        }
+
+        fn putLiteral(
+            backend: *Backend,
+            backend_io: Io,
+            resolved: *Io.Queue(Io.net.HostName.LookupResult),
+            options: Io.net.HostName.LookupOptions,
+            address: Io.net.IpAddress,
+            name: []const u8,
+        ) LookupPutError!void {
+            backend.world.record(
+                "io.net.lookup host={s} port={} results=1",
+                .{ name, options.port },
+            ) catch return error.NameServerFailure;
+            if (copyCanonicalName(options.canonical_name_buffer, name)) |canonical| {
+                try resolved.putAll(backend_io, &.{
+                    .{ .address = address },
+                    .{ .canonical_name = canonical },
+                });
+            } else {
+                try resolved.putOne(backend_io, .{ .address = address });
+            }
+        }
+
+        fn copyCanonicalName(buffer: ?*[Io.net.HostName.max_len]u8, name: []const u8) ?Io.net.HostName {
+            const destination_buffer = buffer orelse return null;
+            const destination = destination_buffer[0..name.len];
+            @memcpy(destination, name);
+            return .{ .bytes = destination };
+        }
+
         pub fn simNetConnectIp(
             userdata: ?*anyopaque,
             address: *const Io.net.IpAddress,

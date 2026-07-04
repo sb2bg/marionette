@@ -1804,7 +1804,7 @@ const sim_vtable: Io.VTable = .{
     .netShutdown = net_ops.simNetShutdown,
     .netInterfaceNameResolve = Io.failingNetInterfaceNameResolve,
     .netInterfaceName = Io.unreachableNetInterfaceName,
-    .netLookup = Io.failingNetLookup,
+    .netLookup = net_ops.simNetLookup,
 };
 
 fn backendFromUserdata(userdata: ?*anyopaque) *Backend {
