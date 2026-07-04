@@ -1,11 +1,12 @@
 # Run
 
-`mar.runCase` is the primary stateful scenario wrapper. It initializes a fresh
-state value for each replay attempt, executes the scenario twice with the same
-seed, runs named checks, and compares the resulting traces byte-for-byte.
+`mar.runSimCase` is the primary stateful simulation wrapper. It initializes a
+fresh `SimCase(App)` value for each replay attempt, executes the scenario twice
+with the same seed, runs named checks, and compares the resulting traces
+byte-for-byte.
 
-`mar.run` remains the lower-level world-only wrapper for scenarios that do not
-need structured state.
+`mar.runCase` remains available for custom or low-level state. `mar.run` is the
+lower-level world-only wrapper for scenarios that do not need structured state.
 
 ## World-Only Shape
 
@@ -121,7 +122,8 @@ writer.
 
 The seed is necessary but not sufficient once scenarios generate options from
 that seed. Use a run name, tags, and attributes to make the expanded run shape
-visible. Both `mar.runCase` and the lower-level `mar.run` options use `.name`:
+visible. `mar.runSimCase`, `mar.runCase`, and the lower-level `mar.run` options
+use `.name`:
 
 ```zig
 const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };

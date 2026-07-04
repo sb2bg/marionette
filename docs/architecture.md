@@ -32,15 +32,15 @@ Marionette currently has:
 - `Control`, the harness-facing counterpart for simulator-only controls.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
-- `mar.runCase`, the primary stateful scenario runner, and lower-level
-  `mar.run` for world-only scenarios. Both execute a scenario twice and compare
-  traces.
+- `mar.runSimCase`, the primary stateful simulation runner, plus `mar.runCase`
+  for custom state and lower-level `mar.run` for world-only scenarios. All
+  execute a scenario twice and compare traces.
 - Run names, tags, and `RunAttribute`, which make expanded run facts
   replay-visible in traces and failure summaries without losing scalar value
   types. `runAttribute` is the constructor; keys are written explicitly so
   exported metadata names never silently track internal field renames.
 - `mar.Check`, a named post-scenario check hook.
-- `mar.runCase` and `mar.StateCheck`, which let checks inspect structured
+- `mar.SimCase` and `mar.StateCheck`, which let checks inspect structured
   scenario state initialized fresh for each replay attempt.
 - An internal fixed-capacity deterministic event queue used by the network
   packet core for stable `(deliver_at, packet_id)`-style ordering.
@@ -353,10 +353,10 @@ Planned API direction:
 - Include invariant name and event index in failure reports.
 
 Current support is deliberately smaller: `RunOptions.checks` accepts
-named `mar.Check` functions that run after the scenario body, and `mar.runCase`
-accepts named `mar.StateCheck(State)` functions that inspect structured
-scenario state. This proves the failure-report shape, but it is not enough for
-serious multi-event DST yet.
+named `mar.Check` functions that run after the scenario body, and
+`mar.runSimCase`/`mar.runCase` accept named `mar.StateCheck(State)` functions
+that inspect structured scenario state. This proves the failure-report shape,
+but it is not enough for serious multi-event DST yet.
 
 Liveness is harder. The scheduler detects the concrete case where unfinished
 tasks are blocked with no runnable task or pending timer. Broader progress and
@@ -413,26 +413,28 @@ a time. Running two independent simulations concurrently in the same process is
 fine if each thread owns a different `World` and they do not share simulated
 state. Cross-world coordination is outside Marionette's determinism contract.
 
-## `runCase` Walkthrough
+## Stateful Runner Walkthrough
 
-`mar.runCase(.{ .seed = 0x1234, .init = init, .scenario = scenario, ... })`
+`mar.runSimCase(.{ .seed = 0x1234, .simulate = .{}, .init = init, .scenario = scenario, ... })`
 chronology:
 
 1. Freeze the seed, start time, tick size, checks, and trace settings.
 2. Construct one `World`.
 3. Create exactly one clock authority and one PRNG authority inside the world.
-4. Invoke the user's initializer with that world to build fresh scenario state.
-5. Invoke the user's scenario with that state.
-6. On every event, pick simulator decisions from the world's PRNG.
-7. Route all time movement through the world's clock and simulator controls.
-8. Record stable event data into the trace.
-9. If the scenario succeeds, run configured checks in order.
-10. Deinitialize state if a `.deinit` hook was provided.
-11. Stop on success, scenario error, check error, or deinit error.
-12. Preserve a partial trace if the scenario, a check, or deinit returned an error.
-13. If the first run passed, rerun the same scenario with the same seed.
-14. Compare byte-identical traces.
-15. Return `RunReport.passed` with one owned trace, or `RunReport.failed` with
+4. Call `world.simulate(config.simulate)`.
+5. Invoke the user's initializer with the resulting `Sim` to build fresh app
+   state.
+6. Invoke the user's scenario with `*SimCase(App)`.
+7. On every event, pick simulator decisions from the world's PRNG.
+8. Route all time movement through the world's clock and simulator controls.
+9. Record stable event data into the trace.
+10. If the scenario succeeds, run configured checks in order.
+11. Deinitialize app state if `App` defines `deinit`.
+12. Stop on success, scenario error, check error, or deinit error.
+13. Preserve a partial trace if the scenario, a check, or deinit returned an error.
+14. If the first run passed, rerun the same scenario with the same seed.
+15. Compare byte-identical traces.
+16. Return `RunReport.passed` with one owned trace, or `RunReport.failed` with
     seed, options, event counts, failure kind, traces, error name when
     available, and check name when a check failed.
 

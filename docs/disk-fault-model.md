@@ -316,7 +316,7 @@ hashes, the hash algorithm must be named and stable.
 
 - Low-level disk type: `Disk`.
 - Simulator implementation type: `SimDisk`.
-- Harness-control type: `DiskControl`.
+- Simulator-control type: `DiskControl`.
 - Low-level access: `env.disk`; preferred storage app access is `env.io()`.
 - File identity: logical path-like `[]const u8`, escaped in traces and never
   resolved against the host filesystem by the simulator.

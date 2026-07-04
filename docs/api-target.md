@@ -8,15 +8,18 @@ intentionally narrower than a full production networking stack; see
 
 Production-shaped storage code should receive `std.Io`, a root `std.Io.Dir`,
 and any small Marionette handles it actually needs, such as `Recorder` or
-`Endpoint(Message)`. `Env` is the harness/composition-root bundle that supplies
-those handles. Test harnesses receive `Control` and use it to inject faults.
+`Endpoint(Message)`. `Env` is the composition-root bundle that supplies those
+handles.
 
-Harnesses own simulator control. Production-shaped code does not import or hold
-`Control`, `World`, or packet-core types.
+Simulation tests should usually use `SimCase(App)`: the app initializer
+receives `Sim`, app state lives at `case.app`, and scenarios use
+`case.control()` to inject faults. Production-shaped code does not import or
+hold `Control`, `World`, or packet-core types.
 
-`runCase(opts) !RunReport` is the primitive for stateful scenarios.
-`expectPass`, `expectFuzz`, and `expectFailure` are assertive test helpers
-built on top of it.
+`runSimCase(opts) !RunReport` is the primary stateful simulation runner.
+`expectSimPass`, `expectSimFuzz`, and `expectSimFailure` are assertive test
+helpers built on top of it. `runCase` remains available for genuinely custom
+or low-level state.
 
 Faults are configuration, not per-call parameters. Network loss, latency,
 clogs, and automatic partition dynamics are set through focused
@@ -30,6 +33,12 @@ Empty options are not options. Disk crash and restart calls are `crash()` and
 ## Current Library Shape
 
 ```zig
+pub fn SimCase(comptime App: type) type;
+pub fn runSimCase(opts: anytype) !RunReport;
+pub fn expectSimPass(opts: anytype) !void;
+pub fn expectSimFuzz(opts: anytype) !void;
+pub fn expectSimFailure(opts: anytype) !void;
+
 pub fn runCase(opts: anytype) !RunReport;
 pub fn expectPass(opts: anytype) !void;
 pub fn expectFuzz(opts: anytype) !void;
@@ -90,7 +99,8 @@ pub const Production = struct {
 };
 ```
 
-`runCase` accepts optional `.deinit = State.deinit` for state that owns
+`SimCase(App)` automatically calls `app.deinit()` when `App` defines it.
+`runCase` accepts optional `.deinit = State.deinit` for custom state that owns
 non-world resources. The older positional `runWithState*` helpers are internal
 implementation details, not part of the public teaching surface.
 
@@ -162,10 +172,10 @@ Network-shaped examples should split into:
 
 - A production-shaped type that holds `env`, typed node endpoints, and app
   state.
-- A test-only `Harness` that owns the production-shaped type, `control`, and
-  any simulation owner needed for handle lifetime.
-- Free check functions that inspect `*const Harness` or the app state through
-  the harness.
+- `SimCase(App)`, where `init(sim: Sim)` wires endpoints into the app and
+  scenarios use `case.control()` for simulator-only authority.
+- Free check functions that inspect `*const SimCase(App)` or the app state
+  through `case.app`.
 
 Application sends look like:
 
@@ -179,9 +189,9 @@ while (try endpoint.receive()) |envelope| {
 Scenario faults look like:
 
 ```zig
-try harness.control.network.setLossiness(.{ .drop_rate = .percent(20) });
-try harness.control.network.partition(&isolated, &majority);
-try harness.control.network.heal();
+try case.control().network.setLossiness(.{ .drop_rate = .percent(20) });
+try case.control().network.partition(&isolated, &majority);
+try case.control().network.heal();
 ```
 
 The replicated-register example is the canonical network-shaped reference.

@@ -76,17 +76,19 @@ This is deliberately not a field on `Env`. `Env` is one non-generic type, while
 Simulation setup wires node-scoped endpoints into production-shaped code:
 
 ```zig
-fn init(world: *mar.World) !Harness {
-    const sim = try world.simulate(.{ .network = .{ .nodes = replica_count + 1 } });
+const Case = mar.SimCase(Service);
 
-    return .{
-        .service = Service.init(
-            sim.env.recorder(),
-            try sim.endpoint(Message, client_node_id),
-            try sim.endpoints(Message, replica_count, 0),
-        ),
-        .control = sim.control,
-    };
+fn init(sim: mar.Sim) !Service {
+    return Service.init(
+        sim.env.recorder(),
+        try sim.endpoint(Message, client_node_id),
+        try sim.endpoints(Message, replica_count, 0),
+    );
+}
+
+fn scenario(case: *Case) !void {
+    try case.control().network.setLossiness(.{ .drop_rate = .percent(20) });
+    try case.app.write(.{ .version = 1, .value = 41 });
 }
 ```
 

@@ -52,9 +52,9 @@ The KV store is the first disk-backed example. It is intentionally tiny: a
 fixed-size append-only WAL where each sector is one record with a magic value,
 key, value, and checksum. The store itself is production-shaped: it accepts
 `std.Io`, a root `std.Io.Dir`, and a narrow `mar.Recorder`, then uses
-`std.Io.File` positional read/write and `sync`. The harness still owns
-Marionette's `Control` authority for disk faults, crash, restart, and scripted
-corruption.
+`std.Io.File` positional read/write and `sync`. The scenario runs under
+`mar.SimCase(KVStore)`, so application state lives at `case.app` while
+Marionette's disk fault authority is available through `case.control().disk`.
 
 The correct scenario:
 
@@ -103,7 +103,7 @@ the planted magic-only recovery accepting a torn record as
 
 ## KV Compatibility Validation
 
-Harness source:
+Validation source:
 [`validation/kv_compat.zig`](https://github.com/sb2bg/marionette/blob/main/validation/kv_compat.zig)
 
 The KV compatibility validation is a local surrogate for the storage-facing
@@ -180,9 +180,10 @@ portable shapes Marionette needs:
 - Runtime network fault configuration through focused `control.network`
   helpers such as `setLossiness(...)`, `setLatency(...)`, `setClogs(...)`,
   and `setPartitionDynamics(...)`.
-- `runCase` / `expectPass` / `expectFuzz` / `expectFailure` for scenario runs.
+- `runSimCase` / `expectSimPass` / `expectSimFuzz` / `expectSimFailure` for
+  scenario runs.
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
-- A named `mar.StateCheck` that inspects structured harness state.
+- A named `mar.StateCheck` that inspects structured `SimCase` state.
 - Rejection of conflicting same-version proposals.
 - A parity test that initializes the same `Replicas` type with simulated and
   production-shaped network handles.

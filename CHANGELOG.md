@@ -247,10 +247,10 @@ Marionette's first tagged release demonstrates the core thesis:
   boundary with a deliberately non-realistic 7-byte sector.
 
 This is still a `0.x` API. There is no stability guarantee before 1.0. The
-intended-stable surface today is `World`, `Env`, `Control`, `runCase` /
-`expect*`, `Disk`, `SimDisk`, `RealDisk`, `Production`, `Recorder`, and the
-app-facing `Endpoint(Message)` shape. Everything else may change as the
-simulator grows.
+intended-stable surface today is `World`, `Env`, `Control`, `SimCase`,
+`runSimCase` / `expectSim*`, `runCase` / `expect*`, `Disk`, `SimDisk`,
+`RealDisk`, `Production`, `Recorder`, and the app-facing `Endpoint(Message)`
+shape. Everything else may change as the simulator grows.
 
 Known scope limits for this release:
 

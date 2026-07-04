@@ -186,17 +186,17 @@ needs file I/O should prefer `std.Io` so it stays ordinary Zig code.
 Network simulation works the same way. Here's a partition test against a toy replicated register:
 
 ```zig
-fn partitionScenario(harness: *Harness) !void {
+fn partitionScenario(case: *Case) !void {
     const isolated = [_]mar.NodeId{0};
     const majority = [_]mar.NodeId{ 1, 2, client_node_id };
 
-    try harness.control.network.partition(&isolated, &majority);
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
+    try case.control().network.partition(&isolated, &majority);
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
 
-    try harness.control.network.heal();
-    try harness.replicas.write(.{ .version = 1, .value = 41, .retry_limit = 1 });
+    try case.control().network.heal();
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 1 });
 
-    try checkReplicaCommitted(&harness.replicas, 0, 1, 41);
+    try checkReplicaCommitted(&case.app, 0, 1, 41);
 }
 ```
 
@@ -336,9 +336,9 @@ have.
 
 Marionette is early. This is a `0.x` release: there is no API stability
 guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
-`Control`, `runCase` / `expect*`, `Disk`, `SimDisk`, `RealDisk`, `Production`,
-`Recorder`, and the app-facing `Endpoint(Message)` shape. Everything else may
-change as the simulator grows.
+`Control`, `SimCase`, `runSimCase` / `expectSim*`, `runCase` / `expect*`,
+`Disk`, `SimDisk`, `RealDisk`, `Production`, `Recorder`, and the app-facing
+`Endpoint(Message)` shape. Everything else may change as the simulator grows.
 
 The simulator currently models clock, deterministic randomness, disk, a
 directory-aware `std.Io.File`/`Dir` subset, typed endpoint networking, a narrow scheduler-backed

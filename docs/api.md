@@ -442,7 +442,7 @@ disk.read op=4 path=wal.log offset=0 len=4096 status=io_error latency_ns=1000000
 ```
 
 `corrupt_read_rate` corrupts only the returned buffer; it does not mutate the
-durable in-memory model. Harnesses can inject persistent scripted sector
+durable in-memory model. Scenario code can inject persistent scripted sector
 corruption with:
 
 ```zig
@@ -620,14 +620,16 @@ count, final simulated timestamp when present, replay context, subsystem and
 event counts, singleton events, network send/drop/delivery counts, drop
 reasons, and per-link network counts.
 
-## `runCase` And `run`
+## `runSimCase`, `runCase`, And `run`
 
-`mar.runCase(opts)` is the primary stateful scenario runner. It initializes
-fresh state for each replay attempt, executes a scenario twice with the same
-seed, runs named checks, and compares byte-identical traces.
+`mar.runSimCase(opts)` is the primary stateful simulation runner. It
+initializes fresh `SimCase(App)` state for each replay attempt, executes a
+scenario twice with the same seed, runs named checks, and compares
+byte-identical traces.
 
-`mar.run(allocator, options, scenario)` remains the lower-level world-only
-runner for scenarios that do not need structured state.
+`mar.runCase(opts)` remains available for custom or low-level state.
+`mar.run(allocator, options, scenario)` is the lower-level world-only runner for
+scenarios that do not need structured state.
 
 ```zig
 fn scenario(world: *mar.World) !void {
