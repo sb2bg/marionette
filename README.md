@@ -90,57 +90,67 @@ Marionette brings that approach to Zig. It's inspired by the techniques behind F
 Here's a WAL recovery test that crashes the disk mid-write, corrupts a sector, and asserts that committed records survive while unsynced ones don't.
 
 ```zig
-pub fn scenario(harness: *Harness) !void {
-    try harness.store.put(committed_key, committed_value, .sync);
-    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try harness.store.put(volatile_key, volatile_value, .no_sync);
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.control.disk.corruptSector(wal_path, record_size);
-    try harness.store.reopen();
-    try harness.store.recover(.strict);
+const Case = mar.SimCase(WalStore);
+
+pub fn scenario(case: *Case) !void {
+    const store = &case.app;
+    const disk = case.control().disk;
+
+    try store.put(committed_key, committed_value, .sync);
+    try disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try store.put(volatile_key, volatile_value, .no_sync);
+    try disk.crash();
+    try disk.restart();
+    try disk.corruptSector(wal_path, record_size);
+    try store.reopen();
+    try store.recover(.strict);
 }
 
-pub const checks = [_]mar.StateCheck(Harness){
+pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "synced records recover, unsynced records are rejected", .check = recoveredStateIsSafe },
 };
 
 test "wal recovery" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
-        .init = Harness.init,
+        .simulate = .{},
+        .init = WalStore.init,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "wal recovery fuzz" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 16,
-        .init = Harness.init,
+        .simulate = .{},
+        .init = WalStore.init,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 ```
 
-Most simulation tests use `mar.SimCase(App)`: `init` receives `mar.Sim`,
-`scenario` receives `*mar.SimCase(App)`, and the app state lives at
-`case.app`. Custom harness types still work through `mar.runCase` when a test
-needs lower-level `World` access or unusual ownership.
+`mar.SimCase(App)` is the standard wrapper for simulation tests: `init`
+receives `mar.Sim`, `scenario` receives `*mar.SimCase(App)`, and app state
+lives at `case.app`. Custom harness types still work through `mar.runCase` when
+a test needs lower-level `World` access or unusual ownership.
 
 Three pieces, either way:
 
-- **`init`** sets up your app state from `mar.Sim`, or a custom harness from
-  `*mar.World` for lower-level tests.
-- **`scenario`** drives the action. It calls into your code through the handles
-  created by `env`, and into the simulator via `control`.
-- **`checks`** assert invariants on the final state.
+- **`init`** sets up app state from `mar.Sim`.
+- **`scenario`** drives the action through `case.app` and simulator authorities
+  such as `case.control()`.
+- **`checks`** assert invariants on the final state, usually through
+  `*const mar.SimCase(App)`.
 
-`expectPass` runs once with a fixed seed. `expectFuzz` runs many seeds in parallel. `expectFailure` asserts that a deliberately-buggy scenario gets caught, useful for proving your checker actually works.
+`expectSimPass` runs once with a fixed seed. `expectSimFuzz` runs many seeds in
+parallel. `expectSimFailure` asserts that a deliberately-buggy scenario gets
+caught, useful for proving your checker actually works. The non-`Sim`
+`expect*` helpers are the matching `runCase` wrappers for custom harnesses.
 
 ## The two surfaces: `io` and `control`
 
