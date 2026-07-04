@@ -11,6 +11,7 @@ pub const idempotency_bug = @import("idempotency_bug.zig");
 pub const toy_sql_db = @import("toy_sql_db.zig");
 pub const std_io_net_kv = @import("std_io_net_kv.zig");
 pub const memtable_pressure = @import("memtable_pressure.zig");
+pub const wal_record = @import("wal_record.zig");
 
 test {
     _ = @import("wal_record.zig");

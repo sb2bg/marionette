@@ -213,6 +213,23 @@ pub fn build(b: *std.Build) void {
     );
     validate_std_io_net_kv_step.dependOn(&run_validate_std_io_net_kv.step);
 
+    const validate_kv_compat_mod = b.createModule(.{
+        .root_source_file = b.path("validation/kv_compat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    validate_kv_compat_mod.addImport("marionette", mod);
+    validate_kv_compat_mod.addImport("examples", examples_mod);
+
+    const validate_kv_compat_tests = b.addTest(.{ .root_module = validate_kv_compat_mod });
+    const run_validate_kv_compat = b.addRunArtifact(validate_kv_compat_tests);
+
+    const validate_kv_compat_step = b.step(
+        "validate-kv-compat",
+        "Run the KV compatibility lifecycle (WAL, compaction rename, recovery) under Marionette",
+    );
+    validate_kv_compat_step.dependOn(&run_validate_kv_compat.step);
+
     const seed_sweep_count = b.option(
         usize,
         "seed-sweep-count",
@@ -267,6 +284,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_validate_bounded_queue.step);
     test_step.dependOn(&run_validate_std_io_net_kv.step);
+    test_step.dependOn(&run_validate_kv_compat.step);
     test_step.dependOn(&tidy.step);
 
     // The fiber overflow diagnostics are POSIX-only and their subprocess

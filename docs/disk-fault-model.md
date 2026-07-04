@@ -190,7 +190,11 @@ second storage example justifies a generic API.
 **Durability boundary.** The operation after which the application may claim
 data survives a crash: a successful `sync` for file bytes, a successful
 `syncDir` for creates, deletes, and renames. Acknowledged writes that have not
-crossed a boundary are pending.
+crossed a boundary are pending. Directory-entry boundaries are parent-scoped:
+creating `/kvc` requires syncing the root directory, and syncing `/kvc` only
+persists entries under `/kvc`. For newly created files, sync the file first so
+its create metadata is registered, then sync the parent directory before
+treating the file entry as durable.
 
 **Durable truth.** Everything behind a durability boundary at crash time.
 The crash fault classes (`crash_lost_write`, `crash_torn_write`,
@@ -234,6 +238,23 @@ The planted `buggy_accept_magic_only` recovery validates the checker: it
 accepts a torn record on magic alone, and the seed search in
 `examples/root.zig` finds the resulting `DamagedRecordAccepted` within a
 bounded seed range.
+
+### Worked case: KV compatibility validation
+
+`validation/kv_compat.zig` extends the same vocabulary to a compacting store:
+
+- the WAL commit is durable truth only after `kv.wal.sync`;
+- the compacted table contents are durable only after `kv.tab.tmp.sync`;
+- the tmp-to-table rename is metadata and becomes durable only after syncing
+  `/kvc`;
+- WAL clear/delete is metadata and becomes durable only after the final
+  `/kvc` sync.
+
+Crashes before a directory sync may recover either file incarnation. The
+checker therefore asserts convergence, not one physical layout: old table plus
+WAL, new table plus old WAL, and new table plus empty WAL must all produce the
+same durable key/value state. Recovery never reads `kv.tab.tmp`, so torn tmp
+writes stay inside the recovery window instead of becoming durable truth.
 
 Replicated windows (per-replica faults bounded so at least one quorum path
 stays recoverable) remain future work tracked with the multi-replica fault

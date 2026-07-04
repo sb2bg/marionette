@@ -101,6 +101,33 @@ damaged. A fuzz test holds the window across seeds, and a seed search finds
 the planted magic-only recovery accepting a torn record as
 `DamagedRecordAccepted`.
 
+## KV Compatibility Validation
+
+Harness source:
+[`validation/kv_compat.zig`](https://github.com/sb2bg/marionette/blob/main/validation/kv_compat.zig)
+
+The KV compatibility validation is a local surrogate for the storage-facing
+slice of an external KV engine. It uses only `std.Io` file and directory calls:
+append fixed WAL records, sync commits, recover by replaying the WAL, compact
+the in-memory table through a tmp-file rename, directory-sync the rename, then
+delete and recreate the WAL.
+
+The scenario matrix drives every compaction crash point:
+
+- before the tmp file is renamed,
+- after rename but before directory sync,
+- after a torn tmp write,
+- after WAL delete/recreate but before the final directory sync,
+- across seed-varying crash points with aligned and misaligned sectors.
+
+The oracle is either-incarnation recovery. If pending metadata is lost, the old
+table plus full WAL must recover the durable truth. If pending metadata
+survives, the compacted table plus old or empty WAL must converge to the same
+state. Recovery deliberately rejects damaged compacted table records but
+accepts a damaged WAL tail as inside the recovery window. The validation omits
+directory deletion, permissions, symlinks, and richer directory APIs; those
+remain deferred until a compatibility target forces them.
+
 ## Idempotency Bug
 
 Source: [`examples/idempotency_bug.zig`](https://github.com/sb2bg/marionette/blob/main/examples/idempotency_bug.zig)
