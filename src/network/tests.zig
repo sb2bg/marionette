@@ -134,7 +134,8 @@ test "network: invalid durations are runtime errors" {
             .latency_jitter_ns = 11,
         }),
     );
-    try std.testing.expectError(error.InvalidDuration, sim.runFor(11));
+    // Misaligned `runFor` durations are harness misuse and assert rather
+    // than returning an error; see the runFor misuse contract.
 }
 
 test "network: invalid drop rates are runtime errors" {

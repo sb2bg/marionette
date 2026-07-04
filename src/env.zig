@@ -302,6 +302,11 @@ pub const Env = struct {
             return false;
         }
         try rate.validate();
+        // Disabled-fault convention: a zero rate consumes no randomness and
+        // emits no trace, matching the disk model's `rollFault`. Toggling a
+        // fault off therefore never shifts unrelated draws through hooks
+        // that would have rolled zero.
+        if (rate.numerator == 0) return false;
 
         const roll = try self.random.intLessThan(u32, rate.denominator);
         const fired = roll < rate.numerator;
@@ -478,10 +483,14 @@ pub const SimControl = struct {
 
     pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
         const tick_ns = self.world.clock().tick_ns;
-        if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+        // Misuse contract: like `World.runFor` and `SimClock.runFor`, a
+        // duration that is not a whole number of ticks is a harness bug and
+        // asserts instead of returning an error.
+        std.debug.assert(duration_ns % tick_ns == 0);
         if (duration_ns == 0) return;
 
-        const end_ns = std.math.add(clock_module.Timestamp, self.world.now(), duration_ns) catch return error.InvalidDuration;
+        const end_ns = std.math.add(clock_module.Timestamp, self.world.now(), duration_ns) catch
+            @panic("simulated duration exceeds clock range");
         try self.evolveFaultsAtCurrentBoundary();
         while (try self.nextFaultBoundaryBeforeOrAt(end_ns)) |boundary_ns| {
             if (boundary_ns > self.world.now()) {

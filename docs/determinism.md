@@ -120,3 +120,23 @@ Do not record wall-clock timestamps, memory addresses, thread ids, or
 unordered container dumps.
 
 The Phase 0 trace format is specified in [Trace Format](trace-format.md).
+
+## Randomness and Misuse Conventions
+
+Two conventions keep seed streams and harness contracts uniform across the
+simulator:
+
+- **Disabled faults consume no randomness and emit no trace.** A fault hook
+  with a zero rate (`.never()`, `numerator == 0`) returns without drawing
+  from the world's random stream and without recording a trace event. The
+  disk model's `rollFault` and `Env.buggify` both follow this rule. Toggling
+  a fault off therefore never shifts unrelated draws through call sites
+  that would have rolled zero; enabling a fault does shift downstream
+  draws, which is inherent to injecting it. A convention change here shifts
+  seed streams, so any future revision must land inside a release boundary.
+- **Misaligned `runFor` durations are harness misuse and assert.** `World`,
+  `SimClock`, `SimControl`, and the network control all assert that a
+  `runFor` duration is a whole number of ticks instead of returning
+  `error.InvalidDuration`. Errors are reserved for conditions a correct
+  harness can encounter at runtime; a misaligned duration is a bug in the
+  test.

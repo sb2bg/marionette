@@ -595,9 +595,11 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
             }
 
             /// Advance simulated time by whole ticks and evolve network faults.
+            /// A duration that is not a whole number of ticks is harness
+            /// misuse and asserts, matching `World.runFor`.
             pub fn runFor(self: Control, duration_ns: clock_module.Duration) !void {
                 const tick_ns = self.world.clock().tick_ns;
-                if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+                std.debug.assert(duration_ns % tick_ns == 0);
 
                 var remaining = duration_ns;
                 while (remaining > 0) : (remaining -= tick_ns) {
@@ -675,7 +677,7 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
 
         fn runNetworkFor(packet_core: *PacketCore, duration_ns: clock_module.Duration) !void {
             const tick_ns = packet_core.world.clock().tick_ns;
-            if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+            std.debug.assert(duration_ns % tick_ns == 0);
 
             var remaining = duration_ns;
             while (remaining > 0) : (remaining -= tick_ns) {
