@@ -152,6 +152,28 @@ authority boundaries, not CPU memory-model or kernel scheduling behavior.
 - Linearizability checker.
 - Richer reduced failure reports for distributed protocols.
 
+### Seed Schedules And Guided Exploration
+
+Make the seed plural: a run becomes identified by (code, options, seed
+schedule), where a schedule is an ordered list of seed segments ending at
+deterministic cutpoints. Cutpoints must cover more than simulated time,
+because randomness is also drawn at non-time boundaries (scheduler choices,
+disk fault rolls, app-facing randomness, allocation buggify, send-time
+network loss/latency), so the boundary vocabulary wants simulated-time
+boundaries, random-draw or trace-event indices, and named trace milestones.
+Every switch is trace-visible, so the determinism contract is unchanged:
+same code, same options, same seed schedule, byte-identical trace, and the
+twice-and-compare runner works on schedules as-is.
+
+This unlocks Antithesis-style exploration: branch from an interesting point
+by keeping the schedule prefix and appending a fresh suffix seed, derivable
+as hash(prefix, branch index). As a library, forking means replaying the
+prefix, O(prefix) per branch rather than O(1) snapshotting; quiet spans
+already jump, so replay is cheap. Search policy (milestone predicates over
+trace events, schedule retention) belongs in an `explore()` harness layered
+above the core, not in `World`. Done when guided exploration measurably
+beats the durable broadcast example's 64-seed probabilistic bug search.
+
 ### Shrinking And Debugging UX
 
 - General seed shrinking.
