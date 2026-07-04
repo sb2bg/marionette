@@ -560,6 +560,14 @@ pub const World = struct {
         /// simulated SUT's call chains outgrow the default; stacks cost
         /// address space, not resident memory, on guard-page targets.
         task_stack_size: usize = scheduler_module.default_task_stack_size,
+        /// Whether a task fiber overflowing its guarded stack produces a
+        /// targeted stderr diagnostic (task id, process, configured stack
+        /// size, the `task_stack_size` fix) before the fault chains to the
+        /// previously installed signal handler. Installs a process-global
+        /// `SIGSEGV`/`SIGBUS` handler on first task spawn; embedders that
+        /// own their signal dispositions should disable this. POSIX
+        /// guard-page targets only; elsewhere it is inert.
+        fiber_overflow_diagnostics: bool = true,
     };
 
     pub const Simulation = struct {
@@ -697,6 +705,7 @@ pub const World = struct {
 
         scheduler.* = scheduler_module.TaskScheduler.init(self.allocator, self);
         scheduler.task_stack_size = options.task_stack_size;
+        scheduler.overflow_diagnostics = options.fiber_overflow_diagnostics;
         errdefer if (!scheduler_registered) scheduler.deinit();
 
         try self.registerTeardown(scheduler, scheduler_module.deinitTaskSchedulerOpaque);

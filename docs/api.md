@@ -84,6 +84,15 @@ crashing disk.
 run deep; on guard-page targets stacks cost address space, not resident
 memory, and overflow faults at a 256 KiB guard region instead of corrupting
 neighboring memory.
+On POSIX guard-page targets, an overflow fault also produces a targeted
+stderr diagnostic before the fault proceeds: the task id, owning process,
+configured stack size, and the `task_stack_size` fix, after which the fault
+chains to the previously installed signal handler (Zig's Debug handler still
+prints the fault-site trace). This installs a process-global
+`SIGSEGV`/`SIGBUS` handler on first task spawn; embedders that own their
+signal dispositions can disable it with
+`simulate(.{ .fiber_overflow_diagnostics = false })`. Faults outside fiber
+guard regions chain through with no added output.
 `env.buggify` draws through the env's random capability only when the env was
 built by simulation; production envs construct the same composition bundle with
 production adapters such as `mar.RealDisk`.

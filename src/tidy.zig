@@ -64,6 +64,7 @@ pub const default_allowed = [_]Allow{
     // Fiber stacks come from mmap so a guard page can sit below them; a
     // documented exception to allocator discipline.
     .{ .path = "src/fiber.zig", .needle = "std.posix" },
+    .{ .path = "src/fiber_guard_diagnostics.zig", .needle = "std.posix" },
     // CLI entry points own argument parsing and exit codes.
     .{ .path = "src/main_run.zig", .needle = "std.process" },
     .{ .path = "src/main_tidy.zig", .needle = "std.process" },

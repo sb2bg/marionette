@@ -254,6 +254,8 @@ pub fn build(b: *std.Build) void {
         .paths = &.{ "src", "examples", "tests", "validation" },
         .extra_allowed = &.{
             .{ .path = "tests/release_symbol_probe.zig", .needle = "std.process" },
+            .{ .path = "tests/fiber_overflow_crash.zig", .needle = "std.process" },
+            .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.process" },
         },
         .target = target,
         .optimize = optimize,
@@ -266,4 +268,44 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_validate_bounded_queue.step);
     test_step.dependOn(&run_validate_std_io_net_kv.step);
     test_step.dependOn(&tidy.step);
+
+    // The fiber overflow diagnostics are POSIX-only and their subprocess
+    // test must execute the crash binary it builds, so wire it only when
+    // building natively for a guard-page target.
+    const guard_page_target = switch (target.result.os.tag) {
+        .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => true,
+        else => false,
+    };
+    if (guard_page_target and target.query.isNative()) {
+        const overflow_crash_mod = b.createModule(.{
+            .root_source_file = b.path("tests/fiber_overflow_crash.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        overflow_crash_mod.addImport("marionette", mod);
+        const overflow_crash_exe = b.addExecutable(.{
+            .name = "marionette-fiber-overflow-crash",
+            .root_module = overflow_crash_mod,
+        });
+
+        const overflow_check_mod = b.createModule(.{
+            .root_source_file = b.path("tests/fiber_overflow_check.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const overflow_check_exe = b.addExecutable(.{
+            .name = "marionette-fiber-overflow-check",
+            .root_module = overflow_check_mod,
+        });
+
+        const run_overflow_check = b.addRunArtifact(overflow_check_exe);
+        run_overflow_check.addArtifactArg(overflow_crash_exe);
+        run_overflow_check.addArg("overflow");
+        test_step.dependOn(&run_overflow_check.step);
+
+        const run_non_fiber_check = b.addRunArtifact(overflow_check_exe);
+        run_non_fiber_check.addArtifactArg(overflow_crash_exe);
+        run_non_fiber_check.addArg("non-fiber-fault");
+        test_step.dependOn(&run_non_fiber_check.step);
+    }
 }

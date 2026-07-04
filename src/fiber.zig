@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const guard_diagnostics = @import("fiber_guard_diagnostics.zig");
 const std_fiber = std.Io.fiber;
 
 /// Win64 uses `rcx` for the first argument, while the current x86_64 entry
@@ -71,6 +72,16 @@ pub const CreateOptions = struct {
     finish_context: *Context,
     entry: Entry,
     arg: *anyopaque,
+    /// When set on guard-page targets, the fiber's guard region is
+    /// registered with the overflow-diagnostics signal handler under this
+    /// identity, so an overflow fault names the task instead of presenting
+    /// as a raw segfault. No effect on targets without guard pages.
+    diagnostic: ?Diagnostic = null,
+};
+
+pub const Diagnostic = struct {
+    task_id: u64,
+    process_id: ?u64,
 };
 
 pub const Fiber = struct {
@@ -145,6 +156,19 @@ pub const Fiber = struct {
         };
         self.context = initContext(closure);
 
+        if (use_guard_pages) {
+            if (options.diagnostic) |diagnostic| {
+                switch (self.memory) {
+                    .mapped => |mapping| guard_diagnostics.register(mapping[0..guardLength()], .{
+                        .task_id = diagnostic.task_id,
+                        .process_id = diagnostic.process_id,
+                        .stack_size = options.stack_size,
+                    }),
+                    .heap => {},
+                }
+            }
+        }
+
         return self;
     }
 
@@ -154,7 +178,10 @@ pub const Fiber = struct {
             // The comptime branch keeps std.posix out of analysis on
             // targets without guard pages; the arm itself still exists
             // because the union does.
-            .mapped => |mapping| if (use_guard_pages) std.posix.munmap(mapping) else unreachable,
+            .mapped => |mapping| if (use_guard_pages) {
+                guard_diagnostics.unregister(mapping[0..guardLength()]);
+                std.posix.munmap(mapping);
+            } else unreachable,
             .heap => |stack| allocator.free(stack),
         }
         allocator.destroy(self);

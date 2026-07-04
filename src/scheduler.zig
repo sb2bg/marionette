@@ -83,6 +83,10 @@ pub const TaskScheduler = struct {
     /// Stack size for tasks spawned through the type-erased `std.Io` runtime
     /// seam. Direct `spawn` callers can still override per task.
     task_stack_size: usize = default_task_stack_size,
+    /// Whether task fibers register their guard regions with the
+    /// stack-overflow diagnostics signal handler. See
+    /// `SimulateOptions.fiber_overflow_diagnostics`.
+    overflow_diagnostics: bool = true,
 
     const MainWait = struct {
         key: WaitKey,
@@ -284,6 +288,10 @@ pub const TaskScheduler = struct {
             .finish_context = &self.main_context,
             .entry = Task.run,
             .arg = task,
+            .diagnostic = if (self.overflow_diagnostics) .{
+                .task_id = task_id,
+                .process_id = if (options.process_id) |process_id| @as(u64, process_id) else null,
+            } else null,
         });
         errdefer fiber_instance.destroy();
         task.fiber_instance = fiber_instance;
