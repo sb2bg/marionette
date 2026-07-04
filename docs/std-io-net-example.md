@@ -103,6 +103,31 @@ std_io_net_kv.invariant_violation expected_value=41 actual_value=41 expected_rev
 The seed reproduces both the scheduler choices and the network delivery
 history.
 
+## Dusty HTTP Fault Scenarios
+
+[`validation/dusty_http.zig`](https://github.com/sb2bg/marionette/blob/main/validation/dusty_http.zig)
+also runs the pinned, unmodified dusty HTTP client/server through partition
+fault scenarios. The server is dusty's real `Server.listen` loop; the harness
+owns only the simulated network, scheduler, trace, and oracle.
+
+Two scenarios cut the server/client link at structural points:
+
+- before the held handler writes any response bytes;
+- mid-response after a configured number of chunked body chunks.
+
+Both cuts use futex handshakes rather than tick counts or sleeps. Under the
+severed link, dusty surfaces the first failed fetch as `error.Timeout`. After
+the harness heals the link, a fresh dusty client retries and must receive the
+exact response: `hello from the simulation` for the held route and the full
+64 KiB chunked body for the large route.
+
+The mid-response oracle is intentionally strict. A first fetch that returns a
+short or different body is `error.ShortSuccess`; partial response bytes must
+not be accepted as a complete HTTP response. The trace also pins the network
+shape: at least one response frame is sent before `dusty_fault.partition`, and
+a queued response frame is later dropped with `reason=link_disabled` before
+`dusty_fault.heal`.
+
 ## Stream Semantics
 
 The current simulated stream subset supports:
