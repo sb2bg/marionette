@@ -87,12 +87,12 @@ fn runScenario(
     } else if (std.mem.eql(u8, scenario, "durable-broadcast-bug")) {
         try printReport(try examples.durable_broadcast.runBuggyScenarioReport(allocator, seed), expect_failure);
     } else if (std.mem.eql(u8, scenario, "kv-store")) {
-        const trace = try runKvStoreTrace(allocator, seed, examples.kv_store.scenario);
+        const trace = try runKvStoreTrace(allocator, seed, "kv-store", examples.kv_store.scenario);
         defer allocator.free(trace);
         if (expect_failure) return expectedFailureDidNotHappen();
         try printTraceOrSummary(allocator, trace, mode);
     } else if (std.mem.eql(u8, scenario, "kv-store-bug")) {
-        try printReport(try runKvStoreReport(allocator, seed, examples.kv_store.buggyScenario), expect_failure);
+        try printReport(try runKvStoreReport(allocator, seed, "kv-store-bug", examples.kv_store.buggyScenario), expect_failure);
     } else if (std.mem.eql(u8, scenario, "idempotency-bug")) {
         try printSeedSensitiveReport(allocator, try runIdempotencyBugReport(allocator, seed), mode, expect_failure);
     } else if (std.mem.eql(u8, scenario, "std-io-net-kv")) {
@@ -130,9 +130,10 @@ fn runStdIoNetKv(
 fn runKvStoreTrace(
     allocator: std.mem.Allocator,
     seed: u64,
-    comptime scenario_fn: fn (*examples.kv_store.Harness) anyerror!void,
+    name: []const u8,
+    comptime scenario_fn: fn (*examples.kv_store.Case) anyerror!void,
 ) ![]u8 {
-    var report = try runKvStoreReport(allocator, seed, scenario_fn);
+    var report = try runKvStoreReport(allocator, seed, name, scenario_fn);
     defer report.deinit();
 
     switch (report) {
@@ -147,29 +148,23 @@ fn runKvStoreTrace(
 fn runKvStoreReport(
     allocator: std.mem.Allocator,
     seed: u64,
-    comptime scenario_fn: fn (*examples.kv_store.Harness) anyerror!void,
+    name: []const u8,
+    comptime scenario_fn: fn (*examples.kv_store.Case) anyerror!void,
 ) !mar.RunReport {
-    return mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = examples.kv_store.tick_ns,
-        .init = examples.kv_store.Harness.init,
-        .scenario = scenario_fn,
-        .checks = &examples.kv_store.checks,
-    });
+    return examples.kv_store.runReport(
+        allocator,
+        seed,
+        name,
+        scenario_fn,
+        &examples.kv_store.checks,
+    );
 }
 
 fn runIdempotencyBugReport(
     allocator: std.mem.Allocator,
     seed: u64,
 ) !mar.RunReport {
-    return mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .init = examples.idempotency_bug.Harness.init,
-        .scenario = examples.idempotency_bug.scenario,
-        .checks = &examples.idempotency_bug.checks,
-    });
+    return examples.idempotency_bug.runReport(allocator, seed);
 }
 
 fn printSeedSensitiveReport(

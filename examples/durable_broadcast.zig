@@ -36,6 +36,7 @@ const MessagePayload = struct {
 };
 
 const Endpoint = mar.Endpoint(MessagePayload);
+pub const Case = mar.SimCase(DurableBroadcast);
 
 fn replayProfile(runtime: mar.SimProfile.RuntimeOptions) mar.SimProfile.Expanded {
     return mar.SimProfile.replay(.{
@@ -62,13 +63,18 @@ fn baselineProfile() mar.SimProfile.Expanded {
     return replayProfile(.{});
 }
 
+pub fn simulateOptions() mar.World.SimulateOptions {
+    const profile = baselineProfile();
+    return profile.simulateOptions();
+}
+
 fn probabilisticBugSearchProfile() mar.SimProfile.Expanded {
     return replayProfile(.{
         .disk_faults = .{ .crash_lost_write_rate = .percent(25) },
     });
 }
 
-pub const checks = [_]mar.StateCheck(Harness){
+pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "quorum acknowledgements are durable", .check = quorumAcknowledgementsAreDurable },
 };
 
@@ -101,7 +107,7 @@ fn runTrace(
     allocator: std.mem.Allocator,
     seed: u64,
     name: []const u8,
-    comptime scenario_fn: fn (*Harness) anyerror!void,
+    comptime scenario_fn: fn (*Case) anyerror!void,
 ) ![]u8 {
     var report = try runReport(allocator, seed, name, scenario_fn);
     defer report.deinit();
@@ -119,14 +125,15 @@ fn runReport(
     allocator: std.mem.Allocator,
     seed: u64,
     name: []const u8,
-    comptime scenario_fn: fn (*Harness) anyerror!void,
+    comptime scenario_fn: fn (*Case) anyerror!void,
 ) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .tick_ns = tick_ns,
         .name = name,
-        .init = Harness.init,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = scenario_fn,
         .checks = &checks,
     });
@@ -137,93 +144,85 @@ fn runReportWithProfile(
     seed: u64,
     name: []const u8,
     profile: *const mar.SimProfile.Expanded,
-    comptime scenario_fn: fn (*Harness) anyerror!void,
+    comptime scenario_fn: fn (*Case) anyerror!void,
 ) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .tick_ns = tick_ns,
         .name = name,
         .tags = profile.runTags(),
         .attributes = profile.runAttributes(),
-        .init = Harness.init,
+        .simulate = profile.simulateOptions(),
+        .init = init,
         .scenario = scenario_fn,
         .checks = &checks,
     });
 }
 
-pub const Harness = struct {
-    service: DurableBroadcast,
-    control: mar.Control,
+pub fn init(sim: mar.Sim) !DurableBroadcast {
+    return DurableBroadcast.init(
+        sim.env,
+        try sim.endpoint(MessagePayload, client_node_id),
+        try sim.endpoints(MessagePayload, replica_count, 0),
+    );
+}
 
-    pub fn init(world: *mar.World) !Harness {
-        const profile = baselineProfile();
-        const sim = try world.simulate(profile.simulateOptions());
-
-        return .{
-            .service = DurableBroadcast.init(
-                sim.env,
-                try sim.endpoint(MessagePayload, client_node_id),
-                try sim.endpoints(MessagePayload, replica_count, 0),
-            ),
-            .control = sim.control,
-        };
-    }
-};
-
-pub fn scenario(harness: *Harness) !void {
-    try configureNetworkFaults(harness);
-    try harness.service.submit(.{
+pub fn scenario(case: *Case) !void {
+    try configureNetworkFaults(case);
+    try case.app.submit(.{
         .op = .{ .id = 1, .value = 41 },
         .retry_limit = 8,
         .sync_before_broadcast = true,
     });
 }
 
-pub fn crashRecoveryScenario(harness: *Harness) !void {
-    try harness.service.submit(.{
+pub fn crashRecoveryScenario(case: *Case) !void {
+    try case.app.submit(.{
         .op = .{ .id = 1, .value = 41 },
         .retry_limit = 2,
         .sync_before_broadcast = true,
     });
 
-    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.service.recover();
+    try case.control().disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try case.control().disk.crash();
+    try case.control().disk.restart();
+    try case.app.recover();
 
-    try harness.control.network.heal();
-    try harness.service.broadcastRecovered(3);
+    try case.control().network.heal();
+    try case.app.broadcastRecovered(3);
 }
 
-pub fn multiRecordScenario(harness: *Harness) !void {
-    try harness.service.submit(.{
+pub fn multiRecordScenario(case: *Case) !void {
+    try case.app.submit(.{
         .op = .{ .id = 1, .value = 41 },
         .retry_limit = 2,
         .sync_before_broadcast = true,
     });
-    try harness.service.submit(.{
+    try case.app.submit(.{
         .op = .{ .id = 2, .value = 42 },
         .retry_limit = 2,
         .sync_before_broadcast = true,
     });
 
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.service.recover();
+    try case.control().disk.crash();
+    try case.control().disk.restart();
+    try case.app.recover();
 }
 
-fn configureNetworkFaults(harness: *Harness) !void {
-    try harness.control.network.setLossiness(.{ .drop_rate = .percent(10) });
-    try harness.control.network.setLatency(.{
+fn configureNetworkFaults(case: *Case) !void {
+    const network = case.control().network;
+
+    try network.setLossiness(.{ .drop_rate = .percent(10) });
+    try network.setLatency(.{
         .min_latency_ns = tick_ns,
         .latency_jitter_ns = 2 * tick_ns,
     });
-    try harness.control.network.setClogs(.{
+    try network.setClogs(.{
         .path_clog_rate = .percent(5),
         .path_clog_duration_ns = 2 * tick_ns,
     });
-    try harness.control.network.setPartitionDynamics(.{
+    try network.setPartitionDynamics(.{
         .partition_rate = .percent(5),
         .unpartition_rate = .percent(20),
         .partition_stability_min_ns = 2 * tick_ns,
@@ -231,31 +230,31 @@ fn configureNetworkFaults(harness: *Harness) !void {
     });
 }
 
-pub fn buggyScenario(harness: *Harness) !void {
-    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try harness.service.submit(.{
+pub fn buggyScenario(case: *Case) !void {
+    try case.control().disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try case.app.submit(.{
         .op = .{ .id = 1, .value = 99 },
         .retry_limit = 1,
         .sync_before_broadcast = false,
     });
 
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.service.recover();
+    try case.control().disk.crash();
+    try case.control().disk.restart();
+    try case.app.recover();
 }
 
-pub fn probabilisticBugScenario(harness: *Harness) !void {
+pub fn probabilisticBugScenario(case: *Case) !void {
     const profile = probabilisticBugSearchProfile();
-    try profile.apply(harness.control);
-    try harness.service.submit(.{
+    try profile.apply(case.control());
+    try case.app.submit(.{
         .op = .{ .id = 1, .value = 99 },
         .retry_limit = 1,
         .sync_before_broadcast = false,
     });
 
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.service.recover();
+    try case.control().disk.crash();
+    try case.control().disk.restart();
+    try case.app.recover();
 }
 
 const SyncMode = enum {
@@ -467,8 +466,8 @@ const DurableBroadcast = struct {
     }
 };
 
-fn quorumAcknowledgementsAreDurable(harness: *const Harness) !void {
-    try durableServiceIsSafe(&harness.service);
+fn quorumAcknowledgementsAreDurable(case: *const Case) !void {
+    try durableServiceIsSafe(&case.app);
 }
 
 fn durableServiceIsSafe(service: *const DurableBroadcast) !void {
@@ -547,34 +546,37 @@ fn writeBroadcastRecover(
 }
 
 test "durable broadcast: smoke" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "durable broadcast: swarm fuzz" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 64,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "durable broadcast: bug detected" {
-    try mar.expectFailure(.{
+    try mar.expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = buggyScenario,
         .checks = &checks,
     });

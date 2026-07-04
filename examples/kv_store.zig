@@ -1,9 +1,9 @@
 //! Marionette example: WAL recovery under crash + corruption.
 //!
-//! - `Harness` holds simulator state that outlives one scenario.
+//! - `SimCase(KVStore)` holds app state and simulator authority for each run.
 //! - `scenario` drives writes, faults, crash, restart, and recovery.
 //! - `checks` assert the invariant after the scenario runs.
-//! - `expectPass` / `expectFuzz` / `expectFailure` are the runners.
+//! - `expectSimPass` / `expectSimFuzz` / `expectSimFailure` are the runners.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -20,7 +20,20 @@ const committed_value: u32 = 41;
 const volatile_key: u32 = 2;
 const volatile_value: u32 = 99;
 
-pub const checks = [_]mar.StateCheck(Harness){
+pub const Case = mar.SimCase(KVStore);
+
+pub fn simulateOptions() mar.World.SimulateOptions {
+    return .{ .disk = .{
+        .sector_size = record_size,
+        .min_latency_ns = tick_ns,
+    } };
+}
+
+pub fn init(sim: mar.Sim) !KVStore {
+    return try KVStore.init(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder());
+}
+
+pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "synced records recover and unsynced records are rejected", .check = recoveredStateIsSafe },
 };
 
@@ -31,82 +44,92 @@ pub const checks = [_]mar.StateCheck(Harness){
 /// Allowed damage: the unsynced record was still inside the window, so it may
 /// be absent (lost or torn and rejected) or present exactly as written; a
 /// recovered record with any other value means recovery accepted damage.
-pub const window_checks = [_]mar.StateCheck(Harness){
+pub const window_checks = [_]mar.StateCheck(Case){
     .{ .name = "recovered state is within the recovery window", .check = recoveredStateIsWithinWindow },
 };
 
-pub fn scenario(harness: *Harness) !void {
-    try harness.store.put(committed_key, committed_value, .sync);
-    try harness.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try harness.store.put(volatile_key, volatile_value, .no_sync);
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
-    try harness.control.disk.corruptSector(wal_path, record_size);
-    try harness.store.recover(.strict);
+pub fn scenario(case: *Case) !void {
+    const store = &case.app;
+    const disk = case.control().disk;
+
+    try store.put(committed_key, committed_value, .sync);
+    try disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try store.put(volatile_key, volatile_value, .no_sync);
+    try disk.crash();
+    try disk.restart();
+    try store.reopen();
+    try disk.corruptSector(wal_path, record_size);
+    try store.recover(.strict);
 }
 
-pub fn buggyScenario(harness: *Harness) !void {
-    try harness.store.put(committed_key, committed_value, .sync);
-    try harness.control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
-    try harness.store.put(volatile_key, volatile_value, .no_sync);
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
-    try harness.store.recover(.buggy_accept_magic_only);
+pub fn buggyScenario(case: *Case) !void {
+    const store = &case.app;
+    const disk = case.control().disk;
+
+    try store.put(committed_key, committed_value, .sync);
+    try disk.setFaults(.{ .crash_torn_write_rate = .always() });
+    try store.put(volatile_key, volatile_value, .no_sync);
+    try disk.crash();
+    try disk.restart();
+    try store.reopen();
+    try store.recover(.buggy_accept_magic_only);
 }
 
 /// Probabilistic crash faults against the unsynced write only: the synced
 /// record is durable truth and stays out of every crash fault's reach.
-fn runProbabilisticCrash(harness: *Harness, mode: RecoveryMode) !void {
-    try harness.store.put(committed_key, committed_value, .sync);
-    try harness.control.disk.setFaults(.{
+fn runProbabilisticCrash(case: *Case, mode: RecoveryMode) !void {
+    const store = &case.app;
+    const disk = case.control().disk;
+
+    try store.put(committed_key, committed_value, .sync);
+    try disk.setFaults(.{
         .crash_lost_write_rate = .percent(25),
         .crash_torn_write_rate = .percent(25),
     });
-    try harness.store.put(volatile_key, volatile_value, .no_sync);
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
-    try harness.store.recover(mode);
+    try store.put(volatile_key, volatile_value, .no_sync);
+    try disk.crash();
+    try disk.restart();
+    try store.reopen();
+    try store.recover(mode);
 }
 
-pub fn probabilisticScenario(harness: *Harness) !void {
-    try runProbabilisticCrash(harness, .strict);
+pub fn probabilisticScenario(case: *Case) !void {
+    try runProbabilisticCrash(case, .strict);
 }
 
-pub fn probabilisticBuggyScenario(harness: *Harness) !void {
-    try runProbabilisticCrash(harness, .buggy_accept_magic_only);
+pub fn probabilisticBuggyScenario(case: *Case) !void {
+    try runProbabilisticCrash(case, .buggy_accept_magic_only);
+}
+
+pub fn runReport(
+    allocator: std.mem.Allocator,
+    seed: u64,
+    name: []const u8,
+    comptime scenario_fn: fn (*Case) anyerror!void,
+    comptime state_checks: []const mar.StateCheck(Case),
+) !mar.RunReport {
+    return mar.runSimCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = tick_ns,
+        .name = name,
+        .simulate = simulateOptions(),
+        .init = init,
+        .scenario = scenario_fn,
+        .checks = state_checks,
+    });
 }
 
 pub fn runRecoveryWindowReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = tick_ns,
-        .name = "kv-recovery-window",
-        .init = Harness.init,
-        .deinit = Harness.deinit,
-        .scenario = probabilisticScenario,
-        .checks = &window_checks,
-    });
+    return runReport(allocator, seed, "kv-recovery-window", probabilisticScenario, &window_checks);
 }
 
 pub fn runRecoveryWindowBugReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = tick_ns,
-        .name = "kv-recovery-window-bug",
-        .init = Harness.init,
-        .deinit = Harness.deinit,
-        .scenario = probabilisticBuggyScenario,
-        .checks = &window_checks,
-    });
+    return runReport(allocator, seed, "kv-recovery-window-bug", probabilisticBuggyScenario, &window_checks);
 }
 
-fn recoveredStateIsSafe(harness: *const Harness) !void {
-    const store = &harness.store;
+fn recoveredStateIsSafe(case: *const Case) !void {
+    const store = &case.app;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
         try store.recorder.record("kv.invariant_violation reason=committed_missing_or_wrong", .{});
@@ -124,8 +147,8 @@ fn recoveredStateIsSafe(harness: *const Harness) !void {
     );
 }
 
-fn recoveredStateIsWithinWindow(harness: *const Harness) !void {
-    const store = &harness.store;
+fn recoveredStateIsWithinWindow(case: *const Case) !void {
+    const store = &case.app;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
         try store.recorder.record("kv.invariant_violation reason=durable_truth_lost", .{});
@@ -180,27 +203,6 @@ const Entry = struct {
     value: u32,
 };
 
-pub const Harness = struct {
-    store: KVStore,
-    control: mar.Control,
-
-    pub fn init(world: *mar.World) !Harness {
-        const sim = try world.simulate(.{ .disk = .{
-            .sector_size = record_size,
-            .min_latency_ns = tick_ns,
-        } });
-
-        return .{
-            .store = try KVStore.init(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder()),
-            .control = sim.control,
-        };
-    }
-
-    pub fn deinit(self: *Harness) void {
-        self.store.deinit();
-    }
-};
-
 const KVStore = struct {
     io: std.Io,
     root: std.Io.Dir,
@@ -219,7 +221,7 @@ const KVStore = struct {
         };
     }
 
-    fn deinit(self: *KVStore) void {
+    pub fn deinit(self: *KVStore) void {
         self.wal.close(self.io);
     }
 
@@ -315,50 +317,50 @@ fn decodeRecord(bytes: *const [record_size]u8, mode: RecoveryMode) ?Entry {
 }
 
 test "kv store: recovery passes through expectation helper" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "kv store: recovery fuzz smoke" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 16,
         .tick_ns = tick_ns,
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "kv store: recovery window holds across probabilistic crash fault seeds" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 32,
         .tick_ns = tick_ns,
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = probabilisticScenario,
         .checks = &window_checks,
     });
 }
 
 test "kv store: buggy recovery fails through expectation helper" {
-    try mar.expectFailure(.{
+    try mar.expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(),
+        .init = init,
         .scenario = buggyScenario,
         .checks = &checks,
     });

@@ -11,7 +11,9 @@ const mar = @import("marionette");
 const value_buffer_len = 16;
 const buggify_put_count: u32 = 8;
 
-pub const checks = [_]mar.StateCheck(Memtable){
+const Case = mar.SimCase(Memtable);
+
+pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "committed puts match stored entries", .check = commitIntegrity },
 };
 
@@ -30,12 +32,12 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 }
 
 pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .name = "memtable-allocation-pressure",
+        .simulate = .{},
         .init = Memtable.init,
-        .deinit = Memtable.deinit,
         .scenario = scenario,
         .checks = &checks,
     });
@@ -43,57 +45,59 @@ pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport
 
 /// Run the planted commit-before-allocate bug under the same fault choreography.
 pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .name = "memtable-phantom-commit",
+        .simulate = .{},
         .init = Memtable.init,
-        .deinit = Memtable.deinit,
         .scenario = buggyScenario,
         .checks = &checks,
     });
 }
 
 pub fn runBuggifyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .name = "memtable-allocation-buggify",
+        .simulate = .{},
         .init = Memtable.init,
-        .deinit = Memtable.deinit,
         .scenario = buggifyScenario,
         .checks = &checks,
     });
 }
 
-fn scenario(table: *Memtable) !void {
-    try runPressureScenario(table, .strict);
+fn scenario(case: *Case) !void {
+    try runPressureScenario(case, .strict);
 }
 
-fn buggyScenario(table: *Memtable) !void {
-    try runPressureScenario(table, .buggy_commit_before_alloc);
+fn buggyScenario(case: *Case) !void {
+    try runPressureScenario(case, .buggy_commit_before_alloc);
 }
 
-fn runPressureScenario(table: *Memtable, mode: PutMode) !void {
+fn runPressureScenario(case: *Case, mode: PutMode) !void {
+    const table = &case.app;
     var buffer: [value_buffer_len]u8 = undefined;
 
     try table.put(1, valueFor(1, &buffer), mode);
 
     // Every allocation and growth request from here on fails deterministically.
-    try table.control.allocation.setFaults(.{ .fail_after = 0 });
+    try case.control().allocation.setFaults(.{ .fail_after = 0 });
     table.put(2, valueFor(2, &buffer), mode) catch |err| switch (err) {
         error.OutOfMemory => {},
         else => return err,
     };
 
-    try table.control.allocation.setFaults(.{});
+    try case.control().allocation.setFaults(.{});
     try table.put(3, valueFor(3, &buffer), mode);
 }
 
-fn buggifyScenario(table: *Memtable) !void {
+fn buggifyScenario(case: *Case) !void {
+    const table = &case.app;
     var buffer: [value_buffer_len]u8 = undefined;
 
-    try table.control.allocation.setFaults(.{ .buggify_rate = .percent(25) });
+    try case.control().allocation.setFaults(.{ .buggify_rate = .percent(25) });
 
     var key: u32 = 1;
     while (key <= buggify_put_count) : (key += 1) {
@@ -103,10 +107,12 @@ fn buggifyScenario(table: *Memtable) !void {
         };
     }
 
-    try table.control.allocation.setFaults(.{});
+    try case.control().allocation.setFaults(.{});
 }
 
-fn commitIntegrity(table: *const Memtable) !void {
+fn commitIntegrity(case: *const Case) !void {
+    const table = &case.app;
+
     if (table.committed_count != table.entries.items.len) {
         try table.env.record(
             "memtable.invariant_violation reason=phantom_commit committed={} entries={}",
@@ -157,22 +163,19 @@ const Entry = struct {
 
 const Memtable = struct {
     env: mar.Env,
-    control: mar.Control,
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
     committed_count: usize = 0,
     rejected_count: usize = 0,
 
-    fn init(world: *mar.World) !Memtable {
-        const sim = try world.simulate(.{});
+    fn init(sim: mar.Sim) Memtable {
         return .{
             .env = sim.env,
-            .control = sim.control,
             .allocator = sim.env.allocator(),
         };
     }
 
-    fn deinit(self: *Memtable) void {
+    pub fn deinit(self: *Memtable) void {
         for (self.entries.items) |entry| self.allocator.free(entry.value);
         self.entries.deinit(self.allocator);
     }
@@ -209,34 +212,34 @@ const Memtable = struct {
 };
 
 test "memtable: allocation rejection passes through expectation helper" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
+        .simulate = .{},
         .init = Memtable.init,
-        .deinit = Memtable.deinit,
         .scenario = scenario,
         .checks = &checks,
     });
 }
 
 test "memtable: phantom commit fails through expectation helper" {
-    try mar.expectFailure(.{
+    try mar.expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
+        .simulate = .{},
         .init = Memtable.init,
-        .deinit = Memtable.deinit,
         .scenario = buggyScenario,
         .checks = &checks,
     });
 }
 
 test "memtable: probabilistic allocation faults fuzz clean" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 16,
+        .simulate = .{},
         .init = Memtable.init,
-        .deinit = Memtable.deinit,
         .scenario = buggifyScenario,
         .checks = &checks,
     });

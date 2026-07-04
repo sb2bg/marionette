@@ -14,24 +14,25 @@ test "nightly deterministic seed sweep" {
     if (options.count == 0) return error.SeedSweepCountMustBePositive;
 
     try sweepRetryQueue();
-    try expectFuzzScenario("kv-store-recovery", .{
+    try expectSimFuzzScenario("kv-store-recovery", .{
         .allocator = std.testing.allocator,
         .seed = base_seed + 1,
         .seeds = options.count,
         .tick_ns = examples.kv_store.tick_ns,
         .name = "kv-store-recovery",
-        .init = examples.kv_store.Harness.init,
-        .deinit = examples.kv_store.Harness.deinit,
+        .simulate = examples.kv_store.simulateOptions(),
+        .init = examples.kv_store.init,
         .scenario = examples.kv_store.scenario,
         .checks = &examples.kv_store.checks,
     });
-    try expectFuzzScenario("durable-broadcast-network-faults", .{
+    try expectSimFuzzScenario("durable-broadcast-network-faults", .{
         .allocator = std.testing.allocator,
         .seed = base_seed + 2,
         .seeds = options.count,
         .tick_ns = examples.durable_broadcast.tick_ns,
         .name = "durable-broadcast-network-faults",
-        .init = examples.durable_broadcast.Harness.init,
+        .simulate = examples.durable_broadcast.simulateOptions(),
+        .init = examples.durable_broadcast.init,
         .scenario = examples.durable_broadcast.scenario,
         .checks = &examples.durable_broadcast.checks,
     });
@@ -62,11 +63,11 @@ fn sweepRetryQueue() !void {
     }
 }
 
-fn expectFuzzScenario(
+fn expectSimFuzzScenario(
     comptime scenario: []const u8,
     config: anytype,
 ) !void {
-    mar.expectFuzz(config) catch |err| {
+    mar.expectSimFuzz(config) catch |err| {
         std.debug.print("seed sweep failed: scenario={s} error={s}\n", .{
             scenario,
             @errorName(err),

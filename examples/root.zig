@@ -284,18 +284,20 @@ test "examples: memtable checker catches phantom commit under OOM" {
 }
 
 test "examples: idempotency bug is seed-sensitive" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = idempotency_bug.passing_seed,
-        .init = idempotency_bug.Harness.init,
+        .simulate = .{},
+        .init = idempotency_bug.init,
         .scenario = idempotency_bug.scenario,
         .checks = &idempotency_bug.checks,
     });
 
-    try mar.expectFailure(.{
+    try mar.expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = idempotency_bug.failing_seed,
-        .init = idempotency_bug.Harness.init,
+        .simulate = .{},
+        .init = idempotency_bug.init,
         .scenario = idempotency_bug.scenario,
         .checks = &idempotency_bug.checks,
     });
@@ -354,7 +356,7 @@ test "examples: idempotency seed search finds the bug" {
 fn runKvStoreTrace(
     allocator: std.mem.Allocator,
     seed: u64,
-    comptime scenario_fn: fn (*kv_store.Harness) anyerror!void,
+    comptime scenario_fn: fn (*kv_store.Case) anyerror!void,
 ) ![]u8 {
     var report = try runKvStoreReport(allocator, seed, scenario_fn);
     defer report.deinit();
@@ -371,15 +373,13 @@ fn runKvStoreTrace(
 fn runKvStoreReport(
     allocator: std.mem.Allocator,
     seed: u64,
-    comptime scenario_fn: fn (*kv_store.Harness) anyerror!void,
+    comptime scenario_fn: fn (*kv_store.Case) anyerror!void,
 ) !mar.RunReport {
-    return mar.runCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = kv_store.tick_ns,
-        .init = kv_store.Harness.init,
-        .deinit = kv_store.Harness.deinit,
-        .scenario = scenario_fn,
-        .checks = &kv_store.checks,
-    });
+    return kv_store.runReport(
+        allocator,
+        seed,
+        "kv-store-recovery",
+        scenario_fn,
+        &kv_store.checks,
+    );
 }

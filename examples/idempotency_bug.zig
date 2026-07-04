@@ -1,6 +1,6 @@
 //! Marionette example: a seed-sensitive idempotency bug.
 //!
-//! - `Harness` owns a small payment service and simulator authorities.
+//! - `SimCase(PaymentService)` owns the service plus simulator authorities.
 //! - `scenario` uses the seeded env to choose whether two accounts reuse an id.
 //! - `checks` assert both account-local deposits are applied exactly once.
 //! - Passing and failing seeds are replayable because every decision is traced.
@@ -12,13 +12,19 @@ pub const passing_seed: u64 = 0xC0FFEE;
 pub const failing_seed: u64 = 13;
 
 const deposit_cents = 100;
+pub const Case = mar.SimCase(PaymentService);
 
-pub const checks = [_]mar.StateCheck(Harness){
+pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "account-local deposits are not globally deduped", .check = balancesAreSafe },
 };
 
-pub fn scenario(harness: *Harness) !void {
-    const env = harness.service.env;
+pub fn init(sim: mar.Sim) PaymentService {
+    return .{ .env = sim.env };
+}
+
+pub fn scenario(case: *Case) !void {
+    const service = &case.app;
+    const env = service.env;
     const alice_request_id = try env.random.intLessThan(u32, 10_000);
     const reuse_request_id = try env.buggify(.reuse_request_id_across_accounts, .oneIn(8));
     const bob_request_id = if (reuse_request_id) alice_request_id else alice_request_id + 1;
@@ -28,12 +34,12 @@ pub fn scenario(harness: *Harness) !void {
         .{ alice_request_id, bob_request_id, reuse_request_id },
     );
 
-    try harness.service.deposit(.alice, alice_request_id, deposit_cents);
-    try harness.service.deposit(.bob, bob_request_id, deposit_cents);
+    try service.deposit(.alice, alice_request_id, deposit_cents);
+    try service.deposit(.bob, bob_request_id, deposit_cents);
 }
 
-fn balancesAreSafe(harness: *const Harness) !void {
-    const service = &harness.service;
+fn balancesAreSafe(case: *const Case) !void {
+    const service = &case.app;
 
     if (service.balance(.alice) != deposit_cents or service.balance(.bob) != deposit_cents) {
         try service.env.record(
@@ -48,19 +54,6 @@ fn balancesAreSafe(harness: *const Harness) !void {
         .{ service.balance(.alice), service.balance(.bob) },
     );
 }
-
-pub const Harness = struct {
-    service: PaymentService,
-    control: mar.Control,
-
-    pub fn init(world: *mar.World) !Harness {
-        const sim = try world.simulate(.{});
-        return .{
-            .service = .{ .env = sim.env },
-            .control = sim.control,
-        };
-    }
-};
 
 const Account = enum {
     alice,
@@ -104,10 +97,11 @@ const PaymentService = struct {
 };
 
 pub fn runReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
-        .init = Harness.init,
+        .simulate = .{},
+        .init = init,
         .scenario = scenario,
         .checks = &checks,
     });

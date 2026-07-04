@@ -23,7 +23,9 @@ const profile: Profile = .{
     .second_worker = 2,
 };
 
-const checks = [_]mar.StateCheck(RetryQueue){
+const Case = mar.SimCase(RetryQueue);
+
+const checks = [_]mar.StateCheck(Case){
     .{ .name = "job completed at most once", .check = jobCompletedAtMostOnce },
 };
 
@@ -42,11 +44,12 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
 }
 
 pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .tick_ns = ns_per_ms,
         .name = "retry-queue-late-ack",
+        .simulate = .{},
         .init = RetryQueue.init,
         .scenario = scenario,
         .checks = &checks,
@@ -55,23 +58,24 @@ pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport
 
 /// Run the deliberately buggy late-ack scenario.
 pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
         .tick_ns = ns_per_ms,
         .name = "retry-queue-late-ack-bug",
+        .simulate = .{},
         .init = RetryQueue.init,
         .scenario = buggyScenario,
         .checks = &checks,
     });
 }
 
-fn scenario(queue: *RetryQueue) !void {
-    try runLateAckScenario(queue, .strict);
+fn scenario(case: *Case) !void {
+    try runLateAckScenario(case, .strict);
 }
 
-fn buggyScenario(queue: *RetryQueue) !void {
-    try runLateAckScenario(queue, .buggy_accept_stale_ack);
+fn buggyScenario(case: *Case) !void {
+    try runLateAckScenario(case, .buggy_accept_stale_ack);
 }
 
 const CompletionMode = enum {
@@ -79,7 +83,9 @@ const CompletionMode = enum {
     buggy_accept_stale_ack,
 };
 
-fn runLateAckScenario(queue: *RetryQueue, mode: CompletionMode) !void {
+fn runLateAckScenario(case: *Case, mode: CompletionMode) !void {
+    const queue = &case.app;
+
     try queue.makeReady(profile.job_id);
 
     const first_worker: u8 = @intCast(profile.first_worker);
@@ -89,7 +95,7 @@ fn runLateAckScenario(queue: *RetryQueue, mode: CompletionMode) !void {
     _ = try queue.lease(first_worker, lease_duration_ns);
 
     const extra_delay_ticks = 1 + try queue.env.random.intLessThan(u8, 3);
-    try queue.control.runFor((profile.lease_ticks + extra_delay_ticks) * ns_per_ms);
+    try case.control().runFor((profile.lease_ticks + extra_delay_ticks) * ns_per_ms);
     try queue.expireDue();
 
     _ = try queue.lease(second_worker, lease_duration_ns);
@@ -106,7 +112,9 @@ fn runLateAckScenario(queue: *RetryQueue, mode: CompletionMode) !void {
     }
 }
 
-fn jobCompletedAtMostOnce(queue: *const RetryQueue) !void {
+fn jobCompletedAtMostOnce(case: *const Case) !void {
+    const queue = &case.app;
+
     if (queue.completion_count > 1) {
         try queue.env.record(
             "queue.invariant_violation job={} completions={}",
@@ -130,24 +138,20 @@ const JobState = enum {
 
 const RetryQueue = struct {
     env: mar.Env,
-    control: mar.Control,
     job_id: u64 = 0,
     state: JobState = .empty,
     lease_owner: u8 = 0,
     lease_deadline_ns: mar.Timestamp = 0,
     completion_count: u8 = 0,
 
-    fn init(world: *mar.World) !RetryQueue {
-        const sim = try world.simulate(.{});
-        return .{ .env = sim.env, .control = sim.control };
+    fn init(sim: mar.Sim) RetryQueue {
+        return .{ .env = sim.env };
     }
 
     fn makeReady(self: *RetryQueue, job_id: u64) !void {
         const env = self.env;
-        const control = self.control;
         self.* = .{
             .env = env,
-            .control = control,
             .job_id = job_id,
             .state = .ready,
         };
