@@ -597,3 +597,61 @@ test "disk: crash traces are deterministic for the same seed" {
 
     try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
 }
+
+test "disk: armed crash fires at the operation boundary and disarms" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4, .min_latency_ns = 10 });
+    defer disk.deinit();
+
+    const control = disk.control();
+    try control.setFaults(.{ .crash_lost_write_rate = .always() });
+
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "aaaa" });
+    try control.crashAfterOps(1);
+
+    // One operation of budget: this write still runs and stays pending.
+    try disk.disk().write(.{ .path = "wal.log", .offset = 4, .bytes = "bbbb" });
+
+    // Budget exhausted: the next operation crashes the disk before doing
+    // any work and fails like any post-crash operation.
+    var buffer: [4]u8 = @splat(0xff);
+    try std.testing.expectError(error.DiskCrashed, disk.disk().read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    }));
+
+    try control.restart();
+
+    // Both writes were pending at the crash and the always-lost fault ate
+    // them; the disk runs normally again and the trigger stayed disarmed.
+    var recovered: [8]u8 = @splat(0xff);
+    try disk.disk().read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &recovered,
+    });
+    try std.testing.expectEqualStrings("\x00" ** 8, &recovered);
+
+    const trace = world.traceBytes();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.fault kind=armed_crash after_ops=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.crash") != null);
+}
+
+test "disk: manual crash disarms a pending armed crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 100, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4, .min_latency_ns = 10 });
+    defer disk.deinit();
+
+    const control = disk.control();
+    try control.crashAfterOps(0);
+    try control.crash();
+    try control.restart();
+
+    // The manual crash consumed the armed trigger: operations run again.
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "aaaa" });
+}

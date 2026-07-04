@@ -165,6 +165,20 @@ the basic model is traceable and tested. Misdirected writes should be a named
 fault type rather than being collapsed into generic corruption, because they
 test whether user code validates record identity and location.
 
+### Structural crash trigger
+
+`control.disk.crashAfterOps(n)` arms a crash that fires at the operation
+boundary after `n` more data/metadata operations complete: the first
+operation past the budget crashes the disk before doing any work and fails
+like any post-crash operation. This places a crash at a structural point of
+the workload (the Nth write of a commit) instead of a measured tick offset,
+the disk-side analog of the futex-handshake choreography the network
+scenarios use. Arming is trace-visible as `disk.fault kind=armed_crash
+after_ops=n`; re-arming replaces the budget, and any crash (armed or manual)
+disarms it. A budget the workload never reaches simply never fires, which
+harnesses can use as a self-bounding crash-point scan (see the xitdb
+fuzzer).
+
 ## Recovery Windows
 
 Fault injection needs budgets. A simulator that can corrupt every copy of

@@ -14,6 +14,7 @@ pub const DiskControl = struct {
         set_faults: *const fn (*anyopaque, DiskFaultOptions) DiskError!void,
         corrupt_sector: *const fn (*anyopaque, []const u8, u64) DiskError!void,
         crash: *const fn (*anyopaque) DiskError!void,
+        crash_after_ops: *const fn (*anyopaque, u64) DiskError!void,
         restart: *const fn (*anyopaque) DiskError!void,
         disk: *const fn (*anyopaque) Disk,
     };
@@ -28,6 +29,15 @@ pub const DiskControl = struct {
 
     pub fn crash(self: DiskControl) DiskError!void {
         try self.vtable.crash(self.ptr);
+    }
+
+    /// Arm a structural crash: the disk crashes at the operation boundary
+    /// after `ops` more data/metadata operations complete, applying the
+    /// configured crash fault classes at that point. This places a crash at
+    /// a structural point of the workload instead of a measured tick
+    /// offset. Re-arming replaces the previous budget; any crash disarms.
+    pub fn crashAfterOps(self: DiskControl, ops: u64) DiskError!void {
+        try self.vtable.crash_after_ops(self.ptr, ops);
     }
 
     pub fn restart(self: DiskControl) DiskError!void {

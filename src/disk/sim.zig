@@ -155,6 +155,11 @@ pub const SimDisk = struct {
     next_file_inode: u64 = 2,
     next_dir_id: DirId = 1,
     crashed: bool = false,
+    /// Remaining data/metadata operations before an armed structural crash
+    /// fires. Armed by `control.disk.crashAfterOps`; the crash triggers at
+    /// the operation boundary, before the first operation past the budget
+    /// does any work. Any crash disarms it.
+    armed_crash_budget: ?u64 = null,
     crash_observer: ?CrashObserver = null,
     latency_runtime: ?DiskLatencyRuntime = null,
 
@@ -230,7 +235,7 @@ pub const SimDisk = struct {
     fn read(self: *Self, options: Read) DiskError!void {
         try self.validatePath(options.path);
         try self.validateRange(options.offset, options.buffer.len);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -276,7 +281,7 @@ pub const SimDisk = struct {
     fn write(self: *Self, options: Write) DiskError!void {
         try self.validatePath(options.path);
         try self.validateRange(options.offset, options.bytes.len);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -314,7 +319,7 @@ pub const SimDisk = struct {
 
     fn sync(self: *Self, options: Sync) DiskError!void {
         try self.validatePath(options.path);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -331,7 +336,7 @@ pub const SimDisk = struct {
 
     fn syncDir(self: *Self, options: SyncDir) DiskError!void {
         try validateLogicalPath(options.path, .directory);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -348,7 +353,7 @@ pub const SimDisk = struct {
 
     fn stat(self: *Self, options: Disk.Stat) DiskError!Disk.StatResult {
         try self.validatePath(options.path);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -372,7 +377,7 @@ pub const SimDisk = struct {
     fn createDir(self: *Self, options: Disk.CreateDir) DiskError!void {
         try validateLogicalPath(options.path, .directory);
         if (std.mem.eql(u8, options.path, ".")) return error.PathAlreadyExists;
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -411,7 +416,7 @@ pub const SimDisk = struct {
 
     fn statDir(self: *Self, options: Disk.StatDir) DiskError!Disk.StatDirResult {
         try validateLogicalPath(options.path, .directory);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -432,7 +437,7 @@ pub const SimDisk = struct {
 
     fn readDir(self: *Self, options: Disk.ReadDir) DiskError!Disk.DirList {
         try validateLogicalPath(options.path, .directory);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -489,7 +494,7 @@ pub const SimDisk = struct {
     fn readSome(self: *Self, options: Disk.ReadSome) DiskError!usize {
         try self.validatePath(options.path);
         try validateByteRange(options.offset, options.buffer.len);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -554,7 +559,7 @@ pub const SimDisk = struct {
 
     fn setLength(self: *Self, options: Disk.SetLength) DiskError!void {
         try self.validatePath(options.path);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -571,7 +576,7 @@ pub const SimDisk = struct {
 
     fn delete(self: *Self, options: Disk.Delete) DiskError!void {
         try self.validatePath(options.path);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -600,7 +605,7 @@ pub const SimDisk = struct {
     fn rename(self: *Self, options: Disk.Rename) DiskError!void {
         try self.validatePath(options.old_path);
         try self.validatePath(options.new_path);
-        try self.ensureRunning();
+        try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
@@ -669,7 +674,10 @@ pub const SimDisk = struct {
     }
 
     fn crash(self: *Self, _: Crash) DiskError!void {
+        // A control action, not a data operation: it must neither consume
+        // armed-crash budget nor recursively trigger itself.
         try self.ensureRunning();
+        self.armed_crash_budget = null;
 
         const pending_count = self.pending_writes.items.len;
         var landed: u64 = 0;
@@ -808,6 +816,31 @@ pub const SimDisk = struct {
 
     fn ensureRunning(self: *const Self) DiskError!void {
         if (self.crashed) return error.DiskCrashed;
+    }
+
+    /// Entry gate for every data and metadata operation. An armed
+    /// operation-count crash fires here, at the boundary between
+    /// operations: the operation that finds the budget exhausted crashes
+    /// the disk before doing any work and fails like any post-crash
+    /// operation.
+    fn beginOp(self: *Self) DiskError!void {
+        try self.ensureRunning();
+        if (self.armed_crash_budget) |budget| {
+            if (budget == 0) {
+                try self.crash(.{});
+                return error.DiskCrashed;
+            }
+            self.armed_crash_budget = budget - 1;
+        }
+    }
+
+    fn crashAfterOps(self: *Self, ops: u64) DiskError!void {
+        try self.ensureRunning();
+        self.armed_crash_budget = ops;
+        try self.world.recordFields("disk.fault", &.{
+            traceField("kind", .{ .literal = "armed_crash" }),
+            traceField("after_ops", .{ .uint = ops }),
+        });
     }
 
     fn validateRange(self: *const Self, offset: u64, len: usize) DiskError!void {
@@ -1519,6 +1552,7 @@ pub const SimDisk = struct {
         .set_faults = controlSetFaults,
         .corrupt_sector = controlCorruptSector,
         .crash = controlCrash,
+        .crash_after_ops = controlCrashAfterOps,
         .restart = controlRestart,
         .disk = controlDisk,
     };
@@ -1585,6 +1619,10 @@ pub const SimDisk = struct {
 
     fn controlCrash(ptr: *anyopaque) DiskError!void {
         try fromOpaque(ptr).crash(.{});
+    }
+
+    fn controlCrashAfterOps(ptr: *anyopaque, ops: u64) DiskError!void {
+        try fromOpaque(ptr).crashAfterOps(ops);
     }
 
     fn controlRestart(ptr: *anyopaque) DiskError!void {
