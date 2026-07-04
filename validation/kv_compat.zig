@@ -21,186 +21,189 @@ const tmp_path = "/kvc/kv.tab.tmp";
 const Record = wal_record.Fixed(u32, 4);
 const record_size = Record.record_size;
 const magic: u32 = 0x4b434d31; // KCM1
+const misaligned_sector_size = 7;
 
 const Entry = struct {
     key: u32,
     value: u32,
 };
 
-pub const lifecycle_checks = [_]mar.StateCheck(Harness){
+const Case = mar.SimCase(CompatStore);
+
+fn simulateOptions(sector_size: u64) mar.World.SimulateOptions {
+    return .{ .disk = .{
+        .sector_size = sector_size,
+        .min_latency_ns = tick_ns,
+    } };
+}
+
+fn initStore(sim: mar.Sim) !CompatStore {
+    return try CompatStore.init(sim.env.io(), sim.env.recorder());
+}
+
+pub const lifecycle_checks = [_]mar.StateCheck(Case){
     .{ .name = "compacted table and replayed WAL recover exactly", .check = lifecycleRecoveredState },
 };
 
-pub const durable_prefix_checks = [_]mar.StateCheck(Harness){
+pub const durable_prefix_checks = [_]mar.StateCheck(Case){
     .{ .name = "durable prefix recovers exactly", .check = durablePrefixRecoveredState },
 };
 
-pub fn fullLifecycle(harness: *Harness) !void {
-    try harness.store.put(0, 10);
-    try harness.store.put(1, 11);
-    try harness.store.commit();
-    try harness.store.compact();
-    try harness.store.put(2, 12);
-    try harness.store.commit();
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn fullLifecycle(case: *Case) !void {
+    const store = &case.app;
+    const disk = case.control().disk;
+
+    try store.put(0, 10);
+    try store.put(1, 11);
+    try store.commit();
+    try store.compact();
+    try store.put(2, 12);
+    try store.commit();
+    try disk.crash();
+    try disk.restart();
+    try store.reopen();
 }
 
-fn writeDurablePrefix(harness: *Harness) !void {
-    try harness.store.put(0, 10);
-    try harness.store.put(1, 11);
-    try harness.store.commit();
+fn writeDurablePrefix(case: *Case) !void {
+    try case.app.put(0, 10);
+    try case.app.put(1, 11);
+    try case.app.commit();
 }
 
 /// Allowed outcome set: durable truth only. The tmp table create is pending
 /// metadata; if it is lost, recovery uses the old table plus full WAL.
-pub fn crashBeforeRenameLostTmp(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.store.compactUntil(.tmp_synced);
-    try harness.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn crashBeforeRenameLostTmp(case: *Case) !void {
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try case.app.compactUntil(.tmp_synced);
+    try disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.crash();
+    try disk.restart();
+    try case.app.reopen();
 }
 
 /// Allowed outcome set: durable truth only. The tmp table may survive, but it
 /// is still outside the rename boundary and recovery must drop it unread.
-pub fn crashBeforeRenameSurvivingTmp(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.store.compactUntil(.tmp_synced);
-    try harness.control.disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn crashBeforeRenameSurvivingTmp(case: *Case) !void {
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try case.app.compactUntil(.tmp_synced);
+    try disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
+    try disk.crash();
+    try disk.restart();
+    try case.app.reopen();
 }
 
 /// Allowed outcome set: durable truth only. If the rename is lost, old table
 /// plus WAL recovers; if it survives, the compacted table plus old WAL
 /// converges idempotently to the same state.
-pub fn crashAfterRenameLostMetadata(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.store.compactUntil(.renamed);
-    try harness.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn crashAfterRenameLostMetadata(case: *Case) !void {
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try case.app.compactUntil(.renamed);
+    try disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.crash();
+    try disk.restart();
+    try case.app.reopen();
 }
 
 /// Allowed outcome set: durable truth only. The renamed table incarnation may
 /// survive, with the uncleared WAL replaying over it idempotently.
-pub fn crashAfterRenameMetadataSurvives(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.store.compactUntil(.renamed);
-    try harness.control.disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn crashAfterRenameMetadataSurvives(case: *Case) !void {
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try case.app.compactUntil(.renamed);
+    try disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
+    try disk.crash();
+    try disk.restart();
+    try case.app.reopen();
 }
 
 /// Allowed outcome set: durable truth only. Torn tmp bytes are allowed damage
 /// inside the recovery window because the tmp file has not been renamed into
 /// durable truth and recovery never reads it.
-pub fn crashAfterTornTmpWrite(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.store.compactUntil(.tmp_written);
-    try harness.control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn crashAfterTornTmpWrite(case: *Case) !void {
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try case.app.compactUntil(.tmp_written);
+    try disk.setFaults(.{ .crash_torn_write_rate = .always() });
+    try disk.crash();
+    try disk.restart();
+    try case.app.reopen();
 }
 
 /// Allowed outcome set: durable truth only. Lost WAL-clear metadata leaves the
 /// old WAL beside the durable compacted table; replay is idempotent.
-pub fn crashDuringWalClearMetadataLost(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.store.compactUntil(.wal_cleared_unsynced);
-    try harness.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn crashDuringWalClearMetadataLost(case: *Case) !void {
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try case.app.compactUntil(.wal_cleared_unsynced);
+    try disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.crash();
+    try disk.restart();
+    try case.app.reopen();
 }
 
 /// Allowed outcome set: durable truth only. Surviving WAL-clear metadata leaves
 /// the durable compacted table and a fresh empty WAL.
-pub fn crashDuringWalClearMetadataSurvives(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.store.compactUntil(.wal_cleared_unsynced);
-    try harness.control.disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+pub fn crashDuringWalClearMetadataSurvives(case: *Case) !void {
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try case.app.compactUntil(.wal_cleared_unsynced);
+    try disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
+    try disk.crash();
+    try disk.restart();
+    try case.app.reopen();
 }
 
 /// Allowed outcome set: durable truth only. The sweep chooses one structural
 /// crash point and permits allowed damage only to pending tmp/WAL-clear work.
-pub fn recoveryWindowCrashPointSweep(harness: *Harness) !void {
-    try writeDurablePrefix(harness);
-    try harness.control.disk.setFaults(.{
+pub fn recoveryWindowCrashPointSweep(case: *Case) !void {
+    const store = &case.app;
+    const disk = case.control().disk;
+
+    try writeDurablePrefix(case);
+    try disk.setFaults(.{
         .crash_lost_metadata_rate = .percent(50),
         .crash_torn_write_rate = .percent(25),
         .crash_lost_write_rate = .percent(25),
     });
 
     const phase_count = @typeInfo(CompactPhase).@"enum".fields.len;
-    const choice = try harness.world.randomIntLessThan(u8, phase_count + 1);
+    const choice = try case.env().random.intLessThan(u8, phase_count + 1);
     if (choice == 0) {
-        try harness.store.recorder.record("kv_compat.sweep crash_point=no_compaction", .{});
+        try store.recorder.record("kv_compat.sweep crash_point=no_compaction", .{});
     } else {
         const phase: CompactPhase = @enumFromInt(choice - 1);
-        try harness.store.recorder.record("kv_compat.sweep crash_point={s}", .{@tagName(phase)});
-        try harness.store.compactUntil(phase);
+        try store.recorder.record("kv_compat.sweep crash_point={s}", .{@tagName(phase)});
+        try store.compactUntil(phase);
     }
 
-    try harness.control.disk.crash();
-    try harness.control.disk.restart();
-    try harness.store.reopen();
+    try disk.crash();
+    try disk.restart();
+    try store.reopen();
 }
 
-fn lifecycleRecoveredState(harness: *const Harness) !void {
+fn lifecycleRecoveredState(case: *const Case) !void {
     try expectTable(
-        &harness.store,
+        &case.app,
         &.{ .{ .key = 0, .value = 10 }, .{ .key = 1, .value = 11 }, .{ .key = 2, .value = 12 } },
     );
 }
 
-fn durablePrefixRecoveredState(harness: *const Harness) !void {
+fn durablePrefixRecoveredState(case: *const Case) !void {
     try expectTable(
-        &harness.store,
+        &case.app,
         &.{ .{ .key = 0, .value = 10 }, .{ .key = 1, .value = 11 } },
     );
 }
-
-pub const Harness = struct {
-    store: CompatStore,
-    control: mar.Control,
-    world: *mar.World,
-
-    pub fn init(world: *mar.World) !Harness {
-        return try initWithSectorSize(world, record_size);
-    }
-
-    pub fn initMisaligned(world: *mar.World) !Harness {
-        return try initWithSectorSize(world, 7);
-    }
-
-    fn initWithSectorSize(world: *mar.World, sector_size: u64) !Harness {
-        const sim = try world.simulate(.{ .disk = .{
-            .sector_size = sector_size,
-            .min_latency_ns = tick_ns,
-        } });
-
-        return .{
-            .store = try CompatStore.init(sim.env.io(), sim.env.recorder()),
-            .control = sim.control,
-            .world = world,
-        };
-    }
-
-    pub fn deinit(self: *Harness) void {
-        self.store.deinit();
-    }
-};
 
 const CompactPhase = enum {
     tmp_written,
@@ -244,7 +247,7 @@ const CompatStore = struct {
         return store;
     }
 
-    fn deinit(self: *CompatStore) void {
+    pub fn deinit(self: *CompatStore) void {
         self.wal.close(self.io);
     }
 
@@ -439,25 +442,25 @@ fn expectTable(store: *const CompatStore, expected: []const Entry) !void {
 }
 
 test "kv compat: full lifecycle survives clean crash and recovery" {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(record_size),
+        .init = initStore,
         .scenario = fullLifecycle,
         .checks = &lifecycle_checks,
     });
 }
 
 test "kv compat: lifecycle trace records the compaction phases" {
-    var report = try mar.runCase(.{
+    var report = try mar.runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
         .name = "kv-compat-lifecycle",
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(record_size),
+        .init = initStore,
         .scenario = fullLifecycle,
         .checks = &lifecycle_checks,
     });
@@ -473,38 +476,37 @@ test "kv compat: lifecycle trace records the compaction phases" {
 }
 
 fn expectCrashScenarioPass(
-    comptime init: fn (*mar.World) anyerror!Harness,
-    comptime scenario: fn (*Harness) anyerror!void,
+    comptime scenario: fn (*Case) anyerror!void,
 ) !void {
-    try mar.expectPass(.{
+    try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
-        .init = init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(record_size),
+        .init = initStore,
         .scenario = scenario,
         .checks = &durable_prefix_checks,
     });
 }
 
 fn runCrashScenarioReport(
-    comptime scenario: fn (*Harness) anyerror!void,
+    comptime scenario: fn (*Case) anyerror!void,
 ) !mar.RunReport {
-    return mar.runCase(.{
+    return mar.runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .tick_ns = tick_ns,
         .name = "kv-compat-crash-point",
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(record_size),
+        .init = initStore,
         .scenario = scenario,
         .checks = &durable_prefix_checks,
     });
 }
 
 test "kv compat: crash before compaction rename preserves durable truth" {
-    try expectCrashScenarioPass(Harness.init, crashBeforeRenameLostTmp);
-    try expectCrashScenarioPass(Harness.init, crashBeforeRenameSurvivingTmp);
+    try expectCrashScenarioPass(crashBeforeRenameLostTmp);
+    try expectCrashScenarioPass(crashBeforeRenameSurvivingTmp);
 
     var report = try runCrashScenarioReport(crashBeforeRenameSurvivingTmp);
     defer report.deinit();
@@ -517,40 +519,40 @@ test "kv compat: crash before compaction rename preserves durable truth" {
 }
 
 test "kv compat: crash between rename and dir sync recovers either incarnation" {
-    try expectCrashScenarioPass(Harness.init, crashAfterRenameLostMetadata);
-    try expectCrashScenarioPass(Harness.init, crashAfterRenameMetadataSurvives);
+    try expectCrashScenarioPass(crashAfterRenameLostMetadata);
+    try expectCrashScenarioPass(crashAfterRenameMetadataSurvives);
 }
 
 test "kv compat: torn tmp write never damages durable truth" {
-    try expectCrashScenarioPass(Harness.init, crashAfterTornTmpWrite);
+    try expectCrashScenarioPass(crashAfterTornTmpWrite);
 }
 
 test "kv compat: crash during wal clear converges after replay" {
-    try expectCrashScenarioPass(Harness.init, crashDuringWalClearMetadataLost);
-    try expectCrashScenarioPass(Harness.init, crashDuringWalClearMetadataSurvives);
+    try expectCrashScenarioPass(crashDuringWalClearMetadataLost);
+    try expectCrashScenarioPass(crashDuringWalClearMetadataSurvives);
 }
 
 test "kv compat: recovery window holds across crash-point fuzz seeds" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 32,
         .tick_ns = tick_ns,
-        .init = Harness.init,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(record_size),
+        .init = initStore,
         .scenario = recoveryWindowCrashPointSweep,
         .checks = &durable_prefix_checks,
     });
 }
 
 test "kv compat: recovery window holds across misaligned crash-point fuzz seeds" {
-    try mar.expectFuzz(.{
+    try mar.expectSimFuzz(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 32,
         .tick_ns = tick_ns,
-        .init = Harness.initMisaligned,
-        .deinit = Harness.deinit,
+        .simulate = simulateOptions(misaligned_sector_size),
+        .init = initStore,
         .scenario = recoveryWindowCrashPointSweep,
         .checks = &durable_prefix_checks,
     });
