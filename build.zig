@@ -16,6 +16,13 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
 
+    // Everything past this point is development-only build graph: tests,
+    // examples, validation SUTs, tidy, and release checks. A project that
+    // depends on Marionette needs only the modules above, and returning
+    // here keeps the lazy validation dependencies from being fetched into
+    // consumer projects and keeps their build scripts from running there.
+    if (b.pkg_hash.len != 0) return;
+
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 

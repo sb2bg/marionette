@@ -13,6 +13,12 @@
   asserts as harness misuse, and recoverable validation errors (invalid
   core node, killed core process without a registered lifecycle) are
   checked before any state changes so a failed call stays retryable.
+- Keeps consumer builds lean: Marionette's build script registers only the
+  public modules when built as a dependency, so depending on Marionette no
+  longer fetches its lazy validation SUTs (xitdb, mailbox, Ochi, dusty, and
+  their transitive dependency trees) or runs their build scripts, one of
+  which shelled out to git and printed `fatal: not a git repository` noise
+  into consumer projects.
 - Documents the user-facing API surface with contract-level doc comments
   (errors, trace events, alignment and determinism rules): `Env`
   authorities, the network/disk/process/allocation simulator controls and
