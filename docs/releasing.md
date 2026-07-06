@@ -24,7 +24,10 @@ After the release commit is green:
 1. Replace `Unreleased` in the changelog heading with the release date.
 2. Commit and push that date-only change, then require green CI again.
 3. Create an annotated `vX.Y.Z` tag at the dated release commit.
-4. Push the tag.
+4. Push the tag promptly. Between the release-commit push and the tag push,
+   the install commands published from `main` point at a tag that does not
+   exist yet, so keep that window short and do not pause the release between
+   these steps.
 5. Create a GitHub Release from the tag using the changelog section as the
    release notes.
 6. Verify the documented `zig fetch` command from a clean temporary consumer.

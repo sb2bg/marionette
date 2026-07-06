@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 - Unreleased
 
 - Adds the one-shot liveness transition `sim.transitionToLiveness(core)`,
   following the VOPR `transition_to_liveness_mode` shape: zeroes every
