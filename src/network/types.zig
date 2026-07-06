@@ -97,7 +97,7 @@ pub const SimNetworkOptions = struct {
     /// Use this when the topology includes client ids that should experience
     /// partitions but should not be selected as the isolated service node.
     /// Defaults to all configured processes when zero.
-    // TODO(roadmap item 12): replace this prefix count with an explicit
+    // TODO(roadmap "Opportunistic 0.5 Cleanup"): replace this prefix count with an explicit
     // `partitionable_nodes` set before richer topologies depend on it.
     service_nodes: usize = 0,
     /// Maximum packets queued on one directed path.

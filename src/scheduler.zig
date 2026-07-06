@@ -1200,7 +1200,7 @@ const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
 ///
 /// This is not the final Marionette scheduler. It is a small shared primitive
 /// for examples and early designs that need stable event ordering.
-/// TODO(roadmap item 11): `pop` does a linear scan, which is fine for Phase 0.
+/// TODO(roadmap "Scheduler Scale"): `pop` does a linear scan, which is fine for Phase 0.
 /// Replace this with a heap once the scheduler becomes hot or user-facing.
 pub fn EventQueue(
     comptime Event: type,

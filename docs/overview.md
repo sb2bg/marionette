@@ -15,9 +15,10 @@ summaries, named post-scenario checks, deterministic disk/network authorities
 with replayable faults, and a deterministic `std.Io` backend for the current
 file and network subset. The cooperative scheduler, timed futex waits, and
 narrow blocking `std.Io.net` stream path are implemented. Single-future
-`Io.async` / `Io.concurrent` / await are scheduler-backed; cooperative
-cancellation points, `Io.Group`, queue suspension, richer reset/node-down
-behavior, and richer replay tooling remain planned.
+`Io.async` / `Io.concurrent` / await, `Io.Group`, and cooperative
+cancellation (`error.Canceled` delivered at futex, sleep, and net
+suspension points) are scheduler-backed; queue suspension, richer
+reset/node-down behavior, and richer replay tooling remain planned.
 
 For the precise correctness model, see [Architecture](architecture.md). For
 the replay artifact bytes, see [Trace Format](trace-format.md). For

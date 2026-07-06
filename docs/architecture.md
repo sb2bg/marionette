@@ -80,9 +80,9 @@ Marionette currently has:
 Marionette does not yet have:
 
 - Event-by-event invariant checking.
-- Seed shrinking.
+- Generic seed shrinking (the xitdb validation ships a domain-specific
+  shrinker; the general mechanism is roadmap work).
 - Syscall interception.
-- Broader async integration such as `Io.Group` and cooperative cancellation.
 - Preemptive OS-thread or memory-model exploration.
 
 ## Source Layout

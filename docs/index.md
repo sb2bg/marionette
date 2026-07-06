@@ -9,8 +9,9 @@ fault, disk, and network primitives that make that direction concrete.
 
 The current validation targets include an unmodified storage engine
 (`xit-vcs/xitdb`), an unmodified cooperative-concurrency library
-(`g41797/mailbox`), and an external-style client/server KV service whose SUT
-imports only `std.Io.net`.
+(`g41797/mailbox`), the pinned Ochi storage engine, the unmodified
+`lalinsky/dusty` HTTP client/server library, and an external-style
+client/server KV service whose SUT imports only `std.Io.net`.
 
 Write production-shaped code against `std.Io` wherever possible, and add small
 Marionette handles only when the application actually needs them. In tests,
@@ -19,6 +20,8 @@ surfaces, the same application logic can run on the simulator and on production
 adapters.
 
 ```zig
+const mar = @import("marionette");
+
 fn writeAndRecover(io: std.Io, root: std.Io.Dir) !KVStore {
     var store = try KVStore.init(io, root);
     try store.put(1, 41, .sync);
@@ -235,20 +238,28 @@ guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
 
 The simulator currently models clock, deterministic randomness, disk, a
 directory-aware `std.Io.File`/`Dir` subset, typed endpoint networking, a narrow scheduler-backed
-`std.Io.net` stream subset with deterministic latency, timeout, partition, and
-healing behavior, and cooperative `std.Io` tasks, groups, and futex waits for
+`std.Io.net` stream subset with deterministic latency, timeout, partition,
+healing behavior, and literal-only host lookup (an unmodified
+`std.http.Client` runs against simulated servers; real DNS stays
+unsupported), and cooperative `std.Io` tasks, groups, and futex waits for
 `Mutex` / `Condition` code, validated against the pinned `g41797/mailbox`
-target, the internal bounded-queue capability demo, and pinned Ochi storage. Simulated disk
+target, the internal bounded-queue capability demo, pinned Ochi storage, and
+the pinned `lalinsky/dusty` HTTP library. Simulated disk
 operations park scheduler tasks until their completion deadlines rather than
 skipping earlier timers. When network simulation is configured, each node also
 has a process-scoped `std.Io` backend; `killProcess` and registered restart
 lifecycles model process death and explicit application restart.
+The simulator also models deterministic allocation faults through
+`Env.allocator()` and cooperative cancellation: `Future.cancel` and
+`Group.cancel` deliver `error.Canceled` at futex, sleep, and net suspension
+points following `std.Io`'s one-shot protocol. A one-shot
+`sim.transitionToLiveness(core)` ends the fault regime so bounded runs can
+prove the core makes progress once faults stop.
 It does not model arbitrary OS thread scheduling or memory-level concurrency;
 code that depends on those needs separate testing. The production network path
 is partial: local same-process endpoints and experimental framed loopback paths
-exist, but cross-process production transport is still roadmap work. Allocator
-simulation, cooperative cancellation, and broader scheduler parity
-are planned.
+exist, but cross-process production transport is still roadmap work. Queue
+suspension and broader scheduler parity are planned.
 
 Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows
 fiber path is deliberately disabled until its Win64 entry ABI has execution
@@ -261,8 +272,26 @@ directory is the best place to start.
 ## Install
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.4.0.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.5.0.tar.gz
 ```
+
+Then wire the module into your test build in `build.zig` and import it:
+
+```zig
+const marionette = b.dependency("marionette", .{
+    .target = target,
+    .optimize = optimize,
+});
+tests_module.addImport("marionette", marionette.module("marionette"));
+```
+
+```zig
+const mar = @import("marionette");
+```
+
+Consumer builds stay lean: depending on Marionette pulls in Marionette
+alone, never its validation targets or their pinned third-party
+dependencies.
 
 Requires Zig 0.16.x.
 

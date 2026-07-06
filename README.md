@@ -43,6 +43,8 @@ surfaces, the same application logic can run on the simulator and on production
 adapters.
 
 ```zig
+const mar = @import("marionette");
+
 fn writeAndRecover(io: std.Io, root: std.Io.Dir) !KVStore {
     var store = try KVStore.init(io, root);
     try store.put(1, 41, .sync);
@@ -278,17 +280,21 @@ shutdown shapes are validated: a clean shutdown where `error.Canceled` lands
 in dusty's `accept` park and the drain finds no active connections, and a
 hung-connection shutdown where a keep-alive handler is still parked in a
 read, dusty's drain times out, and its deferred `Group.cancel` sweeps the
-parked handler on the way out. Both replay byte-identically from the same
-seed. dusty is a lazy dependency and this target is not part of the default
-test step.
+parked handler on the way out. Fault scenarios partition the link before and
+during a response, pin dusty's observed `error.Timeout` contract, heal and
+retry against an exact body oracle, and sweep every chunk cut point while
+rejecting short-success partial responses. Everything replays
+byte-identically from the same seed. dusty is a lazy dependency and this
+target is not part of the default test step.
 
 ```sh
 zig build validate-dusty
 ```
 
 This is an external-style capability demonstration of the `std.Io.net`
-boundary, not a third-party SUT finding. Fault scenarios against this SUT are
-the remaining 0.6 roadmap work.
+boundary, not a third-party SUT finding. Keep-alive connection churn, larger
+transfers, and randomized task start jitter are the remaining 0.6 roadmap
+work.
 
 ## Traces
 
@@ -354,7 +360,9 @@ those needs separate testing. The simulator also models
 deterministic allocation faults through `Env.allocator()` and cooperative
 cancellation: `Future.cancel` and `Group.cancel` deliver `error.Canceled` at
 futex, sleep, and net suspension points following `std.Io`'s one-shot
-protocol. The production network path
+protocol. A one-shot `sim.transitionToLiveness(core)` ends the fault regime
+so bounded runs can prove the core makes progress once faults stop. The
+production network path
 is partial: local same-process endpoints and experimental framed loopback paths
 exist, but cross-process production transport is still roadmap work. Queue
 suspension and broader scheduler parity are planned.
@@ -369,8 +377,22 @@ If you're building something where determinism matters and you want to try it, t
 
 ## Install
 
+```sh
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.5.0.tar.gz
 ```
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.4.0.tar.gz
+
+Then wire the module into your test build in `build.zig` and import it:
+
+```zig
+const marionette = b.dependency("marionette", .{
+    .target = target,
+    .optimize = optimize,
+});
+tests_module.addImport("marionette", marionette.module("marionette"));
+```
+
+```zig
+const mar = @import("marionette");
 ```
 
 Requires Zig 0.16.x.
