@@ -18,6 +18,7 @@ const validateLogicalPath = model.validateLogicalPath;
 pub const RealDisk = struct {
     const Self = @This();
 
+    /// Static configuration; alignment rules match the simulated disk.
     pub const Options = struct {
         sector_size: u64 = 4096,
     };
@@ -40,10 +41,12 @@ pub const RealDisk = struct {
         };
     }
 
+    /// Return the app-facing disk handle over this adapter.
     pub fn disk(self: *Self) Disk {
         return .{ .ptr = self, .vtable = &disk_vtable };
     }
 
+    /// No-op; the caller owns the root directory and host I/O.
     pub fn deinit(_: *Self) void {}
 
     fn read(self: *Self, options: Disk.Read) DiskError!void {

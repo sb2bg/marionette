@@ -12,6 +12,7 @@ pub fn Endpoint(comptime Message: type) type {
         self_node: NodeId,
         vtable: *const VTable,
 
+        /// One received message and the node that sent it.
         pub const Envelope = struct {
             from: NodeId,
             message: Message,
@@ -22,14 +23,20 @@ pub fn Endpoint(comptime Message: type) type {
             receive: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
         };
 
+        /// This endpoint's own node id.
         pub fn node(self: Self) NodeId {
             return self.self_node;
         }
 
+        /// Send one message to `to`. In simulation, loss, latency, and
+        /// topology faults apply; drops are trace-visible, not errors.
         pub fn send(self: Self, to: NodeId, message: Message) !void {
             try self.vtable.send(self.ptr, self.self_node, to, message);
         }
 
+        /// Return the next delivered message, advancing simulated time
+        /// to the next queued delivery when needed, or null when none is
+        /// pending.
         pub fn receive(self: Self) !?Envelope {
             return try self.vtable.receive(self.ptr, self.self_node);
         }
@@ -44,6 +51,7 @@ pub const ByteEndpoint = struct {
 
     pub const Message = message_pool_module.Message;
 
+    /// One received message and the node that sent it.
     pub const Envelope = struct {
         from: NodeId,
         message: Message,
@@ -56,6 +64,7 @@ pub const ByteEndpoint = struct {
         receive: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
     };
 
+    /// This endpoint's own node id.
     pub fn node(self: ByteEndpoint) NodeId {
         return self.self_node;
     }

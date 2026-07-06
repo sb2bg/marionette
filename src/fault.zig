@@ -2,11 +2,15 @@
 
 const std = @import("std");
 
+/// Errors from validating a `BuggifyRate`.
 pub const BuggifyError = error{
     InvalidRate,
 };
 
 /// Probability that a BUGGIFY hook fires in simulation.
+/// A seeded probability expressed as `numerator/denominator`, used by
+/// every simulator fault surface. Zero-numerator rates are fully disabled:
+/// they consume no randomness and emit no trace when rolled.
 pub const BuggifyRate = struct {
     numerator: u32,
     denominator: u32,

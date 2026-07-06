@@ -21,6 +21,7 @@ pub const FaultOptions = struct {
     /// Seeded probabilistic allocation/growth failure rate.
     buggify_rate: BuggifyRate = .never(),
 
+    /// Validate the buggify rate (`error.InvalidRate` otherwise).
     pub fn validate(self: FaultOptions) BuggifyError!void {
         try self.buggify_rate.validate();
     }
@@ -51,6 +52,9 @@ pub const RandomSource = struct {
     int_less_than: *const fn (*anyopaque, u32) anyerror!u32,
 };
 
+/// Deterministic allocation authority wrapped around a backing allocator.
+/// Simulation builds one per world; `allocator()` is what apps receive from
+/// `Env.allocator()` and `control()` is the harness fault handle.
 pub const Authority = struct {
     backing: std.mem.Allocator,
     faults: FaultOptions,
@@ -62,12 +66,15 @@ pub const Authority = struct {
     total_allocated_bytes: usize = 0,
     total_freed_bytes: usize = 0,
 
+    /// Initial faults plus the trace and random hookups simulation wires
+    /// to the world.
     pub const Options = struct {
         faults: FaultOptions = .{},
         trace: ?TraceSink = null,
         random: ?RandomSource = null,
     };
 
+    /// Wrap `backing` with deterministic fault injection and tracing.
     pub fn init(backing: std.mem.Allocator, options: Options) Authority {
         return .{
             .backing = backing,
@@ -77,6 +84,8 @@ pub const Authority = struct {
         };
     }
 
+    /// The app-facing allocator. Injected failures surface as ordinary
+    /// `error.OutOfMemory`; decisions are traced without addresses.
     pub fn allocator(self: *Authority) std.mem.Allocator {
         return .{
             .ptr = self,
@@ -84,6 +93,7 @@ pub const Authority = struct {
         };
     }
 
+    /// The harness-facing fault and stats handle.
     pub fn control(self: *Authority) Control {
         return .{ .authority = self };
     }
@@ -104,6 +114,8 @@ pub const Authority = struct {
     }
 };
 
+/// Simulator-control view over allocation faults, obtained as
+/// `sim.control.allocation`.
 pub const Control = struct {
     authority: *Authority,
 

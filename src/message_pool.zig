@@ -5,17 +5,23 @@
 
 const std = @import("std");
 
+/// Errors from pool construction and buffer acquisition.
 pub const PoolError = error{
     InvalidOptions,
     MessageTooLarge,
     PoolExhausted,
 };
 
+/// Pool sizing: every buffer has the same fixed capacity.
 pub const Options = struct {
+    /// Number of preallocated buffers.
     buffers: usize,
+    /// Capacity of each buffer in bytes; also the maximum message length.
     buffer_size: usize,
 };
 
+/// Fixed-size pool of reference-counted message buffers. All storage is
+/// allocated once at init; acquire/release never touch the allocator.
 pub const Pool = struct {
     allocator: std.mem.Allocator,
     storage: []u8,
@@ -29,6 +35,8 @@ pub const Pool = struct {
         len: usize = 0,
     };
 
+    /// Preallocate all buffers. Zero counts or overflowing totals return
+    /// `error.InvalidOptions`.
     pub fn init(allocator: std.mem.Allocator, options: Options) !Pool {
         if (options.buffers == 0 or options.buffer_size == 0) return error.InvalidOptions;
         const storage_len = std.math.mul(usize, options.buffers, options.buffer_size) catch {
@@ -58,6 +66,7 @@ pub const Pool = struct {
         };
     }
 
+    /// Free the pool storage. All messages must be released first.
     pub fn deinit(self: *Pool) void {
         self.allocator.free(self.free_stack);
         self.allocator.free(self.slots);
@@ -65,6 +74,9 @@ pub const Pool = struct {
         self.* = undefined;
     }
 
+    /// Take one zeroed buffer of length `len` with reference count one.
+    /// Returns `error.MessageTooLarge` beyond `buffer_size` and
+    /// `error.PoolExhausted` when no buffer is free.
     pub fn acquire(self: *Pool, len: usize) PoolError!Message {
         // Each message occupies one fixed-size slot, so buffer_size is this
         // pool's maximum storable message length.
@@ -83,10 +95,12 @@ pub const Pool = struct {
         return message;
     }
 
+    /// Count of buffers currently free.
     pub fn freeBuffers(self: *const Pool) usize {
         return self.free_count;
     }
 
+    /// Count of buffers currently acquired.
     pub fn liveBuffers(self: *const Pool) usize {
         return self.slots.len - self.free_count;
     }
@@ -116,19 +130,23 @@ pub const Pool = struct {
     }
 };
 
+/// Reference-counted view of one pooled buffer.
 pub const Message = struct {
     pool: *Pool,
     index: usize,
 
+    /// The message payload, valid until the last `release`.
     pub fn bytes(self: Message) []u8 {
         return self.pool.bytesFor(self.index);
     }
 
+    /// Add one reference and return the same message.
     pub fn retain(self: Message) Message {
         self.pool.retainIndex(self.index);
         return self;
     }
 
+    /// Drop one reference; the buffer returns to the pool at zero.
     pub fn release(self: Message) void {
         self.pool.releaseIndex(self.index);
     }

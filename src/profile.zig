@@ -13,6 +13,9 @@ const network_module = @import("network/root.zig");
 const run_types = @import("run_types.zig");
 const World = @import("world.zig").World;
 
+/// A named scenario class: static `World.simulate` options plus the
+/// runtime fault controls that define it. Expand with `expand()` and apply
+/// each part explicitly so traces and failure summaries show the values.
 pub const SimProfile = struct {
     kind: Kind,
     simulate: World.SimulateOptions,
@@ -23,6 +26,7 @@ pub const SimProfile = struct {
     network_partitions: network_module.NetworkPartitionDynamicsOptions = .{},
     process_dynamics: env_module.ProcessDynamicsOptions = .{},
 
+    /// The built-in profile families.
     pub const Kind = enum {
         baseline,
         swarm,
@@ -46,6 +50,8 @@ pub const SimProfile = struct {
         process_dynamics: ?env_module.ProcessDynamicsOptions = null,
     };
 
+    /// The runtime fault controls a profile applies through
+    /// `apply(control)`, as concrete values after defaults resolve.
     pub const RuntimeOptions = struct {
         disk_faults: disk_module.DiskFaultOptions = .{},
         network_loss: network_module.NetworkLossOptions = .{},
@@ -55,8 +61,12 @@ pub const SimProfile = struct {
         process_dynamics: env_module.ProcessDynamicsOptions = .{},
     };
 
+    /// Number of run attributes `Expanded` reports for every profile.
     pub const attribute_count = 41;
 
+    /// A profile flattened into run metadata: one `profile:<name>` tag
+    /// and a fixed attribute set covering every fault knob, so two runs
+    /// with the same profile name but different values are distinguishable.
     pub const Expanded = struct {
         profile: SimProfile,
         tags: [1][]const u8,
@@ -113,31 +123,41 @@ pub const SimProfile = struct {
             };
         }
 
+        /// The profile name, e.g. "swarm".
         pub fn name(self: *const Expanded) []const u8 {
             return self.profile.name();
         }
 
+        /// Run tags to pass to the case runner (`profile:<name>`).
         pub fn runTags(self: *const Expanded) []const []const u8 {
             return self.tags[0..];
         }
 
+        /// Expanded run attributes to pass to the case runner.
         pub fn runAttributes(self: *const Expanded) []const run_types.RunAttribute {
             return self.attributes[0..];
         }
 
+        /// Static options to pass to `World.simulate`.
         pub fn simulateOptions(self: *const Expanded) World.SimulateOptions {
             return self.profile.simulateOptions();
         }
 
+        /// Apply the profile's runtime fault controls; see
+        /// `SimProfile.apply`.
         pub fn apply(self: *const Expanded, control: env_module.SimControl) !void {
             try self.profile.apply(control);
         }
     };
 
+    /// Fault-free defaults: no network faults, no disk faults, no
+    /// process dynamics.
     pub fn baseline(options: Options) SimProfile {
         return init(.baseline, options, .{});
     }
 
+    /// Hostile-network defaults: packet loss, latency jitter, automatic
+    /// clogs, and automatic node-isolating partitions, scaled to the tick.
     pub fn swarm(options: Options) SimProfile {
         const tick_ns = options.tick_ns;
         return init(.swarm, options, .{
@@ -159,10 +179,14 @@ pub const SimProfile = struct {
         });
     }
 
+    /// Fault-free defaults intended for replaying a recorded scenario;
+    /// pass the original run's explicit fault values as overrides.
     pub fn replay(options: Options) SimProfile {
         return init(.replay, options, .{});
     }
 
+    /// Throughput-oriented defaults: zero disk latency unless overridden
+    /// and no network perturbations.
     pub fn performance(options: Options) SimProfile {
         var performance_options = options;
         if (performance_options.disk.min_latency_ns == null) {
@@ -175,10 +199,12 @@ pub const SimProfile = struct {
         });
     }
 
+    /// Flatten this profile into run tags and attributes.
     pub fn expand(self: SimProfile) Expanded {
         return Expanded.init(self);
     }
 
+    /// The profile name, e.g. "swarm".
     pub fn name(self: SimProfile) []const u8 {
         return switch (self.kind) {
             .baseline => "baseline",
@@ -188,6 +214,7 @@ pub const SimProfile = struct {
         };
     }
 
+    /// The run tag form of the name, e.g. "profile:swarm".
     pub fn tag(self: SimProfile) []const u8 {
         return switch (self.kind) {
             .baseline => "profile:baseline",
@@ -197,10 +224,14 @@ pub const SimProfile = struct {
         };
     }
 
+    /// Static options to pass to `World.simulate`.
     pub fn simulateOptions(self: SimProfile) World.SimulateOptions {
         return self.simulate;
     }
 
+    /// Apply the profile's runtime fault controls to a live simulation:
+    /// disk faults, the four network fault surfaces when a network is
+    /// configured, and process dynamics on every node.
     pub fn apply(self: SimProfile, control: env_module.SimControl) !void {
         try control.disk.setFaults(self.disk_faults);
 

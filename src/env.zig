@@ -26,13 +26,24 @@ pub const AllocationFaultOptions = allocation_module.FaultOptions;
 pub const AllocationStats = allocation_module.Stats;
 pub const AllocationControl = allocation_module.Control;
 
+/// Per-node automatic crash/restart rates, applied through
+/// `SimControl.process.setDynamics` and evolved only at `tick`/`runFor`
+/// fault boundaries. Zero rates schedule nothing and consume no randomness.
 pub const ProcessDynamicsOptions = struct {
+    /// Per-tick chance that an alive process is killed.
     crash_rate: BuggifyRate = .never(),
+    /// Per-tick chance that a killed process reruns its registered lifecycle.
     restart_rate: BuggifyRate = .never(),
+    /// Minimum simulated time a process stays alive before an automatic
+    /// crash may fire. Must be tick-aligned.
     crash_stability_min_ns: clock_module.Duration = 0,
+    /// Minimum simulated time a process stays killed before an automatic
+    /// restart may fire. Must be tick-aligned.
     restart_stability_min_ns: clock_module.Duration = 0,
 };
 
+/// App-facing time authority. Simulation clocks read and advance the
+/// world's virtual time; production clocks read host time.
 pub const Clock = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -42,18 +53,25 @@ pub const Clock = struct {
         sleep: *const fn (*anyopaque, clock_module.Duration) ClockError!void,
     };
 
+    /// Current timestamp in nanoseconds: virtual time in simulation,
+    /// host monotonic time in production.
     pub fn now(self: Clock) clock_module.Timestamp {
         return self.vtable.now(self.ptr);
     }
 
+    /// Sleep for `duration_ns`. In simulation this advances virtual time
+    /// (rounded up to the clock's tick resolution) without blocking the
+    /// host; in production it blocks the calling thread.
     pub fn sleep(self: Clock, duration_ns: clock_module.Duration) ClockError!void {
         try self.vtable.sleep(self.ptr, duration_ns);
     }
 
+    /// Build the simulation clock view over a world's virtual time.
     pub fn fromWorld(world: *World) Clock {
         return .{ .ptr = world, .vtable = &world_clock_vtable };
     }
 
+    /// Build the production clock view over host time.
     pub fn fromProduction(clock: *clock_module.ProductionClock) Clock {
         return .{ .ptr = clock, .vtable = &production_clock_vtable };
     }
@@ -93,6 +111,9 @@ pub const Clock = struct {
     }
 };
 
+/// App-facing randomness authority. Simulation draws come from the world's
+/// seeded stream and are traced for replay; production draws come from host
+/// entropy and are untraced.
 pub const Random = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -125,10 +146,12 @@ pub const Random = struct {
         return @intCast(value);
     }
 
+    /// Build the simulation random view over a world's seeded stream.
     pub fn fromWorld(world: *World) Random {
         return .{ .ptr = world, .vtable = &world_random_vtable };
     }
 
+    /// Build the production random view over a host entropy source.
     pub fn fromProduction(source: *std.Random.IoSource) Random {
         return .{ .ptr = source, .vtable = &production_random_vtable };
     }
@@ -178,6 +201,8 @@ pub const Random = struct {
     }
 };
 
+/// App-facing trace authority. Simulation tracers append to the world's
+/// deterministic byte trace; production tracers drop everything.
 pub const Tracer = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -188,14 +213,19 @@ pub const Tracer = struct {
         record_payload: *const fn (*anyopaque, []const u8) TracerError!void,
     };
 
+    /// A tracer that records nothing and formats nothing.
     pub fn none() Tracer {
         return .{ .ptr = &noop_tracer_ctx, .vtable = &noop_tracer_vtable };
     }
 
+    /// Build the simulation tracer over a world's byte trace.
     pub fn fromWorld(world: *World) Tracer {
         return .{ .ptr = world, .vtable = &world_tracer_vtable };
     }
 
+    /// Format and append one trace event. Payloads must follow the trace
+    /// format contract (`docs/trace-format.md`); a disabled tracer skips
+    /// formatting entirely.
     pub fn record(self: Tracer, comptime fmt: []const u8, args: anytype) TracerError!void {
         if (!self.vtable.should_record(self.ptr)) return;
         const allocator = self.vtable.allocator.?(self.ptr);
@@ -239,17 +269,21 @@ pub const Tracer = struct {
     fn noopTracerRecordPayload(_: *anyopaque, _: []const u8) TracerError!void {}
 };
 
+/// Thin app-facing wrapper over `Tracer` for user service events.
 pub const Recorder = struct {
     tracer: Tracer,
 
+    /// A recorder that drops everything.
     pub fn none() Recorder {
         return .{ .tracer = .none() };
     }
 
+    /// Wrap an existing tracer.
     pub fn fromTracer(tracer: Tracer) Recorder {
         return .{ .tracer = tracer };
     }
 
+    /// Format and append one user trace event.
     pub fn record(self: Recorder, comptime fmt: []const u8, args: anytype) TracerError!void {
         try self.tracer.record(fmt, args);
     }
@@ -257,6 +291,10 @@ pub const Recorder = struct {
 
 var noop_tracer_ctx: u8 = 0;
 
+/// The capability bundle handed to application code: I/O, allocation, disk,
+/// clock, randomness, and tracing, each backed by simulation or production
+/// authorities without the app knowing which. See the API doc's `Env`
+/// section for the full contract.
 pub const Env = struct {
     io_backend: std.Io = .failing,
     memory: std.mem.Allocator,
@@ -318,6 +356,9 @@ pub const Env = struct {
     }
 };
 
+/// Composition root for production capabilities: host I/O, a real disk
+/// rooted below a caller-owned directory, host clock and entropy, and
+/// socket-backed endpoints. `env()` returns the app-facing view.
 pub const Production = struct {
     allocator: std.mem.Allocator,
     io_backend: std.Io,
@@ -339,6 +380,8 @@ pub const Production = struct {
         tracer: ?Tracer = null,
     };
 
+    /// Construct production capabilities over host resources. The caller
+    /// keeps `options.root_dir` alive for the lifetime of the value.
     pub fn init(options: Options) disk_module.DiskError!Production {
         return .{
             .allocator = options.allocator,
@@ -351,6 +394,8 @@ pub const Production = struct {
         };
     }
 
+    /// Open one typed production endpoint. Teardown is owned by this
+    /// `Production` and runs in `deinit`.
     pub fn endpoint(
         self: *Production,
         comptime Payload: type,
@@ -359,6 +404,8 @@ pub const Production = struct {
         return try network_module.internal.productionEndpoint(Payload, self.allocator, &self.network_entries, options);
     }
 
+    /// Open one byte-payload production endpoint. Teardown is owned by
+    /// this `Production` and runs in `deinit`.
     pub fn byteEndpoint(
         self: *Production,
         options: network_module.ProductionEndpointOptions,
@@ -366,6 +413,8 @@ pub const Production = struct {
         return try network_module.internal.productionByteEndpoint(self.allocator, self.network_io.io(), &self.network_entries, options);
     }
 
+    /// Open `count` typed production endpoints on consecutive node ids
+    /// starting at `options.first_node`.
     pub fn endpoints(
         self: *Production,
         comptime Payload: type,
@@ -382,6 +431,8 @@ pub const Production = struct {
         return handles;
     }
 
+    /// Open `count` byte-payload production endpoints on consecutive node
+    /// ids starting at `options.first_node`.
     pub fn byteEndpoints(
         self: *Production,
         comptime count: usize,
@@ -397,6 +448,8 @@ pub const Production = struct {
         return handles;
     }
 
+    /// Return the app-facing environment over these production
+    /// capabilities. `Env.buggify` hooks never fire in production.
     pub fn env(self: *Production) Env {
         return .{
             .io_backend = self.io_backend,
@@ -408,6 +461,7 @@ pub const Production = struct {
         };
     }
 
+    /// Tear down endpoints in reverse open order, then the disk.
     pub fn deinit(self: *Production) void {
         var index = self.network_entries.items.len;
         while (index > 0) {
@@ -421,6 +475,8 @@ pub const Production = struct {
     }
 };
 
+/// Simulator-control view over logical process lifecycles. Obtained as
+/// `sim.control.process`; invalid nodes return `error.InvalidNode`.
 pub const ProcessControl = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -434,14 +490,25 @@ pub const ProcessControl = struct {
         finish_run_for: *const fn (*anyopaque) anyerror!void,
     };
 
+    /// Configure automatic crash/restart rates for one node. Replaces any
+    /// previous dynamics and reschedules from the current time. Invalid
+    /// rates return `error.InvalidRate`; misaligned stability durations
+    /// return `error.InvalidDuration`. Traced as `process.dynamics`.
     pub fn setDynamics(self: ProcessControl, node: network_module.NodeId, options: ProcessDynamicsOptions) !void {
         try self.vtable.set_dynamics(self.ptr, node, options);
     }
 
+    /// Kill one logical process: cancel its scheduler tasks, close its
+    /// process-local handles, and run its `on_kill` callback once. Killing
+    /// an already-killed process is a no-op. Traced as `process.kill`.
     pub fn kill(self: ProcessControl, node: network_module.NodeId) !void {
         try self.vtable.kill(self.ptr, node);
     }
 
+    /// Restart one logical process by rerunning its registered lifecycle;
+    /// an alive process is killed first so restart always creates a fresh
+    /// incarnation. Returns `error.ProcessNotRegistered` without a
+    /// registered lifecycle. Traced as `process.restart`.
     pub fn restart(self: ProcessControl, node: network_module.NodeId) !void {
         try self.vtable.restart(self.ptr, node);
     }
@@ -456,6 +523,9 @@ pub const ProcessControl = struct {
     }
 };
 
+/// Harness-facing simulator controls: time movement plus the fault
+/// authorities for allocation, disk, network, processes, and tasks.
+/// Application code receives `Env` instead and never sees this.
 pub const SimControl = struct {
     allocation: allocation_module.Control,
     disk: disk_module.DiskControl,
@@ -464,6 +534,8 @@ pub const SimControl = struct {
     tasks: io_task_module.TaskControl,
     world: *World,
 
+    /// Advance simulated time by one tick, then evolve time-based faults
+    /// at the new boundary.
     pub fn tick(self: SimControl) !void {
         try self.world.tick();
         try self.evolveFaultsAtCurrentBoundary();
@@ -481,6 +553,10 @@ pub const SimControl = struct {
         return self.tasks.blockedCount();
     }
 
+    /// Advance simulated time by `duration_ns`, stopping at every
+    /// scheduled fault boundary so time-based faults fire at their exact
+    /// timestamps. The duration must be a whole number of ticks; a
+    /// misaligned duration asserts as harness misuse.
     pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
         const tick_ns = self.world.clock().tick_ns;
         // Misuse contract: like `World.runFor` and `SimClock.runFor`, a

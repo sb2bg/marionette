@@ -23,6 +23,10 @@ const DiskWrite = model.DiskWrite;
 const validateByteRange = model.validateByteRange;
 const validateLogicalPath = model.validateLogicalPath;
 
+/// Deterministic simulated disk: an in-memory sector store with seeded
+/// latency, probabilistic faults, and crash/recovery semantics over pending
+/// writes and metadata. Built by `World.simulate`; harnesses drive it
+/// through `sim.control.disk`.
 pub const SimDisk = struct {
     const Self = @This();
     const ResolvedOptions = struct {
@@ -163,6 +167,8 @@ pub const SimDisk = struct {
     crash_observer: ?CrashObserver = null,
     latency_runtime: ?DiskLatencyRuntime = null,
 
+    /// Construct an empty simulated disk over the world's clock, random
+    /// stream, and trace. Latency values must be tick-aligned.
     pub fn init(world: *World, options: DiskOptions) DiskError!Self {
         const resolved_options = try resolveOptions(world, options);
         return .{
@@ -171,14 +177,17 @@ pub const SimDisk = struct {
         };
     }
 
+    /// Return the app-facing disk handle.
     pub fn disk(self: *Self) Disk {
         return .{ .ptr = self, .vtable = &disk_vtable };
     }
 
+    /// Return the harness-facing fault and crash control handle.
     pub fn control(self: *Self) DiskControl {
         return .{ .ptr = self, .vtable = &control_vtable };
     }
 
+    /// The configured sector size in bytes.
     pub fn sectorSize(self: *const Self) u64 {
         return self.options.sector_size;
     }
@@ -194,6 +203,7 @@ pub const SimDisk = struct {
         self.latency_runtime = runtime;
     }
 
+    /// Free all in-memory files, directories, and pending operations.
     pub fn deinit(self: *Self) void {
         for (self.files.items) |*file| file.deinit(self.world.allocator);
         self.files.deinit(self.world.allocator);

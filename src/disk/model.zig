@@ -5,6 +5,7 @@ const std = @import("std");
 const clock_module = @import("../clock.zig");
 const env_module = @import("../env.zig");
 
+/// Errors shared by every disk implementation and control operation.
 pub const DiskError = error{
     DiskUnavailable,
     FileNotFound,
@@ -43,22 +44,42 @@ pub const DiskLatencyRuntime = struct {
     }
 };
 
+/// Static simulated-disk configuration passed to `World.simulate`.
 pub const DiskOptions = struct {
+    /// Sector size in bytes; offsets and lengths must align to it.
     sector_size: u64 = 4096,
+    /// Base per-operation latency. Defaults to one world tick; both
+    /// latency values must be tick-aligned.
     min_latency_ns: ?clock_module.Duration = null,
+    /// Maximum additional seeded per-operation jitter.
     latency_jitter_ns: clock_module.Duration = 0,
 };
 
+/// Probabilistic disk fault rates, set through `control.disk.setFaults`.
+/// The `crash_*` classes apply only to writes and metadata still pending at
+/// a crash; they never damage durable truth (see the disk fault model doc).
 pub const DiskFaultOptions = struct {
+    /// Per-operation chance a read fails with `error.ReadError`.
     read_error_rate: env_module.BuggifyRate = .never(),
+    /// Per-operation chance a write fails with `error.WriteError`.
     write_error_rate: env_module.BuggifyRate = .never(),
+    /// Per-operation chance a read returns corrupted sector bytes.
     corrupt_read_rate: env_module.BuggifyRate = .never(),
+    /// Per-pending-write chance the write vanishes at a crash.
     crash_lost_write_rate: env_module.BuggifyRate = .never(),
+    /// Per-pending-write chance only a prefix of sectors lands at a crash.
     crash_torn_write_rate: env_module.BuggifyRate = .never(),
+    /// Per-pending-write chance writes land out of order at a crash.
     crash_reordered_write_rate: env_module.BuggifyRate = .never(),
+    /// Per-pending-metadata chance a directory operation rolls back at a crash.
     crash_lost_metadata_rate: env_module.BuggifyRate = .never(),
 };
 
+/// App-facing disk capability handle. Apps receive it as `Env.disk`;
+/// simulation backs it with `SimDisk` (deterministic latency, faults, and
+/// crash semantics) and production backs it with `RealDisk`. Offsets and
+/// lengths must be sector-aligned (`error.InvalidAlignment`), and paths use
+/// rooted, non-traversing logical syntax (`error.InvalidPath`).
 pub const Disk = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -96,14 +117,20 @@ pub const Disk = struct {
         read_dir: *const fn (*anyopaque, ReadDir) DiskError!DirList,
     };
 
+    /// Fill `options.buffer` from sector-aligned `options.offset`,
+    /// zero-filling past the current logical file size.
     pub fn read(self: Disk, options: Read) DiskError!void {
         try self.vtable.read(self.ptr, options);
     }
 
+    /// Write sector-aligned bytes. In simulation the write is pending,
+    /// vulnerable to crash fault classes, until a `sync` commits it.
     pub fn write(self: Disk, options: Write) DiskError!void {
         try self.vtable.write(self.ptr, options);
     }
 
+    /// Commit one file's pending writes to durable truth. Directory
+    /// metadata needs `syncDir` separately.
     pub fn sync(self: Disk, options: Sync) DiskError!void {
         try self.vtable.sync(self.ptr, options);
     }
@@ -116,6 +143,7 @@ pub const Disk = struct {
         try self.vtable.sync_dir(self.ptr, options);
     }
 
+    /// Report one file's logical size and existence.
     pub fn stat(self: Disk, options: Stat) DiskError!StatResult {
         return try self.vtable.stat(self.ptr, options);
     }
@@ -128,30 +156,40 @@ pub const Disk = struct {
         return try self.vtable.read_some(self.ptr, options);
     }
 
+    /// Truncate or extend one file's logical size.
     pub fn setLength(self: Disk, options: SetLength) DiskError!void {
         try self.vtable.set_length(self.ptr, options);
     }
 
+    /// Delete one file. Durable only after `syncDir` on its directory.
     pub fn delete(self: Disk, options: Delete) DiskError!void {
         try self.vtable.delete(self.ptr, options);
     }
 
+    /// Atomically rename one file, replacing any existing target.
+    /// Durable only after `syncDir` on the affected directories.
     pub fn rename(self: Disk, options: Rename) DiskError!void {
         try self.vtable.rename(self.ptr, options);
     }
 
+    /// Create one directory. Durable only after `syncDir` on its parent.
     pub fn createDir(self: Disk, options: CreateDir) DiskError!void {
         try self.vtable.create_dir(self.ptr, options);
     }
 
+    /// Report one directory's existence.
     pub fn statDir(self: Disk, options: StatDir) DiskError!StatDirResult {
         return try self.vtable.stat_dir(self.ptr, options);
     }
 
+    /// List one directory's direct children. Simulation returns a
+    /// deterministic order; production returns the host's order. The
+    /// caller owns the returned list and must `deinit` it.
     pub fn readDir(self: Disk, options: ReadDir) DiskError!DirList {
         return try self.vtable.read_dir(self.ptr, options);
     }
 
+    /// A disk whose every operation returns `error.DiskUnavailable`.
     pub fn unavailable() Disk {
         return .{ .ptr = &unavailable_disk_ctx, .vtable = &unavailable_disk_vtable };
     }

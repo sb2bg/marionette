@@ -22,6 +22,7 @@ pub const NetworkError = error{
     EventQueueFull,
 };
 
+/// Validate a rate as a network-domain error (`error.InvalidRate`).
 pub fn validateRate(rate: env_module.BuggifyRate) NetworkError!void {
     if (rate.denominator == 0) return error.InvalidRate;
     if (rate.numerator > rate.denominator) return error.InvalidRate;
@@ -50,24 +51,41 @@ pub const NetworkFaultOptions = struct {
     unpartition_stability_min_ns: clock_module.Duration = 0,
 };
 
+/// Seeded per-packet drop rate applied at send time, set through
+/// `control.network.setLossiness`.
 pub const NetworkLossOptions = struct {
     drop_rate: env_module.BuggifyRate = .never(),
 };
 
+/// Delivery latency applied to every packet, set through
+/// `control.network.setLatency`. Both values must be tick-aligned.
 pub const NetworkLatencyOptions = struct {
+    /// Base delivery delay in nanoseconds.
     min_latency_ns: clock_module.Duration = 0,
+    /// Maximum additional seeded jitter in nanoseconds.
     latency_jitter_ns: clock_module.Duration = 0,
 };
 
+/// Seeded automatic path clogging, set through `control.network.setClogs`.
+/// A nonzero rate requires a positive tick-aligned duration.
 pub const NetworkClogOptions = struct {
+    /// Per-tick chance that one directed path clogs.
     path_clog_rate: env_module.BuggifyRate = .never(),
+    /// How long an automatic clog holds the path, in nanoseconds.
     path_clog_duration_ns: clock_module.Duration = 0,
 };
 
+/// Seeded automatic node-isolating partitions, set through
+/// `control.network.setPartitionDynamics` and evolved at `tick`/`runFor`
+/// fault boundaries. Stability durations must be tick-aligned.
 pub const NetworkPartitionDynamicsOptions = struct {
+    /// Per-tick chance that one service node is isolated.
     partition_rate: env_module.BuggifyRate = .never(),
+    /// Per-tick chance that an active automatic partition heals.
     unpartition_rate: env_module.BuggifyRate = .never(),
+    /// Minimum healed time before the next automatic partition.
     partition_stability_min_ns: clock_module.Duration = 0,
+    /// Minimum partitioned time before an automatic heal.
     unpartition_stability_min_ns: clock_module.Duration = 0,
 };
 
@@ -85,6 +103,7 @@ pub const SimNetworkOptions = struct {
     /// Maximum packets queued on one directed path.
     path_capacity: usize = 64,
 };
+/// Default buffer pool sizing for byte endpoints.
 pub const default_byte_pool_options: message_pool_module.Options = .{
     .buffers = 64,
     .buffer_size = 64 * 1024,

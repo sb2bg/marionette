@@ -141,6 +141,7 @@ pub const ProcessSupervisor = struct {
         return .{ .ptr = self, .vtable = &process_control_vtable };
     }
 
+    /// Register lifecycle callbacks for one node.
     pub fn registerProcess(
         self: *ProcessSupervisor,
         node: network_module.NodeId,
@@ -173,12 +174,14 @@ pub const ProcessSupervisor = struct {
         );
     }
 
+    /// Kill one process's tasks and handles and run its `on_kill` once.
     pub fn killProcess(self: *ProcessSupervisor, node: network_module.NodeId) !void {
         _ = try self.nodeIndex(node);
         try self.io_runtime.kill(node);
         try self.noteKilled(node, "manual");
     }
 
+    /// Rerun one node's registered lifecycle, killing it first if alive.
     pub fn restartProcess(self: *ProcessSupervisor, node: network_module.NodeId) !void {
         try self.restartProcessInternal(node, false);
     }
@@ -212,6 +215,8 @@ pub const ProcessSupervisor = struct {
         });
     }
 
+    /// Disk-crash observer: kills every alive process, since a machine
+    /// whose disk vanished cannot keep running.
     pub fn onDiskCrash(self: *ProcessSupervisor) void {
         self.io_runtime.onDiskCrash();
         for (self.states, 0..) |state, index| {
@@ -474,6 +479,7 @@ pub const World = struct {
     /// Simulator resources owned by the world and torn down in reverse order.
     teardowns: std.ArrayList(Teardown),
 
+    /// Destructor signature for world-owned simulator resources.
     pub const TeardownFn = *const fn (*anyopaque, std.mem.Allocator) void;
 
     const Teardown = struct {
@@ -563,6 +569,8 @@ pub const World = struct {
         self.teardowns.shrinkRetainingCapacity(checkpoint);
     }
 
+    /// Static configuration for `World.simulate`, fixed for the life of
+    /// the simulation. Runtime fault rates live on `SimControl` instead.
     pub const SimulateOptions = struct {
         allocation: allocation_module.FaultOptions = .{},
         disk: disk_module.DiskOptions = .{},
@@ -581,24 +589,34 @@ pub const World = struct {
         fiber_overflow_diagnostics: bool = true,
     };
 
+    /// The two views over one simulation: the app-facing `env` and the
+    /// harness-facing `control`. Returned by `World.simulate`.
     pub const Simulation = struct {
         env: env_module.Env,
         control: env_module.SimControl,
 
+        /// An environment whose `std.Io` is bound to one node's logical
+        /// process, so handles and tasks are killed with that process.
         pub fn envForNode(self: Simulation, node: network_module.NodeId) !env_module.Env {
             var env = self.env;
             env.io_backend = try self.ioRuntime().io(node);
             return env;
         }
 
+        /// Open one typed simulated endpoint on `node`. Requires a
+        /// configured network (`error.NetworkUnavailable` otherwise).
         pub fn endpoint(self: Simulation, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
             return try network_module.internal.endpointFromControl(Payload, self.control.network, node);
         }
 
+        /// Open one byte-payload simulated endpoint on `node`. Requires a
+        /// configured network (`error.NetworkUnavailable` otherwise).
         pub fn byteEndpoint(self: Simulation, node: network_module.NodeId) !network_module.ByteEndpoint {
             return try network_module.internal.byteEndpointFromControl(self.control.network, node);
         }
 
+        /// Open typed endpoints on `count` consecutive nodes starting at
+        /// `first_node`.
         pub fn endpoints(
             self: Simulation,
             comptime Payload: type,
@@ -612,6 +630,8 @@ pub const World = struct {
             return handles;
         }
 
+        /// Open byte-payload endpoints on `count` consecutive nodes
+        /// starting at `first_node`.
         pub fn byteEndpoints(
             self: Simulation,
             comptime count: usize,

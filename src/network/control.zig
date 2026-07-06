@@ -38,54 +38,81 @@ pub const AnyNetworkControl = struct {
         shared: *const fn (*anyopaque) ?*anyopaque,
     };
 
+    /// Control handle for a simulation without a configured network.
+    /// Every fault operation returns `error.NetworkUnavailable`.
     pub fn unavailable() AnyNetworkControl {
         return .{ .ptr = &unavailable_network_control_ctx, .vtable = &unavailable_network_control_vtable };
     }
 
+    /// Set the seeded per-packet drop rate applied at send time. Traced
+    /// as `network.lossiness`; drops record `network.drop`.
     pub fn setLossiness(self: AnyNetworkControl, options: NetworkLossOptions) !void {
         try self.vtable.set_lossiness(self.ptr, options);
     }
 
+    /// Set base delivery latency plus seeded jitter. Values must be
+    /// tick-aligned or `error.InvalidDuration` returns. Traced as
+    /// `network.latency`.
     pub fn setLatency(self: AnyNetworkControl, options: NetworkLatencyOptions) !void {
         try self.vtable.set_latency(self.ptr, options);
     }
 
+    /// Set the seeded automatic path-clog rate and duration. Replaces
+    /// pending automatic clog schedules. Traced as `network.clog_faults`.
     pub fn setClogs(self: AnyNetworkControl, options: NetworkClogOptions) !void {
         try self.vtable.set_clogs(self.ptr, options);
     }
 
+    /// Set the seeded automatic node-isolating partition/heal rates.
+    /// Dynamics evolve only at `tick`/`runFor` fault boundaries. Traced
+    /// as `network.partition_dynamics`.
     pub fn setPartitionDynamics(self: AnyNetworkControl, options: NetworkPartitionDynamicsOptions) !void {
         try self.vtable.set_partition_dynamics(self.ptr, options);
     }
 
+    /// Mark one simulated node up or down. Packets from or to a down node
+    /// are dropped with a trace-visible reason. Traced as `network.node`.
     pub fn setNode(self: AnyNetworkControl, node: NodeId, up: bool) !void {
         try self.vtable.set_node(self.ptr, node, up);
     }
 
+    /// Enable or disable one directed link. Traced as `network.link`.
     pub fn setLink(self: AnyNetworkControl, from: NodeId, to: NodeId, enabled: bool) !void {
         try self.vtable.set_link(self.ptr, from, to, enabled);
     }
 
+    /// Clog one directed path until simulated time advances by
+    /// `duration_ns` (positive and tick-aligned, or
+    /// `error.InvalidDuration`). Queued packets wait; they are not
+    /// dropped. Traced as `network.clog`.
     pub fn clog(self: AnyNetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
         try self.vtable.clog(self.ptr, from, to, duration_ns);
     }
 
+    /// Clear one directed path clog. Traced as `network.unclog`.
     pub fn unclog(self: AnyNetworkControl, from: NodeId, to: NodeId) !void {
         try self.vtable.unclog(self.ptr, from, to);
     }
 
+    /// Clear every directed path clog. Traced as `network.unclog_all`.
     pub fn unclogAll(self: AnyNetworkControl) !void {
         try self.vtable.unclog_all(self.ptr);
     }
 
+    /// Disable every directed link crossing between the two groups, in
+    /// both directions. Traced as `network.partition`.
     pub fn partition(self: AnyNetworkControl, left: []const NodeId, right: []const NodeId) !void {
         try self.vtable.partition(self.ptr, left, right);
     }
 
+    /// Re-enable every link, clear every clog, and mark every node up.
+    /// Traced as `network.heal`.
     pub fn heal(self: AnyNetworkControl) !void {
         try self.vtable.heal(self.ptr);
     }
 
+    /// Re-enable every link without changing node up/down state or clogs.
+    /// Traced as `network.heal_links`.
     pub fn healLinks(self: AnyNetworkControl) !void {
         try self.vtable.heal_links(self.ptr);
     }

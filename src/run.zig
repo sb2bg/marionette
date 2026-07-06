@@ -20,7 +20,11 @@ pub const StateCheck = run_types.StateCheck;
 pub const runAttribute = run_types.runAttribute;
 pub const TraceError = world_module.TraceError;
 
+/// Infrastructure errors from the runners themselves; scenario failures
+/// are reported through `RunReport`, not as errors.
 pub const RunError = std.mem.Allocator.Error || TraceError;
+/// The `expect*` wrappers' outcome mismatches: the run passed where a
+/// failure was required, or failed where a pass was required.
 pub const ExpectError = error{
     ExpectedRunFailure,
     ExpectedRunPass,
@@ -53,34 +57,43 @@ pub fn SimCase(comptime App: type) type {
         sim: World.Simulation,
         app: App,
 
+        /// The node-0 app-facing environment.
         pub fn env(self: *const Self) env_module.Env {
             return self.sim.env;
         }
 
+        /// The harness-facing simulator controls.
         pub fn control(self: *const Self) env_module.SimControl {
             return self.sim.control;
         }
 
+        /// An environment whose `std.Io` is bound to one node's process.
         pub fn envForNode(self: *const Self, node: network_module.NodeId) !env_module.Env {
             return try self.sim.envForNode(node);
         }
 
+        /// The node-0 deterministic `std.Io`.
         pub fn io(self: *const Self) std.Io {
             return self.env().io();
         }
 
+        /// The deterministic `std.Io` bound to one node's process.
         pub fn ioForNode(self: *const Self, node: network_module.NodeId) !std.Io {
             return (try self.envForNode(node)).io();
         }
 
+        /// Open one typed simulated endpoint on `node`.
         pub fn endpoint(self: *const Self, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
             return try self.sim.endpoint(Payload, node);
         }
 
+        /// Open one byte-payload simulated endpoint on `node`.
         pub fn byteEndpoint(self: *const Self, node: network_module.NodeId) !network_module.ByteEndpoint {
             return try self.sim.byteEndpoint(node);
         }
 
+        /// Open typed endpoints on `count` consecutive nodes starting at
+        /// `first_node`.
         pub fn endpoints(
             self: *const Self,
             comptime Payload: type,
@@ -90,6 +103,8 @@ pub fn SimCase(comptime App: type) type {
             return try self.sim.endpoints(Payload, count, first_node);
         }
 
+        /// Open byte-payload endpoints on `count` consecutive nodes
+        /// starting at `first_node`.
         pub fn byteEndpoints(
             self: *const Self,
             comptime count: usize,
@@ -98,6 +113,8 @@ pub fn SimCase(comptime App: type) type {
             return try self.sim.byteEndpoints(count, first_node);
         }
 
+        /// Deinitialize the app state if it defines `deinit`; the
+        /// runner tears down world-owned simulator state itself.
         pub fn deinit(self: *Self) void {
             if (comptime appHasDeinit(App)) {
                 self.app.deinit();
