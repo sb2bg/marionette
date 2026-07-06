@@ -333,6 +333,34 @@ const SharedRuntime = struct {
         try self.world.record("network.heal_links disabled_count={}", .{disabled_count});
     }
 
+    fn restoreCoreLiveness(self: *SharedRuntime, core: []const NodeId) !void {
+        try self.validateNodes(core);
+        const now_ns = self.world.now();
+        var restored_links: usize = 0;
+        var cleared_clogs: usize = 0;
+        for (core) |from| {
+            for (core) |to| {
+                if (from == to) continue;
+                const link = &self.links[try self.pathIndex(from, to)];
+                if (!link.enabled()) restored_links += 1;
+                if (link.clogged_until > now_ns) cleared_clogs += 1;
+                link.manual_enabled = true;
+                link.auto_enabled = true;
+                link.clogged_until = 0;
+                link.next_auto_clog_at_ns = null;
+            }
+        }
+        var revived_nodes: usize = 0;
+        for (core) |node| {
+            if (self.down_nodes[@intCast(node)]) revived_nodes += 1;
+            self.down_nodes[@intCast(node)] = false;
+        }
+        try self.world.record(
+            "network.liveness_restore core_count={} restored_links={} cleared_clogs={} revived_nodes={}",
+            .{ core.len, restored_links, cleared_clogs, revived_nodes },
+        );
+    }
+
     fn expireDeterministicFaults(self: *SharedRuntime) !void {
         const now_ns = self.world.now();
         for (self.links, 0..) |*link, index| {
@@ -594,6 +622,7 @@ const shared_control_vtable: AnyNetworkControl.VTable = .{
     .partition = sharedControlPartition,
     .heal = sharedControlHeal,
     .heal_links = sharedControlHealLinks,
+    .restore_core_liveness = sharedControlRestoreCoreLiveness,
     .evolve_tick_faults = sharedControlEvolveTickFaults,
     .evolve_for = sharedControlEvolveFor,
     .next_fault_boundary_before_or_at = sharedControlNextFaultBoundaryBeforeOrAt,
@@ -648,6 +677,10 @@ fn sharedControlHeal(ptr: *anyopaque) anyerror!void {
 
 fn sharedControlHealLinks(ptr: *anyopaque) anyerror!void {
     try sharedControl(ptr).healLinks();
+}
+
+fn sharedControlRestoreCoreLiveness(ptr: *anyopaque, core: []const NodeId) anyerror!void {
+    try sharedControl(ptr).restoreCoreLiveness(core);
 }
 
 fn sharedControlEvolveTickFaults(ptr: *anyopaque) anyerror!void {

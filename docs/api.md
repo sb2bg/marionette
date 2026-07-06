@@ -507,6 +507,35 @@ lifecycle and record `process.restart automatic=true`. Invalid rates return
 `error.InvalidRate`; stability durations must be tick-aligned or
 `setDynamics` returns `error.InvalidDuration`.
 
+### Liveness Transition
+
+`sim.transitionToLiveness(core)` is a one-shot switch out of fault mode,
+following the VOPR `transition_to_liveness_mode` shape. It zeroes every
+probabilistic simulator fault rate (process crash/restart dynamics on every
+node, network lossiness, clog and partition dynamics, disk fault rates, and
+allocation faults), restores links, clogs, and node-down state between core
+nodes, restarts the disk if it is crashed, and revives killed core processes
+through their registered lifecycles. Non-core failures become permanent:
+killed non-core processes stay down and severed non-core links stay severed,
+because nothing reschedules them once the rates are zero.
+
+```zig
+try sim.transitionToLiveness(&.{ 0, 1 });
+try sim.control.runFor(bounded_recovery_window_ns);
+// Assert the core made progress.
+```
+
+The transition records `liveness.transition core_count=...` and
+`network.liveness_restore ...`, and the zeroed rates record their usual
+`process.dynamics`, `network.lossiness`, and related events, so same-seed
+replay stays byte-identical. Calling it twice asserts as harness misuse. An
+invalid core node returns `error.InvalidNode` and a killed core process
+without a registered lifecycle returns `error.ProcessNotRegistered`; both
+are checked before any state changes, so a failed call leaves the one-shot
+transition unconsumed and retryable. Harness-armed deterministic faults are not
+undone: an armed `crashAfterOps` budget stays armed, and app-level
+`Env.buggify` rates are call-site values the harness zeroes itself.
+
 ## Network
 
 `mar.Endpoint(Message)` is the app-facing network handle. Simulation and

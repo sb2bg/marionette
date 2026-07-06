@@ -183,6 +183,14 @@ pub const ProcessSupervisor = struct {
         try self.restartProcessInternal(node, false);
     }
 
+    /// Restart one process only if it is currently killed; alive processes
+    /// keep their current incarnation. Used by the liveness transition.
+    fn reviveKilled(self: *ProcessSupervisor, node: network_module.NodeId) !void {
+        const index = try self.nodeIndex(node);
+        if (self.states[index] != .killed) return;
+        try self.restartProcessInternal(node, false);
+    }
+
     fn restartProcessInternal(self: *ProcessSupervisor, node: network_module.NodeId, automatic: bool) !void {
         const index = try self.nodeIndex(node);
         const lifecycle = self.lifecycles[index] orelse return error.ProcessNotRegistered;
@@ -461,6 +469,8 @@ pub const World = struct {
     event_index: u64,
     /// Whether this world has successfully constructed its simulation.
     simulation_created: bool,
+    /// Whether the one-shot liveness transition has already run.
+    liveness_transitioned: bool,
     /// Simulator resources owned by the world and torn down in reverse order.
     teardowns: std.ArrayList(Teardown),
 
@@ -493,6 +503,7 @@ pub const World = struct {
             .trace_log = .empty,
             .event_index = 0,
             .simulation_created = false,
+            .liveness_transitioned = false,
             .teardowns = .empty,
         };
         errdefer world.deinit();
@@ -632,8 +643,71 @@ pub const World = struct {
             try self.processSupervisor().restartProcess(node);
         }
 
+        /// One-shot transition into liveness mode, following the VOPR
+        /// `transition_to_liveness_mode` shape: zero every probabilistic
+        /// simulator fault rate, restore links, clogs, and node state
+        /// inside the core, bring killed core processes back up, and leave
+        /// non-core failures permanent so a bounded run can prove the core
+        /// makes progress.
+        ///
+        /// A crashed disk restarts before core processes revive. Killed
+        /// core processes need a registered lifecycle
+        /// (`error.ProcessNotRegistered` otherwise); alive core processes
+        /// keep their current incarnation. Core validity and lifecycles
+        /// are checked before any state changes, so a failed call leaves
+        /// the transition unconsumed and retryable after the harness
+        /// corrects it. Harness-owned deterministic
+        /// faults stay in place: an armed `crashAfterOps` budget is not
+        /// disarmed, and app-level `Env.buggify` rates are the app
+        /// harness's own to zero.
+        pub fn transitionToLiveness(self: Simulation, core: []const network_module.NodeId) !void {
+            const world = self.control.world;
+            // Misuse contract: the transition is one-shot; a second call
+            // is a harness bug and asserts.
+            std.debug.assert(!world.liveness_transitioned);
+
+            // Preflight recoverable errors before consuming the one-shot
+            // flag or touching any fault state, so a failed call leaves
+            // the simulation unchanged and the transition retryable.
+            const supervisor = self.processSupervisor();
+            for (core) |node| {
+                const index = try supervisor.nodeIndex(node);
+                if (supervisor.states[index] == .killed and supervisor.lifecycles[index] == null) {
+                    return error.ProcessNotRegistered;
+                }
+            }
+            world.liveness_transitioned = true;
+
+            try world.record("liveness.transition core_count={}", .{core.len});
+
+            // Zero probabilistic rates first so no new fault schedules
+            // while the core is restored.
+            for (0..supervisor.states.len) |index| {
+                try supervisor.setDynamics(@intCast(index), .{});
+            }
+            try self.control.allocation.setFaults(.{});
+            try self.control.disk.setFaults(.{});
+            if (network_module.internal.processCountFromControl(self.control.network) != null) {
+                try self.control.network.setLossiness(.{});
+                try self.control.network.setClogs(.{});
+                try self.control.network.setPartitionDynamics(.{});
+                try self.control.network.restoreCoreLiveness(core);
+            }
+
+            if (self.simDisk().crashed) {
+                try self.control.disk.restart();
+            }
+            for (core) |node| {
+                try supervisor.reviveKilled(node);
+            }
+        }
+
         fn processSupervisor(self: Simulation) *ProcessSupervisor {
             return @ptrCast(@alignCast(self.control.process.ptr));
+        }
+
+        fn simDisk(self: Simulation) *disk_module.SimDisk {
+            return @ptrCast(@alignCast(self.control.disk.ptr));
         }
 
         fn ioRuntime(self: Simulation) *io_module.internal.ProcessRuntime {

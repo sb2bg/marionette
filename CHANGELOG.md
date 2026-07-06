@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Adds the one-shot liveness transition `sim.transitionToLiveness(core)`,
+  following the VOPR `transition_to_liveness_mode` shape: zeroes every
+  probabilistic simulator fault rate (process dynamics, network lossiness,
+  clog and partition dynamics, disk faults, allocation faults), restores
+  links, clogs, and node-down state inside the core, restarts a crashed
+  disk, and revives killed core processes through their registered
+  lifecycles, while non-core failures stay permanent. Trace-visible as
+  `liveness.transition` and `network.liveness_restore`; a second call
+  asserts as harness misuse, and recoverable validation errors (invalid
+  core node, killed core process without a registered lifecycle) are
+  checked before any state changes so a failed call stays retryable.
 - Adds simulated `netLookup` for address literals: IPv4/IPv6 literals and
   RFC 6761 `localhost` names resolve deterministically through the std
   queue protocol (trace event `io.net.lookup`), so an unmodified

@@ -3251,3 +3251,170 @@ test "io: std.http.Client fetch replays byte-identically from the same seed" {
     defer std.testing.allocator.free(second);
     try std.testing.expectEqualStrings(first, second);
 }
+
+test "io: transitionToLiveness restores the core and leaves non-core failures permanent" {
+    const State = struct {
+        starts: u32 = 0,
+        kills: u32 = 0,
+
+        fn onKill(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.kills += 1;
+        }
+
+        fn restart(raw: *anyopaque, _: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.starts += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA70, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+
+    var states: [3]State = .{ .{}, .{}, .{} };
+    for (&states, 0..) |*state, node| {
+        try sim.registerProcess(@intCast(node), .{
+            .ptr = state,
+            .on_kill = State.onKill,
+            .restart = State.restart,
+        });
+        try sim.control.process.setDynamics(@intCast(node), .{
+            .crash_rate = .percent(50),
+            .restart_rate = .percent(50),
+        });
+    }
+    try sim.control.network.setLossiness(.{ .drop_rate = .percent(50) });
+    try sim.control.network.setClogs(.{ .path_clog_rate = .percent(10), .path_clog_duration_ns = 100 });
+    try sim.control.network.setPartitionDynamics(.{ .partition_rate = .percent(10), .unpartition_rate = .percent(10) });
+    try sim.control.disk.setFaults(.{ .read_error_rate = .percent(10) });
+    try sim.control.allocation.setFaults(.{ .buggify_rate = .percent(10) });
+
+    try sim.killProcess(0);
+    try sim.killProcess(2);
+    try sim.control.network.partition(&.{0}, &.{ 1, 2 });
+    try sim.control.network.setNode(0, false);
+    try sim.control.network.clog(1, 0, 1_000);
+
+    try sim.transitionToLiveness(&.{ 0, 1 });
+
+    // The killed core process restarts once; the alive core process keeps
+    // its incarnation and the killed non-core process stays down.
+    try std.testing.expectEqual(@as(u32, 1), states[0].starts);
+    try std.testing.expectEqual(@as(u32, 0), states[1].starts);
+    try std.testing.expectEqual(@as(u32, 0), states[1].kills);
+    try std.testing.expectEqual(@as(u32, 0), states[2].starts);
+
+    const trace = world.traceBytes();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "liveness.transition core_count=2") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        trace,
+        "network.liveness_restore core_count=2 restored_links=2 cleared_clogs=1 revived_nodes=1",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "process.restart node=0 automatic=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "process.dynamics node=2 crash_rate=0/1 restart_rate=0/1") != null);
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(trace, "process.restart node=2"));
+
+    // With every probabilistic rate zeroed, a long run schedules no new
+    // automatic faults and never revives the non-core process.
+    try sim.control.runFor(100_000);
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(world.traceBytes(), "reason=auto_crash"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(world.traceBytes(), "automatic=true"));
+    try std.testing.expectEqual(@as(u32, 0), states[2].starts);
+}
+
+test "io: transitionToLiveness clears an automatic partition inside the core" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA71, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    try sim.control.network.setPartitionDynamics(.{
+        .partition_rate = .always(),
+        .unpartition_rate = .never(),
+    });
+    try sim.control.runFor(20);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "network.auto_partition"));
+
+    try sim.transitionToLiveness(&.{ 0, 1 });
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "network.liveness_restore core_count=2 restored_links=2 cleared_clogs=0 revived_nodes=0",
+    ) != null);
+
+    try sim.control.runFor(1_000);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "network.auto_partition"));
+}
+
+test "io: transitionToLiveness restarts a crashed disk before reviving core processes" {
+    const State = struct {
+        starts: u32 = 0,
+        kills: u32 = 0,
+
+        fn onKill(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.kills += 1;
+        }
+
+        fn restart(raw: *anyopaque, _: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.starts += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA72, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    var state: State = .{};
+    try sim.registerProcess(0, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+
+    try sim.control.disk.crash();
+    try std.testing.expectEqual(@as(u32, 1), state.kills);
+
+    try sim.transitionToLiveness(&.{0});
+
+    try std.testing.expectEqual(@as(u32, 1), state.starts);
+    const trace = world.traceBytes();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.restart status=ok") != null);
+    // No network is configured, so the transition touches no network state.
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(trace, "network.liveness_restore"));
+}
+
+test "io: transitionToLiveness preflight failures leave the transition retryable" {
+    const State = struct {
+        starts: u32 = 0,
+
+        fn restart(raw: *anyopaque, _: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.starts += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA73, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    var state: State = .{};
+    try sim.registerProcess(0, .{ .ptr = &state, .restart = State.restart });
+    try sim.killProcess(0);
+    try sim.killProcess(1);
+
+    try std.testing.expectError(error.InvalidNode, sim.transitionToLiveness(&.{ 0, 7 }));
+    try std.testing.expectError(error.ProcessNotRegistered, sim.transitionToLiveness(&.{ 0, 1 }));
+    // The failed calls consumed nothing and mutated no fault state.
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(world.traceBytes(), "liveness.transition"));
+    try std.testing.expectEqual(@as(u32, 0), state.starts);
+
+    // Correcting the core lets the one-shot transition proceed.
+    try sim.transitionToLiveness(&.{0});
+    try std.testing.expectEqual(@as(u32, 1), state.starts);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "liveness.transition core_count=1"));
+}

@@ -87,6 +87,10 @@ Rules:
   is translated into a stream error.
 - Logical process lifecycle records use `process.kill node=<u64> reason=<literal>`
   and `process.restart node=<u64>`.
+- The one-shot liveness transition records `liveness.transition core_count=<u64>`
+  followed by the zeroed-rate events and, when a network is configured,
+  `network.liveness_restore` with `core_count`, `restored_links`,
+  `cleared_clogs`, and `revived_nodes` fields.
 
 ## What Goes In
 

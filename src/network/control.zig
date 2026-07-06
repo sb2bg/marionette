@@ -29,6 +29,7 @@ pub const AnyNetworkControl = struct {
         partition: *const fn (*anyopaque, []const NodeId, []const NodeId) anyerror!void,
         heal: *const fn (*anyopaque) anyerror!void,
         heal_links: *const fn (*anyopaque) anyerror!void,
+        restore_core_liveness: *const fn (*anyopaque, []const NodeId) anyerror!void,
         evolve_tick_faults: *const fn (*anyopaque) anyerror!void,
         evolve_for: *const fn (*anyopaque, clock_module.Duration) anyerror!void,
         next_fault_boundary_before_or_at: *const fn (*anyopaque, clock_module.Timestamp) anyerror!?clock_module.Timestamp,
@@ -89,6 +90,14 @@ pub const AnyNetworkControl = struct {
         try self.vtable.heal_links(self.ptr);
     }
 
+    /// Re-enable links, clear clogs, and mark nodes up inside the core
+    /// only, leaving faults that touch non-core nodes in place. Building
+    /// block for the one-shot liveness transition.
+    pub fn restoreCoreLiveness(self: AnyNetworkControl, core: []const NodeId) !void {
+        try self.vtable.restore_core_liveness(self.ptr, core);
+    }
+
+    /// Return the owning world, or null for the unavailable control.
     pub fn world(self: AnyNetworkControl) ?*World {
         return self.vtable.world(self.ptr);
     }
@@ -121,6 +130,7 @@ const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
     .partition = unavailableControlPartition,
     .heal = unavailableControlHeal,
     .heal_links = unavailableControlHealLinks,
+    .restore_core_liveness = unavailableControlRestoreCoreLiveness,
     .evolve_tick_faults = unavailableControlEvolveTickFaults,
     .evolve_for = unavailableControlEvolveFor,
     .next_fault_boundary_before_or_at = unavailableControlNextFaultBoundaryBeforeOrAt,
@@ -174,6 +184,10 @@ fn unavailableControlHeal(_: *anyopaque) anyerror!void {
 }
 
 fn unavailableControlHealLinks(_: *anyopaque) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlRestoreCoreLiveness(_: *anyopaque, _: []const NodeId) anyerror!void {
     return error.NetworkUnavailable;
 }
 

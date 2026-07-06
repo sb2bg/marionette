@@ -28,19 +28,6 @@ maintainer-readable repros.
 
 Pick from this section first unless a later release item is blocking it.
 
-### Liveness Mode Transition
-
-Add a one-shot `sim.transitionToLiveness(core: []const NodeId)` that:
-
-- zeroes probabilistic fault rates,
-- restores the core's links,
-- brings the core's nodes up,
-- leaves non-core failures permanent.
-
-This follows the VOPR `transition_to_liveness_mode` shape. It depends on the
-recovery-window vocabulary and storage compatibility validation, which are now
-met by `docs/disk-fault-model.md` and `validation/kv_compat.zig`.
-
 ### Opportunistic 0.5 Cleanup
 
 Take these only if they are naturally forced by the work above or can land as
@@ -52,8 +39,10 @@ small isolated patches:
 
 Settled in 0.5: misaligned `runFor` durations assert as harness misuse
 everywhere; disabled faults (zero rates) consume no randomness and emit no
-trace (see the determinism doc's conventions section); and deferred host
-filename parity is documented in the API doc's logical-path section.
+trace (see the determinism doc's conventions section); deferred host
+filename parity is documented in the API doc's logical-path section; and
+the one-shot liveness transition `sim.transitionToLiveness(core)` landed
+following the VOPR shape (see the API doc's liveness section).
 
 ---
 
