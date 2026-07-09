@@ -3627,3 +3627,111 @@ test "io: stream writes larger than the path queue backpressure instead of faili
         try std.testing.expectEqual(@as(u8, @truncate(index *% 13 +% 5)), byte);
     }
 }
+
+/// A writer parked on shared stream backpressure waits on the world-global
+/// key, so connection teardown must wake that key too; waking only the
+/// per-handle keys leaves the writer parked forever.
+const BackpressureTeardown = struct {
+    sim: World.Simulation,
+    server_io: Io,
+    client_io: Io,
+    kill_server_process: bool,
+    write_error: ?anyerror = null,
+
+    fn serverTask(self: *BackpressureTeardown) void {
+        const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4721) catch unreachable;
+        var listener = address.listen(self.server_io, .{}) catch |err| {
+            std.debug.panic("teardown listen failed: {}", .{err});
+        };
+        defer listener.deinit(self.server_io);
+        const stream = listener.accept(self.server_io) catch |err| {
+            std.debug.panic("teardown accept failed: {}", .{err});
+        };
+        // Never read: the shared path queue stays full, so the writer
+        // stays parked until this endpoint is torn down. The sleeps give
+        // the writer time to fill the queue and park.
+        if (self.kill_server_process) {
+            // Park far past the kill; the process kill sweeps the stream
+            // and this task, so nothing after the sleep runs.
+            Io.sleep(self.server_io, .fromNanoseconds(1_000_000), .awake) catch {};
+            return;
+        }
+        Io.sleep(self.server_io, .fromNanoseconds(1000), .awake) catch
+            @panic("teardown server sleep failed");
+        stream.close(self.server_io);
+    }
+
+    fn killerTask(self: *BackpressureTeardown) void {
+        if (!self.kill_server_process) return;
+        Io.sleep(self.client_io, .fromNanoseconds(2000), .awake) catch
+            @panic("teardown killer sleep failed");
+        self.sim.killProcess(0) catch @panic("teardown process kill failed");
+    }
+
+    fn clientTask(self: *BackpressureTeardown) void {
+        Io.sleep(self.client_io, .fromNanoseconds(10), .awake) catch
+            @panic("teardown client sleep failed");
+        const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4721) catch unreachable;
+        const stream = address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
+            std.debug.panic("teardown connect failed: {}", .{err});
+        };
+        defer stream.close(self.client_io);
+
+        var payload: [96 * 1024]u8 = undefined;
+        for (&payload, 0..) |*byte, index| {
+            byte.* = @truncate(index *% 13 +% 5);
+        }
+        var written: usize = 0;
+        while (written < payload.len) {
+            const chunk: [1][]const u8 = .{payload[written..]};
+            written += self.client_io.vtable.netWrite(
+                self.client_io.userdata,
+                stream.socket.handle,
+                "",
+                &chunk,
+                1,
+            ) catch |err| {
+                self.write_error = err;
+                return;
+            };
+        }
+    }
+
+    fn run(kill_server_process: bool) !?anyerror {
+        var world = try World.init(std.testing.allocator, .{ .seed = 0xBACD, .tick_ns = 10 });
+        defer world.deinit();
+
+        const sim = try world.simulate(.{
+            .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 2 },
+        });
+        const server_io = (try sim.envForNode(0)).io();
+        const client_io = (try sim.envForNode(1)).io();
+        try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+        var scenario = BackpressureTeardown{
+            .sim = sim,
+            .server_io = server_io,
+            .client_io = client_io,
+            .kill_server_process = kill_server_process,
+        };
+        var server_future = try Io.concurrent(server_io, BackpressureTeardown.serverTask, .{&scenario});
+        var client_future = try Io.concurrent(client_io, BackpressureTeardown.clientTask, .{&scenario});
+        var killer_future = try Io.concurrent(client_io, BackpressureTeardown.killerTask, .{&scenario});
+
+        client_future.await(client_io);
+        server_future.await(server_io);
+        killer_future.await(client_io);
+        try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+        return scenario.write_error;
+    }
+};
+
+test "io: peer close wakes a writer parked on stream backpressure" {
+    const write_error = try BackpressureTeardown.run(false);
+    try std.testing.expectEqual(@as(anyerror, error.ConnectionResetByPeer), write_error.?);
+}
+
+test "io: process kill wakes a writer parked on stream backpressure" {
+    const write_error = try BackpressureTeardown.run(true);
+    try std.testing.expectEqual(@as(anyerror, error.ConnectionResetByPeer), write_error.?);
+}

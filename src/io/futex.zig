@@ -63,6 +63,15 @@ pub fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
     return (id << wait_key_tag_bits) | @intFromEnum(tag);
 }
 
+/// World-global wait key for stream writers parked on backpressure. The
+/// byte pool and path queues are shared resources, so a writer blocked
+/// because another connection filled them must be woken by any drain or
+/// any connection teardown, not only by its own peer. All backends in a
+/// world share one scheduler wait set, and socket handles start at 1000,
+/// so the connection-tagged key for handle 0 can never collide with a
+/// real connection.
+pub const stream_backpressure_wait_key = waitKey(.connection, 0);
+
 pub fn Ops(comptime Backend: type) type {
     return struct {
         fn backendFromUserdata(userdata: ?*anyopaque) *Backend {

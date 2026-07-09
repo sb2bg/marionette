@@ -738,6 +738,13 @@ pub const Backend = struct {
     ) void {
         connection_state.closed = true;
         self.wakeConnection(handle, std.math.maxInt(usize));
+        // A writer blocked on shared stream backpressure parks on the
+        // world-global key, not its handle key; teardown (close, shutdown,
+        // process kill) must wake it so it observes the close or reset
+        // instead of staying parked forever.
+        if (self.futex_wait_set) |wait_set| {
+            _ = wait_set.wake(futex_module.stream_backpressure_wait_key, std.math.maxInt(usize));
+        }
         if (connection_state.peer) |peer| {
             if (reset_peer) {
                 if (peer.backend.connection(peer.handle)) |peer_state| {

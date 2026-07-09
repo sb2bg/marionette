@@ -15,13 +15,10 @@ const stream_frame_handle_size = @sizeOf(u64);
 /// packet_id)` ordering keeps segments in order for inbox reassembly.
 const max_stream_segment_len = 16 * 1024;
 
-/// World-global wait key for stream writers parked on backpressure. The
-/// byte pool and path queues are shared resources, so a writer blocked
-/// because another connection filled them must be woken by any drain, not
-/// only its own peer's. All backends in a world share one scheduler wait
-/// set, and socket handles start at 1000, so the connection-tagged key for
-/// handle 0 can never collide with a real connection.
-const stream_backpressure_wait_key = futex_module.waitKey(.connection, 0);
+/// See `futex.stream_backpressure_wait_key`: writers parked on shared
+/// backpressure wait world-globally, and both frame drains (here) and
+/// connection teardown (`Backend.closeConnectionState`) must wake them.
+const stream_backpressure_wait_key = futex_module.stream_backpressure_wait_key;
 
 pub fn Ops(comptime Backend: type) type {
     return struct {
@@ -80,6 +77,12 @@ pub fn Ops(comptime Backend: type) type {
 
                 switch (event) {
                     .delivered => |envelope| {
+                        // Draining releases the pooled message and frees a
+                        // path-queue slot even when the frame's target is
+                        // gone or closed; the pool and queues are shared,
+                        // so wake every backpressured writer in the world
+                        // for every drained frame.
+                        defer wakeBackpressuredWriters(backend);
                         defer envelope.message.release();
 
                         const bytes = envelope.message.bytes();
@@ -97,13 +100,11 @@ pub fn Ops(comptime Backend: type) type {
                         ) catch return error.SystemResources;
 
                         backend.wakeConnection(target_handle, 1);
-                        // Draining releases the pooled message and frees a
-                        // path-queue slot; the pool and queues are shared,
-                        // so wake every backpressured writer in the world,
-                        // not just this frame's sender.
-                        wakeBackpressuredWriters(backend);
                     },
                     .dropped => |dropped| {
+                        // A dropped envelope also releases its pooled
+                        // message; same rule as `.delivered`.
+                        defer wakeBackpressuredWriters(backend);
                         defer dropped.message.release();
 
                         const bytes = dropped.message.bytes();
@@ -125,9 +126,6 @@ pub fn Ops(comptime Backend: type) type {
                         ) catch return error.SystemResources;
 
                         backend.wakeConnection(target_handle, 1);
-                        // A dropped envelope also releases its pooled
-                        // message; wake every backpressured writer.
-                        wakeBackpressuredWriters(backend);
                     },
                 }
             }
@@ -505,9 +503,18 @@ pub fn Ops(comptime Backend: type) type {
                                     connection.waiters -= 1;
                                     switch (wait_result) {
                                         .woken, .timed_out => {},
-                                        .canceled => return error.Canceled,
+                                        .canceled => {
+                                            // Same closed-while-canceled race
+                                            // as the read park: never skip
+                                            // retiring a closed idle handle.
+                                            if (connection.closed) backend.retireClosedNetHandleIfIdle(dest);
+                                            return error.Canceled;
+                                        },
                                     }
-                                    if (connection.closed) return error.SocketUnconnected;
+                                    if (connection.closed) {
+                                        backend.retireClosedNetHandleIfIdle(dest);
+                                        return error.SocketUnconnected;
+                                    }
                                     continue;
                                 },
                                 else => return errors.mapNetworkWriteError(err),
