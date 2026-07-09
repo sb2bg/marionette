@@ -649,6 +649,18 @@ count, final simulated timestamp when present, replay context, subsystem and
 event counts, singleton events, network send/drop/delivery counts, drop
 reasons, and per-link network counts.
 
+## Trace Assertions
+
+`mar.expectTraceContains(trace, needle)` asserts that a trace contains a
+substring, printing the needle and the trace tail on failure. The trace is a
+first-class Marionette artifact, so pinning contracts against its events is a
+standard oracle shape:
+
+```zig
+try mar.expectTraceContains(outcome.trace, "network.drop");
+try mar.expectTraceContains(outcome.trace, "reason=link_disabled");
+```
+
 ## `runSimCase` And `run`
 
 `mar.runSimCase(opts)` is the primary stateful simulation runner. It

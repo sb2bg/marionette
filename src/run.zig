@@ -211,6 +211,18 @@ pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
     }
 }
 
+/// Expect `trace` to contain `needle`; on failure, print the needle and the
+/// tail of the trace so the mismatch is diagnosable from test output.
+pub fn expectTraceContains(trace: []const u8, needle: []const u8) error{TraceNeedleMissing}!void {
+    if (std.mem.indexOf(u8, trace, needle) != null) return;
+    const tail_len = @min(trace.len, 4096);
+    std.debug.print(
+        "trace does not contain \"{s}\"; trace tail ({} of {} bytes):\n{s}\n",
+        .{ needle, tail_len, trace.len, trace[trace.len - tail_len ..] },
+    );
+    return error.TraceNeedleMissing;
+}
+
 const NoState = struct {
     world: *World,
 };

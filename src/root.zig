@@ -237,6 +237,9 @@ pub const expectSimPass = run_module.expectSimPass;
 /// Expect a simulation case to fail.
 pub const expectSimFailure = run_module.expectSimFailure;
 
+/// Expect a trace to contain a needle, printing the tail on failure.
+pub const expectTraceContains = run_module.expectTraceContains;
+
 /// Expect a simulation case to pass over many seeds.
 pub const expectSimFuzz = run_module.expectSimFuzz;
 

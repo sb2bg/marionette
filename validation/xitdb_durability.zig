@@ -123,9 +123,9 @@ test "marionette detects xitdb torn header corruption at sub-field granularity" 
     const outcome = try runTornHeaderRecoveryCase(allocator, 0x70A1_0007, 7);
     defer allocator.free(outcome.trace);
     try std.testing.expectEqual(TornOutcome.recovery_corrupted, outcome.result);
-    try expectTraceContains(outcome.trace, "disk.crash_write");
-    try expectTraceContains(outcome.trace, "path=xit-torn.db offset=28");
-    try expectTraceContains(outcome.trace, "result=torn");
+    try mar.expectTraceContains(outcome.trace, "disk.crash_write");
+    try mar.expectTraceContains(outcome.trace, "path=xit-torn.db offset=28");
+    try mar.expectTraceContains(outcome.trace, "result=torn");
 }
 
 test "xitdb realistic sector sizes keep committed-size header tear atomic" {
@@ -137,9 +137,9 @@ test "xitdb realistic sector sizes keep committed-size header tear atomic" {
         const outcome = try runTornHeaderRecoveryCase(allocator, 0x70A1_0000 + sector_size, sector_size);
         defer allocator.free(outcome.trace);
         try std.testing.expectEqual(TornOutcome.recovered, outcome.result);
-        try expectTraceContains(outcome.trace, "disk.crash_write");
-        try expectTraceContains(outcome.trace, "path=xit-torn.db offset=0");
-        try expectTraceContains(outcome.trace, "result=torn");
+        try mar.expectTraceContains(outcome.trace, "disk.crash_write");
+        try mar.expectTraceContains(outcome.trace, "path=xit-torn.db offset=0");
+        try mar.expectTraceContains(outcome.trace, "result=torn");
     }
 }
 
@@ -647,9 +647,6 @@ fn verifySnapshot(allocator: std.mem.Allocator, moment: DB.HashMap(.read_only), 
     }
 }
 
-fn expectTraceContains(trace: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, trace, needle) != null);
-}
 
 // --- Crash-fault fuzzer with shrinking -------------------------------------
 //
