@@ -50,10 +50,13 @@ reject short-success partial responses. Finish the chain:
   `netShutdown` under partition (local-only, trace-visible as
   `io.net.shutdown`) landed through the pool scenarios, which also found
   two confirmed dusty bugs (FOUND_BUGS DUSTY-001/002).
-- **16e. Larger transfers.** Chunked bodies and payloads spanning many
-  simulated packets, exercising partial reads and writes through the
-  `Io.Reader`/`Io.Writer` adapters.
-- **16f. Randomized task start jitter.** Readiness races are structurally
+- **16e. Larger transfers.** Done. A 512 KiB verified upload and a 1 MiB
+  verified chunked download over one keep-alive connection forced two
+  stream-fidelity fixes: segmentation of oversized writes into 16 KiB
+  frames, and write backpressure when the byte pool is full (the writer
+  parks until the receiver drains; mutual blocked writers are a real
+  deadlock, as on TCP).
+- **16f (deferred). Randomized task start jitter.** Readiness races are structurally
   masked today: virtual time advances only when every task blocks, so a
   server with no suspension point before `listen` always beats a client that
   sleeps first, and no seed can find the race. Add an opt-in simulate option

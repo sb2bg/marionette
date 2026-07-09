@@ -39,6 +39,16 @@ const chunk_len = 4 * 1024;
 const total_chunks = 16;
 const chunk_pattern: [chunk_len]u8 = @splat('x');
 const max_retry_attempts = 3;
+const large_chunk_len = 4 * 1024;
+const large_total_chunks = 256;
+const large_download_len = large_chunk_len * large_total_chunks;
+const large_upload_len = 512 * 1024;
+
+/// Position-dependent transfer pattern: unlike a constant fill, it catches
+/// reordered, duplicated, or aliased regions, not just wrong lengths.
+fn transferPatternByte(index: usize) u8 {
+    return @truncate(index *% 31 +% 7);
+}
 
 fn handleHello(req: *http.Request, res: *http.Response) !void {
     _ = req;
@@ -217,6 +227,240 @@ const Scenario = struct {
         self.record("dusty_http.client.hello status={}", .{self.hello_status});
     }
 };
+
+fn handleLargeDownload(req: *http.Request, res: *http.Response) !void {
+    _ = req;
+    var chunk: [large_chunk_len]u8 = undefined;
+    for (0..large_total_chunks) |chunk_index| {
+        const base = chunk_index * large_chunk_len;
+        for (&chunk, 0..) |*byte, offset| {
+            byte.* = transferPatternByte(base + offset);
+        }
+        try res.chunk(&chunk);
+    }
+}
+
+fn handleLargeUpload(req: *http.Request, res: *http.Response) !void {
+    var reader = req.reader();
+    const payload = try reader.interface.allocRemaining(
+        req.arena,
+        .limited(large_upload_len + 1024),
+    );
+    var pattern_ok = payload.len == large_upload_len;
+    if (pattern_ok) {
+        for (payload, 0..) |byte, index| {
+            if (byte != transferPatternByte(index)) {
+                pattern_ok = false;
+                break;
+            }
+        }
+    }
+    res.body = try std.fmt.allocPrint(req.arena, "upload:{s}:{}", .{
+        if (pattern_ok) "ok" else "bad", payload.len,
+    });
+}
+
+/// Large transfers over one keep-alive connection: a patterned upload the
+/// server verifies byte-for-byte, then a chunked download the client
+/// verifies byte-for-byte. Both directions span many simulated packets,
+/// exercising partial reads and writes through the `Io.Reader`/`Io.Writer`
+/// adapters.
+const LargeTransferScenario = struct {
+    allocator: std.mem.Allocator,
+    world: *mar.World,
+    server_io: Io,
+    client_io: Io,
+    server: *http.Server(void),
+    client: ?http.Client = null,
+    upload_status: u32 = 0,
+    upload_reply_copy: []u8 = &.{},
+    download_status: u32 = 0,
+    download_len: usize = 0,
+    download_pattern_ok: bool = false,
+    graceful_shutdown: bool = false,
+    timeout_shutdown: bool = false,
+
+    fn record(self: *LargeTransferScenario, comptime fmt: []const u8, args: anytype) void {
+        self.world.record(fmt, args) catch @panic("dusty_large trace record failed");
+    }
+
+    fn serverTask(self: *LargeTransferScenario) void {
+        self.record("dusty_large.server.listen_start", .{});
+        const address: http.Address = .{
+            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+        };
+        self.server.listen(address) catch |err| switch (err) {
+            error.Canceled => {
+                self.graceful_shutdown = true;
+                self.record("dusty_large.server.graceful_shutdown", .{});
+                return;
+            },
+            error.Timeout => {
+                self.timeout_shutdown = true;
+                self.record("dusty_large.server.timeout_shutdown", .{});
+                return;
+            },
+            else => std.debug.panic("dusty_large listen failed: {}", .{err}),
+        };
+        @panic("dusty_large listen returned without a shutdown request");
+    }
+
+    fn clientTask(self: *LargeTransferScenario) void {
+        self.server.ready.wait(self.server_io) catch @panic("dusty_large ready wait failed");
+        self.record("dusty_large.client.server_ready", .{});
+
+        self.client = http.Client.init(self.allocator, self.client_io, .{
+            .max_response_size = large_download_len + 4096,
+        });
+
+        // Upload: the client writes half a MiB through the stream writer;
+        // the server verifies every byte and echoes a verdict.
+        {
+            const body = self.allocator.alloc(u8, large_upload_len) catch
+                @panic("dusty_large upload alloc failed");
+            defer self.allocator.free(body);
+            for (body, 0..) |*byte, index| {
+                byte.* = transferPatternByte(index);
+            }
+
+            var response = self.client.?.fetch(base_url ++ "/upload", .{
+                .method = .post,
+                .body = body,
+            }) catch |err| {
+                std.debug.panic("dusty_large upload failed: {}", .{err});
+            };
+            defer response.deinit();
+            self.upload_status = @intFromEnum(response.status());
+            const reply = (response.body() catch @panic("dusty_large upload reply failed")) orelse "";
+            self.upload_reply_copy = self.allocator.dupe(u8, reply) catch @panic("dusty_large oom");
+            self.record("dusty_large.client.upload status={} reply={s}", .{
+                self.upload_status, reply,
+            });
+        }
+
+        // Download on the same keep-alive connection: a 1 MiB chunked body
+        // the client verifies byte-for-byte.
+        {
+            var response = self.client.?.fetch(base_url ++ "/download", .{
+                .decompress = false,
+            }) catch |err| {
+                std.debug.panic("dusty_large download failed: {}", .{err});
+            };
+            defer response.deinit();
+            self.download_status = @intFromEnum(response.status());
+            const payload = (response.body() catch @panic("dusty_large download body failed")) orelse "";
+            self.download_len = payload.len;
+            self.download_pattern_ok = payload.len == large_download_len;
+            if (self.download_pattern_ok) {
+                for (payload, 0..) |byte, index| {
+                    if (byte != transferPatternByte(index)) {
+                        self.download_pattern_ok = false;
+                        break;
+                    }
+                }
+            }
+            self.record("dusty_large.client.download status={} bytes={} pattern_ok={}", .{
+                self.download_status, self.download_len, self.download_pattern_ok,
+            });
+        }
+    }
+};
+
+pub const LargeTransferOutcome = struct {
+    allocator: std.mem.Allocator,
+    trace: []u8,
+    upload_status: u32,
+    upload_reply: []u8,
+    download_status: u32,
+    download_len: usize,
+    download_pattern_ok: bool,
+    deliver_count: usize,
+    connect_count: usize,
+    graceful_shutdown: bool,
+
+    pub fn deinit(self: *LargeTransferOutcome) void {
+        self.allocator.free(self.trace);
+        self.allocator.free(self.upload_reply);
+        self.* = undefined;
+    }
+};
+
+/// Large patterned transfers in both directions over one connection.
+pub fn runLargeTransferScenario(allocator: std.mem.Allocator, seed: u64) !LargeTransferOutcome {
+    var world = try mar.World.init(allocator, .{
+        .seed = seed,
+        .tick_ns = 10,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{
+            .nodes = 2,
+            .service_nodes = 1,
+            // Both transfers emit hundreds of stream frames before the
+            // cooperative peer drains them; keep capacity above the full
+            // frame count so the oracle tests transfer integrity, not
+            // queue capacity.
+            .path_capacity = 4096,
+        },
+        // dusty's Debug-mode fetch frames are platform-sensitive and deep;
+        // Linux/x86_64 needs more than the default stack to enter fetchInternal.
+        .task_stack_size = dusty_task_stack_size,
+    });
+    const server_env = try sim.envForNode(0);
+    const client_env = try sim.envForNode(1);
+    const server_io = server_env.io();
+    const client_io = client_env.io();
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    var server = http.Server(void).init(allocator, server_io, .{}, {});
+    defer server.deinit();
+    server.router.post("/upload", handleLargeUpload);
+    server.router.get("/download", handleLargeDownload);
+
+    var scenario = LargeTransferScenario{
+        .allocator = allocator,
+        .world = &world,
+        .server_io = server_io,
+        .client_io = client_io,
+        .server = &server,
+    };
+    errdefer allocator.free(scenario.upload_reply_copy);
+    defer if (scenario.client) |*client| client.deinit();
+
+    var server_future = try Io.concurrent(server_io, LargeTransferScenario.serverTask, .{&scenario});
+    var client_future = try Io.concurrent(client_io, LargeTransferScenario.clientTask, .{&scenario});
+
+    client_future.await(client_io);
+    // Closing the pooled connection first lets its parked keep-alive
+    // handler drain, so listen cancellation shuts down gracefully.
+    if (scenario.client) |*client| {
+        client.deinit();
+        scenario.client = null;
+    }
+    server_future.cancel(server_io);
+    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+
+    const trace = try allocator.dupe(u8, world.traceBytes());
+    errdefer allocator.free(trace);
+
+    const upload_reply = scenario.upload_reply_copy;
+    scenario.upload_reply_copy = &.{};
+
+    return .{
+        .allocator = allocator,
+        .trace = trace,
+        .upload_status = scenario.upload_status,
+        .upload_reply = upload_reply,
+        .download_status = scenario.download_status,
+        .download_len = scenario.download_len,
+        .download_pattern_ok = scenario.download_pattern_ok,
+        .deliver_count = std.mem.count(u8, trace, "io.net.deliver "),
+        .connect_count = std.mem.count(u8, trace, "io.net.connect handle="),
+        .graceful_shutdown = scenario.graceful_shutdown,
+    };
+}
 
 /// Pooled keep-alive reuse: one shared client, connections idle across
 /// virtual-time gaps, concurrent fetches that force the pool to grow, and
@@ -1292,6 +1536,33 @@ test "dusty HTTP mid-response partition replays byte-identically from the same s
 
     try std.testing.expectEqualStrings(first.trace, second.trace);
     try std.testing.expectEqualStrings(first.first_error_name, second.first_error_name);
+}
+
+test "dusty HTTP large transfers survive byte-exact in both directions" {
+    var outcome = try runLargeTransferScenario(std.testing.allocator, 0xC0FFEE);
+    defer outcome.deinit();
+
+    try std.testing.expectEqual(@as(u32, 200), outcome.upload_status);
+    try std.testing.expectEqualStrings("upload:ok:524288", outcome.upload_reply);
+    try std.testing.expectEqual(@as(u32, 200), outcome.download_status);
+    try std.testing.expectEqual(@as(usize, large_download_len), outcome.download_len);
+    try std.testing.expect(outcome.download_pattern_ok);
+
+    // Both transfers ride one keep-alive connection, and the payloads span
+    // many simulated packets rather than one oversized frame.
+    try std.testing.expectEqual(@as(usize, 1), outcome.connect_count);
+    try std.testing.expect(outcome.deliver_count >= 64);
+    try std.testing.expect(outcome.graceful_shutdown);
+}
+
+test "dusty HTTP large transfers replay byte-identically from the same seed" {
+    var first = try runLargeTransferScenario(std.testing.allocator, 0xC0FFEE);
+    defer first.deinit();
+    var second = try runLargeTransferScenario(std.testing.allocator, 0xC0FFEE);
+    defer second.deinit();
+
+    try std.testing.expectEqualStrings(first.trace, second.trace);
+    try mar.expectTraceContains(first.trace, "dusty_large.client.download status=200");
 }
 
 test "dusty HTTP pool reuses keep-alive connections across idle gaps and concurrency" {

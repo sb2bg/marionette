@@ -8,6 +8,12 @@ const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
 const stream_frame_handle_size = @sizeOf(u64);
 
+/// Maximum stream payload carried by one simulated network frame. Larger
+/// writes are segmented like a real transport instead of rejected by the
+/// byte pool's fixed per-message capacity; per-link `(deliver_at,
+/// packet_id)` ordering keeps segments in order for inbox reassembly.
+const max_stream_segment_len = 16 * 1024;
+
 pub fn Ops(comptime Backend: type) type {
     return struct {
         fn backendFromUserdata(userdata: ?*anyopaque) *Backend {
@@ -82,6 +88,11 @@ pub fn Ops(comptime Backend: type) type {
                         ) catch return error.SystemResources;
 
                         backend.wakeConnection(target_handle, 1);
+                        // Draining releases the pooled message, so a writer
+                        // parked on backpressure can make progress.
+                        if (target.peer) |sender_ref| {
+                            sender_ref.backend.wakeConnection(sender_ref.handle, std.math.maxInt(usize));
+                        }
                     },
                     .dropped => |dropped| {
                         defer dropped.message.release();
@@ -105,6 +116,11 @@ pub fn Ops(comptime Backend: type) type {
                         ) catch return error.SystemResources;
 
                         backend.wakeConnection(target_handle, 1);
+                        // A dropped envelope also releases its pooled
+                        // message; wake any backpressured writer.
+                        if (target.peer) |sender_ref| {
+                            sender_ref.backend.wakeConnection(sender_ref.handle, std.math.maxInt(usize));
+                        }
                     },
                 }
             }
@@ -413,23 +429,77 @@ pub fn Ops(comptime Backend: type) type {
                     const payload_len = try appendStreamFrame(backend, &frame, peer_ref.handle, header, data, splat);
                     if (payload_len == 0) return 0;
 
-                    const send_result = network_module.internal.sendStreamBytesFromControl(
-                        backend.network_control,
-                        from_node,
-                        to_node,
-                        frame.items,
-                        connection.delivery_floor_ns,
-                    ) catch |err| return errors.mapNetworkWriteError(err);
+                    const payload = frame.items[stream_frame_handle_size..];
+                    var segment: std.ArrayList(u8) = .empty;
+                    defer segment.deinit(backend.allocator);
 
-                    switch (send_result) {
-                        .queued => |deliver_at| {
-                            connection.delivery_floor_ns = deliver_at;
-                            peer_ref.backend.wakeConnection(peer_ref.handle, 1);
-                        },
-                        .dropped => {
-                            if (peer.read_error == null) peer.read_error = error.Timeout;
-                            peer_ref.backend.wakeConnection(peer_ref.handle, 1);
-                        },
+                    var offset: usize = 0;
+                    while (offset < payload.len) {
+                        const segment_len = @min(max_stream_segment_len, payload.len - offset);
+                        const bytes = if (offset == 0 and segment_len == payload.len)
+                            frame.items
+                        else blk: {
+                            segment.clearRetainingCapacity();
+                            segment.appendNTimes(backend.allocator, 0, stream_frame_handle_size) catch
+                                return error.SystemResources;
+                            std.mem.writeInt(
+                                u64,
+                                segment.items[0..stream_frame_handle_size],
+                                @intCast(peer_ref.handle),
+                                .little,
+                            );
+                            segment.appendSlice(backend.allocator, payload[offset..][0..segment_len]) catch
+                                return error.SystemResources;
+                            break :blk segment.items;
+                        };
+                        offset += segment_len;
+
+                        const send_result = while (true) {
+                            break network_module.internal.sendStreamBytesFromControl(
+                                backend.network_control,
+                                from_node,
+                                to_node,
+                                bytes,
+                                connection.delivery_floor_ns,
+                            ) catch |err| switch (err) {
+                                // Backpressure: a real transport blocks the
+                                // writer when the in-flight window is full.
+                                // Park until the receiver drains a frame
+                                // (releasing its pool slot) and wakes this
+                                // connection, then retry. Two peers both
+                                // blocked writing at each other is a real
+                                // deadlock, exactly as it is on TCP, and
+                                // surfaces through deadlock detection.
+                                error.PoolExhausted => {
+                                    const wait_set = backend.futex_wait_set orelse
+                                        return errors.mapNetworkWriteError(err);
+                                    connection.waiters += 1;
+                                    const wait_result = wait_set.blockUntilCancelable(
+                                        backend.connectionWaitKey(dest),
+                                        null,
+                                    );
+                                    connection.waiters -= 1;
+                                    switch (wait_result) {
+                                        .woken, .timed_out => {},
+                                        .canceled => return error.Canceled,
+                                    }
+                                    if (connection.closed) return error.SocketUnconnected;
+                                    continue;
+                                },
+                                else => return errors.mapNetworkWriteError(err),
+                            };
+                        };
+
+                        switch (send_result) {
+                            .queued => |deliver_at| {
+                                connection.delivery_floor_ns = deliver_at;
+                                peer_ref.backend.wakeConnection(peer_ref.handle, 1);
+                            },
+                            .dropped => {
+                                if (peer.read_error == null) peer.read_error = error.Timeout;
+                                peer_ref.backend.wakeConnection(peer_ref.handle, 1);
+                            },
+                        }
                     }
                     return payload_len;
                 }

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Lands 16e, large transfers: a dusty scenario uploads a 512 KiB
+  position-patterned body the server verifies byte-for-byte, then
+  downloads a 1 MiB chunked body the client verifies byte-for-byte, both
+  over one keep-alive connection and spanning hundreds of simulated
+  packets. This forced two stream-fidelity fixes in the simulated
+  `std.Io.net` backend: writes larger than a pool slot are now segmented
+  into 16 KiB frames like a real transport instead of failing with
+  `MessageTooLarge`, and a full byte pool now applies write backpressure
+  (the writer parks until the receiver drains a frame and wakes it)
+  instead of surfacing `NetworkDown` mid-stream. Two peers both blocked
+  writing at each other is a real deadlock, exactly as on TCP, and
+  surfaces through deadlock detection.
+
 - Lands 16d, dusty pooled keep-alive depth: a pool-reuse scenario (idle
   gaps in virtual time, concurrent fetches growing the pool, sequential
   fetches reusing both connections, connection count pinned via the new
