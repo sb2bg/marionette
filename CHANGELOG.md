@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Adds the pinned lazy beanstalkz validation (`validate-beanstalkz`): the
+  unmodified `g41797/beanstalkz` work-queue client runs against a
+  harness-owned in-memory beanstalkd speaking the text protocol over
+  simulated `std.Io.net` streams. Covers a produce/consume round trip with
+  bury/kick transitions and the pinned `error.Timeout` empty-reserve
+  contract, sequential connection churn (connect, put, quit,
+  `shutdown(.both)`, close) drained in FIFO order, a blocking
+  `reserve-with-timeout` parked across a five-second virtual publish
+  delay, and a server-process crash under a parked reserve that surfaces
+  the pinned `error.CommunicationFailure` reset contract before a
+  registered restart recovers on a fresh incarnation. All scenarios replay
+  byte-identically from the same seed.
+
 ## v0.5.0 - 2026-07-06
 
 - Adds the one-shot liveness transition `sim.transitionToLiveness(core)`,

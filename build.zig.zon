@@ -24,6 +24,11 @@
             .hash = "dusty-0.1.0-Qdw7Rj5bGwAU7Hfb70_6Ck9PJ3zYYxB8YxSibQT04PYx",
             .lazy = true,
         },
+        .beanstalkz = .{
+            .url = "git+https://github.com/g41797/beanstalkz#d8ac61183d80b4cf0e15c52ab4edaea69cb3a56c",
+            .hash = "beanstalkz-0.0.0-SOgqEYSpAADT0GjkD1w3My31q54ZsVrw-Jd-6M_3sStA",
+            .lazy = true,
+        },
     },
     .paths = .{
         "README.md",

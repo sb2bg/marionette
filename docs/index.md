@@ -10,8 +10,9 @@ fault, disk, and network primitives that make that direction concrete.
 The current validation targets include an unmodified storage engine
 (`xit-vcs/xitdb`), an unmodified cooperative-concurrency library
 (`g41797/mailbox`), the pinned Ochi storage engine, the unmodified
-`lalinsky/dusty` HTTP client/server library, and an external-style
-client/server KV service whose SUT imports only `std.Io.net`.
+`lalinsky/dusty` HTTP client/server library, the unmodified
+`g41797/beanstalkz` queue client, and an external-style client/server KV
+service whose SUT imports only `std.Io.net`.
 
 Write production-shaped code against `std.Io` wherever possible, and add small
 Marionette handles only when the application actually needs them. In tests,

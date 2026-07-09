@@ -292,9 +292,29 @@ zig build validate-dusty
 ```
 
 This is an external-style capability demonstration of the `std.Io.net`
-boundary, not a third-party SUT finding. Keep-alive connection churn, larger
+boundary, not a third-party SUT finding. Pooled keep-alive reuse, larger
 transfers, and randomized task start jitter are the remaining 0.6 roadmap
 work.
+
+## Queue client validation
+
+The optional `validate-beanstalkz` target runs the pinned, unmodified
+[`g41797/beanstalkz`](https://github.com/g41797/beanstalkz) beanstalkd
+work-queue client against a harness-owned in-memory beanstalkd that speaks
+the text protocol over simulated `std.Io.net` streams. It covers a
+produce/consume round trip with bury/kick state transitions, sequential
+connection churn (fresh connect, put, quit, `shutdown(.both)`, close cycles
+drained in FIFO order), a blocking `reserve-with-timeout` parked across a
+five-second virtual publish delay, and a server-process crash under a
+parked reserve: the surviving client wakes with a reset that surfaces as
+the library's `CommunicationFailure` contract, then a registered process
+restart recovers on a fresh incarnation. Everything replays byte-identically
+from the same seed. beanstalkz is a lazy dependency and this target is not
+part of the default test step.
+
+```sh
+zig build validate-beanstalkz
+```
 
 ## Traces
 
@@ -353,8 +373,9 @@ send-time loss, delivery-time partitions, deterministic healing, and
 literal-only host lookup (an unmodified `std.http.Client` runs against
 simulated servers; real DNS stays unsupported), and
 cooperative `std.Io` tasks, groups, and futex waits for `Mutex` / `Condition` code,
-validated against the pinned `g41797/mailbox` target and the internal
-bounded-queue capability demo, plus the pinned Ochi storage target. It does not model
+validated against the pinned `g41797/mailbox` and `g41797/beanstalkz`
+targets and the internal bounded-queue capability demo, plus the pinned
+Ochi storage target. It does not model
 arbitrary OS thread scheduling or memory-level concurrency; code that depends on
 those needs separate testing. The simulator also models
 deterministic allocation faults through `Env.allocator()` and cooperative

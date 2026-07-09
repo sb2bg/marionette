@@ -184,6 +184,28 @@ pub fn build(b: *std.Build) void {
         validate_dusty_step.dependOn(&run_validate_dusty.step);
     }
 
+    if (b.lazyDependency("beanstalkz", .{
+        .target = target,
+        .optimize = optimize,
+    })) |beanstalkz_dep| {
+        const validate_beanstalkz_mod = b.createModule(.{
+            .root_source_file = b.path("validation/beanstalkz_queue.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validate_beanstalkz_mod.addImport("marionette", mod);
+        validate_beanstalkz_mod.addImport("beanstalkz", beanstalkz_dep.module("beanstalkz"));
+
+        const validate_beanstalkz_tests = b.addTest(.{ .root_module = validate_beanstalkz_mod });
+        const run_validate_beanstalkz = b.addRunArtifact(validate_beanstalkz_tests);
+
+        const validate_beanstalkz_step = b.step(
+            "validate-beanstalkz",
+            "Run the unmodified beanstalkz queue client under Marionette",
+        );
+        validate_beanstalkz_step.dependOn(&run_validate_beanstalkz.step);
+    }
+
     const validate_bounded_queue_mod = b.createModule(.{
         .root_source_file = b.path("validation/bounded_queue_concurrency.zig"),
         .target = target,
