@@ -56,15 +56,11 @@ reject short-success partial responses. Finish the chain:
   frames, and write backpressure when the byte pool is full (the writer
   parks until the receiver drains; mutual blocked writers are a real
   deadlock, as on TCP).
-- **16f (deferred). Randomized task start jitter.** Readiness races are structurally
-  masked today: virtual time advances only when every task blocks, so a
-  server with no suspension point before `listen` always beats a client that
-  sleeps first, and no seed can find the race. Add an opt-in simulate option
-  that draws a small per-task initial delay from the seed so the scheduler
-  explores those orderings for the whole class of SUTs instead of one
-  hand-written delay per scenario. Done when a validation deterministically
-  reproduces a connect-before-listen race with same-seed replay, and the
-  option defaults off so existing traces and snapshots are unchanged.
+- **16f. Randomized task start jitter.** Done. Opt-in
+  `task_start_jitter_ns` draws a seeded initial delay per task; a
+  capability test deterministically reproduces a connect-before-listen
+  race with same-seed replay, and the option defaults off (no draws, no
+  trace events) so existing traces are unchanged.
 
 Deferred cancellation follow-ups, promoted when a SUT forces them: a
 cancelable `Group.await` park (a canceled awaiter should propagate to members

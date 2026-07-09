@@ -93,6 +93,17 @@ prints the fault-site trace). This installs a process-global
 signal dispositions can disable it with
 `simulate(.{ .fiber_overflow_diagnostics = false })`. Faults outside fiber
 guard regions chain through with no added output.
+
+`simulate` options also include `task_start_jitter_ns` (default 0, off).
+When nonzero, every scheduler-backed task draws a uniform initial delay in
+`[0, max]` from the seed and becomes runnable only after that much virtual
+time, so seed sweeps explore task start orderings, such as
+connect-before-listen races, that the cooperative scheduler otherwise masks
+structurally (virtual time advances only when every task blocks, so a task
+with a suspension point before its first action always loses to one
+without). Zero consumes no randomness and emits no trace; enabled draws are
+trace-visible as `scheduler.start_jitter` events, so jittered runs replay
+byte-identically from their seed.
 `env.buggify` draws through the env's random capability only when the env was
 built by simulation; production envs construct the same composition bundle with
 production adapters such as `mar.RealDisk`.

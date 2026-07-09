@@ -579,6 +579,16 @@ pub const World = struct {
         /// simulated SUT's call chains outgrow the default; stacks cost
         /// address space, not resident memory, on guard-page targets.
         task_stack_size: usize = scheduler_module.default_task_stack_size,
+        /// Maximum seeded initial delay for scheduler-backed tasks, in
+        /// nanoseconds. When nonzero, every spawned task draws a uniform
+        /// delay in `[0, max]` from the world PRNG and becomes runnable
+        /// only after that much virtual time, so seeds explore start
+        /// orderings (for example connect-before-listen races) that the
+        /// cooperative scheduler otherwise masks structurally. Zero (the
+        /// default) consumes no randomness and emits no trace, leaving
+        /// existing traces unchanged. Draws are trace-visible as
+        /// `scheduler.start_jitter`.
+        task_start_jitter_ns: u64 = 0,
         /// Whether a task fiber overflowing its guarded stack produces a
         /// targeted stderr diagnostic (task id, process, configured stack
         /// size, the `task_stack_size` fix) before the fault chains to the
@@ -799,6 +809,7 @@ pub const World = struct {
 
         scheduler.* = scheduler_module.TaskScheduler.init(self.allocator, self);
         scheduler.task_stack_size = options.task_stack_size;
+        scheduler.task_start_jitter_ns = options.task_start_jitter_ns;
         scheduler.overflow_diagnostics = options.fiber_overflow_diagnostics;
         errdefer if (!scheduler_registered) scheduler.deinit();
 

@@ -3418,3 +3418,124 @@ test "io: transitionToLiveness preflight failures leave the transition retryable
     try std.testing.expectEqual(@as(u32, 1), state.starts);
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "liveness.transition core_count=1"));
 }
+
+const StartRace = struct {
+    server_io: Io,
+    client_io: Io,
+    connected: bool = false,
+    connect_error: ?anyerror = null,
+
+    fn serverTask(self: *StartRace) void {
+        const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4710) catch unreachable;
+        var listener = address.listen(self.server_io, .{}) catch |err| {
+            std.debug.panic("start race listen failed: {}", .{err});
+        };
+        defer listener.deinit(self.server_io);
+        if (listener.accept(self.server_io)) |stream| {
+            stream.close(self.server_io);
+        } else |_| {}
+    }
+
+    fn clientTask(self: *StartRace) void {
+        // The suspension point before connect is the structural mask: with
+        // no start jitter, virtual time only advances once the server has
+        // also blocked, which is after `listen` registered the listener,
+        // so the server wins this race on every seed.
+        Io.sleep(self.client_io, .fromNanoseconds(10), .awake) catch
+            @panic("start race client sleep failed");
+        const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4710) catch unreachable;
+        if (address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp })) |stream| {
+            self.connected = true;
+            stream.close(self.client_io);
+        } else |err| {
+            self.connect_error = err;
+        }
+    }
+};
+
+const StartRaceOutcome = struct {
+    connected: bool,
+    connect_error: ?anyerror,
+    trace: []u8,
+};
+
+/// A server task with no suspension point before `listen` races a client
+/// task that connects immediately. Without start jitter the spawn order
+/// decides the race identically on every seed; with jitter the seed does.
+fn runStartRace(allocator: std.mem.Allocator, seed: u64, jitter_ns: u64) !StartRaceOutcome {
+    var world = try World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 8 },
+        .task_start_jitter_ns = jitter_ns,
+    });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    var race = StartRace{ .server_io = server_io, .client_io = client_io };
+    var server_future = try Io.concurrent(server_io, StartRace.serverTask, .{&race});
+    var client_future = try Io.concurrent(client_io, StartRace.clientTask, .{&race});
+
+    client_future.await(client_io);
+    // A refused client leaves the server parked in accept; cancellation is
+    // the shutdown path either way.
+    server_future.cancel(server_io);
+    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+
+    return .{
+        .connected = race.connected,
+        .connect_error = race.connect_error,
+        .trace = try allocator.dupe(u8, world.traceBytes()),
+    };
+}
+
+test "io: task start jitter defaults off and masks the connect-before-listen race" {
+    var seed: u64 = 0;
+    while (seed < 8) : (seed += 1) {
+        const outcome = try runStartRace(std.testing.allocator, seed, 0);
+        defer std.testing.allocator.free(outcome.trace);
+
+        // The mask holds on every seed: the client's sleep parks it, time
+        // advances only after the server blocks in accept (listener
+        // registered), and the connect always succeeds. No seed can find
+        // the connect-before-listen ordering.
+        try std.testing.expect(outcome.connected);
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, outcome.trace, "scheduler.start_jitter"));
+    }
+}
+
+test "io: task start jitter reproduces a connect-before-listen race with same-seed replay" {
+    const jitter_ns = 1000;
+    var refused_seed: ?u64 = null;
+    var success_seen = false;
+
+    var seed: u64 = 0;
+    while (seed < 32) : (seed += 1) {
+        const outcome = try runStartRace(std.testing.allocator, seed, jitter_ns);
+        defer std.testing.allocator.free(outcome.trace);
+
+        try std.testing.expect(std.mem.indexOf(u8, outcome.trace, "scheduler.start_jitter") != null);
+        if (outcome.connected) {
+            success_seen = true;
+        } else {
+            try std.testing.expectEqual(@as(anyerror, error.ConnectionRefused), outcome.connect_error.?);
+            if (refused_seed == null) refused_seed = seed;
+        }
+        if (success_seen and refused_seed != null) break;
+    }
+
+    // The jittered schedule space must contain both orderings.
+    try std.testing.expect(success_seen);
+    try std.testing.expect(refused_seed != null);
+
+    // The found race replays byte-identically from its seed.
+    const first = try runStartRace(std.testing.allocator, refused_seed.?, jitter_ns);
+    defer std.testing.allocator.free(first.trace);
+    const second = try runStartRace(std.testing.allocator, refused_seed.?, jitter_ns);
+    defer std.testing.allocator.free(second.trace);
+
+    try std.testing.expect(!first.connected);
+    try std.testing.expectEqualStrings(first.trace, second.trace);
+}

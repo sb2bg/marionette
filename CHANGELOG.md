@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Adds opt-in randomized task start jitter
+  (`simulate(.{ .task_start_jitter_ns = ... })`): every scheduler-backed
+  task draws a seeded initial delay and becomes runnable only after that
+  much virtual time, so seed sweeps explore start orderings the
+  cooperative scheduler otherwise masks structurally. A capability test
+  deterministically reproduces a connect-before-listen race and replays
+  it byte-identically from its seed. The option defaults off, consumes no
+  randomness, and emits no trace when disabled, so existing traces are
+  unchanged; enabled draws are trace-visible as `scheduler.start_jitter`.
+
 - Lands 16e, large transfers: a dusty scenario uploads a 512 KiB
   position-patterned body the server verifies byte-for-byte, then
   downloads a 1 MiB chunked body the client verifies byte-for-byte, both

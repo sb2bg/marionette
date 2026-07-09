@@ -292,10 +292,11 @@ zig build validate-dusty
 ```
 
 This is an external-style capability demonstration of the `std.Io.net`
-boundary, not a third-party SUT finding. Randomized task start jitter is
-the remaining (deferred) 0.6 roadmap work; pooled keep-alive reuse and
-large byte-exact transfers landed with the pool and transfer scenarios,
-which also found two confirmed dusty bugs (see FOUND_BUGS.md).
+boundary, not a third-party SUT finding. The 0.6 slice chain is complete:
+pooled keep-alive reuse and large byte-exact transfers landed with the
+pool and transfer scenarios, which also found two confirmed dusty bugs
+(see FOUND_BUGS.md), and opt-in task start jitter lets seed sweeps
+explore start orderings such as connect-before-listen races.
 
 ## Queue client validation
 

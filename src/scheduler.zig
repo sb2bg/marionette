@@ -83,6 +83,10 @@ pub const TaskScheduler = struct {
     /// Stack size for tasks spawned through the type-erased `std.Io` runtime
     /// seam. Direct `spawn` callers can still override per task.
     task_stack_size: usize = default_task_stack_size,
+    /// Maximum seeded initial task delay; see
+    /// `SimulateOptions.task_start_jitter_ns`. Zero draws nothing and
+    /// records nothing.
+    task_start_jitter_ns: u64 = 0,
     /// Whether task fibers register their guard regions with the
     /// stack-overflow diagnostics signal handler. See
     /// `SimulateOptions.fiber_overflow_diagnostics`.
@@ -152,9 +156,27 @@ pub const TaskScheduler = struct {
         /// the `recancel` precondition assert.
         cancel_delivered: bool = false,
         cancel_protection: Io.CancelProtection = .unblocked,
+        /// Seeded initial delay drawn at spawn when start jitter is
+        /// enabled; the task parks this long before its entry runs.
+        start_delay_ns: u64 = 0,
 
         fn run(arg: *anyopaque) void {
             const task: *Task = @ptrCast(@alignCast(arg));
+            if (task.start_delay_ns > 0) {
+                const scheduler = task.scheduler;
+                const wake_at = std.math.add(u64, scheduler.world.now(), task.start_delay_ns) catch
+                    @panic("task start jitter deadline exceeds clock range");
+                // The park shares the sleep key namespace (keyed by task id,
+                // so nothing wakes it); a spurious wake must not start the
+                // task early. Not a cancellation point: an armed cancel is
+                // delivered at the task's first real one.
+                while (scheduler.world.now() < wake_at) {
+                    _ = scheduler.blockCurrentUntil(
+                        futex_module.waitKey(.sleep, task.id + 1),
+                        wake_at,
+                    );
+                }
+            }
             task.entry(task.scheduler, task.arg);
             task.scheduler.completeCurrent(task);
             unreachable;
@@ -303,6 +325,10 @@ pub const TaskScheduler = struct {
         errdefer _ = self.ready.pop();
 
         try self.recordSpawn(task_id, options.process_id);
+        if (self.task_start_jitter_ns > 0) {
+            task.start_delay_ns = try self.world.randomIntLessThan(u64, self.task_start_jitter_ns + 1);
+            try self.recordStartJitter(task_id, task.start_delay_ns);
+        }
         self.next_task_id += 1;
         return task_id;
     }
@@ -868,6 +894,17 @@ pub const TaskScheduler = struct {
             "scheduler.spawn",
             fields[0..if (process_id != null) 2 else 1],
         );
+    }
+
+    fn recordStartJitter(
+        self: *Self,
+        task_id: TaskId,
+        delay_ns: u64,
+    ) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        try self.world.recordFields("scheduler.start_jitter", &.{
+            traceField("task", .{ .uint = task_id }),
+            traceField("delay_ns", .{ .uint = delay_ns }),
+        });
     }
 
     fn recordYield(self: *Self, task_id: TaskId) (std.mem.Allocator.Error || world_module.TraceError)!void {
