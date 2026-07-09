@@ -13,40 +13,11 @@ belong in the relevant docs, especially:
 - `docs/disk-fault-model.md`
 - `docs/api.md`
 
-Last updated after `v0.4.0`.
+Last updated after `v0.5.0`.
 
 ---
 
-## Current Target: 0.5 - Deepen Simulation Correctness
-
-**Theme:** close the last missing simulator primitive and give faults a real
-recovery vocabulary before the production-transport push.
-
-**Done-signal:** Marionette can model allocation pressure and storage
-recoverability, then shrink meaningful disk/allocation failures into
-maintainer-readable repros.
-
-Pick from this section first unless a later release item is blocking it.
-
-### Opportunistic 0.5 Cleanup
-
-Take these only if they are naturally forced by the work above or can land as
-small isolated patches:
-
-- Replace `SimNetworkOptions.service_nodes: usize` with
-  `partitionable_nodes: []const NodeId` when a third caller sets
-  `service_nodes`, or when a real example needs a non-prefix subset.
-
-Settled in 0.5: misaligned `runFor` durations assert as harness misuse
-everywhere; disabled faults (zero rates) consume no randomness and emit no
-trace (see the determinism doc's conventions section); deferred host
-filename parity is documented in the API doc's logical-path section; and
-the one-shot liveness transition `sim.transitionToLiveness(core)` landed
-following the VOPR shape (see the API doc's liveness section).
-
----
-
-## Next Target: 0.6 - Deterministic std.Io.net Depth
+## Current Target: 0.6 - Deterministic std.Io.net Depth
 
 **Theme:** grow the simulated `std.Io.net` surface until a pinned, unmodified
 external network SUT runs, fails meaningfully, and shuts down cleanly under
@@ -73,8 +44,11 @@ dusty fault scenarios (16c) partition before and during responses, pin the
 observed `error.Timeout` contract, heal, retry with an exact body oracle, and
 reject short-success partial responses. Finish the chain:
 
-- **16d. Keep-alive and connection churn.** Sequential connections, pooled
-  reuse across requests, and close/shutdown discipline, including
+- **16d. Keep-alive and connection churn.** Sequential connection churn and
+  close/shutdown discipline landed through the pinned beanstalkz queue
+  client (`validate-beanstalkz`): fresh connect/put/quit/`shutdown(.both)`
+  cycles, a reserve parked across virtual time, and reset-on-crash
+  contracts. Remaining: dusty's pooled keep-alive reuse across requests and
   `netShutdown` semantics under partition.
 - **16e. Larger transfers.** Chunked bodies and payloads spanning many
   simulated packets, exercising partial reads and writes through the
@@ -95,6 +69,14 @@ and resurface `error.Canceled`), and cancellation points on disk-latency and
 file-lock waits.
 
 Supporting scheduler/runtime work belongs in 0.6 only when the SUT forces it.
+
+### Opportunistic Cleanup
+
+Take this only when naturally forced or as a small isolated patch:
+
+- Replace `SimNetworkOptions.service_nodes: usize` with
+  `partitionable_nodes: []const NodeId` when a third caller sets
+  `service_nodes`, or when a real example needs a non-prefix subset.
 
 ---
 
