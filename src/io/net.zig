@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const errors = @import("errors.zig");
+const futex_module = @import("futex.zig");
 const network_module = @import("../network/root.zig");
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
@@ -13,6 +14,14 @@ const stream_frame_handle_size = @sizeOf(u64);
 /// byte pool's fixed per-message capacity; per-link `(deliver_at,
 /// packet_id)` ordering keeps segments in order for inbox reassembly.
 const max_stream_segment_len = 16 * 1024;
+
+/// World-global wait key for stream writers parked on backpressure. The
+/// byte pool and path queues are shared resources, so a writer blocked
+/// because another connection filled them must be woken by any drain, not
+/// only its own peer's. All backends in a world share one scheduler wait
+/// set, and socket handles start at 1000, so the connection-tagged key for
+/// handle 0 can never collide with a real connection.
+const stream_backpressure_wait_key = futex_module.waitKey(.connection, 0);
 
 pub fn Ops(comptime Backend: type) type {
     return struct {
@@ -88,11 +97,11 @@ pub fn Ops(comptime Backend: type) type {
                         ) catch return error.SystemResources;
 
                         backend.wakeConnection(target_handle, 1);
-                        // Draining releases the pooled message, so a writer
-                        // parked on backpressure can make progress.
-                        if (target.peer) |sender_ref| {
-                            sender_ref.backend.wakeConnection(sender_ref.handle, std.math.maxInt(usize));
-                        }
+                        // Draining releases the pooled message and frees a
+                        // path-queue slot; the pool and queues are shared,
+                        // so wake every backpressured writer in the world,
+                        // not just this frame's sender.
+                        wakeBackpressuredWriters(backend);
                     },
                     .dropped => |dropped| {
                         defer dropped.message.release();
@@ -117,12 +126,16 @@ pub fn Ops(comptime Backend: type) type {
 
                         backend.wakeConnection(target_handle, 1);
                         // A dropped envelope also releases its pooled
-                        // message; wake any backpressured writer.
-                        if (target.peer) |sender_ref| {
-                            sender_ref.backend.wakeConnection(sender_ref.handle, std.math.maxInt(usize));
-                        }
+                        // message; wake every backpressured writer.
+                        wakeBackpressuredWriters(backend);
                     },
                 }
+            }
+        }
+
+        fn wakeBackpressuredWriters(backend: *Backend) void {
+            if (backend.futex_wait_set) |wait_set| {
+                _ = wait_set.wake(stream_backpressure_wait_key, std.math.maxInt(usize));
             }
         }
 
@@ -454,8 +467,17 @@ pub fn Ops(comptime Backend: type) type {
                         };
                         offset += segment_len;
 
-                        const send_result = while (true) {
-                            break network_module.internal.sendStreamBytesFromControl(
+                        while (true) {
+                            // The peer can close or die while this writer is
+                            // parked on backpressure; re-resolve and validate
+                            // it before every attempt so a stale pointer is
+                            // never dereferenced and a dead peer surfaces as
+                            // a reset instead of a silent retry.
+                            const live_peer = peer_ref.backend.connection(peer_ref.handle) orelse
+                                return error.ConnectionResetByPeer;
+                            if (live_peer.closed) return error.ConnectionResetByPeer;
+
+                            const send_result = network_module.internal.sendStreamBytesFromControl(
                                 backend.network_control,
                                 from_node,
                                 to_node,
@@ -463,19 +485,21 @@ pub fn Ops(comptime Backend: type) type {
                                 connection.delivery_floor_ns,
                             ) catch |err| switch (err) {
                                 // Backpressure: a real transport blocks the
-                                // writer when the in-flight window is full.
-                                // Park until the receiver drains a frame
-                                // (releasing its pool slot) and wakes this
-                                // connection, then retry. Two peers both
-                                // blocked writing at each other is a real
-                                // deadlock, exactly as it is on TCP, and
-                                // surfaces through deadlock detection.
-                                error.PoolExhausted => {
+                                // writer when the in-flight window is full,
+                                // whether the byte pool or the directed path
+                                // queue is what filled up. Park on the
+                                // world-global backpressure key until any
+                                // receiver drains a frame, then retry. Two
+                                // peers both blocked writing at each other
+                                // is a real deadlock, exactly as it is on
+                                // TCP, and surfaces through deadlock
+                                // detection.
+                                error.PoolExhausted, error.EventQueueFull => {
                                     const wait_set = backend.futex_wait_set orelse
                                         return errors.mapNetworkWriteError(err);
                                     connection.waiters += 1;
                                     const wait_result = wait_set.blockUntilCancelable(
-                                        backend.connectionWaitKey(dest),
+                                        stream_backpressure_wait_key,
                                         null,
                                     );
                                     connection.waiters -= 1;
@@ -488,17 +512,18 @@ pub fn Ops(comptime Backend: type) type {
                                 },
                                 else => return errors.mapNetworkWriteError(err),
                             };
-                        };
 
-                        switch (send_result) {
-                            .queued => |deliver_at| {
-                                connection.delivery_floor_ns = deliver_at;
-                                peer_ref.backend.wakeConnection(peer_ref.handle, 1);
-                            },
-                            .dropped => {
-                                if (peer.read_error == null) peer.read_error = error.Timeout;
-                                peer_ref.backend.wakeConnection(peer_ref.handle, 1);
-                            },
+                            switch (send_result) {
+                                .queued => |deliver_at| {
+                                    connection.delivery_floor_ns = deliver_at;
+                                    peer_ref.backend.wakeConnection(peer_ref.handle, 1);
+                                },
+                                .dropped => {
+                                    if (live_peer.read_error == null) live_peer.read_error = error.Timeout;
+                                    peer_ref.backend.wakeConnection(peer_ref.handle, 1);
+                                },
+                            }
+                            break;
                         }
                     }
                     return payload_len;

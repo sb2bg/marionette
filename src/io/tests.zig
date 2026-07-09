@@ -3539,3 +3539,91 @@ test "io: task start jitter reproduces a connect-before-listen race with same-se
     try std.testing.expect(!first.connected);
     try std.testing.expectEqualStrings(first.trace, second.trace);
 }
+
+const QueueBackpressure = struct {
+    server_io: Io,
+    client_io: Io,
+    received: [96 * 1024]u8 = undefined,
+    received_len: usize = 0,
+
+    fn serverTask(self: *QueueBackpressure) void {
+        const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4720) catch unreachable;
+        var listener = address.listen(self.server_io, .{}) catch |err| {
+            std.debug.panic("backpressure listen failed: {}", .{err});
+        };
+        defer listener.deinit(self.server_io);
+        const stream = listener.accept(self.server_io) catch |err| {
+            std.debug.panic("backpressure accept failed: {}", .{err});
+        };
+        defer stream.close(self.server_io);
+
+        while (self.received_len < self.received.len) {
+            var bufs: [1][]u8 = .{self.received[self.received_len..]};
+            const read = self.server_io.vtable.netRead(
+                self.server_io.userdata,
+                stream.socket.handle,
+                &bufs,
+            ) catch |err| {
+                std.debug.panic("backpressure read failed: {}", .{err});
+            };
+            if (read == 0) break;
+            self.received_len += read;
+        }
+    }
+
+    fn clientTask(self: *QueueBackpressure) void {
+        Io.sleep(self.client_io, .fromNanoseconds(10), .awake) catch
+            @panic("backpressure client sleep failed");
+        const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4720) catch unreachable;
+        const stream = address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
+            std.debug.panic("backpressure connect failed: {}", .{err});
+        };
+        defer stream.close(self.client_io);
+
+        var payload: [96 * 1024]u8 = undefined;
+        for (&payload, 0..) |*byte, index| {
+            byte.* = @truncate(index *% 13 +% 5);
+        }
+        var written: usize = 0;
+        while (written < payload.len) {
+            const chunk: [1][]const u8 = .{payload[written..]};
+            written += self.client_io.vtable.netWrite(
+                self.client_io.userdata,
+                stream.socket.handle,
+                "",
+                &chunk,
+                1,
+            ) catch |err| {
+                std.debug.panic("backpressure write failed: {}", .{err});
+            };
+        }
+    }
+};
+
+test "io: stream writes larger than the path queue backpressure instead of failing" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xBACC, .tick_ns = 10 });
+    defer world.deinit();
+
+    // A 96 KiB write becomes six 16 KiB segments, far beyond a two-slot
+    // path queue: without write backpressure this fails EventQueueFull;
+    // with it, the writer parks until the reader drains.
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 2 },
+    });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    var scenario = QueueBackpressure{ .server_io = server_io, .client_io = client_io };
+    var server_future = try Io.concurrent(server_io, QueueBackpressure.serverTask, .{&scenario});
+    var client_future = try Io.concurrent(client_io, QueueBackpressure.clientTask, .{&scenario});
+
+    client_future.await(client_io);
+    server_future.await(server_io);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+
+    try std.testing.expectEqual(scenario.received.len, scenario.received_len);
+    for (scenario.received, 0..) |byte, index| {
+        try std.testing.expectEqual(@as(u8, @truncate(index *% 13 +% 5)), byte);
+    }
+}

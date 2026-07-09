@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Hardens stream write backpressure from review findings. Writers now
+  park on a world-global backpressure key instead of their own
+  connection, so a writer blocked because another connection filled the
+  shared byte pool is woken by any drain, not only its own peer's; a full
+  directed path queue (`EventQueueFull`) now backpressures the same way
+  instead of failing the write with `SystemResources`; and the peer is
+  re-resolved and validated before every retry, so a peer that closes or
+  dies while the writer is parked surfaces as `ConnectionResetByPeer`
+  rather than a stale-pointer retry.
+
 - Adds opt-in randomized task start jitter
   (`simulate(.{ .task_start_jitter_ns = ... })`): every scheduler-backed
   task draws a seeded initial delay and becomes runnable only after that
