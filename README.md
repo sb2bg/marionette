@@ -149,10 +149,10 @@ Three pieces, either way:
 - **`checks`** assert invariants on the final state, usually through
   `*const mar.SimCase(App)`.
 
-`expectSimPass` runs once with a fixed seed. `expectSimFuzz` runs many seeds in
-parallel. `expectSimFailure` asserts that a deliberately-buggy scenario gets
-caught, useful for proving your checker actually works. The non-`Sim`
-`expect*` helpers are the matching `runCase` wrappers for custom harnesses.
+`expectSimPass` runs once with a fixed seed. `expectSimFuzz` runs many seeds
+sequentially. `expectSimFailure` asserts that a deliberately-buggy scenario gets
+caught, useful for proving your checker actually works. Custom harnesses that
+outgrow these helpers drive `mar.World` directly.
 
 ## The two surfaces: `io` and `control`
 
@@ -364,7 +364,7 @@ have.
 
 Marionette is early. This is a `0.x` release: there is no API stability
 guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
-`Control`, `SimCase`, `runSimCase` / `expectSim*`, `runCase` / `expect*`,
+`Control`, `SimCase`, `runSimCase` / `expectSim*`,
 `Disk`, `SimDisk`, `RealDisk`, `Production`, `Recorder`, and the app-facing
 `Endpoint(Message)` shape. Everything else may change as the simulator grows.
 

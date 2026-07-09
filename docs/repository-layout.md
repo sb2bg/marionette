@@ -25,7 +25,7 @@ Marionette itself. Keep app-level WAL or database behavior in examples or
 validation targets.
 
 Top-level `src/*.zig` files compose the simulator: `World`, `Env`, `SimCase`,
-`runSimCase`, `runCase`, the scheduler, clock, seeded random, trace summaries,
+`runSimCase`, the scheduler, clock, seeded random, trace summaries,
 build support, and CLI entry points. Prefer these files for cross-subsystem
 orchestration, not for disk, network, or `std.Io` internals that already have
 an owner directory.

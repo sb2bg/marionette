@@ -233,7 +233,7 @@ Passing runs return traces for persistence, diffing, or external tooling.
 
 Marionette is early. This is a `0.x` release: there is no API stability
 guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
-`Control`, `SimCase`, `runSimCase` / `expectSim*`, `runCase` / `expect*`,
+`Control`, `SimCase`, `runSimCase` / `expectSim*`,
 `Disk`, `SimDisk`, `RealDisk`, `Production`, `Recorder`, and the app-facing
 `Endpoint(Message)` shape. Everything else may change as the simulator grows.
 
