@@ -326,7 +326,12 @@ pub const TaskScheduler = struct {
 
         try self.recordSpawn(task_id, options.process_id);
         if (self.task_start_jitter_ns > 0) {
-            task.start_delay_ns = try self.world.randomIntLessThan(u64, self.task_start_jitter_ns + 1);
+            // The bound is inclusive, so `maxInt(u64)` means a full-range
+            // draw; `+ 1` would overflow before reaching the bounded draw.
+            task.start_delay_ns = if (self.task_start_jitter_ns == std.math.maxInt(u64))
+                try self.world.randomU64()
+            else
+                try self.world.randomIntLessThan(u64, self.task_start_jitter_ns + 1);
             try self.recordStartJitter(task_id, task.start_delay_ns);
         }
         self.next_task_id += 1;
@@ -1392,6 +1397,39 @@ fn runToySchedulerTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     try scheduler.runUntilIdle();
     try std.testing.expectEqual(@as(usize, tasks.len), scheduler.completedCount());
     return try allocator.dupe(u8, world.traceBytes());
+}
+
+test "TaskScheduler: maximum task start jitter draws full-range without overflow" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const runtime_allocator = std.testing.allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = 0x717E4, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    scheduler.task_start_jitter_ns = std.math.maxInt(u64);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    // The inclusive-bound draw wrapped on `maxInt(u64) + 1` before reaching
+    // the PRNG; the spawn itself is the regression. The task is deliberately
+    // never run: its drawn delay may sit anywhere in the u64 range and would
+    // advance the clock accordingly.
+    var task = ToyTask{ .remaining = 1 };
+    _ = try scheduler.spawn(.{ .entry = ToyTask.run, .arg = &task });
+    try std.testing.expect(
+        std.mem.indexOf(u8, world.traceBytes(), "scheduler.start_jitter") != null,
+    );
 }
 
 const UnwindScenario = struct {
