@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Removes the World-config runner family: `runCase`, `expectPass`,
+  `expectFailure`, and `expectFuzz`. It was a complete parallel API to
+  `runSimCase`/`expectSim*` with no consumers; harnesses with genuinely
+  custom state drive `World` directly or use the world-only `mar.run`.
+  `Check` and `world_checks` stay, since the sim runner accepts them.
+- Removes the `SimControl` root export; `Control` is the single name for
+  the simulator-control capability bundle (the two were aliases of the
+  same type).
+- Removes `ByteTransport`, `CodecTransport`, and the `codec` namespace
+  (including `CodecRecvLifetime` and `default_codec_encode_buffer_size`).
+  These were convenience wrappers over `ByteEndpoint` with a single
+  in-repo consumer, and a codec interface is a serialization concern that
+  belongs to the app, not the simulator. `Endpoint(Message)` and
+  `ByteEndpoint` are unchanged; code using the wrappers should encode and
+  decode at the `ByteEndpoint` edge instead, as the toy SQL example now
+  demonstrates.
 - Adds the pinned lazy beanstalkz validation (`validate-beanstalkz`): the
   unmodified `g41797/beanstalkz` work-queue client runs against a
   harness-owned in-memory beanstalkd speaking the text protocol over

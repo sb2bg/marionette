@@ -18,8 +18,8 @@ hold `Control`, `World`, or packet-core types.
 
 `runSimCase(opts) !RunReport` is the primary stateful simulation runner.
 `expectSimPass`, `expectSimFuzz`, and `expectSimFailure` are assertive test
-helpers built on top of it. `runCase` remains available for genuinely custom
-or low-level state.
+helpers built on top of it. Harnesses with genuinely custom state drive
+`World` directly.
 
 Faults are configuration, not per-call parameters. Network loss, latency,
 clogs, and automatic partition dynamics are set through focused
@@ -39,11 +39,6 @@ pub fn expectSimPass(opts: anytype) !void;
 pub fn expectSimFuzz(opts: anytype) !void;
 pub fn expectSimFailure(opts: anytype) !void;
 
-pub fn runCase(opts: anytype) !RunReport;
-pub fn expectPass(opts: anytype) !void;
-pub fn expectFuzz(opts: anytype) !void;
-pub fn expectFailure(opts: anytype) !void;
-
 pub const Env = struct {
     io_backend: std.Io,
     disk: Disk,
@@ -56,7 +51,7 @@ pub const Env = struct {
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void;
 };
 
-pub const Control = SimControl;
+pub const Control = ...; // simulator-control capability bundle
 pub const ProcessLifecycle = struct {
     ptr: *anyopaque,
     on_kill: ?*const fn (*anyopaque) void = null,
@@ -64,12 +59,6 @@ pub const ProcessLifecycle = struct {
 };
 
 pub fn Endpoint(comptime Message: type) type;
-pub fn CodecTransport(comptime Codec: type) type;
-
-pub const codec = struct {
-    pub const bytes = ...;
-    pub fn fixed(comptime Send: type, comptime Recv: type) type;
-};
 
 pub const SimNetworkOptions = struct {
     nodes: usize,
@@ -100,9 +89,6 @@ pub const Production = struct {
 ```
 
 `SimCase(App)` automatically calls `app.deinit()` when `App` defines it.
-`runCase` accepts optional `.deinit = State.deinit` for custom state that owns
-non-world resources. The older positional `runWithState*` helpers are internal
-implementation details, not part of the public teaching surface.
 
 `Env.io()` is the app-facing `std.Io` accessor. Production envs return the host
 `std.Io` supplied to `Production.init`; simulation envs return Marionette's
@@ -154,17 +140,8 @@ the first socket-backed loopback transport slice.
 behind their own protocol API. `send(to, bytes)` copies borrowed bytes before
 returning; `acquire(len)` plus `sendMessage(to, message)` transfers an acquired
 pool buffer without a second copy; `receive()` returns a releasable message that
-the caller must release.
-
-`ByteTransport` is the preferred small wrapper for protocol adapters that do
-not want to expose message-pool ownership. It wraps `ByteEndpoint` with
-`send(to, bytes)`, `receive()` plus `deinit`, and an optional builder returned
-by `acquire(len)`.
-
-`CodecTransport(Codec)` is the preferred typed wrapper for protocol adapters.
-The codec declares `Send`, `Recv`, `recv_lifetime`, `encode`, and `decode`.
-Received handles own the underlying bytes until `deinit`; borrowed codecs can
-opt into `take(allocator)` by providing `cloneRecv`.
+the caller must release. Wire formats and typed protocol adapters are the
+app's job; Marionette does not ship codec or transport wrappers.
 
 ## Example Shape
 

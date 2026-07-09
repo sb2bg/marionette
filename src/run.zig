@@ -146,92 +146,6 @@ pub fn run(
     );
 }
 
-/// Run a stateful scenario twice with fresh state and compare traces.
-///
-/// `init_state` is called once per replay attempt. Stateful scenarios receive
-/// only `*State`; store any environment authorities needed by the scenario in
-/// the state initializer.
-fn runWithState(
-    allocator: std.mem.Allocator,
-    options: RunOptions,
-    comptime State: type,
-    comptime init_state: fn (*World) State,
-    comptime scenario: fn (*State) anyerror!void,
-    comptime state_checks: []const StateCheck(State),
-) RunError!RunReport {
-    return runTwiceWithStateLifecycle(
-        allocator,
-        options,
-        State,
-        infallibleStateInit(State, init_state),
-        noopStateDeinit(State),
-        scenario,
-        state_checks,
-    );
-}
-
-/// Run a stateful scenario with fallible initialization and world-owned teardown.
-///
-/// Use this when state initialization can fail, but any simulator resources it
-/// creates are owned by `World` through `world.simulate`.
-fn runWithStateInit(
-    allocator: std.mem.Allocator,
-    options: RunOptions,
-    comptime State: type,
-    comptime init_state: fn (*World) anyerror!State,
-    comptime scenario: fn (*State) anyerror!void,
-    comptime state_checks: []const StateCheck(State),
-) RunError!RunReport {
-    return runTwiceWithStateLifecycle(
-        allocator,
-        options,
-        State,
-        init_state,
-        noopStateDeinit(State),
-        scenario,
-        state_checks,
-    );
-}
-
-/// Run a stateful scenario with fallible initialization and explicit teardown.
-///
-/// `init_state` and `deinit_state` are called once per replay attempt. Init,
-/// scenario, and check errors are returned as `RunReport.failed` with the
-/// partial trace preserved. Teardown must be infallible.
-fn runWithStateLifecycle(
-    allocator: std.mem.Allocator,
-    options: RunOptions,
-    comptime State: type,
-    comptime init_state: fn (*World) anyerror!State,
-    comptime deinit_state: fn (*State) void,
-    comptime scenario: fn (*State) anyerror!void,
-    comptime state_checks: []const StateCheck(State),
-) RunError!RunReport {
-    return runTwiceWithStateLifecycle(
-        allocator,
-        options,
-        State,
-        init_state,
-        deinit_state,
-        scenario,
-        state_checks,
-    );
-}
-
-/// Run one struct-config scenario case.
-///
-/// Required fields:
-/// - `allocator`
-/// - `init: fn (*World) State` or `fn (*World) !State`
-/// - `scenario: fn (*State) !void`
-///
-/// Optional fields mirror `RunOptions`: `seed`, `start_ns`, `tick_ns`,
-/// `name`, `name`, `tags`, `attributes`, `world_checks`, `checks`,
-/// and `deinit: fn (*State) void`.
-pub fn runCase(config: anytype) RunError!RunReport {
-    return runCaseWithSeed(config, null);
-}
-
 /// Run one simulation case.
 ///
 /// Required fields:
@@ -244,20 +158,6 @@ pub fn runCase(config: anytype) RunError!RunReport {
 /// `name`, `tags`, `attributes`, `world_checks`, and `checks`.
 pub fn runSimCase(config: anytype) RunError!RunReport {
     return runSimCaseWithSeed(config, null);
-}
-
-/// Expect a struct-config case to pass. Prints the failure summary otherwise.
-pub fn expectPass(config: anytype) ExpectRunError!void {
-    var report = try runCase(config);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => {},
-        .failed => |failure| {
-            failure.print();
-            return error.ExpectedRunPass;
-        },
-    }
 }
 
 /// Expect a simulation case to pass. Prints the failure summary otherwise.
@@ -274,18 +174,6 @@ pub fn expectSimPass(config: anytype) ExpectRunError!void {
     }
 }
 
-/// Expect a struct-config case to fail. Use `runCase` directly when the test
-/// needs to inspect the failure details.
-pub fn expectFailure(config: anytype) ExpectRunError!void {
-    var report = try runCase(config);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => {},
-    }
-}
-
 /// Expect a simulation case to fail. Use `runSimCase` directly when the test
 /// needs to inspect the failure details.
 pub fn expectSimFailure(config: anytype) ExpectRunError!void {
@@ -295,31 +183,6 @@ pub fn expectSimFailure(config: anytype) ExpectRunError!void {
     switch (report) {
         .passed => return error.ExpectedRunFailure,
         .failed => {},
-    }
-}
-
-/// Run a struct-config case over many deterministic seeds.
-///
-/// Required extra field: `seeds`, the number of seeds to run. Optional `seed`
-/// acts as the base seed.
-pub fn expectFuzz(config: anytype) ExpectRunError!void {
-    if (!@hasField(@TypeOf(config), "seeds")) {
-        @compileError("expectFuzz config requires a `seeds` field");
-    }
-
-    for (0..config.seeds) |iteration| {
-        const seed = fuzzSeed(configSeed(config), iteration);
-        var report = try runCaseWithSeed(config, seed);
-        defer report.deinit();
-
-        switch (report) {
-            .passed => {},
-            .failed => |failure| {
-                std.debug.print("marionette fuzz failure: seed={} iteration={}\n", .{ seed, iteration });
-                failure.print();
-                return error.ExpectedRunPass;
-            },
-        }
     }
 }
 
@@ -381,35 +244,6 @@ fn noopStateDeinit(comptime State: type) fn (*State) void {
     return struct {
         fn deinit(_: *State) void {}
     }.deinit;
-}
-
-fn runCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
-    const State = stateTypeFromInit(config.init);
-    const no_state_checks = [_]StateCheck(State){};
-    const state_checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_state_checks;
-
-    if (@hasField(@TypeOf(config), "deinit")) {
-        validateDeinit(State, config.deinit);
-        return runTwiceWithStateLifecycle(
-            config.allocator,
-            runOptionsFromConfig(config, seed_override),
-            State,
-            fallibleInit(State, config.init),
-            config.deinit,
-            config.scenario,
-            state_checks,
-        );
-    }
-
-    return runTwiceWithStateLifecycle(
-        config.allocator,
-        runOptionsFromConfig(config, seed_override),
-        State,
-        fallibleInit(State, config.init),
-        noopStateDeinit(State),
-        config.scenario,
-        state_checks,
-    );
 }
 
 fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
@@ -507,56 +341,6 @@ fn splitmix64(input: u64) u64 {
     z = (z ^ (z >> 30)) *% 0xBF58_476D_1CE4_E5B9;
     z = (z ^ (z >> 27)) *% 0x94D0_49BB_1331_11EB;
     return z ^ (z >> 31);
-}
-
-fn stateTypeFromInit(comptime init_state: anytype) type {
-    const Return = initReturnType(init_state);
-    return switch (@typeInfo(Return)) {
-        .error_union => |error_union| error_union.payload,
-        else => Return,
-    };
-}
-
-fn initReturnType(comptime init_state: anytype) type {
-    const Init = @TypeOf(init_state);
-    const info = switch (@typeInfo(Init)) {
-        .@"fn" => |fn_info| fn_info,
-        else => @compileError("runCase config.init must be a function"),
-    };
-    if (info.params.len != 1 or info.params[0].type != *World) {
-        @compileError("runCase config.init must take `*mar.World`");
-    }
-    return info.return_type orelse @compileError("runCase config.init must return state");
-}
-
-fn validateDeinit(comptime State: type, comptime deinit_state: anytype) void {
-    const info = switch (@typeInfo(@TypeOf(deinit_state))) {
-        .@"fn" => |fn_info| fn_info,
-        else => @compileError("runCase config.deinit must be a function"),
-    };
-    if (info.params.len != 1 or info.params[0].type != *State) {
-        @compileError("runCase config.deinit must take `*State`");
-    }
-    const Return = info.return_type orelse @compileError("runCase config.deinit must return void");
-    if (Return != void) {
-        @compileError("runCase config.deinit must return void");
-    }
-}
-
-fn fallibleInit(comptime State: type, comptime init_state: anytype) fn (*World) anyerror!State {
-    const Return = initReturnType(init_state);
-    return switch (@typeInfo(Return)) {
-        .error_union => struct {
-            fn init(world: *World) anyerror!State {
-                return try init_state(world);
-            }
-        }.init,
-        else => struct {
-            fn init(world: *World) anyerror!State {
-                return init_state(world);
-            }
-        }.init,
-    };
 }
 
 fn appTypeFromSimInit(comptime init_app: anytype) type {
@@ -1385,73 +1169,6 @@ test "run: check failures preserve partial trace and check name" {
     }
 }
 
-const CounterState = struct {
-    env: @import("env.zig").Env,
-    value: u8 = 0,
-
-    fn init(world: *World) CounterState {
-        const sim = world.simulate(.{}) catch unreachable;
-        return .{ .env = sim.env };
-    }
-};
-
-fn counterScenario(state: *CounterState) !void {
-    state.value += 1;
-    try state.env.record("state.value value={}", .{state.value});
-}
-
-fn counterCheck(state: *const CounterState) !void {
-    if (state.value != 1) return error.BadCounter;
-    try state.env.record("state.check value={}", .{state.value});
-}
-
-test "runCase: checks inspect fresh scenario state" {
-    const state_checks = [_]StateCheck(CounterState){
-        .{ .name = "counter is one", .check = counterCheck },
-    };
-
-    var report = try runCase(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .init = CounterState.init,
-        .scenario = counterScenario,
-        .checks = &state_checks,
-    });
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expectEqual(@as(u64, 3), passed.event_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.value value=1") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.check value=1") != null);
-        },
-        .failed => return error.UnexpectedRunFailure,
-    }
-}
-
-test "runCase: infers state type from init" {
-    var report = try runCase(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .name = "counter",
-        .init = CounterState.init,
-        .scenario = counterScenario,
-        .checks = &[_]StateCheck(CounterState){
-            .{ .name = "counter is one", .check = counterCheck },
-        },
-    });
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expectEqual(@as(u64, 4), passed.event_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.name value=counter") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "state.value value=1") != null);
-        },
-        .failed => return error.UnexpectedRunFailure,
-    }
-}
-
 test "fuzzSeed: distinct within a run and across related bases" {
     const seed_count = 8;
 
@@ -1473,126 +1190,6 @@ test "fuzzSeed: distinct within a run and across related bases" {
         for (seeds) |seed| {
             try std.testing.expect(seed != other);
         }
-    }
-}
-
-test "expectPass and expectFuzz accept passing cases" {
-    const checks = [_]StateCheck(CounterState){
-        .{ .name = "counter is one", .check = counterCheck },
-    };
-
-    try expectPass(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .init = CounterState.init,
-        .scenario = counterScenario,
-        .checks = &checks,
-    });
-
-    try expectFuzz(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .seeds = 4,
-        .init = CounterState.init,
-        .scenario = counterScenario,
-        .checks = &checks,
-    });
-}
-
-fn failingCounterCheck(state: *const CounterState) !void {
-    try state.env.record("state.check.fail value={}", .{state.value});
-    return error.StateInvariantBroken;
-}
-
-test "expectFailure accepts failing cases" {
-    const checks = [_]StateCheck(CounterState){
-        .{ .name = "counter fails", .check = failingCounterCheck },
-    };
-
-    try expectFailure(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .init = CounterState.init,
-        .scenario = counterScenario,
-        .checks = &checks,
-    });
-}
-
-test "runCase: check failures preserve partial trace and check name" {
-    const state_checks = [_]StateCheck(CounterState){
-        .{ .name = "counter fails", .check = failingCounterCheck },
-    };
-
-    var report = try runCase(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .init = CounterState.init,
-        .scenario = counterScenario,
-        .checks = &state_checks,
-    });
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.check_failed, failure.kind);
-            try std.testing.expectEqualStrings("StateInvariantBroken", failure.error_name.?);
-            try std.testing.expectEqualStrings("counter fails", failure.check_name.?);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "state.value value=1") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "state.check.fail value=1") != null);
-        },
-    }
-}
-
-var lifecycle_deinit_count: u8 = 0;
-
-const LifecycleState = struct {
-    env: @import("env.zig").Env,
-    value: u8 = 0,
-
-    fn init(world: *World) !LifecycleState {
-        const sim = try world.simulate(.{});
-        return .{ .env = sim.env };
-    }
-
-    fn deinit(_: *LifecycleState) void {
-        lifecycle_deinit_count += 1;
-    }
-};
-
-fn lifecycleScenario(state: *LifecycleState) !void {
-    state.value += 1;
-    try state.env.record("lifecycle.value value={}", .{state.value});
-}
-
-fn lifecycleCheck(state: *const LifecycleState) !void {
-    if (state.value != 1) return error.BadLifecycleState;
-    try state.env.record("lifecycle.check value={}", .{state.value});
-}
-
-test "runCase: deinitializes each replay attempt" {
-    lifecycle_deinit_count = 0;
-    const state_checks = [_]StateCheck(LifecycleState){
-        .{ .name = "lifecycle is one", .check = lifecycleCheck },
-    };
-
-    var report = try runCase(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .init = LifecycleState.init,
-        .deinit = LifecycleState.deinit,
-        .scenario = lifecycleScenario,
-        .checks = &state_checks,
-    });
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expectEqual(@as(u8, 2), lifecycle_deinit_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "lifecycle.value value=1") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "lifecycle.check value=1") != null);
-        },
-        .failed => return error.UnexpectedRunFailure,
     }
 }
 
@@ -1731,41 +1328,3 @@ test "runSimCase: init errors become scenario failures" {
     }
 }
 
-const FallibleInitState = struct {
-    fn init(_: *World) !FallibleInitState {
-        return error.InitFailed;
-    }
-
-    fn deinit(_: *FallibleInitState) void {
-        lifecycle_deinit_count += 1;
-    }
-};
-
-fn unreachableLifecycleScenario(_: *FallibleInitState) !void {
-    return error.UnreachableScenario;
-}
-
-test "runCase: init errors become scenario failures" {
-    lifecycle_deinit_count = 0;
-    const state_checks = [_]StateCheck(FallibleInitState){};
-
-    var report = try runCase(.{
-        .allocator = std.testing.allocator,
-        .seed = 1234,
-        .init = FallibleInitState.init,
-        .deinit = FallibleInitState.deinit,
-        .scenario = unreachableLifecycleScenario,
-        .checks = &state_checks,
-    });
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.scenario_error, failure.kind);
-            try std.testing.expectEqualStrings("InitFailed", failure.error_name.?);
-            try std.testing.expectEqual(@as(u8, 0), lifecycle_deinit_count);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "world.init") != null);
-        },
-    }
-}

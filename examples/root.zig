@@ -324,7 +324,7 @@ test "examples: idempotency bug failing seed is replayable" {
     try std.testing.expect(std.mem.indexOf(u8, a_trace, "idempotency.invariant_violation") != null);
 }
 
-test "examples: toy SQL database uses byte transport adapter" {
+test "examples: toy SQL database speaks a typed protocol over the byte endpoint" {
     const trace = try toy_sql_db.runScenario(std.testing.allocator, 0xC0FFEE);
     defer std.testing.allocator.free(trace);
 

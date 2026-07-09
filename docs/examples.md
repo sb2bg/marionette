@@ -261,9 +261,9 @@ Source: [`examples/toy_sql_db.zig`](https://github.com/sb2bg/marionette/blob/mai
 
 The toy database is a tiny protocol-adapter example. Its wire format is just a
 one-byte tag plus an optional little-endian `i64`. Its purpose is not SQL
-coverage; it shows how a user-owned protocol can declare codecs for
-`mar.CodecTransport` so database code sees typed `Request` and `Response`
-values instead of Marionette vtables, byte buffers, or message-pool handles.
+coverage; it shows a user-owned protocol encoding and decoding at the
+`mar.ByteEndpoint` edge, so database code sees typed `Request` and `Response`
+values while Marionette only moves bytes.
 
 The scenario drives a client and server over simulated byte endpoints, so the
 same adapter shape can later sit on production byte endpoints.

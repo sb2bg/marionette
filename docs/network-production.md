@@ -334,14 +334,13 @@ Each item ships on its own. Cross-process parity is the done-signal.
 3. **Topology config and `Production.endpoint(Message, opts)`.** Started.
    Production endpoint accepts peers and self id. It still returns the same
    in-process FIFO behavior as today; the topology API change is the gate.
-4. **ByteEndpoint and codec bridge.** Started. `ByteEndpoint` exists for sim
-   and production setup with explicit ownership semantics: `send` copies
-   borrowed bytes, `sendMessage` transfers an acquired buffer, and `receive`
-   returns a releasable byte message. `ByteTransport` hides pool ownership for
-   adapter authors, and `CodecTransport(Codec)` gives protocol adapters typed
-   send/receive values with codec-declared receive lifetimes. This gives future
-   Zig network/RPC libraries a Marionette backend target without forcing them
-   to use typed value-message endpoints directly.
+4. **ByteEndpoint bridge.** Started. `ByteEndpoint` exists for sim and
+   production setup with explicit ownership semantics: `send` copies borrowed
+   bytes, `sendMessage` transfers an acquired buffer, and `receive` returns a
+   releasable byte message. This gives future Zig network/RPC libraries a
+   Marionette backend target without forcing them to use typed value-message
+   endpoints directly; encoding above the byte surface is the library's own
+   job (the codec/transport wrappers were removed in 0.6).
 5. **Internal network IO seam.** Started. `src/network/io.zig` defines the
    internal listen/connect/read/write/close/time seam plus exact read/write
    helpers and a fake backend that forces short reads/writes and close behavior.

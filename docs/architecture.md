@@ -32,9 +32,9 @@ Marionette currently has:
 - `Control`, the harness-facing counterpart for simulator-only controls.
 - A seeded `Random` wrapper.
 - A text trace format with a version header and global event indexes.
-- `mar.runSimCase`, the primary stateful simulation runner, plus `mar.runCase`
-  for custom state and lower-level `mar.run` for world-only scenarios. All
-  execute a scenario twice and compare traces.
+- `mar.runSimCase`, the primary stateful simulation runner, plus the
+  lower-level `mar.run` for world-only scenarios. Both execute a scenario
+  twice and compare traces.
 - Run names, tags, and `RunAttribute`, which make expanded run facts
   replay-visible in traces and failure summaries without losing scalar value
   types. `runAttribute` is the constructor; keys are written explicitly so
@@ -113,8 +113,6 @@ src/
     root.zig
     control.zig
     endpoint.zig
-    byte_transport.zig
-    codec_transport.zig
     sim.zig
     production.zig
     packet_core.zig
@@ -354,8 +352,8 @@ Planned API direction:
 
 Current support is deliberately smaller: `RunOptions.checks` accepts
 named `mar.Check` functions that run after the scenario body, and
-`mar.runSimCase`/`mar.runCase` accept named `mar.StateCheck(State)` functions
-that inspect structured scenario state. This proves the failure-report shape,
+`mar.runSimCase` accepts named `mar.StateCheck(State)` functions that
+inspect structured scenario state. This proves the failure-report shape,
 but it is not enough for serious multi-event DST yet.
 
 Liveness is harder. The scheduler detects the concrete case where unfinished

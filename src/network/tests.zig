@@ -1,9 +1,6 @@
 const std = @import("std");
 
-const codec_module = @import("../codec.zig");
 const clock_module = @import("../clock.zig");
-const byte_transport_module = @import("byte_transport.zig");
-const codec_transport_module = @import("codec_transport.zig");
 const endpoint_module = @import("endpoint.zig");
 const packet_core = @import("packet_core.zig");
 const production = @import("production.zig");
@@ -11,8 +8,6 @@ const sim_module = @import("sim.zig");
 const types = @import("types.zig");
 const World = @import("../world.zig").World;
 
-const ByteTransport = byte_transport_module.ByteTransport;
-const CodecTransport = codec_transport_module.CodecTransport;
 const Endpoint = endpoint_module.Endpoint;
 const NetworkOptions = types.NetworkOptions;
 const NodeId = types.NodeId;
@@ -578,72 +573,6 @@ test "stream byte sends preserve delivery order under jitter" {
         try std.testing.expect(deliver_at >= delivery_floor);
         delivery_floor = deliver_at;
     }
-}
-
-test "byte transport: builder sends pooled bytes" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    const node_0 = ByteTransport.init(try sim.byteEndpoint(0));
-    const node_1 = ByteTransport.init(try sim.byteEndpoint(1));
-
-    var builder = try node_0.acquire(5);
-    defer builder.deinit();
-    @memcpy(builder.bytes(), "hello");
-    try builder.send(1);
-
-    var received = (try node_1.receive()).?;
-    defer received.deinit();
-
-    try std.testing.expectEqual(@as(NodeId, 0), received.from());
-    try std.testing.expectEqualStrings("hello", received.bytes());
-}
-
-test "codec transport: fixed codec sends typed values" {
-    const Payload = packed struct {
-        id: u32,
-        value: u16,
-    };
-    const Transport = CodecTransport(codec_module.fixed(Payload, Payload));
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    const node_0 = Transport.init(.init(try sim.byteEndpoint(0)));
-    const node_1 = Transport.init(.init(try sim.byteEndpoint(1)));
-
-    try node_0.send(1, .{ .id = 7, .value = 41 });
-
-    var received = (try node_1.receive()).?;
-    defer received.deinit();
-
-    try std.testing.expectEqual(@as(NodeId, 0), received.from());
-    try std.testing.expectEqual(@as(u32, 7), received.value().id);
-    try std.testing.expectEqual(@as(u16, 41), received.value().value);
-}
-
-test "codec transport: borrowed receives can be taken as owned values" {
-    const Transport = CodecTransport(codec_module.bytes);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    const node_0 = Transport.init(.init(try sim.byteEndpoint(0)));
-    const node_1 = Transport.init(.init(try sim.byteEndpoint(1)));
-
-    try node_0.send(1, "borrowed");
-
-    var received = (try node_1.receive()).?;
-    defer received.deinit();
-
-    const owned = try received.take(std.testing.allocator);
-    defer Transport.deinitTaken(std.testing.allocator, owned);
-
-    try std.testing.expectEqualStrings("borrowed", received.value());
-    try std.testing.expectEqualStrings("borrowed", owned);
 }
 
 test "production byte endpoint: topology-shaped handles share byte runtime" {

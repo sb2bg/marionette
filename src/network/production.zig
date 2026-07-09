@@ -152,7 +152,7 @@ fn ProductionRuntime(comptime Payload: type) type {
 
         // FIXME(roadmap item 15): this typed production runtime is still an
         // in-process FIFO. The byte endpoint has the socket-backed path; typed
-        // payloads need either codec-backed sockets or a clear parity-only label.
+        // payloads need either app-encoded sockets or a clear parity-only label.
         fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Self {
             const runtime = try allocator.create(Self);
             runtime.* = .{ .allocator = allocator };

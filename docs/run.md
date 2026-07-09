@@ -5,8 +5,8 @@ fresh `SimCase(App)` value for each replay attempt, executes the scenario twice
 with the same seed, runs named checks, and compares the resulting traces
 byte-for-byte.
 
-`mar.runCase` remains available for custom or low-level state. `mar.run` is the
-lower-level world-only wrapper for scenarios that do not need structured state.
+`mar.run` is the lower-level world-only wrapper for scenarios that do not
+need structured state.
 
 ## World-Only Shape
 
@@ -122,8 +122,8 @@ writer.
 
 The seed is necessary but not sufficient once scenarios generate options from
 that seed. Use a run name, tags, and attributes to make the expanded run shape
-visible. `mar.runSimCase`, `mar.runCase`, and the lower-level `mar.run` options
-use `.name`:
+visible. `mar.runSimCase` and the lower-level `mar.run` options use
+`.name`:
 
 ```zig
 const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
@@ -284,10 +284,6 @@ forward to the underlying `mar.Sim`. `case.io()` and `case.ioForNode(node)`
 are the std.Io-facing equivalents for single-node and node-scoped simulated
 I/O.
 
-Use `mar.runCase` when state really is custom or low-level. It passes the
-attempt's `World` into the initializer and leaves simulation setup entirely to
-the state type.
-
 Use `mar.expectSimPass` when a simulation test only needs to fail loudly on a
 bad run:
 
@@ -318,20 +314,7 @@ try mar.expectSimFuzz(.{
 ```
 
 Use `mar.expectSimFailure` when proving a simulation checker catches a
-known-buggy scenario. Use `mar.expectFailure` for custom `runCase` state.
-If custom `runCase` state owns non-world resources, pass an explicit
-infallible deinitializer:
-
-```zig
-var report = try mar.runCase(.{
-    .allocator = std.testing.allocator,
-    .seed = 0x1234,
-    .init = Model.init,
-    .deinit = Model.deinit,
-    .scenario = scenario,
-    .checks = &state_checks,
-});
-```
+known-buggy scenario.
 
 This is intentionally small. Future scheduler work can check invariants after
 every event or on quiescence, but the current API already gives failures a

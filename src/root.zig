@@ -11,7 +11,6 @@ const env_module = @import("env.zig");
 const fault_module = @import("fault.zig");
 const fiber_module = @import("fiber.zig");
 const io_module = @import("io/root.zig");
-const codec_module = @import("codec.zig");
 const network_module = @import("network/root.zig");
 const profile_module = @import("profile.zig");
 const run_module = @import("run.zig");
@@ -92,9 +91,6 @@ pub const Recorder = env_module.Recorder;
 pub const TracerError = env_module.TracerError;
 
 /// Simulator-control capability bundle.
-pub const SimControl = env_module.SimControl;
-
-/// Preferred name for the simulator-control capability bundle.
 pub const Control = env_module.SimControl;
 
 /// App and control views returned by `World.simulate`.
@@ -169,18 +165,6 @@ pub const Endpoint = network_module.Endpoint;
 /// App-facing byte endpoint with explicit message ownership.
 pub const ByteEndpoint = network_module.ByteEndpoint;
 
-/// Small facade for protocol adapters built on byte endpoints.
-pub const ByteTransport = network_module.ByteTransport;
-
-/// Typed facade for protocol codecs built on byte transports.
-pub const CodecTransport = network_module.CodecTransport;
-
-/// Built-in codecs for `CodecTransport`.
-pub const codec = codec_module;
-
-/// Receive lifetime declaration used by codecs.
-pub const CodecRecvLifetime = codec_module.RecvLifetime;
-
 /// Default byte endpoint pool sizing.
 pub const default_byte_pool_options = network_module.default_byte_pool_options;
 
@@ -241,29 +225,17 @@ pub const traceField = @import("world.zig").traceField;
 /// Run a scenario twice with the same seed and compare traces.
 pub const run = run_module.run;
 
-/// Run a scenario through the struct-config runner.
-pub const runCase = run_module.runCase;
-
 /// Standard simulation scenario state wrapper.
 pub const SimCase = run_module.SimCase;
 
 /// Run a simulation case through the struct-config runner.
 pub const runSimCase = run_module.runSimCase;
 
-/// Expect a struct-config scenario to pass.
-pub const expectPass = run_module.expectPass;
-
 /// Expect a simulation case to pass.
 pub const expectSimPass = run_module.expectSimPass;
 
-/// Expect a struct-config scenario to fail.
-pub const expectFailure = run_module.expectFailure;
-
 /// Expect a simulation case to fail.
 pub const expectSimFailure = run_module.expectSimFailure;
-
-/// Expect a struct-config scenario to pass over many seeds.
-pub const expectFuzz = run_module.expectFuzz;
 
 /// Expect a simulation case to pass over many seeds.
 pub const expectSimFuzz = run_module.expectSimFuzz;

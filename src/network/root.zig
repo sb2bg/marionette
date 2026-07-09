@@ -3,8 +3,6 @@
 //! Assembles public handles and options from the focused endpoint, control,
 //! simulation, transport, and production modules in this directory.
 
-const byte_transport = @import("byte_transport.zig");
-const codec_transport = @import("codec_transport.zig");
 const control = @import("control.zig");
 const endpoint = @import("endpoint.zig");
 const packet_core = @import("packet_core.zig");
@@ -14,9 +12,6 @@ const types = @import("types.zig");
 
 pub const AnyNetworkControl = control.AnyNetworkControl;
 pub const ByteEndpoint = endpoint.ByteEndpoint;
-pub const ByteTransport = byte_transport.ByteTransport;
-pub const CodecRecvLifetime = codec_transport.CodecRecvLifetime;
-pub const CodecTransport = codec_transport.CodecTransport;
 pub const Endpoint = endpoint.Endpoint;
 pub const NetworkClogOptions = types.NetworkClogOptions;
 pub const NetworkError = types.NetworkError;
@@ -32,7 +27,6 @@ pub const ProductionNetworkError = production.ProductionNetworkError;
 pub const ProductionPeer = production.ProductionPeer;
 pub const SimNetworkOptions = types.SimNetworkOptions;
 pub const default_byte_pool_options = types.default_byte_pool_options;
-pub const default_codec_encode_buffer_size = codec_transport.default_codec_encode_buffer_size;
 
 /// Internal composition hooks for Marionette's world, I/O backend, and
 /// production environment.

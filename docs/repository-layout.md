@@ -14,9 +14,8 @@ under Marionette-controlled production or simulation authorities. Keep
 subsystem tests in `src/io/tests.zig`.
 
 `src/network/` contains deterministic and production network transport
-implementation. It owns typed endpoints, byte and codec transports, production
-endpoint setup, the packet core, framing, network control hooks, and network
-tests. Add protocol-neutral transport behavior here; add application-specific
+implementation. It owns typed and byte endpoints, production endpoint setup,
+the packet core, framing, network control hooks, and network tests. Add protocol-neutral transport behavior here; add application-specific
 network scenarios under `examples/` or `validation/` instead.
 
 `src/disk/` contains the app-facing disk capability, deterministic disk model,

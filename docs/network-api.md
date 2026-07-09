@@ -152,47 +152,19 @@ This is the intended integration point for future Zig networking/RPC libraries
 that want Marionette as a test or transport backend without exposing
 `Endpoint(Message)` to their users.
 
-`ByteTransport` is the friendlier byte facade. It wraps a `ByteEndpoint`,
-exposes `send(to, bytes)` and `receive()` with `deinit`, and keeps pool-message
-details out of user adapter code. Adapters that need to encode directly into a
-pooled buffer can use `acquire(len)` and then `builder.send(to)`.
-
-`CodecTransport(Codec)` is the preferred typed facade for protocol adapters.
-The codec declares its own `Send`, `Recv`, `recv_lifetime`, `encode`, and
-`decode` contract. Borrowed receive values stay valid until the received handle
-is deinitialized; escaping them requires the codec to provide `cloneRecv`.
-The built-in `mar.codec.bytes` and `mar.codec.fixed(Send, Recv)` codecs cover
-pass-through bytes and raw fixed-layout values. JSON-style codecs are expected
-to be user-supplied until the allocator/decode ownership contract is driven by
-a real integration.
-
-The intended shape is:
+Encoding and decoding are deliberately the app's job. Marionette moves bytes
+deterministically; the wire format, its buffers, and its receive-value
+lifetimes belong to the protocol that owns them. The intended shape is:
 
 ```zig
-const ServerCodec = struct {
-    pub const Send = Response;
-    pub const Recv = Request;
-    pub const recv_lifetime: mar.CodecRecvLifetime = .owned;
+const endpoint = try sim.byteEndpoint(server_node);
 
-    pub fn encodedLen(response: Send) !usize {
-        return if (response == .row) 9 else 1;
-    }
+var buffer: [max_frame_len]u8 = undefined;
+try endpoint.send(client_node, encodeResponse(&buffer, response));
 
-    pub fn encode(buffer: []u8, response: Send) ![]const u8 {
-        const len = try encodedLen(response);
-        buffer[0] = @intFromEnum(std.meta.activeTag(response));
-        if (response == .row) std.mem.writeInt(i64, buffer[1..][0..8], response.row, .little);
-        return buffer[0..len];
-    }
-
-    pub fn decode(bytes: []const u8) !Recv { ... }
-};
-
-const transport = mar.CodecTransport(ServerCodec).init(.init(byte_endpoint));
-
-var received = (try transport.receive()) orelse return;
-defer received.deinit();
-try apply(received.from(), received.value());
+const envelope = (try endpoint.receive()) orelse return;
+defer envelope.message.release();
+try apply(envelope.from, try decodeRequest(envelope.message.bytes()));
 ```
 
 ## Production Path
@@ -203,7 +175,7 @@ topology. Typed production endpoints still use the local in-process adapter.
 
 `Production.byteEndpoint(opts)` uses the same local in-process adapter unless
 `opts.listen` is set. With `listen`, it uses the first socket-backed loopback
-transport slice behind the same `ByteEndpoint`/`ByteTransport` surface.
+transport slice behind the same `ByteEndpoint` surface.
 Reconnect, background receive, and multi-peer connection management remain
 scoped under roadmap item 15. The target architecture lives in
 `docs/network-production.md`.

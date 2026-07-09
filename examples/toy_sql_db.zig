@@ -1,14 +1,16 @@
-//! Tiny database-over-byte-transport example.
+//! Tiny database-over-byte-endpoint example.
 //!
 //! This intentionally uses a trivial binary wire format. The point is the
-//! transport pattern: codecs adapt bytes to typed requests and responses, while
-//! the database service only sees those typed values.
+//! pattern: the app owns its encoding and decodes typed requests and
+//! responses at the edge, while `ByteEndpoint` only moves bytes between
+//! nodes deterministically.
 
 const std = @import("std");
 const mar = @import("marionette");
 
 const server_node: mar.NodeId = 0;
 const client_node: mar.NodeId = 1;
+const max_frame_len = 9;
 
 const Db = struct {
     value: ?i64 = null,
@@ -54,75 +56,58 @@ const Response = union(ResponseTag) {
     empty,
 };
 
-const ClientCodec = struct {
-    pub const Send = Request;
-    pub const Recv = Response;
-    pub const recv_lifetime: mar.CodecRecvLifetime = .owned;
-
-    pub fn encodedLen(request: Send) !usize {
-        return if (request == .insert) 9 else 1;
+fn encodeRequest(buffer: *[max_frame_len]u8, request: Request) []const u8 {
+    buffer[0] = @intFromEnum(std.meta.activeTag(request));
+    if (request == .insert) {
+        std.mem.writeInt(i64, buffer[1..][0..8], request.insert, .little);
+        return buffer[0..9];
     }
+    return buffer[0..1];
+}
 
-    pub fn encode(buffer: []u8, request: Send) ![]const u8 {
-        const len = try encodedLen(request);
-        if (len > buffer.len) return error.NoSpaceLeft;
-        buffer[0] = @intFromEnum(std.meta.activeTag(request));
-        if (request == .insert) std.mem.writeInt(i64, buffer[1..][0..8], request.insert, .little);
-        return buffer[0..len];
+fn decodeRequest(bytes: []const u8) !Request {
+    if (bytes.len == 0) return error.InvalidRequest;
+    return switch (try decodeTag(RequestTag, bytes[0])) {
+        .ping => if (bytes.len == 1) .ping else error.InvalidRequest,
+        .insert => if (bytes.len == 9) .{ .insert = std.mem.readInt(i64, bytes[1..][0..8], .little) } else error.InvalidRequest,
+        .select_value => if (bytes.len == 1) .select_value else error.InvalidRequest,
+    };
+}
+
+fn encodeResponse(buffer: *[max_frame_len]u8, response: Response) []const u8 {
+    buffer[0] = @intFromEnum(std.meta.activeTag(response));
+    if (response == .row) {
+        std.mem.writeInt(i64, buffer[1..][0..8], response.row, .little);
+        return buffer[0..9];
     }
+    return buffer[0..1];
+}
 
-    pub fn decode(bytes: []const u8) !Recv {
-        if (bytes.len == 0) return error.InvalidResponse;
-        return switch (try decodeTag(ResponseTag, bytes[0])) {
-            .pong => if (bytes.len == 1) .pong else error.InvalidResponse,
-            .insert_one => if (bytes.len == 1) .insert_one else error.InvalidResponse,
-            .row => if (bytes.len == 9) .{ .row = std.mem.readInt(i64, bytes[1..][0..8], .little) } else error.InvalidResponse,
-            .empty => if (bytes.len == 1) .empty else error.InvalidResponse,
-        };
-    }
-};
-
-const ServerCodec = struct {
-    pub const Send = Response;
-    pub const Recv = Request;
-    pub const recv_lifetime: mar.CodecRecvLifetime = .owned;
-
-    pub fn encodedLen(response: Send) !usize {
-        return if (response == .row) 9 else 1;
-    }
-
-    pub fn encode(buffer: []u8, response: Send) ![]const u8 {
-        const len = try encodedLen(response);
-        if (len > buffer.len) return error.NoSpaceLeft;
-        buffer[0] = @intFromEnum(std.meta.activeTag(response));
-        if (response == .row) std.mem.writeInt(i64, buffer[1..][0..8], response.row, .little);
-        return buffer[0..len];
-    }
-
-    pub fn decode(bytes: []const u8) !Recv {
-        if (bytes.len == 0) return error.InvalidRequest;
-        return switch (try decodeTag(RequestTag, bytes[0])) {
-            .ping => if (bytes.len == 1) .ping else error.InvalidRequest,
-            .insert => if (bytes.len == 9) .{ .insert = std.mem.readInt(i64, bytes[1..][0..8], .little) } else error.InvalidRequest,
-            .select_value => if (bytes.len == 1) .select_value else error.InvalidRequest,
-        };
-    }
-};
-
-const ClientTransport = mar.CodecTransport(ClientCodec);
-const ServerTransport = mar.CodecTransport(ServerCodec);
+fn decodeResponse(bytes: []const u8) !Response {
+    if (bytes.len == 0) return error.InvalidResponse;
+    return switch (try decodeTag(ResponseTag, bytes[0])) {
+        .pong => if (bytes.len == 1) .pong else error.InvalidResponse,
+        .insert_one => if (bytes.len == 1) .insert_one else error.InvalidResponse,
+        .row => if (bytes.len == 9) .{ .row = std.mem.readInt(i64, bytes[1..][0..8], .little) } else error.InvalidResponse,
+        .empty => if (bytes.len == 1) .empty else error.InvalidResponse,
+    };
+}
 
 const Server = struct {
     db: Db = .{},
-    transport: ServerTransport,
+    endpoint: mar.ByteEndpoint,
 
+    /// Handle the next pending request, if any. Returns whether one arrived.
     fn step(self: *Server) !bool {
-        return try self.transport.handleNext(self, handleRequest);
-    }
+        const envelope = (try self.endpoint.receive()) orelse return false;
+        defer envelope.message.release();
 
-    fn handleRequest(self: *Server, from: mar.NodeId, request: Request) !void {
+        const request = try decodeRequest(envelope.message.bytes());
         const response = self.db.execute(request);
-        try self.transport.send(from, response);
+
+        var buffer: [max_frame_len]u8 = undefined;
+        try self.endpoint.send(envelope.from, encodeResponse(&buffer, response));
+        return true;
     }
 };
 
@@ -135,10 +120,8 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         .path_capacity = 8,
     } });
 
-    var server = Server{
-        .transport = .init(.init(try sim.byteEndpoint(server_node))),
-    };
-    const client = ClientTransport.init(.init(try sim.byteEndpoint(client_node)));
+    var server = Server{ .endpoint = try sim.byteEndpoint(server_node) };
+    const client = try sim.byteEndpoint(client_node);
 
     try expectResponse(.pong, try roundTrip(&server, client, .ping));
     try expectResponse(.insert_one, try roundTrip(&server, client, .{ .insert = 41 }));
@@ -147,14 +130,15 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return try allocator.dupe(u8, world.traceBytes());
 }
 
-fn roundTrip(server: *Server, client: ClientTransport, request: Request) !Response {
-    try client.send(server_node, request);
+fn roundTrip(server: *Server, client: mar.ByteEndpoint, request: Request) !Response {
+    var buffer: [max_frame_len]u8 = undefined;
+    try client.send(server_node, encodeRequest(&buffer, request));
     if (!try server.step()) return error.MissingRequest;
 
-    var response = (try client.receive()) orelse return error.MissingResponse;
-    defer response.deinit();
+    const envelope = (try client.receive()) orelse return error.MissingResponse;
+    defer envelope.message.release();
 
-    return response.value();
+    return try decodeResponse(envelope.message.bytes());
 }
 
 fn decodeTag(comptime Tag: type, value: u8) !Tag {
@@ -174,7 +158,7 @@ fn expectResponse(expected: Response, actual: Response) !void {
     }
 }
 
-test "toy database: protocol adapter wraps codec transport" {
+test "toy database: typed protocol over raw byte endpoint" {
     const trace = try runScenario(std.testing.allocator, 0xC0FFEE);
     defer std.testing.allocator.free(trace);
 

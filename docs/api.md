@@ -649,16 +649,15 @@ count, final simulated timestamp when present, replay context, subsystem and
 event counts, singleton events, network send/drop/delivery counts, drop
 reasons, and per-link network counts.
 
-## `runSimCase`, `runCase`, And `run`
+## `runSimCase` And `run`
 
 `mar.runSimCase(opts)` is the primary stateful simulation runner. It
 initializes fresh `SimCase(App)` state for each replay attempt, executes a
 scenario twice with the same seed, runs named checks, and compares
 byte-identical traces.
 
-`mar.runCase(opts)` remains available for custom or low-level state.
-`mar.run(allocator, options, scenario)` is the lower-level world-only runner for
-scenarios that do not need structured state.
+`mar.run(allocator, options, scenario)` is the lower-level world-only runner
+for scenarios that do not need structured state.
 
 ```zig
 fn scenario(world: *mar.World) !void {
@@ -812,12 +811,9 @@ for simulator authority. `case.env()`, `case.envForNode(...)`,
 `case.io()` and `case.ioForNode(node)` are the std.Io-facing equivalents for
 single-node and node-scoped simulated I/O.
 
-Use `runCase` when state really is custom or low-level. It passes the attempt's
-`World` into the initializer and leaves simulation setup entirely to the state
-type. If custom state owns non-world resources, provide
-`.deinit = State.deinit`; the deinitializer runs once per replay attempt after
-scenario execution and checks. `SimCase(App)` automatically calls `app.deinit()`
-when `App` defines that method.
+`SimCase(App)` automatically calls `app.deinit()` when `App` defines that
+method. For state too custom for `SimCase`, drive `mar.World` directly through
+`mar.run` or a hand-rolled harness.
 
 Tests that only need pass/fail behavior can skip report handling:
 
@@ -843,9 +839,8 @@ try mar.expectSimFuzz(.{
 ```
 
 Use `mar.expectSimFailure` when proving a simulation checker catches a
-known-buggy scenario. Use `mar.expectFailure` for custom `runCase` state.
-Use the lower-level `mar.run` for world-only scenarios. The older
-`runWithState*` positional helpers are internal implementation details.
+known-buggy scenario. Use the lower-level `mar.run` for world-only
+scenarios.
 
 The return value is `mar.RunReport`:
 

@@ -108,8 +108,8 @@ test "wal recovery" {
 
 `mar.SimCase(App)` is the standard wrapper for simulation tests: `init`
 receives `mar.Sim`, `scenario` receives `*mar.SimCase(App)`, and app state
-lives at `case.app`. Custom harness types still work through `mar.runCase` when
-a test needs lower-level `World` access or unusual ownership.
+lives at `case.app`. Harnesses that need lower-level `World` access or
+unusual ownership drive `mar.World` directly.
 
 Three pieces show up either way:
 

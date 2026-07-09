@@ -278,10 +278,11 @@ work should keep in view:
 
 The current Marionette network types are not wasted.
 
-`Endpoint(Message)`, `ByteEndpoint`, `ByteTransport`, and
-`CodecTransport(Codec)` are explicit-control primitives. They are useful for
-modeling protocols directly, testing framed transports, and building examples
-before the `std.Io` ecosystem is ready.
+`Endpoint(Message)` and `ByteEndpoint` are explicit-control primitives. They
+are useful for modeling protocols directly, testing framed transports, and
+building examples before the `std.Io` ecosystem is ready. The transport and
+codec wrappers that once sat above them were removed in 0.6: wire formats
+belong to the app, not the simulator.
 
 As `std.Io` matures, these types should become the precise Marionette-native
 path, while ordinary libraries use `std.Io` directly.
