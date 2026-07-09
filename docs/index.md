@@ -257,10 +257,13 @@ points following `std.Io`'s one-shot protocol. A one-shot
 `sim.transitionToLiveness(core)` ends the fault regime so bounded runs can
 prove the core makes progress once faults stop.
 It does not model arbitrary OS thread scheduling or memory-level concurrency;
-code that depends on those needs separate testing. The production network path
-is partial: local same-process endpoints and experimental framed loopback paths
-exist, but cross-process production transport is still roadmap work. Queue
-suspension and broader scheduler parity are planned.
+code that depends on those needs separate testing.
+Endpoints are simulation-only by decision: production networking is host
+`std.Io.net`, and a Marionette-owned cross-process transport was cancelled,
+not deferred (see the roadmap's "Endpoints Are Sim-Only" decision). The
+local same-process endpoints and experimental framed loopback paths that
+exist today are removal candidates, kept only while parity tests use them.
+Queue suspension and broader scheduler parity are planned.
 
 Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows
 fiber path is deliberately disabled until its Win64 entry ABI has execution

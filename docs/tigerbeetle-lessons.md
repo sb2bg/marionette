@@ -250,6 +250,14 @@ return value. This is the cleanest way to keep sim and prod behaviorally
 identical at the call site. The full design lives in
 `docs/network-production.md`.
 
+*2026-07 update: the roadmap's "Endpoints Are Sim-Only" decision cancelled
+the production bus this lesson scoped; production networking is host
+`std.Io.net`, and `docs/network-production.md` is retained as design
+history. The analysis above is what informed that decision. The send-
+semantics convergence in the previous paragraph survives as a sim-side
+contract change: silent drop plus a trace-visible `network.drop
+reason=queue_full` event, applied if endpoint usage grows.*
+
 ## What not to copy
 
 VOPR's product-specific VSR and storage assumptions shouldn't leak into

@@ -1,10 +1,18 @@
-# Production Network Transport: Design Plan
+# Production Network Transport: Design History
 
-This document is a forward-looking plan, not a current specification. It
-describes the target shape for Marionette's production-side
-`Endpoint(Message)` once it grows from a same-process FIFO into a real
-cross-process transport. It is the source of truth for roadmap item 15
-("App-facing typed network composition: production transport").
+> **Status: historical.** The work this document scoped was cancelled
+> outright by the "Endpoints Are Sim-Only" decision in `ROADMAP.md`
+> (2026-07): endpoints are simulation modeling tools, production networking
+> is host `std.Io.net`, and Marionette will not ship its own production
+> socket bus. This file is retained as design history because the analysis
+> (framing, pooling, reconnect, TigerBeetle's MessageBus) informed that
+> decision. Nothing below is planned work. The current API direction lives
+> in `docs/network-api.md`.
+
+This document was a forward-looking plan for the target shape of
+Marionette's production-side `Endpoint(Message)`, had it grown from a
+same-process FIFO into a real cross-process transport (formerly roadmap
+item 15, "App-facing typed network composition: production transport").
 
 The current production handle is documented in `docs/network-api.md`. The
 simulation network is documented in `docs/network.md`. This file covers the

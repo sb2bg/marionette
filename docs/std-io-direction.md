@@ -184,8 +184,10 @@ peer and surface as `error.Timeout` on the next empty read. Delivery-time
 link/partition drops preserve enough frame metadata to wake the affected
 connection with `error.Timeout`; healing permits deterministic retries on the
 same stream. Destination-down delivery maps to `error.NetworkDown`; richer
-connection-reset behavior, external host networking, DNS, datagrams, and
-production transport remain future work.
+connection-reset behavior, external host networking, DNS, and datagrams
+remain future work. A Marionette-owned production transport is not: the
+roadmap's "Endpoints Are Sim-Only" decision cancelled it, and production
+networking is host `std.Io.net`.
 
 Graceful close does not discard delayed bytes already accepted by the shared
 network runtime. A reader drains pending deliveries before observing EOF.

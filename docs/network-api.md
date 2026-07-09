@@ -149,8 +149,8 @@ makes byte ownership explicit:
 - `receive()` returns `{ from, message }`; the caller must release the message.
 
 This is the intended integration point for future Zig networking/RPC libraries
-that want Marionette as a test or transport backend without exposing
-`Endpoint(Message)` to their users.
+that want Marionette as a test backend without exposing `Endpoint(Message)` to
+their users.
 
 Encoding and decoding are deliberately the app's job. Marionette moves bytes
 deterministically; the wire format, its buffers, and its receive-value
@@ -169,20 +169,26 @@ try apply(envelope.from, try decodeRequest(envelope.message.bytes()));
 
 ## Production Path
 
-`Production.endpoint(Message, opts)` exists today and returns the same typed
-endpoint shape as simulation. `opts` declares the local `self` node and peer
-topology. Typed production endpoints still use the local in-process adapter.
+Endpoints are simulation-only. The "Endpoints Are Sim-Only" decision in
+`ROADMAP.md` (2026-07) cancelled the production transport work outright:
+production networking is host `std.Io.net`, and Marionette will not ship its
+own production socket bus. Reconnect, background receive, and multi-peer
+connection management are cancelled with it, not deferred.
+`docs/network-production.md` is retained as design history for the cancelled
+bus, not as a plan.
 
-`Production.byteEndpoint(opts)` uses the same local in-process adapter unless
-`opts.listen` is set. With `listen`, it uses the first socket-backed loopback
-transport slice behind the same `ByteEndpoint` surface.
-Reconnect, background receive, and multi-peer connection management remain
-scoped under roadmap item 15. The target architecture lives in
-`docs/network-production.md`.
+What still exists today:
 
-The standing rules until 15h ships:
+- `Production.endpoint(Message, opts)` returns the same typed endpoint shape
+  as simulation over a local in-process adapter. It is a removal candidate;
+  prune it when touching that code.
+- `Production.byteEndpoint(opts)` uses the same local in-process adapter
+  unless `opts.listen` is set, which selects the socket-backed loopback slice
+  behind the same `ByteEndpoint` surface. It stays only while a parity test
+  still uses it.
 
-- Do not invent a large permanent socket ecosystem yet.
+The standing rules:
+
 - Keep app-facing network requirements narrow.
 - Route production through host IO at the composition root.
 - Route simulation through deterministic simulator machinery.
