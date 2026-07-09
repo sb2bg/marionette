@@ -286,6 +286,10 @@ pub fn Ops(comptime Backend: type) type {
 
             listener.pending.append(listener_backend.allocator, server_handle) catch return error.SystemResources;
             listener_backend.wakeListener(listener_ref.handle, 1);
+            backend.world.record(
+                "io.net.connect handle={} port={}",
+                .{ client_handle, address.getPort() },
+            ) catch return error.SystemResources;
             return .{
                 .handle = client_handle,
                 .address = address.*,
@@ -446,8 +450,17 @@ pub fn Ops(comptime Backend: type) type {
             }
         }
 
+        /// Shutdown is local-only in simulation: it closes the handle and the
+        /// peer observes EOF/reset structurally, without a FIN traversing the
+        /// network model. A shutdown during a partition therefore succeeds
+        /// and is trace-visible; peer-side visibility that respects the
+        /// partition is a recorded roadmap gap.
         pub fn simNetShutdown(userdata: ?*anyopaque, handle: SocketHandle, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
-            _ = how;
+            const backend = backendFromUserdata(userdata);
+            backend.world.record(
+                "io.net.shutdown handle={} how={s}",
+                .{ handle, @tagName(how) },
+            ) catch return error.SystemResources;
             simNetClose(userdata, (&handle)[0..1]);
         }
     };

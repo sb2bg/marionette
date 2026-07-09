@@ -44,12 +44,12 @@ dusty fault scenarios (16c) partition before and during responses, pin the
 observed `error.Timeout` contract, heal, retry with an exact body oracle, and
 reject short-success partial responses. Finish the chain:
 
-- **16d. Keep-alive and connection churn.** Sequential connection churn and
-  close/shutdown discipline landed through the pinned beanstalkz queue
-  client (`validate-beanstalkz`): fresh connect/put/quit/`shutdown(.both)`
-  cycles, a reserve parked across virtual time, and reset-on-crash
-  contracts. Remaining: dusty's pooled keep-alive reuse across requests and
-  `netShutdown` semantics under partition.
+- **16d. Keep-alive and connection churn.** Done. Sequential churn landed
+  through beanstalkz; dusty's pooled keep-alive reuse (idle gaps,
+  concurrent pool growth, dial counting via `io.net.connect`) and
+  `netShutdown` under partition (local-only, trace-visible as
+  `io.net.shutdown`) landed through the pool scenarios, which also found
+  two confirmed dusty bugs (FOUND_BUGS DUSTY-001/002).
 - **16e. Larger transfers.** Chunked bodies and payloads spanning many
   simulated packets, exercising partial reads and writes through the
   `Io.Reader`/`Io.Writer` adapters.
@@ -83,13 +83,12 @@ Take this only when naturally forced or as a small isolated patch:
 - Replace `SimNetworkOptions.service_nodes: usize` with
   `partitionable_nodes: []const NodeId` when a third caller sets
   `service_nodes`, or when a real example needs a non-prefix subset.
-- Export trace assertion helpers. `dusty_http.zig` and
-  `xitdb_durability.zig` each define a private `expectTraceContains`
-  (11 call sites between them); the trace is a first-class Marionette
-  artifact, so asserting on it belongs in the public API. Scope is
-  deliberately narrow: trace assertions only, no test-framework layer
-  (ready-signal types, protocol scaffolding, model-comparison harnesses
-  stay out; Marionette's surface is the deterministic `std.Io` substrate).
+- Hot-loop detection. A task loop with no suspension point freezes the
+  cooperative world: the deadlock detector cannot fire (the task is
+  runnable) and no watchdog can run (nothing yields), so the livelock in
+  dusty's shutdown drain (FOUND_BUGS DUSTY-002) was only observable from
+  outside the process. A step budget between suspension points would turn
+  hot loops into harness failures. Promoted when a second SUT hits one.
 
 ---
 

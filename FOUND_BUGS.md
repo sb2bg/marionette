@@ -38,6 +38,8 @@ result before making a claim about it.
 | KVDB-003  | kvdb    | Confirmed SUT bug  | No-fault delete-heavy model workload         | Leaf delete rebalancing broke B+tree separator/order invariants, making unrelated keys unreachable | Not fixed upstream                  |
 | XITDB-001 | xitdb   | Simulator boundary | 7-byte-sector torn committed-size header     | A sub-field tear can corrupt recovery, but the field is structurally atomic at realistic sectors    | Characterized; not a reported bug   |
 | XITDB-002 | xitdb   | Positive result    | 512/4096-byte data-region torn/reorder sweep | Acknowledged modeled history survived the tested realistic data-region crash faults                | No SUT bug found in this profile    |
+| DUSTY-001 | dusty   | Confirmed SUT bug  | Server crash with a pooled keep-alive conn   | Client connection pool never evicts a dead connection; the client can never recover               | Not reported upstream yet           |
+| DUSTY-002 | dusty   | Confirmed SUT bug  | Graceful shutdown with an active handler     | `listen` drain busy-spins forever: the drain event latches set and is never reset                 | Not reported upstream yet           |
 
 ## Shared Harness Pattern
 
@@ -225,6 +227,96 @@ recovery bug in this sweep.
 **Why this is useful:** A clean result at realistic geometries is still
 evidence. It says the initial header-boundary counterexample should not be
 overclaimed, and it gives future sweeps a known baseline.
+
+## dusty Findings
+
+The dusty harness is pinned to dusty 0.1.0 and runs the unmodified HTTP/1.1
+client and server through Marionette's deterministic `std.Io.net` backend
+(`validation/dusty_http.zig`).
+
+### DUSTY-001: Connection Pool Never Evicts a Dead Connection
+
+**Project:** dusty
+
+**Classification:** Confirmed SUT bug
+
+**Trigger:** A healthy keep-alive fetch parks a connection in the client's
+pool, then the server process dies (simulated `killProcess`; equivalent to a
+real server restart or crash). Every subsequent fetch on the same client
+fails.
+
+**Symptom:** The pinned scenario shows three consecutive fetch attempts
+failing with `WriteFailed` and zero new dials (`io.net.connect` count stays
+at the healthy fetch's one). After a server restart, with the server provably
+reachable, the same client still fails with the same error, while a fresh
+client converges on its first attempt.
+
+**Root cause:** `Client.fetchInternal`'s error path is
+`errdefer self.pool.release(conn)`, and `ConnectionPool.release` only
+discards connections marked `closing`. No write-failure path ever sets
+`conn.closing = true` (only response-parsing and keep-alive-header paths
+do). The dead connection is therefore released back into the pool, and
+`acquire` scans LIFO, so every retry re-acquires the same dead connection
+and fails at write time without dialing. The pool is permanently poisoned.
+
+**Why this is a real bug:** Any server restart, idle-timeout close, or
+network blip that kills a pooled connection between requests makes the
+client permanently unable to reach that host until the whole client is
+recreated. No fault model exotica is involved; this is the common case for
+any long-lived HTTP client.
+
+**Fix direction:** Mark the connection `closing` on write/flush failures
+(and arguably on any transport-level error) before the errdefer release, or
+have `release` validate liveness before pooling.
+
+**Regression coverage:** `validation/dusty_http.zig` pins the poisoning
+(three write-failed attempts, zero dials, identical failure after restart,
+fresh-client convergence) across a seed sweep.
+
+### DUSTY-002: Graceful-Shutdown Drain Busy-Spins on a Latched Event
+
+**Project:** dusty
+
+**Classification:** Confirmed SUT bug
+
+**Trigger:** Cancel `Server.listen` (graceful shutdown) while at least one
+connection handler is still active, after at least one other connection has
+closed at any earlier point in the server's life.
+
+**Symptom:** Under Marionette's cooperative scheduler, the whole simulation
+livelocks at 100% CPU with virtual time frozen; the drain loop never
+suspends, so no other task (including the handler that would decrement the
+connection count) can run. On a preemptive production runtime the same code
+busy-spins a core until the remaining handlers happen to finish.
+
+**Root cause:** The drain loop waits on
+`last_connection_closed.waitTimeout(io, 100ms)`. `std.Io.Event` latches: it
+is set on the first connection close and never reset. `Event.waitTimeout`
+on a set event returns immediately by contract, so once any connection has
+ever closed, the drain's "wait" is a no-op and the
+`while (active_connections != 0)` loop spins hot. The 100ms timeout that
+would otherwise propagate `error.Timeout` (dusty's shutdown-timeout
+contract) never fires either, because the wait never blocks.
+
+**Why the existing tests missed it:** dusty's shutdown-timeout contract
+only manifests when the drain actually blocks, which requires that no
+connection ever closed before shutdown. Marionette's earlier hung-shutdown
+scenario met that condition by accident; the pool scenarios were the first
+to shut down after a connection had already closed. Under preemptive
+threads the spin also makes progress eventually, so it reads as "shutdown
+is slow," not "shutdown is broken."
+
+**Fix direction:** Reset the event before re-checking the count, or replace
+the latched event with a condition-variable-style wait that re-arms, or
+count down through the timeout budget explicitly.
+
+**Simulator note:** A task loop with no suspension point is invisible to a
+cooperative scheduler: the deadlock detector cannot fire because the task
+is runnable, and no watchdog task can run because nothing yields. Detecting
+hot loops (a step or instruction budget between suspension points) is
+recorded as a roadmap candidate; until then, harness code must avoid
+triggering this dusty path (the pool scenarios tear the server down with
+`killProcess` instead of cancellation).
 
 ## Takeaways
 

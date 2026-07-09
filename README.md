@@ -292,9 +292,10 @@ zig build validate-dusty
 ```
 
 This is an external-style capability demonstration of the `std.Io.net`
-boundary, not a third-party SUT finding. Pooled keep-alive reuse, larger
-transfers, and randomized task start jitter are the remaining 0.6 roadmap
-work.
+boundary, not a third-party SUT finding. Larger transfers and randomized
+task start jitter are the remaining 0.6 roadmap work; pooled keep-alive
+reuse landed with the pool scenarios, which also found two confirmed dusty
+bugs (see FOUND_BUGS.md).
 
 ## Queue client validation
 

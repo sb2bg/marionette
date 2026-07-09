@@ -17,6 +17,13 @@
 //!   dusty's contract for shutdown with connections that never drained) and
 //!   dusty's deferred `Group.cancel` unparks the handler with
 //!   `error.Canceled` on its way out.
+//!
+//! The pool scenarios cover 16d: keep-alive reuse across virtual-time idle
+//! gaps and concurrent pool growth (dials counted via `io.net.connect`),
+//! and pool poisoning across a server crash and registered restart, which
+//! pinned two confirmed dusty bugs (FOUND_BUGS DUSTY-001/002). The
+//! before-response partition scenario additionally pins `netShutdown`
+//! under partition (`io.net.shutdown` between partition and heal).
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -208,6 +215,242 @@ const Scenario = struct {
         defer response.deinit();
         self.hello_status = @intFromEnum(response.status());
         self.record("dusty_http.client.hello status={}", .{self.hello_status});
+    }
+};
+
+/// Pooled keep-alive reuse: one shared client, connections idle across
+/// virtual-time gaps, concurrent fetches that force the pool to grow, and
+/// sequential fetches that must reuse both pooled connections.
+///
+/// New connections are counted through `io.net.connect` events: dusty only
+/// dials when the pool has no reusable connection, so the connect count
+/// equals the connection count.
+const PoolScenario = struct {
+    allocator: std.mem.Allocator,
+    world: *mar.World,
+    server_io: Io,
+    client_io: Io,
+    server: *http.Server(void),
+    client: ?http.Client = null,
+    statuses: [6]u32 = @splat(0),
+    graceful_shutdown: bool = false,
+    timeout_shutdown: bool = false,
+
+    fn record(self: *PoolScenario, comptime fmt: []const u8, args: anytype) void {
+        self.world.record(fmt, args) catch @panic("dusty_pool trace record failed");
+    }
+
+    fn serverTask(self: *PoolScenario) void {
+        self.record("dusty_pool.server.listen_start", .{});
+        const address: http.Address = .{
+            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+        };
+        self.server.listen(address) catch |err| switch (err) {
+            error.Canceled => {
+                self.graceful_shutdown = true;
+                self.record("dusty_pool.server.graceful_shutdown", .{});
+                return;
+            },
+            error.Timeout => {
+                self.timeout_shutdown = true;
+                self.record("dusty_pool.server.timeout_shutdown", .{});
+                return;
+            },
+            else => std.debug.panic("dusty_pool listen failed: {}", .{err}),
+        };
+        @panic("dusty_pool listen returned without a shutdown request");
+    }
+
+    fn fetchHello(self: *PoolScenario, slot: usize) void {
+        var response = self.client.?.fetch(base_url ++ "/hello", .{}) catch |err| {
+            std.debug.panic("dusty_pool fetch {} failed: {}", .{ slot, err });
+        };
+        defer response.deinit();
+        self.statuses[slot] = @intFromEnum(response.status());
+        const payload = (response.body() catch @panic("dusty_pool body read failed")) orelse "";
+        self.record("dusty_pool.client.fetch slot={} status={} bytes={}", .{
+            slot, self.statuses[slot], payload.len,
+        });
+    }
+
+    fn clientTask(self: *PoolScenario) void {
+        self.server.ready.wait(self.server_io) catch @panic("dusty_pool ready wait failed");
+        self.record("dusty_pool.client.server_ready", .{});
+
+        self.client = http.Client.init(self.allocator, self.client_io, .{});
+
+        // Connection 1: first fetch, then reuse across an idle gap in
+        // virtual time.
+        self.fetchHello(0);
+        Io.sleep(self.client_io, .fromNanoseconds(idle_gap_ns), .awake) catch
+            @panic("dusty_pool idle sleep failed");
+        self.record("dusty_pool.client.idle_gap_over", .{});
+        self.fetchHello(1);
+
+        // Two concurrent fetches: one reuses the single pooled connection,
+        // the other must grow the pool to a second connection.
+        var first = Io.concurrent(self.client_io, PoolScenario.fetchHello, .{ self, 2 }) catch
+            @panic("dusty_pool concurrent fetch spawn failed");
+        var second = Io.concurrent(self.client_io, PoolScenario.fetchHello, .{ self, 3 }) catch
+            @panic("dusty_pool concurrent fetch spawn failed");
+        first.await(self.client_io);
+        second.await(self.client_io);
+        self.record("dusty_pool.client.concurrent_done", .{});
+
+        // Both connections are back in the pool: two sequential fetches must
+        // reuse them without opening a third.
+        self.fetchHello(4);
+        self.fetchHello(5);
+    }
+};
+
+const idle_gap_ns = 1_000_000;
+
+/// Pool poisoning after a server crash: a healthy fetch parks a keep-alive
+/// connection in the pool, then the server process is killed. Pinned dusty
+/// 0.1.0 bug: a write failure never marks the connection closing, so the
+/// dead connection is released back into the pool and every retry
+/// re-acquires it without dialing. The pool stays poisoned even after a
+/// registered process restart brings a fresh server incarnation up, while
+/// a fresh client (empty pool) converges immediately.
+const PoolCrashScenario = struct {
+    allocator: std.mem.Allocator,
+    /// Arena for everything the killable server process allocates: a killed
+    /// process never runs defers, so its allocations must die with the
+    /// harness arena instead of leaking (same pattern as the beanstalkz
+    /// validation).
+    server_allocator: std.mem.Allocator,
+    world: *mar.World,
+    server_io: Io,
+    client_io: Io,
+    restart_io: ?Io = null,
+    server: *http.Server(void),
+    restarted_server: ?http.Server(void) = null,
+    client: ?http.Client = null,
+    first_status: u32 = 0,
+    dead_error_name: []u8 = &.{},
+    poisoned_attempts: u32 = 0,
+    recovery_attempts: u32 = 0,
+    post_restart_error_name: []u8 = &.{},
+    fresh_status: u32 = 0,
+
+    fn record(self: *PoolCrashScenario, comptime fmt: []const u8, args: anytype) void {
+        self.world.record(fmt, args) catch @panic("dusty_pool_crash trace record failed");
+    }
+
+    fn storeError(self: *PoolCrashScenario, slot: *[]u8, err: anyerror) void {
+        if (slot.len != 0) self.allocator.free(slot.*);
+        slot.* = self.allocator.dupe(u8, @errorName(err)) catch @panic("dusty_pool_crash oom");
+    }
+
+    /// Killed by the harness rather than shut down; listen never returns
+    /// in this scenario.
+    fn serverTask(self: *PoolCrashScenario) void {
+        self.record("dusty_pool_crash.server.listen_start", .{});
+        const address: http.Address = .{
+            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+        };
+        self.server.listen(address) catch |err| {
+            std.debug.panic("dusty_pool_crash listen failed: {}", .{err});
+        };
+        @panic("dusty_pool_crash listen returned");
+    }
+
+    fn restartedServerTask(self: *PoolCrashScenario) void {
+        self.record("dusty_pool_crash.server.restart_listen_start", .{});
+        const address: http.Address = .{
+            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+        };
+        self.restarted_server.?.listen(address) catch |err| {
+            std.debug.panic("dusty_pool_crash restarted listen failed: {}", .{err});
+        };
+        @panic("dusty_pool_crash restarted listen returned");
+    }
+
+    /// Healthy fetch: the connection goes back to the pool and the
+    /// server-side handler parks in a keep-alive read.
+    fn healthyFetchTask(self: *PoolCrashScenario) void {
+        self.server.ready.wait(self.server_io) catch @panic("dusty_pool_crash ready wait failed");
+        self.record("dusty_pool_crash.client.server_ready", .{});
+
+        self.client = http.Client.init(self.allocator, self.client_io, .{});
+        var response = self.client.?.fetch(base_url ++ "/hello", .{}) catch |err| {
+            std.debug.panic("dusty_pool_crash healthy fetch failed: {}", .{err});
+        };
+        defer response.deinit();
+        self.first_status = @intFromEnum(response.status());
+        _ = (response.body() catch @panic("dusty_pool_crash body read failed")) orelse "";
+        self.record("dusty_pool_crash.client.first_fetch status={}", .{self.first_status});
+    }
+
+    /// Fetch attempts on the poisoned pool while the server is dead. Every
+    /// attempt re-acquires the dead pooled connection and fails at write
+    /// time without dialing; convergence here would mean the pool evicted
+    /// the dead connection.
+    fn poisonedAttemptsTask(self: *PoolCrashScenario) void {
+        var attempt: u32 = 1;
+        while (attempt <= max_retry_attempts) : (attempt += 1) {
+            if (self.client.?.fetch(base_url ++ "/hello", .{})) |response| {
+                var owned = response;
+                defer owned.deinit();
+                self.recovery_attempts = attempt;
+                self.record("dusty_pool_crash.client.attempt attempt={} outcome=ok", .{attempt});
+                return;
+            } else |err| {
+                if (attempt == 1) self.storeError(&self.dead_error_name, err);
+                self.poisoned_attempts = attempt;
+                self.record("dusty_pool_crash.client.attempt attempt={} outcome={s}", .{
+                    attempt, @errorName(err),
+                });
+            }
+        }
+    }
+
+    /// The restarted incarnation is listening again, so the network is
+    /// provably healthy. The same client still fails (poisoned pool); a
+    /// fresh client with an empty pool converges immediately.
+    fn postRestartTask(self: *PoolCrashScenario) void {
+        self.restarted_server.?.ready.wait(self.restart_io.?) catch
+            @panic("dusty_pool_crash restart ready wait failed");
+        self.record("dusty_pool_crash.client.restart_ready", .{});
+
+        if (self.client.?.fetch(base_url ++ "/hello", .{})) |response| {
+            var owned = response;
+            defer owned.deinit();
+            self.record("dusty_pool_crash.client.post_restart outcome=unexpected_success", .{});
+        } else |err| {
+            self.storeError(&self.post_restart_error_name, err);
+            self.record("dusty_pool_crash.client.post_restart outcome={s}", .{@errorName(err)});
+        }
+
+        var fresh = http.Client.init(self.allocator, self.client_io, .{});
+        defer fresh.deinit();
+        if (fresh.fetch(base_url ++ "/hello", .{})) |response| {
+            var owned = response;
+            defer owned.deinit();
+            self.fresh_status = @intFromEnum(owned.status());
+            _ = (owned.body() catch @panic("dusty_pool_crash fresh body failed")) orelse "";
+            self.record("dusty_pool_crash.client.fresh_fetch status={}", .{self.fresh_status});
+        } else |err| {
+            self.record("dusty_pool_crash.client.fresh_fetch_error err={s}", .{@errorName(err)});
+        }
+    }
+};
+
+const PoolCrashLifecycle = struct {
+    scenario: *PoolCrashScenario,
+
+    fn onKill(_: *anyopaque) void {}
+
+    fn restart(raw: *anyopaque, env: mar.Env) anyerror!void {
+        const self: *PoolCrashLifecycle = @ptrCast(@alignCast(raw));
+        const scenario = self.scenario;
+        // Fresh incarnation: a restarted process starts a new server value;
+        // the killed one's state died with the process.
+        scenario.restart_io = env.io();
+        scenario.restarted_server = http.Server(void).init(scenario.server_allocator, env.io(), .{}, {});
+        scenario.restarted_server.?.router.get("/hello", handleHello);
+        _ = try Io.concurrent(env.io(), PoolCrashScenario.restartedServerTask, .{scenario});
     }
 };
 
@@ -504,6 +747,207 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) !Outcome {
     };
 }
 
+pub const PoolOutcome = struct {
+    allocator: std.mem.Allocator,
+    trace: []u8,
+    statuses: [6]u32,
+    connect_count: usize,
+    graceful_shutdown: bool,
+
+    pub fn deinit(self: *PoolOutcome) void {
+        self.allocator.free(self.trace);
+        self.* = undefined;
+    }
+};
+
+/// Pooled keep-alive reuse across idle gaps and concurrent pool growth.
+pub fn runPoolReuseScenario(allocator: std.mem.Allocator, seed: u64) !PoolOutcome {
+    var world = try mar.World.init(allocator, .{
+        .seed = seed,
+        .tick_ns = 10,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{
+            .nodes = 2,
+            .service_nodes = 1,
+            .path_capacity = 64,
+        },
+        // dusty's Debug-mode fetch frames are platform-sensitive and deep;
+        // Linux/x86_64 needs more than the default stack to enter fetchInternal.
+        .task_stack_size = dusty_task_stack_size,
+    });
+    const server_env = try sim.envForNode(0);
+    const client_env = try sim.envForNode(1);
+    const server_io = server_env.io();
+    const client_io = client_env.io();
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    var server = http.Server(void).init(allocator, server_io, .{}, {});
+    defer server.deinit();
+    server.router.get("/hello", handleHello);
+
+    var scenario = PoolScenario{
+        .allocator = allocator,
+        .world = &world,
+        .server_io = server_io,
+        .client_io = client_io,
+        .server = &server,
+    };
+    defer if (scenario.client) |*client| client.deinit();
+
+    var server_future = try Io.concurrent(server_io, PoolScenario.serverTask, .{&scenario});
+    var client_future = try Io.concurrent(client_io, PoolScenario.clientTask, .{&scenario});
+
+    client_future.await(client_io);
+    // Closing the pooled connections first lets their parked keep-alive
+    // handlers drain, so listen cancellation shuts down gracefully.
+    if (scenario.client) |*client| {
+        client.deinit();
+        scenario.client = null;
+    }
+    server_future.cancel(server_io);
+    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+
+    const trace = try allocator.dupe(u8, world.traceBytes());
+    errdefer allocator.free(trace);
+
+    return .{
+        .allocator = allocator,
+        .trace = trace,
+        .statuses = scenario.statuses,
+        .connect_count = std.mem.count(u8, trace, "io.net.connect handle="),
+        .graceful_shutdown = scenario.graceful_shutdown,
+    };
+}
+
+pub const PoolCrashOutcome = struct {
+    allocator: std.mem.Allocator,
+    trace: []u8,
+    first_status: u32,
+    dead_error_name: []u8,
+    poisoned_attempts: u32,
+    recovery_attempts: u32,
+    post_restart_error_name: []u8,
+    fresh_status: u32,
+    connect_count: usize,
+
+    pub fn deinit(self: *PoolCrashOutcome) void {
+        self.allocator.free(self.trace);
+        self.allocator.free(self.dead_error_name);
+        self.allocator.free(self.post_restart_error_name);
+        self.* = undefined;
+    }
+};
+
+/// Pool poisoning across a server crash and registered restart.
+pub fn runPoolCrashScenario(allocator: std.mem.Allocator, seed: u64) !PoolCrashOutcome {
+    var world = try mar.World.init(allocator, .{
+        .seed = seed,
+        .tick_ns = 10,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{
+            .nodes = 2,
+            .service_nodes = 1,
+            .path_capacity = 64,
+        },
+        // dusty's Debug-mode fetch frames are platform-sensitive and deep;
+        // Linux/x86_64 needs more than the default stack to enter fetchInternal.
+        .task_stack_size = dusty_task_stack_size,
+    });
+    const server_env = try sim.envForNode(0);
+    const client_env = try sim.envForNode(1);
+    const server_io = server_env.io();
+    const client_io = client_env.io();
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const server_allocator = arena_state.allocator();
+
+    var server = http.Server(void).init(server_allocator, server_io, .{}, {});
+    defer server.deinit();
+    server.router.get("/hello", handleHello);
+
+    var scenario = PoolCrashScenario{
+        .allocator = allocator,
+        .server_allocator = server_allocator,
+        .world = &world,
+        .server_io = server_io,
+        .client_io = client_io,
+        .server = &server,
+    };
+    errdefer allocator.free(scenario.dead_error_name);
+    errdefer allocator.free(scenario.post_restart_error_name);
+    defer if (scenario.client) |*client| client.deinit();
+    defer if (scenario.restarted_server) |*restarted| restarted.deinit();
+
+    var lifecycle = PoolCrashLifecycle{ .scenario = &scenario };
+    try sim.registerProcess(0, .{
+        .ptr = &lifecycle,
+        .on_kill = PoolCrashLifecycle.onKill,
+        .restart = PoolCrashLifecycle.restart,
+    });
+
+    // The listen task's future is intentionally dropped: it dies with the
+    // killed process, and the restarted incarnation is joined through
+    // `runTasksUntilIdle`.
+    _ = try Io.concurrent(server_io, PoolCrashScenario.serverTask, .{&scenario});
+
+    var healthy_future = try Io.concurrent(client_io, PoolCrashScenario.healthyFetchTask, .{&scenario});
+    healthy_future.await(client_io);
+
+    // Crash the server: its listener, accept task, and the keep-alive
+    // handler parked on the pooled connection die with the process.
+    try sim.killProcess(0);
+
+    var poisoned_future = try Io.concurrent(client_io, PoolCrashScenario.poisonedAttemptsTask, .{&scenario});
+    poisoned_future.await(client_io);
+
+    try sim.restartProcess(0);
+    var post_restart_future = try Io.concurrent(client_io, PoolCrashScenario.postRestartTask, .{&scenario});
+    post_restart_future.await(client_io);
+
+    if (scenario.client) |*client| {
+        client.deinit();
+        scenario.client = null;
+    }
+    // Tear the restarted incarnation down the same way it came up: killing
+    // the process avoids dusty's shutdown drain entirely (see FOUND_BUGS.md
+    // on the latched drain event).
+    try sim.killProcess(0);
+    try sim.control.runTasksUntilIdle();
+    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+
+    if (scenario.dead_error_name.len == 0) return error.PoisonedFetchDidNotFail;
+
+    const trace = try allocator.dupe(u8, world.traceBytes());
+    errdefer allocator.free(trace);
+
+    const dead_error_name = scenario.dead_error_name;
+    scenario.dead_error_name = &.{};
+    const post_restart_error_name = scenario.post_restart_error_name;
+    scenario.post_restart_error_name = &.{};
+
+    return .{
+        .allocator = allocator,
+        .trace = trace,
+        .first_status = scenario.first_status,
+        .dead_error_name = dead_error_name,
+        .poisoned_attempts = scenario.poisoned_attempts,
+        .recovery_attempts = scenario.recovery_attempts,
+        .post_restart_error_name = post_restart_error_name,
+        .fresh_status = scenario.fresh_status,
+        .connect_count = std.mem.count(u8, trace, "io.net.connect handle="),
+    };
+}
+
 pub const HungOutcome = struct {
     allocator: std.mem.Allocator,
     trace: []u8,
@@ -693,9 +1137,6 @@ fn runFaultScenario(
     };
 }
 
-fn expectTraceContains(trace: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, trace, needle) != null);
-}
 
 fn expectMidResponseNetworkOracle(trace: []const u8) !void {
     const partition = std.mem.indexOf(u8, trace, "dusty_fault.partition") orelse return error.PartitionTraceMissing;
@@ -799,8 +1240,18 @@ test "dusty HTTP partition before response fails deterministically and retry con
     try std.testing.expect(outcome.shutdown_ok);
     // dusty's observed contract under a severed link before response bytes.
     try std.testing.expectEqualStrings("Timeout", outcome.first_error_name);
-    try expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
-    try expectTraceContains(outcome.trace, "dusty_fault.heal");
+    try mar.expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
+    try mar.expectTraceContains(outcome.trace, "dusty_fault.heal");
+
+    // netShutdown under partition: the handler's deferred `shutdown(.both)`
+    // runs while the link is severed. Shutdown is local in simulation, so
+    // it succeeds and is trace-visible between the partition and the heal;
+    // peer visibility that respects the partition is a recorded gap.
+    const partition_index = std.mem.indexOf(u8, outcome.trace, "dusty_fault.partition").?;
+    const heal_index = std.mem.indexOfPos(u8, outcome.trace, partition_index, "dusty_fault.heal").?;
+    const shutdown_index = std.mem.indexOfPos(u8, outcome.trace, partition_index, "io.net.shutdown") orelse
+        return error.ShutdownNotUnderPartition;
+    try std.testing.expect(shutdown_index < heal_index);
 }
 
 test "dusty HTTP partition scenario replays byte-identically from the same seed" {
@@ -825,7 +1276,7 @@ test "dusty HTTP partition mid-response never yields a short success" {
     try std.testing.expect(outcome.shutdown_ok);
     // dusty's observed contract under a severed link.
     try std.testing.expectEqualStrings("Timeout", outcome.first_error_name);
-    try expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
+    try mar.expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
     try expectMidResponseNetworkOracle(outcome.trace);
 }
 
@@ -841,6 +1292,83 @@ test "dusty HTTP mid-response partition replays byte-identically from the same s
 
     try std.testing.expectEqualStrings(first.trace, second.trace);
     try std.testing.expectEqualStrings(first.first_error_name, second.first_error_name);
+}
+
+test "dusty HTTP pool reuses keep-alive connections across idle gaps and concurrency" {
+    var outcome = try runPoolReuseScenario(std.testing.allocator, 0xC0FFEE);
+    defer outcome.deinit();
+
+    for (outcome.statuses) |status| {
+        try std.testing.expectEqual(@as(u32, 200), status);
+    }
+    // Six fetches, exactly two connections: the first fetch dials, the idle
+    // gap and both trailing fetches reuse, and only the second concurrent
+    // fetch grows the pool.
+    try std.testing.expectEqual(@as(usize, 2), outcome.connect_count);
+    try std.testing.expect(outcome.graceful_shutdown);
+}
+
+test "dusty HTTP pool reuse replays byte-identically from the same seed" {
+    var first = try runPoolReuseScenario(std.testing.allocator, 0xC0FFEE);
+    defer first.deinit();
+    var second = try runPoolReuseScenario(std.testing.allocator, 0xC0FFEE);
+    defer second.deinit();
+
+    try std.testing.expectEqualStrings(first.trace, second.trace);
+    try mar.expectTraceContains(first.trace, "dusty_pool.client.idle_gap_over");
+    try mar.expectTraceContains(first.trace, "dusty_pool.client.concurrent_done");
+}
+
+test "dusty HTTP pool poisoning: a dead pooled connection is never evicted" {
+    var outcome = try runPoolCrashScenario(std.testing.allocator, 0xC0FFEE);
+    defer outcome.deinit();
+
+    try std.testing.expectEqual(@as(u32, 200), outcome.first_status);
+
+    // Pinned dusty 0.1.0 bug: a write failure never marks the connection
+    // closing, so the dead connection is re-pooled and every retry
+    // re-acquires it without dialing. No attempt converges while the
+    // server is down, and none converges after the restart either, even
+    // though the restarted server is provably reachable.
+    try std.testing.expectEqual(@as(u32, max_retry_attempts), outcome.poisoned_attempts);
+    try std.testing.expectEqual(@as(u32, 0), outcome.recovery_attempts);
+    try std.testing.expect(outcome.post_restart_error_name.len != 0);
+    try std.testing.expectEqualStrings(outcome.dead_error_name, outcome.post_restart_error_name);
+
+    // A fresh client converges immediately, isolating the failure to the
+    // pool. Exactly two dials in the whole scenario: the healthy fetch and
+    // the fresh client; the poisoned attempts never dialed at all.
+    try std.testing.expectEqual(@as(u32, 200), outcome.fresh_status);
+    try std.testing.expectEqual(@as(usize, 2), outcome.connect_count);
+
+    try mar.expectTraceContains(outcome.trace, "process.kill node=0");
+    try mar.expectTraceContains(outcome.trace, "process.restart node=0");
+}
+
+test "dusty HTTP pool poisoning replays byte-identically from the same seed" {
+    var first = try runPoolCrashScenario(std.testing.allocator, 0xC0FFEE);
+    defer first.deinit();
+    var second = try runPoolCrashScenario(std.testing.allocator, 0xC0FFEE);
+    defer second.deinit();
+
+    try std.testing.expectEqualStrings(first.trace, second.trace);
+    try std.testing.expectEqualStrings(first.dead_error_name, second.dead_error_name);
+}
+
+test "dusty HTTP pool poisoning holds across seeds" {
+    var seed: u64 = 0;
+    while (seed < 8) : (seed += 1) {
+        var outcome = runPoolCrashScenario(std.testing.allocator, seed) catch |err| {
+            std.debug.print("dusty pool poisoning sweep failed seed={} err={}\n", .{ seed, err });
+            return err;
+        };
+        defer outcome.deinit();
+
+        try std.testing.expectEqual(@as(u32, max_retry_attempts), outcome.poisoned_attempts);
+        try std.testing.expectEqual(@as(u32, 0), outcome.recovery_attempts);
+        try std.testing.expectEqual(@as(u32, 200), outcome.fresh_status);
+        try std.testing.expectEqual(@as(usize, 2), outcome.connect_count);
+    }
 }
 
 test "dusty HTTP partition sweep converges for every cut point" {

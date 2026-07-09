@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Lands 16d, dusty pooled keep-alive depth: a pool-reuse scenario (idle
+  gaps in virtual time, concurrent fetches growing the pool, sequential
+  fetches reusing both connections, connection count pinned via the new
+  `io.net.connect` trace event) and a pool-poisoning crash scenario
+  (server `killProcess` under a pooled keep-alive connection, restart
+  through a registered lifecycle, fresh-client isolation probe). Pins
+  `netShutdown` under partition in the before-response scenario: shutdown
+  is local in simulation, succeeds mid-partition, and is trace-visible as
+  the new `io.net.shutdown` event; partition-respecting peer visibility is
+  a recorded gap.
+- Records two confirmed dusty 0.1.0 bugs found by the 16d scenarios
+  (FOUND_BUGS DUSTY-001/002): the client connection pool never evicts a
+  dead connection because write failures never mark it closing, so a
+  poisoned client can never recover even after the server returns; and the
+  server's graceful-shutdown drain busy-spins forever once any earlier
+  connection has closed, because the drain waits on a latched, never-reset
+  `std.Io.Event`.
+- Adds `mar.expectTraceContains`, the trace-substring assertion the dusty
+  and xitdb validations each defined privately; failures print the needle
+  and the trace tail.
+
 - Removes the World-config runner family: `runCase`, `expectPass`,
   `expectFailure`, and `expectFuzz`. It was a complete parallel API to
   `runSimCase`/`expectSim*` with no consumers; harnesses with genuinely
