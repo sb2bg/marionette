@@ -647,7 +647,6 @@ fn verifySnapshot(allocator: std.mem.Allocator, moment: DB.HashMap(.read_only), 
     }
 }
 
-
 // --- Crash-fault fuzzer with shrinking -------------------------------------
 //
 // Fuzz cases are explicit operation plans generated from a host PRNG, not

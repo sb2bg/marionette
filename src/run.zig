@@ -1339,4 +1339,3 @@ test "runSimCase: init errors become scenario failures" {
         },
     }
 }
-

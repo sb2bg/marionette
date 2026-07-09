@@ -1381,7 +1381,6 @@ fn runFaultScenario(
     };
 }
 
-
 fn expectMidResponseNetworkOracle(trace: []const u8) !void {
     const partition = std.mem.indexOf(u8, trace, "dusty_fault.partition") orelse return error.PartitionTraceMissing;
     const heal = std.mem.indexOfPos(u8, trace, partition, "dusty_fault.heal") orelse return error.HealTraceMissing;
