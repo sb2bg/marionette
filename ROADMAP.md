@@ -33,7 +33,7 @@ Rationale: for `std.Io.net` code, production parity is free because the host
 `std.Io` is the production implementation. Every sim-side gap closed here buys
 compatibility with any Zig code written against the standard interface. This
 replaces the previous 0.6 target (production `Endpoint(Message)` transport),
-which moves to 0.7 until a user needs cross-process endpoint parity.
+since cancelled outright; see "Endpoints Are Sim-Only" below.
 
 The first three slices exist: cooperative cancellation (16a) delivers
 `error.Canceled` at futex, sleep, and net suspension points with deterministic
@@ -68,6 +68,12 @@ cancelable `Group.await` park (a canceled awaiter should propagate to members
 and resurface `error.Canceled`), and cancellation points on disk-latency and
 file-lock waits.
 
+Deferred `std.Io.net` surface, promoted when a pinned SUT forces it: UDP
+datagrams (`netBindIp` currently fails closed), unix sockets, and DNS
+resolution. Likely first customer: a gossip or DNS-client library. Do not
+build these speculatively; every simulated surface is a determinism
+contract we then maintain.
+
 Supporting scheduler/runtime work belongs in 0.6 only when the SUT forces it.
 
 ### Opportunistic Cleanup
@@ -77,6 +83,13 @@ Take this only when naturally forced or as a small isolated patch:
 - Replace `SimNetworkOptions.service_nodes: usize` with
   `partitionable_nodes: []const NodeId` when a third caller sets
   `service_nodes`, or when a real example needs a non-prefix subset.
+- Export trace assertion helpers. `dusty_http.zig` and
+  `xitdb_durability.zig` each define a private `expectTraceContains`
+  (11 call sites between them); the trace is a first-class Marionette
+  artifact, so asserting on it belongs in the public API. Scope is
+  deliberately narrow: trace assertions only, no test-framework layer
+  (ready-signal types, protocol scaffolding, model-comparison harnesses
+  stay out; Marionette's surface is the deterministic `std.Io` substrate).
 
 ---
 
@@ -85,26 +98,49 @@ Take this only when naturally forced or as a small isolated patch:
 Promote later items only when they have a concrete example, compatibility
 target, or user-facing proof.
 
-### Production Endpoint Transport (deferred from 0.6)
+Presumptive 0.7 theme: exploration and debugging depth (seed schedules,
+shrinking, failure-report UX) rather than more transport plumbing. The
+durable moat is what a future stdlib deterministic scheduler would never
+ship: disk and network fault models, buggify, trace replay tooling, and
+the external validation corpus. Zig core has floated Io-injection-based
+deterministic schedule testing for unit tests; if that lands, basic
+schedule exploration commoditizes and the fault-model depth is what
+remains differentiated.
 
-The architecture source of truth remains `docs/network-production.md`. Steps
-15a-15f produced framing and buffer-pool code that stays. Finish 15g-15k
-(fake-IO bus tests, multi-peer connection management, seeded reconnect,
-bounded queues, cross-process parity test) when a user or example needs
-cross-process `Endpoint(Message)` parity.
+### Endpoints Are Sim-Only (decided 2026-07, closes the production transport question)
 
-Two notes recorded now so they are not relitigated later:
+`Endpoint(Message)` and `ByteEndpoint` are simulation modeling tools: they
+exist so protocol logic can be tested above the wire, with per-message
+loss, reorder, and partition faults that a byte stream cannot express (a
+stream must deliver in order or die, so "drop message 3" is only
+meaningful at the message layer). Production networking is host
+`std.Io.net`; Marionette will not ship its own production socket bus.
 
-- When the production bus is built, prefer implementing its socket layer on
-  host `std.Io.net` so the simulator's own deterministic backend can exercise
-  partial reads, EOF mid-frame, and reconnect timing, instead of building a
-  bespoke fake-IO backend. This resolves the internal-seam decision that
-  `docs/network-production.md` deferred until 15d.
+This does not break the same-code contract; it locates it. The unit
+under test at the endpoint layer is the transport-independent protocol
+state machine, which runs unchanged in production behind the app's real
+transport glue. The glue is written against `std.Io.net` and is itself
+testable under the deterministic backend with stream-level faults. Apps
+that want literal endpoint parity can implement the `Endpoint(Message)`
+vtable over their own transport, or better, own their bus interface and
+adapt it to `mar.Endpoint` in tests only.
+Rationale: a Marionette-owned transport is a parallel networking stack
+whose adoption cost lands on users, which is the madsim failure mode
+(owning a mirror of an API surface you do not control) in reverse.
+
+Consequences, recorded so they are not relitigated:
+
+- Steps 15g-15k (production bus, multi-peer reconnect, cross-process
+  parity) are cancelled, not deferred. `docs/network-production.md` is
+  retained as design history. If a real user ever needs cross-process
+  `Endpoint(Message)`, that is a new decision made with that user.
+- The typed `Production.endpoint` in-process FIFO and its options/errors
+  are now removal candidates; prune them when touching that code, and
+  keep `Production.byteEndpoint`'s loopback slice only while a parity
+  test still uses it.
 - The 15j send-semantics convergence (silent drop plus a trace-visible
-  `network.drop reason=queue_full` event, `send` no longer surfacing
-  transient errors) is an app-facing contract change independent of sockets.
-  If endpoint usage grows before this section is promoted, land the contract
-  change on the simulation side first.
+  `network.drop reason=queue_full` event) still applies to the simulated
+  endpoint if endpoint usage grows; it is a sim-side contract change now.
 
 ### Production Runtime Parity
 
