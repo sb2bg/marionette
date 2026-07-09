@@ -312,11 +312,17 @@ pub fn Ops(comptime Backend: type) type {
             server.peer = .{ .backend = backend, .handle = client_handle };
 
             listener.pending.append(listener_backend.allocator, server_handle) catch return error.SystemResources;
-            listener_backend.wakeListener(listener_ref.handle, 1);
+            // A failed record must unpublish the handle, or accept would
+            // hand out a socket whose state the errdefers destroyed. The
+            // pop is safe because no suspension point sits between the
+            // append and the record, so the entry is still last; recording
+            // after the append keeps a failed connect out of the trace.
+            errdefer _ = listener.pending.pop();
             backend.world.record(
                 "io.net.connect handle={} port={}",
                 .{ client_handle, address.getPort() },
             ) catch return error.SystemResources;
+            listener_backend.wakeListener(listener_ref.handle, 1);
             return .{
                 .handle = client_handle,
                 .address = address.*,
