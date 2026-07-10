@@ -170,6 +170,21 @@ Every switch is trace-visible, so the determinism contract is unchanged:
 same code, same options, same seed schedule, byte-identical trace, and the
 twice-and-compare runner works on schedules as-is.
 
+Cutpoint representation (settled in issue #1 with Jason Aten): superdense
+`(sim_time_ns, microstep)` pairs, where the microstep is the nth random
+draw at that timestamp. This is Lingua Franca's logical-time shape, not an
+HLC; the HLC's low-bit monotonicity hack exists to reconcile uncoordinated
+physical clocks, a problem a single-authority deterministic clock cannot
+have, and the per-timestamp microstep is unbounded so nothing overflows.
+The pair is a human-friendly projection of the global draw order the trace
+already records: a priori cutpoints ("switch seeds every 10s") desugar to
+`(t, 0)` without knowing any draw counts, while branch points harvested
+from an explored trace use the full pair. One wrinkle to settle at
+implementation time: `unsafeUntracedRandom` consumes PRNG state without
+emitting a trace event, so the microstep must count PRNG draws rather than
+trace events (or untraced draws must be barred once a schedule is active),
+otherwise the same pair could name two different PRNG positions.
+
 This unlocks Antithesis-style exploration: branch from an interesting point
 by keeping the schedule prefix and appending a fresh suffix seed, derivable
 as hash(prefix, branch index). As a library, forking means replaying the
