@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Binding a simulated `std.Io.net` listener to port 0 now allocates an
+  ephemeral port, matching POSIX bind semantics (issue #2). Ports come
+  from the IANA dynamic range (49152-65535) via a rotating cursor shared
+  across process backends, so ports are unique world-wide, allocation is
+  deterministic per seed, and a just-closed port is not immediately
+  reused. The assigned port is surfaced through the returned socket's
+  address (`server.socket.address.getPort()`), and `listen` fails with
+  `AddressInUse` only once the whole range is occupied.
+
 - Completes the architecture clobber set in Marionette's corrected fiber
   context switch. The x86_64 LLVM path now names the `xmm` and `ymm`
   aliases as well as `zmm`, so CPUs without the wider register classes do

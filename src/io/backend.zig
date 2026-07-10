@@ -317,6 +317,7 @@ pub const Backend = struct {
     directory_handles: std.ArrayList(DirectoryHandle) = .empty,
     handles: std.ArrayList(HandleEntry) = .empty,
     next_handle: SocketHandle = 1000,
+    next_ephemeral_port: u16 = ephemeral_port_min,
     locks: FileLockRegistry,
     /// Live operation-scoped buffers (sector scratch, path copies) held
     /// across disk-latency suspension points. A task killed while parked
@@ -878,6 +879,35 @@ pub const Backend = struct {
         };
     }
 
+    pub const ephemeral_port_min: u16 = 49152;
+    pub const ephemeral_port_max: u16 = 65535;
+
+    /// Allocate a free port from the IANA dynamic range for a bind to port 0.
+    /// The cursor rotates rather than reusing the lowest free port, and is
+    /// shared across process backends so concurrent binds in a multi-process
+    /// world cannot converge on the same candidate.
+    pub fn allocateEphemeralPort(self: *Backend, address: *const Io.net.IpAddress) error{AddressInUse}!u16 {
+        const range_len = @as(u17, ephemeral_port_max - ephemeral_port_min) + 1;
+        var candidate = address.*;
+        var attempts: u17 = 0;
+        while (attempts < range_len) : (attempts += 1) {
+            const port = self.takeEphemeralPortCursor();
+            candidate.setPort(port);
+            if (self.findOpenListenerRef(&candidate) == null) return port;
+        }
+        return error.AddressInUse;
+    }
+
+    fn takeEphemeralPortCursor(self: *Backend) u16 {
+        const cursor = if (self.process_registry) |registry|
+            &registry.next_ephemeral_port
+        else
+            &self.next_ephemeral_port;
+        const port = cursor.*;
+        cursor.* = if (port == ephemeral_port_max) ephemeral_port_min else port + 1;
+        return port;
+    }
+
     pub fn registerListener(self: *Backend, handle: SocketHandle, address: Io.net.IpAddress) std.mem.Allocator.Error!void {
         if (self.process_registry) |registry| {
             try registry.registerListener(self, handle, address);
@@ -1414,6 +1444,7 @@ pub const ProcessRegistry = struct {
     next_futex_key: usize = 1,
     next_group_id: usize = 1,
     next_handle: SocketHandle = 1000,
+    next_ephemeral_port: u16 = Backend.ephemeral_port_min,
     locks: FileLockRegistry,
 
     const ListenerRegistration = struct {

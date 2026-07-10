@@ -628,6 +628,47 @@ test "io: duplicate listeners are rejected across process backends" {
     try std.testing.expectError(error.AddressInUse, address.listen(client_io, .{}));
 }
 
+test "io: listen on port 0 allocates distinct ephemeral ports" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA6A, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 0) catch unreachable;
+    var server_a = try address.listen(io, .{});
+    defer server_a.deinit(io);
+    var server_b = try address.listen(io, .{});
+    defer server_b.deinit(io);
+
+    const port_a = server_a.socket.address.getPort();
+    const port_b = server_b.socket.address.getPort();
+    try std.testing.expect(port_a >= Backend.ephemeral_port_min);
+    try std.testing.expect(port_b >= Backend.ephemeral_port_min);
+    try std.testing.expect(port_a != port_b);
+}
+
+test "io: ephemeral listener accepts connections to its assigned port" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA6B, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const bind_address = Io.net.IpAddress.parseIp4("127.0.0.1", 0) catch unreachable;
+    var server = try bind_address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    const assigned = server.socket.address;
+    try std.testing.expect(assigned.getPort() != 0);
+
+    const client = try assigned.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+}
+
 test "io: process futex keys are namespaced by backend" {
     if (!fiber_supported) return error.SkipZigTest;
 

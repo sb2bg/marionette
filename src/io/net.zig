@@ -151,20 +151,28 @@ pub fn Ops(comptime Backend: type) type {
             if (options.protocol != .tcp) return error.ProtocolUnsupportedBySystem;
 
             const backend = backendFromUserdata(userdata);
-            if (backend.findOpenListenerRef(address) != null) return error.AddressInUse;
+            // Port 0 asks for an ephemeral port, per POSIX bind semantics;
+            // the assigned port is surfaced through the returned socket's
+            // address so callers can connect to it.
+            var bound_address = address.*;
+            if (bound_address.getPort() == 0) {
+                bound_address.setPort(try backend.allocateEphemeralPort(&bound_address));
+            } else if (backend.findOpenListenerRef(&bound_address) != null) {
+                return error.AddressInUse;
+            }
 
             const node = backend.allocateNetworkNode() catch return error.NetworkDown;
             const listener = backend.allocator.create(Backend.ListenerState) catch return error.SystemResources;
             errdefer backend.allocator.destroy(listener);
-            listener.* = .{ .address = address.*, .node = node };
+            listener.* = .{ .address = bound_address, .node = node };
             errdefer listener.pending.deinit(backend.allocator);
 
             const handle = backend.createHandle(.{ .listener = listener }) catch return error.SystemResources;
             errdefer _ = backend.handles.pop();
-            backend.registerListener(handle, address.*) catch return error.SystemResources;
+            backend.registerListener(handle, bound_address) catch return error.SystemResources;
             return .{
                 .handle = handle,
-                .address = address.*,
+                .address = bound_address,
             };
         }
 
