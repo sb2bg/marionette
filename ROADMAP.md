@@ -14,8 +14,9 @@ belong in the relevant docs, especially:
 - `docs/api.md`
 
 Item-level status for Marionette's own defects lives in
-[`SIMULATOR_FINDINGS.md`](SIMULATOR_FINDINGS.md). External SUT findings remain
-separately characterized in [`FOUND_BUGS.md`](FOUND_BUGS.md).
+[`SIMULATOR_FINDINGS.md`](https://github.com/sb2bg/marionette/blob/main/SIMULATOR_FINDINGS.md).
+External SUT findings remain separately characterized in
+[`FOUND_BUGS.md`](https://github.com/sb2bg/marionette/blob/main/FOUND_BUGS.md).
 
 Last updated during the post-`v0.5.0` simulator trustworthiness audit.
 
