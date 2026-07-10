@@ -5,6 +5,9 @@ external systems. "Finding" is intentionally broader than "confirmed upstream
 bug": it can include real SUT bugs, simulator-boundary counterexamples, harness
 or model bugs, and positive robustness results worth preserving.
 
+The item-level ledger for defects in Marionette itself is
+[`SIMULATOR_FINDINGS.md`](SIMULATOR_FINDINGS.md).
+
 A finding belongs here only after the failing state is understood well enough to
 separate:
 
@@ -31,15 +34,15 @@ result before making a claim about it.
 
 ## Summary
 
-| ID        | Project | Classification     | Trigger                                      | Result                                                                                             | Upstream status                     |
-| --------- | ------- | ------------------ | -------------------------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| KVDB-001  | kvdb    | Confirmed SUT bug  | Metadata-loss crash / corrupt root page      | Reopen could trust an invalid B-tree root and hit debug assertions instead of reporting corruption | Not fixed upstream                  |
-| KVDB-002  | kvdb    | Confirmed SUT bug  | No-fault randomized synced puts              | Leaf insert could overwrite an existing entry's payload, making a committed key disappear          | Not fixed upstream                  |
-| KVDB-003  | kvdb    | Confirmed SUT bug  | No-fault delete-heavy model workload         | Leaf delete rebalancing broke B+tree separator/order invariants, making unrelated keys unreachable | Not fixed upstream                  |
-| XITDB-001 | xitdb   | Simulator boundary | 7-byte-sector torn committed-size header     | A sub-field tear can corrupt recovery, but the field is structurally atomic at realistic sectors    | Characterized; not a reported bug   |
-| XITDB-002 | xitdb   | Positive result    | 512/4096-byte data-region torn/reorder sweep | Acknowledged modeled history survived the tested realistic data-region crash faults                | No SUT bug found in this profile    |
-| DUSTY-001 | dusty   | Confirmed SUT bug  | Server crash with a pooled keep-alive conn   | Client connection pool never evicts a dead connection; the client can never recover               | Not reported upstream yet           |
-| DUSTY-002 | dusty   | Confirmed SUT bug  | Graceful shutdown with an active handler     | `listen` drain busy-spins forever: the drain event latches set and is never reset                 | Not reported upstream yet           |
+| ID        | Project | Classification     | Trigger                                      | Result                                                                                             | Upstream status                   |
+| --------- | ------- | ------------------ | -------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------- |
+| KVDB-001  | kvdb    | Confirmed SUT bug  | Metadata-loss crash / corrupt root page      | Reopen could trust an invalid B-tree root and hit debug assertions instead of reporting corruption | Not fixed upstream                |
+| KVDB-002  | kvdb    | Confirmed SUT bug  | No-fault randomized synced puts              | Leaf insert could overwrite an existing entry's payload, making a committed key disappear          | Not fixed upstream                |
+| KVDB-003  | kvdb    | Confirmed SUT bug  | No-fault delete-heavy model workload         | Leaf delete rebalancing broke B+tree separator/order invariants, making unrelated keys unreachable | Not fixed upstream                |
+| XITDB-001 | xitdb   | Simulator boundary | 7-byte-sector torn committed-size header     | A sub-field tear can corrupt recovery, but the field is structurally atomic at realistic sectors   | Characterized; not a reported bug |
+| XITDB-002 | xitdb   | Positive result    | 512/4096-byte data-region torn/reorder sweep | Acknowledged modeled history survived the tested realistic data-region crash faults                | No SUT bug found in this profile  |
+| DUSTY-001 | dusty   | Confirmed SUT bug  | Server crash with a pooled keep-alive conn   | Client connection pool never evicts a dead connection; the client can never recover                | Fixed upstream                    |
+| DUSTY-002 | dusty   | Confirmed SUT bug  | Graceful shutdown with an active handler     | `listen` drain busy-spins forever: the drain event latches set and is never reset                  | Fixed upstream                    |
 
 ## Shared Harness Pattern
 
