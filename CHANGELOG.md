@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Completes the architecture clobber set in Marionette's corrected fiber
+  context switch. The x86_64 LLVM path now names the `xmm` and `ymm`
+  aliases as well as `zmm`, so CPUs without the wider register classes do
+  not retain stale SIMD values across a switch. AArch64 now clobbers the
+  allocatable `x18` on targets such as Linux while omitting it on Android,
+  Darwin, Fuchsia, Windows, and OpenHarmony targets where LLVM reserves it
+  as a platform register by default.
+
 - Hardens stream write backpressure from review findings. Writers now
   park on a world-global backpressure key instead of their own
   connection, so a writer blocked because another connection filled the

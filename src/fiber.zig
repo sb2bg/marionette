@@ -221,7 +221,7 @@ pub inline fn contextSwitch(message: *const Switch) *const Switch {
     return correctedContextSwitch(message);
 }
 
-/// Local copy of `std.Io.fiber.contextSwitch` with two corrections, both
+/// Local copy of `std.Io.fiber.contextSwitch` with three corrections, all
 /// load-bearing for ReleaseSafe:
 ///
 /// 1. Corrected asm constraints. The std version lists the message
@@ -240,6 +240,14 @@ pub inline fn contextSwitch(message: *const Switch) *const Switch {
 ///    fold the loop's exit condition into a constant, spinning forever.
 ///    Keeping the label inside this dedicated function makes every switch
 ///    a plain call from the caller's point of view.
+///
+/// 3. Complete LLVM clobber coverage. On x86_64, LLVM does not always treat
+///    `zmmN` as clobbering its `ymmN` and `xmmN` aliases when the target CPU
+///    lacks the wider register classes, so all three widths are explicit.
+///    On aarch64, `x18` is allocatable on targets such as Linux and must be
+///    invalidated across a switch, but it must stay out of the clobber list
+///    on Android, Darwin, Fuchsia, Windows, and OpenHarmony, where LLVM
+///    reserves it as a platform register by default.
 ///
 /// Remove this copy once fixes land upstream in `std.Io.fiber`.
 noinline fn correctedContextSwitch(s: *const Switch) *const Switch {
@@ -275,6 +283,11 @@ noinline fn correctedContextSwitch(s: *const Switch) *const Switch {
               .x15 = true,
               .x16 = true,
               .x17 = true,
+              .x18 = !(builtin.abi.isAndroid() or
+                builtin.abi.isOpenHarmony() or
+                builtin.os.tag.isDarwin() or
+                builtin.os.tag == .fuchsia or
+                builtin.os.tag == .windows),
               .x19 = true,
               .x20 = true,
               .x21 = true,
@@ -523,6 +536,70 @@ noinline fn correctedContextSwitch(s: *const Switch) *const Switch {
               .zmm29 = true,
               .zmm30 = true,
               .zmm31 = true,
+              .ymm0 = true,
+              .ymm1 = true,
+              .ymm2 = true,
+              .ymm3 = true,
+              .ymm4 = true,
+              .ymm5 = true,
+              .ymm6 = true,
+              .ymm7 = true,
+              .ymm8 = true,
+              .ymm9 = true,
+              .ymm10 = true,
+              .ymm11 = true,
+              .ymm12 = true,
+              .ymm13 = true,
+              .ymm14 = true,
+              .ymm15 = true,
+              .ymm16 = true,
+              .ymm17 = true,
+              .ymm18 = true,
+              .ymm19 = true,
+              .ymm20 = true,
+              .ymm21 = true,
+              .ymm22 = true,
+              .ymm23 = true,
+              .ymm24 = true,
+              .ymm25 = true,
+              .ymm26 = true,
+              .ymm27 = true,
+              .ymm28 = true,
+              .ymm29 = true,
+              .ymm30 = true,
+              .ymm31 = true,
+              .xmm0 = true,
+              .xmm1 = true,
+              .xmm2 = true,
+              .xmm3 = true,
+              .xmm4 = true,
+              .xmm5 = true,
+              .xmm6 = true,
+              .xmm7 = true,
+              .xmm8 = true,
+              .xmm9 = true,
+              .xmm10 = true,
+              .xmm11 = true,
+              .xmm12 = true,
+              .xmm13 = true,
+              .xmm14 = true,
+              .xmm15 = true,
+              .xmm16 = true,
+              .xmm17 = true,
+              .xmm18 = true,
+              .xmm19 = true,
+              .xmm20 = true,
+              .xmm21 = true,
+              .xmm22 = true,
+              .xmm23 = true,
+              .xmm24 = true,
+              .xmm25 = true,
+              .xmm26 = true,
+              .xmm27 = true,
+              .xmm28 = true,
+              .xmm29 = true,
+              .xmm30 = true,
+              .xmm31 = true,
               .fpsr = true,
               .fpcr = true,
               .mxcsr = true,
