@@ -1380,6 +1380,61 @@ test "io: fixed fault participants evolve together across a large quiet jump" {
     try std.testing.expect(std.mem.indexOf(u8, a, "process.restart node=0 automatic=true") != null);
 }
 
+test "io: scheduler timer jumps evolve process and network faults" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        kills: u32 = 0,
+
+        fn onKill(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.kills += 1;
+        }
+
+        fn restart(_: *anyopaque, _: env_module.Env) anyerror!void {}
+
+        fn sleep(io: Io) void {
+            Io.sleep(io, .fromNanoseconds(100), .awake) catch unreachable;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA6B, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .service_nodes = 2, .path_capacity = 4 },
+    });
+    var state: State = .{};
+    try sim.registerProcess(1, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+    try sim.control.process.setDynamics(1, .{
+        .crash_rate = .always(),
+        .crash_stability_min_ns = 10,
+    });
+    try sim.control.network.setPartitionDynamics(.{
+        .partition_rate = .always(),
+        .partition_stability_min_ns = 20,
+    });
+
+    const io = sim.env.io();
+    var sleeper = Io.async(io, State.sleep, .{io});
+    sleeper.await(io);
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 100), world.now());
+    try std.testing.expectEqual(@as(u32, 1), state.kills);
+    const trace = world.traceBytes();
+    const run_to_crash = std.mem.indexOf(u8, trace, "world.run_for start_ns=0 duration_ns=10 end_ns=10").?;
+    const crash = std.mem.indexOf(u8, trace, "process.kill node=1 reason=auto_crash").?;
+    const run_to_partition = std.mem.indexOf(u8, trace, "world.run_for start_ns=10 duration_ns=10 end_ns=20").?;
+    const partition = std.mem.indexOf(u8, trace, "network.auto_partition").?;
+    try std.testing.expect(run_to_crash < crash);
+    try std.testing.expect(crash < run_to_partition);
+    try std.testing.expect(run_to_partition < partition);
+}
+
 test "io: automatic process restart reports missing lifecycle" {
     if (!fiber_supported) return error.SkipZigTest;
 

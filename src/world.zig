@@ -846,16 +846,19 @@ pub const World = struct {
             .on_crash = onProcessSupervisorDiskCrashOpaque,
         });
 
+        const control: env_module.SimControl = .{
+            .allocation = sim_allocation.control(),
+            .disk = sim_disk.control(),
+            .network = network_control,
+            .process = process_supervisor.control(),
+            .tasks = scheduler_module.taskControl(scheduler),
+            .world = self,
+        };
+        scheduler.attachFaultEvolution(control.faultEvolution());
+
         return .{
             .env = base_env,
-            .control = .{
-                .allocation = sim_allocation.control(),
-                .disk = sim_disk.control(),
-                .network = network_control,
-                .process = process_supervisor.control(),
-                .tasks = scheduler_module.taskControl(scheduler),
-                .world = self,
-            },
+            .control = control,
         };
     }
 

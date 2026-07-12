@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const disk_module = @import("disk/root.zig");
+const env_module = @import("env.zig");
 const fiber = @import("fiber.zig");
 const futex_module = @import("io/futex.zig");
 const io_internal = @import("io/root.zig").internal;
@@ -91,6 +92,10 @@ pub const TaskScheduler = struct {
     /// stack-overflow diagnostics signal handler. See
     /// `SimulateOptions.fiber_overflow_diagnostics`.
     overflow_diagnostics: bool = true,
+    /// Installed by `World.simulate` so timer-driven clock jumps share the
+    /// same automatic-fault boundaries as harness-driven jumps. Standalone
+    /// scheduler tests leave this null and advance the low-level world.
+    fault_evolution: ?env_module.FaultEvolutionControl = null,
 
     const MainWait = struct {
         key: WaitKey,
@@ -221,6 +226,10 @@ pub const TaskScheduler = struct {
             .allocator = allocator,
             .world = world,
         };
+    }
+
+    pub fn attachFaultEvolution(self: *Self, control: env_module.FaultEvolutionControl) void {
+        self.fault_evolution = control;
     }
 
     pub fn deinit(self: *Self) void {
@@ -511,7 +520,7 @@ pub const TaskScheduler = struct {
 
             const now = self.world.now();
             if (target > now) {
-                self.world.runFor(target - now) catch @panic("failed to advance to main wait deadline");
+                self.advanceClockTo(target) catch @panic("failed to advance to main wait deadline");
             }
             self.wakeDueTasks() catch @panic("failed to wake due tasks during main-context wait");
 
@@ -778,7 +787,7 @@ pub const TaskScheduler = struct {
     /// rather than a scheduled task. Panics on deterministic deadlock: if no
     /// task is runnable, no timer is pending, and the flag is still unset,
     /// the awaited work can never complete.
-    pub fn runUntilDone(self: *Self, done: *const bool) TaskSchedulerError!void {
+    pub fn runUntilDone(self: *Self, done: *const bool) !void {
         while (!done.*) {
             switch (try self.stepOnce()) {
                 .ran => {},
@@ -823,11 +832,11 @@ pub const TaskScheduler = struct {
         }
     }
 
-    fn advanceToNextTimer(self: *Self) TaskSchedulerError!bool {
+    fn advanceToNextTimer(self: *Self) !bool {
         const deadline = self.nextDeadline() orelse return false;
         const now = self.world.now();
         if (deadline > now) {
-            try self.world.runFor(self.world.clock().ceilDuration(deadline - now));
+            try self.advanceClockTo(deadline);
         }
         const wake_at = self.world.now();
 
@@ -851,6 +860,17 @@ pub const TaskScheduler = struct {
         }
 
         return due.items.len > 0;
+    }
+
+    fn advanceClockTo(self: *Self, target_ns: u64) !void {
+        const now = self.world.now();
+        std.debug.assert(target_ns >= now);
+        const duration_ns = target_ns - now;
+        if (self.fault_evolution) |control| {
+            try control.runFor(duration_ns);
+        } else {
+            try self.world.runFor(duration_ns);
+        }
     }
 
     fn nextDeadline(self: *const Self) ?u64 {

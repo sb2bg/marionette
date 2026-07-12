@@ -27,8 +27,8 @@ pub const AllocationStats = allocation_module.Stats;
 pub const AllocationControl = allocation_module.Control;
 
 /// Per-node automatic crash/restart rates, applied through
-/// `SimControl.process.setDynamics` and evolved only at `tick`/`runFor`
-/// fault boundaries. Zero rates schedule nothing and consume no randomness.
+/// `SimControl.process.setDynamics` and evolved at simulated-time fault
+/// boundaries. Zero rates schedule nothing and consume no randomness.
 pub const ProcessDynamicsOptions = struct {
     /// Per-tick chance that an alive process is killed.
     crash_rate: BuggifyRate = .never(),
@@ -524,6 +524,62 @@ pub const ProcessControl = struct {
     }
 };
 
+/// Narrow time authority shared by harness-driven and scheduler-driven clock
+/// jumps so automatic faults evolve identically regardless of who advances
+/// the clock.
+pub const FaultEvolutionControl = struct {
+    network: network_module.AnyNetworkControl,
+    process: ProcessControl,
+    world: *World,
+
+    pub fn runFor(self: FaultEvolutionControl, duration_ns: clock_module.Duration) !void {
+        const tick_ns = self.world.clock().tick_ns;
+        std.debug.assert(duration_ns % tick_ns == 0);
+        if (duration_ns == 0) return;
+
+        const end_ns = std.math.add(clock_module.Timestamp, self.world.now(), duration_ns) catch
+            @panic("simulated duration exceeds clock range");
+        try self.evolveAtCurrentBoundary();
+        while (try self.nextBoundaryBeforeOrAt(end_ns)) |boundary_ns| {
+            if (boundary_ns > self.world.now()) {
+                try self.world.runFor(boundary_ns - self.world.now());
+            }
+            try self.evolveAtCurrentBoundary();
+        }
+
+        if (end_ns > self.world.now()) {
+            try self.world.runFor(end_ns - self.world.now());
+            try self.evolveAtCurrentBoundary();
+        }
+        for (self.participants()) |participant| {
+            try participant.finishRunFor();
+        }
+    }
+
+    fn participants(self: FaultEvolutionControl) [2]fault_evolution_module.Participant {
+        return .{
+            network_module.internal.faultEvolutionParticipantFromControl(self.network),
+            self.process.faultEvolutionParticipant(),
+        };
+    }
+
+    fn evolveAtCurrentBoundary(self: FaultEvolutionControl) !void {
+        try self.world.record("fault_evolution.boundary now_ns={}", .{self.world.now()});
+        for (self.participants()) |participant| {
+            try participant.evolveAtBoundary();
+        }
+    }
+
+    fn nextBoundaryBeforeOrAt(self: FaultEvolutionControl, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
+        var next: ?clock_module.Timestamp = null;
+        for (self.participants()) |participant| {
+            const candidate = (try participant.nextBoundaryBeforeOrAt(end_ns)) orelse continue;
+            next = minOptionalTimestamp(next, candidate);
+        }
+        return next;
+    }
+};
+
 /// Harness-facing simulator controls: time movement plus the fault
 /// authorities for allocation, disk, network, processes, and tasks.
 /// Application code receives `Env` instead and never sees this.
@@ -539,7 +595,7 @@ pub const SimControl = struct {
     /// at the new boundary.
     pub fn tick(self: SimControl) !void {
         try self.world.tick();
-        try self.evolveFaultsAtCurrentBoundary();
+        try self.faultEvolution().evolveAtCurrentBoundary();
     }
 
     /// Run scheduled `Io.async`/`Io.concurrent` tasks until none is
@@ -559,53 +615,18 @@ pub const SimControl = struct {
     /// timestamps. The duration must be a whole number of ticks; a
     /// misaligned duration asserts as harness misuse.
     pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
-        const tick_ns = self.world.clock().tick_ns;
         // Misuse contract: like `World.runFor` and `SimClock.runFor`, a
         // duration that is not a whole number of ticks is a harness bug and
         // asserts instead of returning an error.
-        std.debug.assert(duration_ns % tick_ns == 0);
-        if (duration_ns == 0) return;
-
-        const end_ns = std.math.add(clock_module.Timestamp, self.world.now(), duration_ns) catch
-            @panic("simulated duration exceeds clock range");
-        try self.evolveFaultsAtCurrentBoundary();
-        while (try self.nextFaultBoundaryBeforeOrAt(end_ns)) |boundary_ns| {
-            if (boundary_ns > self.world.now()) {
-                try self.world.runFor(boundary_ns - self.world.now());
-            }
-            try self.evolveFaultsAtCurrentBoundary();
-        }
-
-        if (end_ns > self.world.now()) {
-            try self.world.runFor(end_ns - self.world.now());
-            try self.evolveFaultsAtCurrentBoundary();
-        }
-        for (self.faultEvolutionParticipants()) |participant| {
-            try participant.finishRunFor();
-        }
+        try self.faultEvolution().runFor(duration_ns);
     }
 
-    fn faultEvolutionParticipants(self: SimControl) [2]fault_evolution_module.Participant {
+    pub fn faultEvolution(self: SimControl) FaultEvolutionControl {
         return .{
-            network_module.internal.faultEvolutionParticipantFromControl(self.network),
-            self.process.faultEvolutionParticipant(),
+            .network = self.network,
+            .process = self.process,
+            .world = self.world,
         };
-    }
-
-    fn evolveFaultsAtCurrentBoundary(self: SimControl) !void {
-        try self.world.record("fault_evolution.boundary now_ns={}", .{self.world.now()});
-        for (self.faultEvolutionParticipants()) |participant| {
-            try participant.evolveAtBoundary();
-        }
-    }
-
-    fn nextFaultBoundaryBeforeOrAt(self: SimControl, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
-        var next: ?clock_module.Timestamp = null;
-        for (self.faultEvolutionParticipants()) |participant| {
-            const candidate = (try participant.nextBoundaryBeforeOrAt(end_ns)) orelse continue;
-            next = minOptionalTimestamp(next, candidate);
-        }
-        return next;
     }
 };
 
