@@ -183,8 +183,10 @@ fn incrementCounter(
             return;
         }
     }
-    try counters.append(allocator, .{
-        .name = try allocator.dupe(u8, name),
+    try counters.ensureUnusedCapacity(allocator, 1);
+    const owned_name = try allocator.dupe(u8, name);
+    counters.appendAssumeCapacity(.{
+        .name = owned_name,
         .count = 1,
     });
 }
@@ -264,21 +266,29 @@ fn linkFor(summary: *Summary, from: u16, to: u16) !*LinkCounter {
 fn recordRunContext(summary: *Summary, event: ParsedEvent) !void {
     if (std.mem.eql(u8, event.name, "run.name")) {
         const value = event.field("value") orelse return error.InvalidTraceEvent;
+        const owned_value = try summary.allocator.dupe(u8, value);
         if (summary.name) |name| summary.allocator.free(name);
-        summary.name = try summary.allocator.dupe(u8, value);
+        summary.name = owned_value;
     } else if (std.mem.eql(u8, event.name, "run.profile")) {
         const value = event.field("name") orelse return error.InvalidTraceEvent;
+        const owned_value = try summary.allocator.dupe(u8, value);
         if (summary.name) |name| summary.allocator.free(name);
-        summary.name = try summary.allocator.dupe(u8, value);
+        summary.name = owned_value;
     } else if (std.mem.eql(u8, event.name, "run.tag")) {
         const value = event.field("value") orelse return error.InvalidTraceEvent;
-        try summary.tags.append(summary.allocator, try summary.allocator.dupe(u8, value));
+        try summary.tags.ensureUnusedCapacity(summary.allocator, 1);
+        const owned_value = try summary.allocator.dupe(u8, value);
+        summary.tags.appendAssumeCapacity(owned_value);
     } else if (std.mem.eql(u8, event.name, "run.attribute")) {
         const key = event.field("key") orelse return error.InvalidTraceEvent;
         const value = event.field("value") orelse return error.InvalidTraceEvent;
-        try summary.attributes.append(summary.allocator, .{
-            .key = try summary.allocator.dupe(u8, key),
-            .value = try summary.allocator.dupe(u8, value),
+        try summary.attributes.ensureUnusedCapacity(summary.allocator, 1);
+        const owned_key = try summary.allocator.dupe(u8, key);
+        errdefer summary.allocator.free(owned_key);
+        const owned_value = try summary.allocator.dupe(u8, value);
+        summary.attributes.appendAssumeCapacity(.{
+            .key = owned_key,
+            .value = owned_value,
         });
     }
 }
@@ -373,6 +383,25 @@ test "trace summary: summarizes run context and network events" {
         \\trace.network.link from=3 to=1 sends=0 deliveries=0 drops=1
         \\
     , output);
+}
+
+fn summarizeAllocationFailureSweep(allocator: std.mem.Allocator) !void {
+    const trace =
+        "event=0 run.name value=first\n" ++
+        "event=1 run.profile name=replacement\n" ++
+        "event=2 run.tag value=smoke\n" ++
+        "event=3 run.attribute key=replicas value=uint:3\n" ++
+        "event=4 network.drop id=1 from=3 to=1 reason=link_disabled\n";
+    var summary = try summarize(allocator, trace);
+    defer summary.deinit();
+}
+
+test "trace summary: allocation failures roll back owned fields" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        summarizeAllocationFailureSweep,
+        .{},
+    );
 }
 
 test "trace summary: rejects malformed event prefix" {
