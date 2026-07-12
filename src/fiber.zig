@@ -109,11 +109,15 @@ pub const Fiber = struct {
 
         const memory: Memory = if (use_guard_pages) memory: {
             const page_size = std.heap.pageSize();
-            const usable_len = std.mem.alignForward(usize, options.stack_size, page_size);
+            const usable_with_slop = std.math.add(usize, options.stack_size, page_size - 1) catch
+                return error.OutOfMemory;
+            const usable_len = std.mem.alignBackward(usize, usable_with_slop, page_size);
             const guard_len = guardLength();
+            const mapping_len = std.math.add(usize, usable_len, guard_len) catch
+                return error.OutOfMemory;
             const mapping = std.posix.mmap(
                 null,
-                usable_len + guard_len,
+                mapping_len,
                 .{ .READ = true, .WRITE = true },
                 .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
                 -1,
@@ -784,6 +788,22 @@ test "fiber: rejects undersized stacks" {
 
     try std.testing.expectError(error.StackTooSmall, Fiber.create(std.testing.allocator, .{
         .stack_size = @sizeOf(StartClosure),
+        .finish_context = &finish_context,
+        .entry = Noop.run,
+        .arg = undefined,
+    }));
+}
+
+test "fiber: rejects stack sizes whose guarded mapping length overflows" {
+    if (!supported or !use_guard_pages) return error.SkipZigTest;
+
+    var finish_context: Context = undefined;
+    const Noop = struct {
+        fn run(_: *anyopaque) void {}
+    };
+
+    try std.testing.expectError(error.OutOfMemory, Fiber.create(std.testing.allocator, .{
+        .stack_size = std.math.maxInt(usize),
         .finish_context = &finish_context,
         .entry = Noop.run,
         .arg = undefined,
