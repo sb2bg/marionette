@@ -275,6 +275,31 @@ test "disk: scripted sector corruption persists across reads" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=4 status=corrupt latency_ns=10") != null);
 }
 
+test "disk: scripted sector corruption rejects a missing file" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        disk.control().corruptSector("missing.log", 0),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        disk.disk().stat(.{ .path = "missing.log" }),
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "kind=scripted_corruption",
+    ) == null);
+}
+
 test "disk: rejects invalid fault rates" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();

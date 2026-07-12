@@ -231,6 +231,7 @@ pub const SimDisk = struct {
         try self.validatePath(path);
         try self.validateRange(offset, @intCast(self.options.sector_size));
 
+        if (self.visibleLength(path) == null) return error.FileNotFound;
         const file = try self.getOrCreateFile(path, null);
         const sector = try self.getOrCreateSector(file, offset / self.options.sector_size);
         sector.corrupt = true;
