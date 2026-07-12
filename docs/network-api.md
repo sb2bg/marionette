@@ -1,13 +1,13 @@
 # Network API Direction
 
-This document describes the current network API shape. Marionette exposes the
-same app-facing typed endpoint shape from simulation and production setup.
-Production byte endpoints can use either the local same-process adapter or the
-first socket-backed transport slice when listener topology is configured.
+This document describes the current simulation network API. Marionette
+endpoints are simulation-only; production networking uses host `std.Io.net`.
+The remaining local/socket-backed production endpoint adapters are deprecated
+compatibility code and removal candidates, not a supported parity contract.
 
-Application code should not care whether messages come from deterministic
-simulator events or production IO. The composition root chooses the backing and
-threads `env` plus node-scoped endpoints into the service.
+Application code should put its protocol behind an application-owned seam.
+The composition root supplies simulated endpoints in tests and host networking
+in production.
 
 ## Current Status
 

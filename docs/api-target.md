@@ -1,8 +1,9 @@
 # API Target Spec
 
 This is the current target shape for Marionette examples and public API. It is
-intentionally narrower than a full production networking stack; see
-[Network API Direction](network-api.md) for the remaining socket-adapter work.
+intentionally narrower than a full production networking stack. Endpoints are
+simulation-only; production networking uses host `std.Io.net`. See
+[Network API Direction](network-api.md).
 
 ## Core Principles
 
@@ -81,6 +82,7 @@ pub const Sim = struct {
 
 pub const Production = struct {
     pub fn env(self: *Production) Env;
+    // Deprecated compatibility remnants; production networking uses std.Io.net.
     pub fn endpoint(self: *Production, comptime Message: type, opts: ProductionEndpointOptions) !Endpoint(Message);
     pub fn endpoints(self: *Production, comptime Message: type, comptime count: usize, opts: ProductionEndpointsOptions) ![count]Endpoint(Message);
     pub fn byteEndpoint(self: *Production, opts: ProductionEndpointOptions) !ByteEndpoint;
@@ -98,8 +100,8 @@ backend supports deterministic
 clock, sleep, random, `randomSecure`, scheduler-backed `Io.async` /
 `Io.concurrent` / await, scheduler-backed `Io.Group`, immediate non-blocking
 `Io.Queue` operations, and an
-in-memory TCP stream subset for `std.Io.net`. Cancellation currently awaits
-completion; cooperative cancellation points are not implemented.
+in-memory TCP stream subset for `std.Io.net`. Cooperative cancellation is
+delivered at the supported futex, sleep, and network suspension points.
 It also supports a directory-aware file subset over `SimDisk`:
 `Dir.createFile`, `Dir.openFile`, `Dir.statFile`, `Dir.access`, positional and
 streaming file reads and writes, `File.length`, `File.stat`, `File.setLength`,
@@ -129,12 +131,11 @@ var server = try Server.init(server_env.io(), server_env.recorder());
 ```
 
 The design keeps `Env` non-generic and passes `Endpoint(Message)` as a sibling
-handle. Production-shaped code that does not need all of `Env` should take
-`std.Io` and `Recorder` directly. `Production.endpoint(Message, opts)`
-currently provides a local in-process production-shaped endpoint with declared
-peer topology for same-process parity tests. `Production.byteEndpoint(opts)`
-uses that same local adapter unless `opts.listen` is set, in which case it uses
-the first socket-backed loopback transport slice.
+simulation handle. Production-shaped code that does not need all of `Env`
+should take `std.Io` and `Recorder` directly and use host `std.Io.net` behind
+its own protocol seam. The remaining `Production.endpoint` and
+`Production.byteEndpoint` methods are deprecated parity-test remnants and
+removal candidates.
 
 `ByteEndpoint` is the byte-oriented sibling for libraries that want Marionette
 behind their own protocol API. `send(to, bytes)` copies borrowed bytes before

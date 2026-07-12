@@ -149,10 +149,12 @@ Three pieces, either way:
 - **`checks`** assert invariants on the final state, usually through
   `*const mar.SimCase(App)`.
 
-`expectSimPass` runs once with a fixed seed. `expectSimFuzz` runs many seeds
-sequentially. `expectSimFailure` asserts that a deliberately-buggy scenario gets
-caught, useful for proving your checker actually works. Custom harnesses that
-outgrow these helpers drive `mar.World` directly.
+`expectSimPass` runs twice with one fixed seed and compares the traces.
+`expectSimFuzz` requires a nonzero `seeds` count and performs the same replay
+check for each derived seed. `expectSimFailure` asserts that a deliberately
+buggy scenario reaches a replayable failure, useful for proving your checker
+actually works. Custom harnesses that outgrow these helpers drive `mar.World`
+directly.
 
 ## The two surfaces: `io` and `control`
 

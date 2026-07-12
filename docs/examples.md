@@ -265,8 +265,9 @@ coverage; it shows a user-owned protocol encoding and decoding at the
 `mar.ByteEndpoint` edge, so database code sees typed `Request` and `Response`
 values while Marionette only moves bytes.
 
-The scenario drives a client and server over simulated byte endpoints, so the
-same adapter shape can later sit on production byte endpoints.
+The scenario drives a client and server over simulated byte endpoints. The
+application-owned codec can sit over host `std.Io.net` in production; Marionette
+does not provide a production endpoint transport.
 
 ## Durable Broadcast
 

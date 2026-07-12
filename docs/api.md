@@ -353,9 +353,9 @@ deterministic `std.Io` backend; `sim.envForNode(node).io()` returns the
 process-scoped backend for a specific simulated node. The backend supports
 deterministic clock/random operations, scheduler-backed `Io.async` /
 `Io.concurrent` / await, scheduler-backed `Io.Group`, immediate non-blocking
-`Io.Queue` operations, and an in-memory TCP stream subset today. Cancellation
-currently waits for completion; cooperative cancellation points remain future
-work. The backend also supports a directory-aware file subset over `SimDisk`:
+`Io.Queue` operations, and an in-memory TCP stream subset today. Cooperative
+cancellation is delivered at the supported futex, sleep, and network
+suspension points. The backend also supports a directory-aware file subset over `SimDisk`:
 create/open, access/statFile, positional and streaming read/write,
 length/stat/setLength, sync, close, delete, rename, directory
 create/open/stat/iteration, and process-coordinated blocking and non-blocking
@@ -549,9 +549,9 @@ undone: an armed `crashAfterOps` budget stays armed, and app-level
 
 ## Network
 
-`mar.Endpoint(Message)` is the app-facing network handle. Simulation and
-production setup both return this typed endpoint shape, while simulator-control
-faults remain on `control.network`.
+`mar.Endpoint(Message)` is a simulation-only app-facing network handle.
+Production code uses host `std.Io.net`; simulator-control faults remain on
+`control.network`.
 
 See [Network Model](network.md) for the design contract and current limits.
 See [Network API Direction](network-api.md) for the split between app-facing
@@ -883,11 +883,11 @@ Marionette uses a small error policy:
 
 - Invariant violations use `std.debug.assert`.
 - Resource failures return standard Zig errors.
-- Expected simulated faults will use domain-specific errors when Disk and
-  Network exist.
+- Expected disk and network faults use their narrow domain error sets.
 
-Today, most fallible `World` methods fail only because trace logging can
-allocate. That means standard allocator errors are the right surface for now.
+Low-level `World` methods may fail because trace logging allocates. Disk and
+network capabilities additionally return their declared model and validation
+errors.
 
 Examples of assertions:
 
@@ -901,9 +901,8 @@ Examples of returned errors:
 - Trace allocation failure.
 - Trace formatting allocation failure.
 
-The project may add named aliases like `TraceError` once the trace API
-settles, but it should not invent broad custom errors until there are real
-domain failures to expose.
+`TraceError`, `DiskError`, and `NetworkError` keep those boundaries explicit;
+the API avoids broad catch-all custom errors.
 
 When `mar.run` catches a scenario error return, it preserves the partial trace
 through the last completed event and includes that trace in the failure report.
