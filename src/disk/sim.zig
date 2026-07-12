@@ -695,13 +695,10 @@ pub const SimDisk = struct {
         var lost: u64 = 0;
         var torn: u64 = 0;
         var reordered: u64 = 0;
-        const CrashLanding = struct {
-            index: usize,
-            result: []const u8,
-        };
+        const CrashLanding = struct { index: usize };
         var landing = std.ArrayList(CrashLanding).empty;
         defer landing.deinit(self.world.allocator);
-        var apply_reordered = false;
+        var reorder_requested = false;
 
         for (self.pending_writes.items, 0..) |*pending, index| {
             if (try self.rollFault(
@@ -733,30 +730,29 @@ pub const SimDisk = struct {
                 "crash_reordered_write",
                 self.faults.crash_reordered_write_rate,
             )) {
-                try landing.append(self.world.allocator, .{ .index = index, .result = "reordered" });
-                reordered += 1;
-                apply_reordered = true;
-                continue;
+                reorder_requested = true;
             }
 
-            try landing.append(self.world.allocator, .{ .index = index, .result = "landed" });
-            landed += 1;
+            try landing.append(self.world.allocator, .{ .index = index });
         }
 
+        const apply_reordered = reorder_requested and landing.items.len > 1;
         if (apply_reordered) {
+            reordered = @intCast(landing.items.len);
             var index = landing.items.len;
             while (index > 0) {
                 index -= 1;
                 const item = landing.items[index];
                 const pending = &self.pending_writes.items[item.index];
                 try self.applyFullWrite(pending);
-                try self.recordCrashWrite(pending, item.result);
+                try self.recordCrashWrite(pending, "reordered");
             }
         } else {
+            landed = @intCast(landing.items.len);
             for (landing.items) |item| {
                 const pending = &self.pending_writes.items[item.index];
                 try self.applyFullWrite(pending);
-                try self.recordCrashWrite(pending, item.result);
+                try self.recordCrashWrite(pending, "landed");
             }
         }
         self.clearPendingWrites();

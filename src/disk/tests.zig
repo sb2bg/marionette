@@ -558,7 +558,7 @@ test "disk: a torn one-sector write does not damage durable truth" {
     try std.testing.expectEqualStrings("safe", &buffer);
 }
 
-test "disk: crash can reorder unflushed pending writes" {
+test "disk: crash-global reorder reverses pending writes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
@@ -585,6 +585,31 @@ test "disk: crash can reorder unflushed pending writes" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=0 path=wal.log kind=crash_reordered_write rate=1/1 roll=0 fired=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=1 path=wal.log offset=0 len=4 result=reordered") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=2 landed=0 lost=0 torn=0 reordered=2") != null);
+}
+
+test "disk: crash-global reorder classifies every reversed write" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "1111" });
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "2222" });
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "3333" });
+    try disk.control().setFaults(.{ .crash_reordered_write_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    const trace = world.traceBytes();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "roll=1 fired=false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "result=landed") == null);
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, trace, "result=reordered"));
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.crash pending_writes=3 landed=0 lost=0 torn=0 reordered=3") != null);
 }
 
 test "disk: crashed disk rejects operations until restart" {

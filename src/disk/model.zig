@@ -69,7 +69,7 @@ pub const DiskFaultOptions = struct {
     crash_lost_write_rate: env_module.BuggifyRate = .never(),
     /// Per-pending-write chance only a prefix of sectors lands at a crash.
     crash_torn_write_rate: env_module.BuggifyRate = .never(),
-    /// Per-pending-write chance writes land out of order at a crash.
+    /// Per-surviving-write chance to trigger a crash-global reversal.
     crash_reordered_write_rate: env_module.BuggifyRate = .never(),
     /// Per-pending-metadata chance a directory operation rolls back at a crash.
     crash_lost_metadata_rate: env_module.BuggifyRate = .never(),
