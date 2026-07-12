@@ -2034,6 +2034,59 @@ test "io: group cancel delivers to parked members in deterministic order" {
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.cancel_deliver task=1") != null);
 }
 
+const GroupAwaitCancelState = struct {
+    member_futex: u32 = 0,
+    member_canceled: bool = false,
+    await_canceled: bool = false,
+    cancel_result_canceled: bool = false,
+};
+
+fn groupAwaitCancelMember(io: Io, state: *GroupAwaitCancelState) Io.Cancelable!void {
+    io.futexWait(u32, &state.member_futex, 0) catch |err| {
+        state.member_canceled = true;
+        return err;
+    };
+}
+
+fn groupAwaitCancelOuter(io: Io, state: *GroupAwaitCancelState) Io.Cancelable!void {
+    var group: Io.Group = .init;
+    group.concurrent(io, groupAwaitCancelMember, .{ io, state }) catch
+        @panic("group member spawn failed");
+    group.await(io) catch |err| {
+        state.await_canceled = true;
+        return err;
+    };
+}
+
+fn groupAwaitCanceler(
+    io: Io,
+    future: *Io.Future(Io.Cancelable!void),
+    state: *GroupAwaitCancelState,
+) void {
+    Io.sleep(io, .fromNanoseconds(50), .awake) catch unreachable;
+    future.cancel(io) catch {
+        state.cancel_result_canceled = true;
+    };
+}
+
+test "io: canceling Group.await cancels members and resurfaces Canceled" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x96C5, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state: GroupAwaitCancelState = .{};
+    var outer = try Io.concurrent(io, groupAwaitCancelOuter, .{ io, &state });
+    var canceler = try Io.concurrent(io, groupAwaitCanceler, .{ io, &outer, &state });
+    canceler.await(io);
+
+    try std.testing.expect(state.member_canceled);
+    try std.testing.expect(state.await_canceled);
+    try std.testing.expect(state.cancel_result_canceled);
+}
+
 test "io: cancel of a task without cancellation points runs it to completion" {
     if (!fiber_supported) return error.SkipZigTest;
 

@@ -2174,15 +2174,31 @@ fn simGroupAwait(
     std.debug.assert(state.backend == backend);
     std.debug.assert(state.group == group);
     const runtime = backend.task_runtime orelse unreachable;
+    var canceled = false;
 
     if (!state.done) {
         if (runtime.inTask()) {
-            while (!state.done) runtime.block(state.completionKey());
+            const wait_set = backend.futex_wait_set orelse unreachable;
+            while (!state.done) {
+                if (canceled) {
+                    runtime.block(state.completionKey());
+                    continue;
+                }
+                switch (wait_set.blockUntilCancelable(state.completionKey(), null)) {
+                    .woken => {},
+                    .timed_out => unreachable,
+                    .canceled => {
+                        canceled = true;
+                        requestGroupCancel(backend, state);
+                    },
+                }
+            }
         } else {
             runtime.runUntilDone(&state.done);
         }
     }
     releaseGroupState(state);
+    if (canceled) return error.Canceled;
 }
 
 fn simGroupCancel(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) void {
