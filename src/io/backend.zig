@@ -738,6 +738,13 @@ pub const Backend = struct {
         reset_peer: bool,
     ) void {
         connection_state.closed = true;
+        if (connection_state.node) |node| {
+            _ = network_module.internal.discardStreamFramesFromControl(
+                self.network_control,
+                node,
+                @intCast(handle),
+            );
+        }
         self.wakeConnection(handle, std.math.maxInt(usize));
         // A writer blocked on shared stream backpressure parks on the
         // world-global key, not its handle key; teardown (close, shutdown,

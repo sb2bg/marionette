@@ -42,6 +42,7 @@ pub const internal = struct {
     pub const UnstableNetwork = packet_core.UnstableNetwork;
 
     pub const byteEndpointFromControl = sim.byteEndpointFromControl;
+    pub const discardStreamFramesFromControl = sim.discardStreamFramesFromControl;
     pub const endpointFromControl = sim.endpointFromControl;
     pub const faultEvolutionParticipantFromControl = control.internal.faultEvolutionParticipant;
     pub const initSimControl = sim.initSimControl;

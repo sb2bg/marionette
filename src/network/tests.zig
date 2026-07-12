@@ -593,6 +593,7 @@ test "stream byte sends preserve delivery order under jitter" {
             sim.control.network,
             0,
             1,
+            1000,
             "frame",
             delivery_floor,
         );

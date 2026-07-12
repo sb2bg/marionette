@@ -493,6 +493,7 @@ pub fn Ops(comptime Backend: type) type {
                                 backend.network_control,
                                 from_node,
                                 to_node,
+                                @intCast(peer_ref.handle),
                                 bytes,
                                 connection.delivery_floor_ns,
                             ) catch |err| switch (err) {

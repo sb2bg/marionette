@@ -761,12 +761,19 @@ pub fn sendStreamBytesFromControl(
     control: AnyNetworkControl,
     from: NodeId,
     to: NodeId,
+    target: u64,
     bytes: []const u8,
     minimum_delivery_at: clock_module.Timestamp,
 ) !SimByteSendResult {
     const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
     const runtime = try SimByteRuntime.getOrInit(shared);
-    return try runtime.sendBytesAtOrAfter(from, to, bytes, minimum_delivery_at);
+    return try runtime.sendBytesAtOrAfter(from, to, bytes, minimum_delivery_at, target);
+}
+
+pub fn discardStreamFramesFromControl(control: AnyNetworkControl, node: NodeId, target: u64) usize {
+    const shared = sharedFromControl(control) orelse return 0;
+    const runtime = shared.byte_runtime orelse return 0;
+    return runtime.discardStreamFrames(node, target);
 }
 
 pub fn receiveReadyStreamEventFromControl(control: AnyNetworkControl, node: NodeId) !?SimByteReceiveResult {
@@ -1020,6 +1027,7 @@ const SimByteRuntime = struct {
         from: NodeId,
         to: NodeId,
         deliver_at: clock_module.Timestamp,
+        stream_target: ?u64,
         payload: ByteEndpoint.Message,
     };
 
@@ -1087,7 +1095,7 @@ const SimByteRuntime = struct {
     }
 
     fn sendBytes(self: *Self, from: NodeId, to: NodeId, bytes: []const u8) !SimByteSendResult {
-        return try self.sendBytesAtOrAfter(from, to, bytes, 0);
+        return try self.sendBytesAtOrAfter(from, to, bytes, 0, null);
     }
 
     fn sendBytesAtOrAfter(
@@ -1096,19 +1104,20 @@ const SimByteRuntime = struct {
         to: NodeId,
         bytes: []const u8,
         minimum_delivery_at: clock_module.Timestamp,
+        stream_target: ?u64,
     ) !SimByteSendResult {
         const message = try self.acquire(bytes.len);
         var sent = false;
         defer if (!sent) message.release();
 
         @memcpy(message.bytes(), bytes);
-        const result = try self.sendMessageAtOrAfter(from, to, message, minimum_delivery_at);
+        const result = try self.sendMessageAtOrAfter(from, to, message, minimum_delivery_at, stream_target);
         sent = true;
         return result;
     }
 
     fn sendMessage(self: *Self, from: NodeId, to: NodeId, message: ByteEndpoint.Message) !SimByteSendResult {
-        return try self.sendMessageAtOrAfter(from, to, message, 0);
+        return try self.sendMessageAtOrAfter(from, to, message, 0, null);
     }
 
     fn sendMessageAtOrAfter(
@@ -1117,6 +1126,7 @@ const SimByteRuntime = struct {
         to: NodeId,
         message: ByteEndpoint.Message,
         minimum_delivery_at: clock_module.Timestamp,
+        stream_target: ?u64,
     ) !SimByteSendResult {
         const shared = self.shared;
         try shared.validateNode(from);
@@ -1154,6 +1164,7 @@ const SimByteRuntime = struct {
             .from = from,
             .to = to,
             .deliver_at = deliver_at,
+            .stream_target = stream_target,
             .payload = message,
         };
 
@@ -1172,6 +1183,24 @@ const SimByteRuntime = struct {
             std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
         }
         return .{ .queued = deliver_at };
+    }
+
+    fn discardStreamFrames(self: *Self, node: NodeId, target: u64) usize {
+        var discarded: usize = 0;
+        for (self.queues) |*queue| {
+            var index: usize = 0;
+            while (index < queue.items.len) {
+                const packet = queue.items[index];
+                if (packet.to != node or packet.stream_target != target) {
+                    index += 1;
+                    continue;
+                }
+                const removed = queue.orderedRemove(index);
+                removed.payload.release();
+                discarded += 1;
+            }
+        }
+        return discarded;
     }
 
     fn receive(self: *Self, node: NodeId) !?ByteEndpoint.Envelope {

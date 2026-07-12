@@ -4,6 +4,7 @@ const Backend = @import("backend.zig").Backend;
 const clock_module = @import("../clock.zig");
 const disk_module = @import("../disk/root.zig");
 const env_module = @import("../env.zig");
+const network_module = @import("../network/root.zig");
 const world_module = @import("../world.zig");
 const World = world_module.World;
 const Io = std.Io;
@@ -3775,4 +3776,69 @@ test "io: peer close wakes a writer parked on stream backpressure" {
 test "io: process kill wakes a writer parked on stream backpressure" {
     const write_error = try BackpressureTeardown.run(true);
     try std.testing.expectEqual(@as(anyerror, error.ConnectionResetByPeer), write_error.?);
+}
+
+test "io: closing a connection reclaims its queued stream frames" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        server_io: Io,
+        client_io: Io,
+        sent: u32 = 0,
+
+        fn serverTask(self: *@This()) void {
+            const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4722) catch unreachable;
+            var listener = address.listen(self.server_io, .{}) catch @panic("listen failed");
+            defer listener.deinit(self.server_io);
+            const stream = listener.accept(self.server_io) catch @panic("accept failed");
+            defer stream.close(self.server_io);
+
+            while (self.sent == 0) {
+                self.server_io.futexWait(u32, &self.sent, 0) catch @panic("wait failed");
+            }
+        }
+
+        fn clientTask(self: *@This()) void {
+            Io.sleep(self.client_io, .fromNanoseconds(10), .awake) catch @panic("sleep failed");
+            const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4722) catch unreachable;
+            const stream = address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch
+                @panic("connect failed");
+            defer stream.close(self.client_io);
+
+            const data: [1][]const u8 = .{"queued"};
+            _ = self.client_io.vtable.netWrite(
+                self.client_io.userdata,
+                stream.socket.handle,
+                "",
+                &data,
+                1,
+            ) catch @panic("write failed");
+            self.sent = 1;
+            self.client_io.futexWake(u32, &self.sent, 1);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xBACF, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 4 },
+    });
+    try sim.control.network.setLatency(.{ .min_latency_ns = 1_000 });
+
+    var scenario: Scenario = .{
+        .server_io = (try sim.envForNode(0)).io(),
+        .client_io = (try sim.envForNode(1)).io(),
+    };
+    var server = try Io.concurrent(scenario.server_io, Scenario.serverTask, .{&scenario});
+    var client = try Io.concurrent(scenario.client_io, Scenario.clientTask, .{&scenario});
+    client.await(scenario.client_io);
+    server.await(scenario.server_io);
+
+    const endpoint = try sim.byteEndpoint(1);
+    var messages: [network_module.default_byte_pool_options.buffers]network_module.ByteEndpoint.Message = undefined;
+    var acquired: usize = 0;
+    defer for (messages[0..acquired]) |message| message.release();
+    while (acquired < messages.len) : (acquired += 1) {
+        messages[acquired] = try endpoint.acquire(1);
+    }
 }
