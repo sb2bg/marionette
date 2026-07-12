@@ -3586,6 +3586,40 @@ test "io: transitionToLiveness preflight failures leave the transition retryable
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "liveness.transition core_count=1"));
 }
 
+test "io: transitionToLiveness remains retryable after lifecycle failure" {
+    const State = struct {
+        attempts: u32 = 0,
+        starts: u32 = 0,
+
+        fn restart(raw: *anyopaque, _: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.attempts += 1;
+            if (self.attempts == 1) return error.RestartFailed;
+            self.starts += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA74, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    var state: State = .{};
+    try sim.registerProcess(0, .{ .ptr = &state, .restart = State.restart });
+    try sim.killProcess(0);
+
+    try std.testing.expectError(error.RestartFailed, sim.transitionToLiveness(&.{0}));
+    try std.testing.expectEqual(@as(u32, 1), state.attempts);
+    try std.testing.expectEqual(@as(u32, 0), state.starts);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "liveness.transition core_count=1"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(world.traceBytes(), "process.restart node=0"));
+
+    try sim.transitionToLiveness(&.{0});
+    try std.testing.expectEqual(@as(u32, 2), state.attempts);
+    try std.testing.expectEqual(@as(u32, 1), state.starts);
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(world.traceBytes(), "liveness.transition core_count=1"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "process.restart node=0 automatic=false"));
+}
+
 const StartRace = struct {
     server_io: Io,
     client_io: Io,

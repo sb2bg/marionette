@@ -728,8 +728,6 @@ pub const World = struct {
                     return error.ProcessNotRegistered;
                 }
             }
-            world.liveness_transitioned = true;
-
             try world.record("liveness.transition core_count={}", .{core.len});
 
             // Zero probabilistic rates first so no new fault schedules
@@ -752,6 +750,7 @@ pub const World = struct {
             for (core) |node| {
                 try supervisor.reviveKilled(node);
             }
+            world.liveness_transitioned = true;
         }
 
         fn processSupervisor(self: Simulation) *ProcessSupervisor {
