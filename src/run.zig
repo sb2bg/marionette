@@ -24,8 +24,8 @@ pub const TraceError = world_module.TraceError;
 /// Infrastructure errors from the runners themselves; scenario failures
 /// are reported through `RunReport`, not as errors.
 pub const RunError = std.mem.Allocator.Error || TraceError;
-/// The `expect*` wrappers' outcome mismatches: the run passed where a
-/// failure was required, or failed where a pass was required.
+/// Errors specific to the `expect*` wrappers: outcome mismatches and invalid
+/// expectation configuration.
 pub const ExpectError = error{
     ExpectedRunFailure,
     ExpectedRunPass,
@@ -190,8 +190,8 @@ pub fn expectSimFailure(config: anytype) ExpectRunError!void {
 
 /// Run a simulation case over many deterministic seeds.
 ///
-/// Required extra field: `seeds`, the number of seeds to run. Optional `seed`
-/// acts as the base seed.
+/// Required extra field: `seeds`, which must be greater than zero. Optional
+/// `seed` acts as the base seed.
 pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
     if (!@hasField(@TypeOf(config), "seeds")) {
         @compileError("expectSimFuzz config requires a `seeds` field");
