@@ -169,12 +169,18 @@ pub const TaskScheduler = struct {
             const task: *Task = @ptrCast(@alignCast(arg));
             if (task.start_delay_ns > 0) {
                 const scheduler = task.scheduler;
-                const wake_at = std.math.add(u64, scheduler.world.now(), task.start_delay_ns) catch
-                    @panic("task start jitter deadline exceeds clock range");
+                const now = scheduler.world.now();
+                const remaining = std.math.maxInt(u64) - now;
+                const tick_ns = scheduler.world.clock().tick_ns;
+                const latest_representable_delay = remaining - remaining % tick_ns;
+                const effective_delay = @min(task.start_delay_ns, latest_representable_delay);
+                const wake_at = now + effective_delay;
                 // The park shares the sleep key namespace (keyed by task id,
                 // so nothing wakes it); a spurious wake must not start the
-                // task early. Not a cancellation point: an armed cancel is
-                // delivered at the task's first real one.
+                // task early. At the clock ceiling, clamp to the latest
+                // representable tick instead of overflowing the timestamp.
+                // Not a cancellation point: an armed cancel is delivered at
+                // the task's first real one.
                 while (scheduler.world.now() < wake_at) {
                     _ = scheduler.blockCurrentUntil(
                         futex_module.waitKey(.sleep, task.id + 1),
@@ -1419,14 +1425,18 @@ fn runToySchedulerTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return try allocator.dupe(u8, world.traceBytes());
 }
 
-test "TaskScheduler: maximum task start jitter draws full-range without overflow" {
+test "TaskScheduler: maximum task start jitter draws and schedules without overflow" {
     if (!fiber.supported) return error.SkipZigTest;
 
     const runtime_allocator = std.testing.allocator;
 
     const world = try runtime_allocator.create(World);
     errdefer runtime_allocator.destroy(world);
-    world.* = try World.init(runtime_allocator, .{ .seed = 0x717E4, .tick_ns = 10 });
+    world.* = try World.init(runtime_allocator, .{
+        .seed = 0x717E4,
+        .start_ns = std.math.maxInt(u64) - 15,
+        .tick_ns = 10,
+    });
     defer {
         world.deinit();
         runtime_allocator.destroy(world);
@@ -1441,12 +1451,16 @@ test "TaskScheduler: maximum task start jitter draws full-range without overflow
         runtime_allocator.destroy(scheduler);
     }
 
-    // The inclusive-bound draw wrapped on `maxInt(u64) + 1` before reaching
-    // the PRNG; the spawn itself is the regression. The task is deliberately
-    // never run: its drawn delay may sit anywhere in the u64 range and would
-    // advance the clock accordingly.
+    // The inclusive-bound draw must not wrap on `maxInt(u64) + 1`. Force the
+    // valid maximum draw afterward so executing the task also covers deadline
+    // addition and tick rounding at the timestamp ceiling.
     var task = ToyTask{ .remaining = 1 };
     _ = try scheduler.spawn(.{ .entry = ToyTask.run, .arg = &task });
+    scheduler.tasks.items[0].start_delay_ns = std.math.maxInt(u64);
+    try scheduler.runUntilIdle();
+
+    try std.testing.expectEqual(@as(usize, 1), scheduler.completedCount());
+    try std.testing.expectEqual(std.math.maxInt(u64) - 5, world.now());
     try std.testing.expect(
         std.mem.indexOf(u8, world.traceBytes(), "scheduler.start_jitter") != null,
     );
