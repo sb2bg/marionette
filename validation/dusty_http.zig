@@ -20,8 +20,8 @@
 //!
 //! The pool scenarios cover 16d: keep-alive reuse across virtual-time idle
 //! gaps and concurrent pool growth (dials counted via `io.net.connect`),
-//! and pool poisoning across a server crash and registered restart, which
-//! pinned two confirmed dusty bugs (FOUND_BUGS DUSTY-001/002). The
+//! and pool recovery across a server crash and registered restart, which
+//! preserve regressions for two fixed dusty bugs (FOUND_BUGS DUSTY-001/002). The
 //! before-response partition scenario additionally pins `netShutdown`
 //! under partition (`io.net.shutdown` between partition and heal).
 
@@ -550,13 +550,10 @@ const PoolScenario = struct {
 
 const idle_gap_ns = 1_000_000;
 
-/// Pool poisoning after a server crash: a healthy fetch parks a keep-alive
-/// connection in the pool, then the server process is killed. Pinned dusty
-/// 0.1.0 bug: a write failure never marks the connection closing, so the
-/// dead connection is released back into the pool and every retry
-/// re-acquires it without dialing. The pool stays poisoned even after a
-/// registered process restart brings a fresh server incarnation up, while
-/// a fresh client (empty pool) converges immediately.
+/// Pool recovery after a server crash: a healthy fetch parks a keep-alive
+/// connection in the pool, then the server process is killed. Failed reuse
+/// must evict that connection so the same client can dial the restarted
+/// incarnation.
 const PoolCrashScenario = struct {
     allocator: std.mem.Allocator,
     /// Arena for everything the killable server process allocates: a killed
@@ -627,10 +624,8 @@ const PoolCrashScenario = struct {
         self.record("dusty_pool_crash.client.first_fetch status={}", .{self.first_status});
     }
 
-    /// Fetch attempts on the poisoned pool while the server is dead. Every
-    /// attempt re-acquires the dead pooled connection and fails at write
-    /// time without dialing; convergence here would mean the pool evicted
-    /// the dead connection.
+    /// Fetch attempts while the server is dead. They must all fail regardless
+    /// of whether the first failure evicts the pooled connection.
     fn poisonedAttemptsTask(self: *PoolCrashScenario) void {
         var attempt: u32 = 1;
         while (attempt <= max_retry_attempts) : (attempt += 1) {
@@ -650,9 +645,8 @@ const PoolCrashScenario = struct {
         }
     }
 
-    /// The restarted incarnation is listening again, so the network is
-    /// provably healthy. The same client still fails (poisoned pool); a
-    /// fresh client with an empty pool converges immediately.
+    /// The restarted incarnation is listening again. The same client must
+    /// recover by dialing, and a fresh client independently proves reachability.
     fn postRestartTask(self: *PoolCrashScenario) void {
         self.restarted_server.?.ready.wait(self.restart_io.?) catch
             @panic("dusty_pool_crash restart ready wait failed");
@@ -661,7 +655,7 @@ const PoolCrashScenario = struct {
         if (self.client.?.fetch(base_url ++ "/hello", .{})) |response| {
             var owned = response;
             defer owned.deinit();
-            self.record("dusty_pool_crash.client.post_restart outcome=unexpected_success", .{});
+            self.record("dusty_pool_crash.client.post_restart outcome=ok", .{});
         } else |err| {
             self.storeError(&self.post_restart_error_name, err);
             self.record("dusty_pool_crash.client.post_restart outcome={s}", .{@errorName(err)});
@@ -1162,9 +1156,8 @@ pub fn runPoolCrashScenario(allocator: std.mem.Allocator, seed: u64) !PoolCrashO
         client.deinit();
         scenario.client = null;
     }
-    // Tear the restarted incarnation down the same way it came up: killing
-    // the process avoids dusty's shutdown drain entirely (see FOUND_BUGS.md
-    // on the latched drain event).
+    // Tear the restarted incarnation down through the same process lifecycle
+    // used to create it, keeping this crash scenario independent of shutdown.
     try sim.killProcess(0);
     try sim.control.runTasksUntilIdle();
     if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
@@ -1457,10 +1450,9 @@ test "dusty HTTP shutdown sweeps a handler parked in a keep-alive read" {
     defer outcome.deinit();
 
     try std.testing.expectEqual(@as(u32, 200), outcome.hello_status);
-    try std.testing.expect(outcome.timeout_shutdown);
-    // Two deliveries: one interrupting the listen task's accept park, one
-    // from the deferred group cancel sweeping the parked handler.
-    try std.testing.expectEqual(@as(usize, 2), outcome.cancel_deliveries);
+    try std.testing.expect(!outcome.timeout_shutdown);
+    try std.testing.expectEqual(@as(usize, 1), outcome.cancel_deliveries);
+    try mar.expectTraceContains(outcome.trace, "dusty_http.server.graceful_shutdown");
 }
 
 test "dusty HTTP hung shutdown replays byte-identically from the same seed" {
@@ -1470,7 +1462,7 @@ test "dusty HTTP hung shutdown replays byte-identically from the same seed" {
     defer second.deinit();
 
     try std.testing.expectEqualStrings(first.trace, second.trace);
-    try std.testing.expect(std.mem.indexOf(u8, first.trace, "dusty_http.server.timeout_shutdown") != null);
+    try mar.expectTraceContains(first.trace, "dusty_http.server.graceful_shutdown");
 }
 
 test "dusty HTTP partition before response fails deterministically and retry converges" {
@@ -1589,33 +1581,29 @@ test "dusty HTTP pool reuse replays byte-identically from the same seed" {
     try mar.expectTraceContains(first.trace, "dusty_pool.client.concurrent_done");
 }
 
-test "dusty HTTP pool poisoning: a dead pooled connection is never evicted" {
+test "dusty HTTP pool evicts a dead connection and redials after restart" {
     var outcome = try runPoolCrashScenario(std.testing.allocator, 0xC0FFEE);
     defer outcome.deinit();
 
     try std.testing.expectEqual(@as(u32, 200), outcome.first_status);
 
-    // Pinned dusty 0.1.0 bug: a write failure never marks the connection
-    // closing, so the dead connection is re-pooled and every retry
-    // re-acquires it without dialing. No attempt converges while the
-    // server is down, and none converges after the restart either, even
-    // though the restarted server is provably reachable.
+    // No attempt can converge while the server is down. Once it restarts,
+    // the same client must recover instead of retaining a poisoned pool.
     try std.testing.expectEqual(@as(u32, max_retry_attempts), outcome.poisoned_attempts);
     try std.testing.expectEqual(@as(u32, 0), outcome.recovery_attempts);
-    try std.testing.expect(outcome.post_restart_error_name.len != 0);
-    try std.testing.expectEqualStrings(outcome.dead_error_name, outcome.post_restart_error_name);
+    try std.testing.expectEqual(@as(usize, 0), outcome.post_restart_error_name.len);
+    try mar.expectTraceContains(outcome.trace, "dusty_pool_crash.client.post_restart outcome=ok");
 
-    // A fresh client converges immediately, isolating the failure to the
-    // pool. Exactly two dials in the whole scenario: the healthy fetch and
-    // the fresh client; the poisoned attempts never dialed at all.
+    // Three successful dials: the initial client, the recovered client, and
+    // the fresh reachability probe.
     try std.testing.expectEqual(@as(u32, 200), outcome.fresh_status);
-    try std.testing.expectEqual(@as(usize, 2), outcome.connect_count);
+    try std.testing.expectEqual(@as(usize, 3), outcome.connect_count);
 
     try mar.expectTraceContains(outcome.trace, "process.kill node=0");
     try mar.expectTraceContains(outcome.trace, "process.restart node=0");
 }
 
-test "dusty HTTP pool poisoning replays byte-identically from the same seed" {
+test "dusty HTTP pool recovery replays byte-identically from the same seed" {
     var first = try runPoolCrashScenario(std.testing.allocator, 0xC0FFEE);
     defer first.deinit();
     var second = try runPoolCrashScenario(std.testing.allocator, 0xC0FFEE);
@@ -1625,19 +1613,20 @@ test "dusty HTTP pool poisoning replays byte-identically from the same seed" {
     try std.testing.expectEqualStrings(first.dead_error_name, second.dead_error_name);
 }
 
-test "dusty HTTP pool poisoning holds across seeds" {
+test "dusty HTTP pool recovery holds across seeds" {
     var seed: u64 = 0;
     while (seed < 8) : (seed += 1) {
         var outcome = runPoolCrashScenario(std.testing.allocator, seed) catch |err| {
-            std.debug.print("dusty pool poisoning sweep failed seed={} err={}\n", .{ seed, err });
+            std.debug.print("dusty pool recovery sweep failed seed={} err={}\n", .{ seed, err });
             return err;
         };
         defer outcome.deinit();
 
         try std.testing.expectEqual(@as(u32, max_retry_attempts), outcome.poisoned_attempts);
         try std.testing.expectEqual(@as(u32, 0), outcome.recovery_attempts);
+        try std.testing.expectEqual(@as(usize, 0), outcome.post_restart_error_name.len);
         try std.testing.expectEqual(@as(u32, 200), outcome.fresh_status);
-        try std.testing.expectEqual(@as(usize, 2), outcome.connect_count);
+        try std.testing.expectEqual(@as(usize, 3), outcome.connect_count);
     }
 }
 

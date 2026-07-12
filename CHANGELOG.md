@@ -35,6 +35,12 @@
   waits for their completion, and resurfaces `error.Canceled` to the outer
   future.
 
+- Updates the dusty crash and shutdown validations for upstream commit
+  `e7a4f4b`: a dead pooled connection is evicted so the same client redials
+  after server restart, and graceful shutdown with a parked keep-alive handler
+  completes instead of timing out. The old DUSTY-001/002 scenarios remain as
+  positive regression coverage for the upstream fixes.
+
 - Binding a simulated `std.Io.net` listener to port 0 now allocates an
   ephemeral port, matching POSIX bind semantics (issue #2). Ports come
   from the IANA dynamic range (49152-65535) via a rotating cursor shared

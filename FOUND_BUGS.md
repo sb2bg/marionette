@@ -242,16 +242,19 @@ client and server through Marionette's deterministic `std.Io.net` backend
 
 **Classification:** Confirmed SUT bug
 
+**Status:** Fixed upstream in dusty commit
+`e7a4f4b24c2d3c36244a48617e992a3056c62622`.
+
 **Trigger:** A healthy keep-alive fetch parks a connection in the client's
 pool, then the server process dies (simulated `killProcess`; equivalent to a
 real server restart or crash). Every subsequent fetch on the same client
 fails.
 
-**Symptom:** The pinned scenario shows three consecutive fetch attempts
-failing with `WriteFailed` and zero new dials (`io.net.connect` count stays
-at the healthy fetch's one). After a server restart, with the server provably
-reachable, the same client still fails with the same error, while a fresh
-client converges on its first attempt.
+**Historical symptom:** The original pinned scenario showed three consecutive
+fetch attempts failing with `WriteFailed` and zero new dials (`io.net.connect`
+count stays at the healthy fetch's one). After a server restart, with the
+server provably reachable, the same client still fails with the same error,
+while a fresh client converges on its first attempt.
 
 **Root cause:** `Client.fetchInternal`'s error path is
 `errdefer self.pool.release(conn)`, and `ConnectionPool.release` only
@@ -271,9 +274,9 @@ any long-lived HTTP client.
 (and arguably on any transport-level error) before the errdefer release, or
 have `release` validate liveness before pooling.
 
-**Regression coverage:** `validation/dusty_http.zig` pins the poisoning
-(three write-failed attempts, zero dials, identical failure after restart,
-fresh-client convergence) across a seed sweep.
+**Regression coverage:** `validation/dusty_http.zig` now proves that attempts
+fail while the server is down, the existing client redials successfully after
+restart, and a fresh client independently converges, across a seed sweep.
 
 ### DUSTY-002: Graceful-Shutdown Drain Busy-Spins on a Latched Event
 
@@ -281,12 +284,15 @@ fresh-client convergence) across a seed sweep.
 
 **Classification:** Confirmed SUT bug
 
+**Status:** Fixed upstream in dusty commit
+`e7a4f4b24c2d3c36244a48617e992a3056c62622`.
+
 **Trigger:** Cancel `Server.listen` (graceful shutdown) while at least one
 connection handler is still active, after at least one other connection has
 closed at any earlier point in the server's life.
 
-**Symptom:** Under Marionette's cooperative scheduler, the whole simulation
-livelocks at 100% CPU with virtual time frozen; the drain loop never
+**Historical symptom:** Under Marionette's cooperative scheduler, the whole
+simulation livelocks at 100% CPU with virtual time frozen; the drain loop never
 suspends, so no other task (including the handler that would decrement the
 connection count) can run. On a preemptive production runtime the same code
 busy-spins a core until the remaining handlers happen to finish.
@@ -316,9 +322,11 @@ count down through the timeout budget explicitly.
 cooperative scheduler: the deadlock detector cannot fire because the task
 is runnable, and no watchdog task can run because nothing yields. Detecting
 hot loops (a step or instruction budget between suspension points) is
-recorded as a roadmap candidate; until then, harness code must avoid
-triggering this dusty path (the pool scenarios tear the server down with
-`killProcess` instead of cancellation).
+recorded as a roadmap candidate.
+
+**Regression coverage:** The hung keep-alive scenario now exits through
+graceful cancellation rather than timing out, and the same-seed trace remains
+byte-identical.
 
 ## Takeaways
 
