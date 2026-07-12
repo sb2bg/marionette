@@ -1253,13 +1253,13 @@ test "fuzzSeed: distinct within a run and across related bases" {
 test "runSimCase: forwards every simulate option" {
     const options = simulateOptionsFromConfig(.{
         .allocation = .{
-            .fail_after = @as(?usize, 3),
-            .quota_bytes = @as(?usize, 4096),
+            .fail_after = 3,
+            .quota_bytes = 4096,
             .buggify_rate = .{ .numerator = 1, .denominator = 7 },
         },
         .disk = .{
             .sector_size = 8192,
-            .min_latency_ns = @as(?u64, 20),
+            .min_latency_ns = 20,
             .latency_jitter_ns = 10,
         },
         .network = .{
