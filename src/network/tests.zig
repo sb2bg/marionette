@@ -547,6 +547,36 @@ test "composition byte endpoint: send acquired message transfers ownership" {
     try std.testing.expectEqualStrings("pong", envelope.message.bytes());
 }
 
+fn byteEndpointTraceAllocationFailureSweep(allocator: std.mem.Allocator) !void {
+    var world = try World.init(allocator, .{ .seed = 0xA110C, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sender = try sim.byteEndpoint(0);
+    const receiver = try sim.byteEndpoint(1);
+
+    const message = try sender.acquire(4);
+    var caller_owns_message = true;
+    defer if (caller_owns_message) message.release();
+    @memcpy(message.bytes(), "safe");
+
+    try sender.sendMessage(1, message);
+    caller_owns_message = false;
+    try world.runFor(10);
+
+    const envelope = (try receiver.receive()).?;
+    defer envelope.message.release();
+    try std.testing.expectEqualStrings("safe", envelope.message.bytes());
+}
+
+test "composition byte endpoint: trace allocation failures preserve message ownership" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        byteEndpointTraceAllocationFailureSweep,
+        .{},
+    );
+}
+
 test "stream byte sends preserve delivery order under jitter" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0x51EA, .tick_ns = 10 });
     defer world.deinit();

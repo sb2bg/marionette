@@ -873,16 +873,18 @@ fn TypedRuntime(comptime Payload: type) type {
 
             const queue = &self.queues[try shared.pathIndex(from, to)];
             if (queue.items.len >= shared.path_capacity) return error.EventQueueFull;
-            try queue.append(shared.world.allocator, packet);
-            var index = queue.items.len - 1;
-            while (index > 0 and packetLessThan(queue.items[index], queue.items[index - 1])) : (index -= 1) {
-                std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
-            }
+            try queue.ensureUnusedCapacity(shared.world.allocator, 1);
 
             try shared.world.record(
                 "network.send id={} from={} to={} deliver_at={} latency_ns={}",
                 .{ packet.id, packet.from, packet.to, packet.deliver_at, latency_ns },
             );
+
+            queue.appendAssumeCapacity(packet);
+            var index = queue.items.len - 1;
+            while (index > 0 and packetLessThan(queue.items[index], queue.items[index - 1])) : (index -= 1) {
+                std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
+            }
         }
 
         fn receive(self: *Self, node: NodeId) !?Envelope {
@@ -907,21 +909,23 @@ fn TypedRuntime(comptime Payload: type) type {
         fn popReadyFor(self: *Self, node: NodeId) !?Packet {
             while (true) {
                 const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
-                const ready = self.queues[link_index].orderedRemove(0);
+                const ready = self.queues[link_index].items[0];
 
                 if (self.shared.down_nodes[@intCast(ready.to)]) {
                     try self.shared.world.record("network.drop id={} from={} to={} reason=destination_down", .{ ready.id, ready.from, ready.to });
+                    _ = self.queues[link_index].orderedRemove(0);
                     continue;
                 }
 
                 const link = self.shared.links[try self.shared.pathIndex(ready.from, ready.to)];
                 if (!link.enabled()) {
                     try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
+                    _ = self.queues[link_index].orderedRemove(0);
                     continue;
                 }
 
                 try self.shared.world.record("network.deliver id={} from={} to={} now_ns={}", .{ ready.id, ready.from, ready.to, self.shared.world.now() });
-                return ready;
+                return self.queues[link_index].orderedRemove(0);
             }
         }
 
@@ -1155,16 +1159,18 @@ const SimByteRuntime = struct {
 
         const queue = &self.queues[try shared.pathIndex(from, to)];
         if (queue.items.len >= shared.path_capacity) return error.EventQueueFull;
-        try queue.append(shared.world.allocator, packet);
-        var index = queue.items.len - 1;
-        while (index > 0 and packetLessThan(queue.items[index], queue.items[index - 1])) : (index -= 1) {
-            std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
-        }
+        try queue.ensureUnusedCapacity(shared.world.allocator, 1);
 
         try shared.world.record(
             "network.send id={} from={} to={} deliver_at={} latency_ns={}",
             .{ packet.id, packet.from, packet.to, packet.deliver_at, latency_ns },
         );
+
+        queue.appendAssumeCapacity(packet);
+        var index = queue.items.len - 1;
+        while (index > 0 and packetLessThan(queue.items[index], queue.items[index - 1])) : (index -= 1) {
+            std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
+        }
         return .{ .queued = deliver_at };
     }
 
@@ -1230,12 +1236,12 @@ const SimByteRuntime = struct {
 
     fn popReadyEventFor(self: *Self, node: NodeId) !?ReadyEvent {
         const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
-        const ready = self.queues[link_index].orderedRemove(0);
+        const ready = self.queues[link_index].items[0];
 
         if (self.shared.down_nodes[@intCast(ready.to)]) {
             try self.shared.world.record("network.drop id={} from={} to={} reason=destination_down", .{ ready.id, ready.from, ready.to });
             return .{ .dropped = .{
-                .packet = ready,
+                .packet = self.queues[link_index].orderedRemove(0),
                 .reason = .destination_down,
             } };
         }
@@ -1244,13 +1250,13 @@ const SimByteRuntime = struct {
         if (!link.enabled()) {
             try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
             return .{ .dropped = .{
-                .packet = ready,
+                .packet = self.queues[link_index].orderedRemove(0),
                 .reason = .link_disabled,
             } };
         }
 
         try self.shared.world.record("network.deliver id={} from={} to={} now_ns={}", .{ ready.id, ready.from, ready.to, self.shared.world.now() });
-        return .{ .delivered = ready };
+        return .{ .delivered = self.queues[link_index].orderedRemove(0) };
     }
 
     fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
