@@ -279,7 +279,7 @@ fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
         simulateOptionsFromConfig(config.simulate),
         App,
         fallibleSimInit(App, config.init),
-        config.scenario,
+        fallibleSimScenario(Case, config.scenario),
         case_checks,
     );
 }
@@ -415,6 +415,22 @@ fn validateSimScenario(comptime Case: type, comptime scenario: anytype) void {
             @compileError("runSimCase config.scenario must return void or !void");
         },
     }
+}
+
+fn fallibleSimScenario(comptime Case: type, comptime scenario: anytype) fn (*Case) anyerror!void {
+    const Return = @typeInfo(@TypeOf(scenario)).@"fn".return_type.?;
+    return switch (@typeInfo(Return)) {
+        .error_union => struct {
+            fn run(case: *Case) anyerror!void {
+                try scenario(case);
+            }
+        }.run,
+        else => struct {
+            fn run(case: *Case) anyerror!void {
+                scenario(case);
+            }
+        }.run,
+    };
 }
 
 fn fallibleSimInit(comptime App: type, comptime init_app: anytype) fn (World.Simulation) anyerror!App {
@@ -1401,6 +1417,33 @@ test "runSimCase: initializes app from simulation and deinitializes each replay"
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "simcase.value value=1") != null);
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "simcase.check value=1") != null);
         },
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+test "runSimCase: accepts an infallible scenario" {
+    const App = struct { calls: u8 = 0 };
+    const Functions = struct {
+        fn init(_: World.Simulation) App {
+            return .{};
+        }
+
+        fn scenario(case: *SimCase(App)) void {
+            case.app.calls += 1;
+        }
+    };
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = .{},
+        .init = Functions.init,
+        .scenario = Functions.scenario,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => {},
         .failed => return error.UnexpectedRunFailure,
     }
 }
