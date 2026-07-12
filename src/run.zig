@@ -29,6 +29,7 @@ pub const RunError = std.mem.Allocator.Error || TraceError;
 pub const ExpectError = error{
     ExpectedRunFailure,
     ExpectedRunPass,
+    InvalidSeedCount,
 };
 pub const ExpectRunError = RunError || ExpectError;
 
@@ -195,6 +196,7 @@ pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
     if (!@hasField(@TypeOf(config), "seeds")) {
         @compileError("expectSimFuzz config requires a `seeds` field");
     }
+    if (config.seeds == 0) return error.InvalidSeedCount;
 
     for (0..config.seeds) |iteration| {
         const seed = fuzzSeed(configSeed(config), iteration);
@@ -1502,6 +1504,27 @@ test "expectSimPass and expectSimFuzz accept passing cases" {
         .scenario = simCaseScenario,
         .checks = &case_checks,
     });
+}
+
+test "expectSimFuzz rejects zero-run campaigns" {
+    const App = struct {};
+    const Functions = struct {
+        fn init(_: World.Simulation) App {
+            return .{};
+        }
+
+        fn scenario(_: *SimCase(App)) !void {}
+    };
+    const seed_count: usize = 0;
+
+    try std.testing.expectError(error.InvalidSeedCount, expectSimFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .seeds = seed_count,
+        .simulate = .{},
+        .init = Functions.init,
+        .scenario = Functions.scenario,
+    }));
 }
 
 fn failingSimCaseCheck(case: *const SimCase(SimCaseApp)) !void {
