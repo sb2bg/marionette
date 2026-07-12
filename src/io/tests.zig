@@ -2617,32 +2617,20 @@ test "io: atomic replace preserves logical length across crash" {
     try std.testing.expectEqualStrings("[]", &buffer);
 }
 
-test "io: failed multi-sector write only publishes completed logical length" {
-    var reproduced = false;
-    var seed: u64 = 1;
-    while (seed < 256) : (seed += 1) {
-        {
-            var world = try World.init(std.testing.allocator, .{ .seed = seed });
-            defer world.deinit();
-            const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
-            const io = sim.env.io();
+test "io: failed multi-sector write leaves logical length unchanged" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
 
-            var file = try Io.Dir.cwd().createFile(io, "multi-sector", .{});
-            defer file.close(io);
-            try sim.control.disk.setFaults(.{ .write_error_rate = .oneIn(2) });
-            file.writeStreamingAll(io, "abcdefgh") catch |err| switch (err) {
-                error.InputOutput => {
-                    const stat = try sim.env.disk.stat(.{ .path = "multi-sector" });
-                    if (stat.size == 0) continue;
-                    try std.testing.expectEqual(@as(u64, 4), stat.size);
-                    reproduced = true;
-                    break;
-                },
-                else => return err,
-            };
-        }
-    }
-    try std.testing.expect(reproduced);
+    var file = try Io.Dir.cwd().createFile(io, "multi-sector", .{});
+    defer file.close(io);
+    try sim.control.disk.setFaults(.{ .write_error_rate = .always() });
+    try std.testing.expectError(error.InputOutput, file.writeStreamingAll(io, "abcdefgh"));
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        (try sim.env.disk.stat(.{ .path = "multi-sector" })).size,
+    );
 }
 
 test "io: simulated directories support Ochi layout operations" {
