@@ -1205,6 +1205,31 @@ test "io: process dynamics validate rates and tick-aligned durations" {
     );
 }
 
+test "io: process transition beyond clock range does not fail an earlier run" {
+    const start_ns = std.math.maxInt(clock_module.Timestamp) - 25;
+    var world = try World.init(task_world_allocator, .{
+        .seed = 0xA661,
+        .start_ns = start_ns,
+        .tick_ns = 10,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    try sim.control.process.setDynamics(0, .{
+        .crash_rate = .always(),
+        .crash_stability_min_ns = 30,
+    });
+
+    try sim.control.runFor(10);
+
+    try std.testing.expectEqual(start_ns + 10, world.now());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "process.kill node=0 reason=auto_crash",
+    ) == null);
+}
+
 test "io: process dynamics crash and restart at control boundaries" {
     if (!fiber_supported) return error.SkipZigTest;
 

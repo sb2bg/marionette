@@ -79,12 +79,19 @@ pub const ProcessSupervisor = struct {
     states: []ProcessState,
     dynamics: []env_module.ProcessDynamicsOptions,
     state_changed_at_ns: []clock_module.Timestamp,
-    next_transition_at_ns: []?clock_module.Timestamp,
+    transition_schedules: []TransitionSchedule,
     last_fault_evolution_ns: clock_module.Timestamp,
 
     const ProcessState = enum {
         alive,
         killed,
+    };
+
+    const TransitionSchedule = union(enum) {
+        pending,
+        none,
+        beyond_clock,
+        at: clock_module.Timestamp,
     };
 
     pub fn init(
@@ -110,9 +117,9 @@ pub const ProcessSupervisor = struct {
         errdefer allocator.free(state_changed_at_ns);
         @memset(state_changed_at_ns, world.now());
 
-        const next_transition_at_ns = try allocator.alloc(?clock_module.Timestamp, process_count);
-        errdefer allocator.free(next_transition_at_ns);
-        @memset(next_transition_at_ns, null);
+        const transition_schedules = try allocator.alloc(TransitionSchedule, process_count);
+        errdefer allocator.free(transition_schedules);
+        @memset(transition_schedules, .pending);
 
         return .{
             .allocator = allocator,
@@ -123,13 +130,13 @@ pub const ProcessSupervisor = struct {
             .states = states,
             .dynamics = dynamics,
             .state_changed_at_ns = state_changed_at_ns,
-            .next_transition_at_ns = next_transition_at_ns,
+            .transition_schedules = transition_schedules,
             .last_fault_evolution_ns = world.now(),
         };
     }
 
     pub fn deinit(self: *ProcessSupervisor) void {
-        self.allocator.free(self.next_transition_at_ns);
+        self.allocator.free(self.transition_schedules);
         self.allocator.free(self.state_changed_at_ns);
         self.allocator.free(self.dynamics);
         self.allocator.free(self.states);
@@ -159,7 +166,7 @@ pub const ProcessSupervisor = struct {
         try self.validateDynamics(options);
         const index = try self.nodeIndex(node);
         self.dynamics[index] = options;
-        self.next_transition_at_ns[index] = null;
+        self.transition_schedules[index] = .pending;
         try self.world.record(
             "process.dynamics node={} crash_rate={}/{} restart_rate={}/{} crash_stability_min_ns={} restart_stability_min_ns={}",
             .{
@@ -208,7 +215,7 @@ pub const ProcessSupervisor = struct {
         try lifecycle.restart(lifecycle.ptr, env);
         self.states[index] = .alive;
         self.state_changed_at_ns[index] = self.world.now();
-        self.next_transition_at_ns[index] = null;
+        self.transition_schedules[index] = .pending;
         try self.world.recordFields("process.restart", &.{
             traceField("node", .{ .uint = node }),
             traceField("automatic", .{ .boolean = automatic }),
@@ -235,8 +242,11 @@ pub const ProcessSupervisor = struct {
     fn nextFaultBoundaryBeforeOrAt(self: *ProcessSupervisor, end_ns: clock_module.Timestamp) !?clock_module.Timestamp {
         try self.ensureAutoSchedules();
         var next: ?clock_module.Timestamp = null;
-        for (self.next_transition_at_ns) |maybe_at_ns| {
-            const at_ns = maybe_at_ns orelse continue;
+        for (self.transition_schedules) |schedule| {
+            const at_ns = switch (schedule) {
+                .at => |value| value,
+                .pending, .none, .beyond_clock => continue,
+            };
             if (at_ns > self.world.now() and at_ns <= end_ns) {
                 next = minOptionalTimestamp(next, at_ns);
             }
@@ -261,7 +271,7 @@ pub const ProcessSupervisor = struct {
         }
         self.states[index] = .killed;
         self.state_changed_at_ns[index] = self.world.now();
-        self.next_transition_at_ns[index] = null;
+        self.transition_schedules[index] = .pending;
         try self.world.recordFields("process.kill", &.{
             traceField("node", .{ .uint = node }),
             traceField("reason", .{ .literal = reason }),
@@ -286,8 +296,8 @@ pub const ProcessSupervisor = struct {
             self.last_fault_evolution_ns
         else
             now_ns;
-        for (self.next_transition_at_ns, 0..) |maybe_at_ns, index| {
-            if (maybe_at_ns == null) {
+        for (self.transition_schedules, 0..) |schedule, index| {
+            if (schedule == .pending) {
                 try self.scheduleTransitionFrom(index, from_ns);
             }
         }
@@ -298,31 +308,43 @@ pub const ProcessSupervisor = struct {
         index: usize,
         from_ns: clock_module.Timestamp,
     ) !void {
-        self.next_transition_at_ns[index] = null;
         const options = self.dynamics[index];
         const rate = switch (self.states[index]) {
             .alive => options.crash_rate,
             .killed => options.restart_rate,
         };
-        if (rate.numerator == 0) return;
+        if (rate.numerator == 0) {
+            self.transition_schedules[index] = .none;
+            return;
+        }
 
         const stability_ns = switch (self.states[index]) {
             .alive => options.crash_stability_min_ns,
             .killed => options.restart_stability_min_ns,
         };
-        const floor_ns = try addTimestamp(self.state_changed_at_ns[index], stability_ns);
+        const floor_ns = addTimestamp(self.state_changed_at_ns[index], stability_ns) catch {
+            self.transition_schedules[index] = .beyond_clock;
+            return;
+        };
         const eligible_from = if (floor_ns <= from_ns) from_ns else floor_ns - self.world.clock().tick_ns;
         const ticks = try self.sampleNextOccurrenceTicks(rate);
-        self.next_transition_at_ns[index] = try addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns);
+        const at_ns = addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns) catch {
+            self.transition_schedules[index] = .beyond_clock;
+            return;
+        };
+        self.transition_schedules[index] = .{ .at = at_ns };
     }
 
     fn fireDueTransitions(self: *ProcessSupervisor) !void {
         const now_ns = self.world.now();
-        for (self.next_transition_at_ns, 0..) |maybe_at_ns, index| {
-            const at_ns = maybe_at_ns orelse continue;
+        for (self.transition_schedules, 0..) |schedule, index| {
+            const at_ns = switch (schedule) {
+                .at => |value| value,
+                .pending, .none, .beyond_clock => continue,
+            };
             if (at_ns > now_ns) continue;
 
-            self.next_transition_at_ns[index] = null;
+            self.transition_schedules[index] = .pending;
             const node: network_module.NodeId = @intCast(index);
             switch (self.states[index]) {
                 .alive => {
