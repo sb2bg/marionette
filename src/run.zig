@@ -2,6 +2,7 @@
 
 const std = @import("std");
 
+const allocation_module = @import("allocation.zig");
 const env_module = @import("env.zig");
 const network_module = @import("network/root.zig");
 const run_types = @import("run_types.zig");
@@ -308,8 +309,28 @@ fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) 
 fn simulateOptionsFromConfig(simulate: anytype) World.SimulateOptions {
     const Simulate = @TypeOf(simulate);
     return .{
+        .allocation = if (@hasField(Simulate, "allocation")) allocationOptionsFromConfig(simulate.allocation) else .{},
         .disk = if (@hasField(Simulate, "disk")) diskOptionsFromConfig(simulate.disk) else .{},
         .network = if (@hasField(Simulate, "network")) networkOptionsFromConfig(simulate.network) else null,
+        .task_stack_size = fieldOrDefault(
+            simulate,
+            "task_stack_size",
+            @as(usize, @import("scheduler.zig").default_task_stack_size),
+        ),
+        .task_start_jitter_ns = fieldOrDefault(simulate, "task_start_jitter_ns", @as(u64, 0)),
+        .fiber_overflow_diagnostics = fieldOrDefault(simulate, "fiber_overflow_diagnostics", true),
+    };
+}
+
+fn allocationOptionsFromConfig(allocation: anytype) allocation_module.FaultOptions {
+    const Allocation = @TypeOf(allocation);
+    return .{
+        .fail_after = fieldOrDefault(allocation, "fail_after", @as(?usize, null)),
+        .quota_bytes = fieldOrDefault(allocation, "quota_bytes", @as(?usize, null)),
+        .buggify_rate = if (@hasField(Allocation, "buggify_rate")) .{
+            .numerator = allocation.buggify_rate.numerator,
+            .denominator = allocation.buggify_rate.denominator,
+        } else .never(),
     };
 }
 
@@ -1203,6 +1224,43 @@ test "fuzzSeed: distinct within a run and across related bases" {
             try std.testing.expect(seed != other);
         }
     }
+}
+
+test "runSimCase: forwards every simulate option" {
+    const options = simulateOptionsFromConfig(.{
+        .allocation = .{
+            .fail_after = @as(?usize, 3),
+            .quota_bytes = @as(?usize, 4096),
+            .buggify_rate = .{ .numerator = 1, .denominator = 7 },
+        },
+        .disk = .{
+            .sector_size = 8192,
+            .min_latency_ns = @as(?u64, 20),
+            .latency_jitter_ns = 10,
+        },
+        .network = .{
+            .nodes = 3,
+            .service_nodes = 2,
+            .path_capacity = 32,
+        },
+        .task_stack_size = 1024 * 1024,
+        .task_start_jitter_ns = 50,
+        .fiber_overflow_diagnostics = false,
+    });
+
+    try std.testing.expectEqual(@as(?usize, 3), options.allocation.fail_after);
+    try std.testing.expectEqual(@as(?usize, 4096), options.allocation.quota_bytes);
+    try std.testing.expectEqual(@as(u32, 1), options.allocation.buggify_rate.numerator);
+    try std.testing.expectEqual(@as(u32, 7), options.allocation.buggify_rate.denominator);
+    try std.testing.expectEqual(@as(u64, 8192), options.disk.sector_size);
+    try std.testing.expectEqual(@as(?u64, 20), options.disk.min_latency_ns);
+    try std.testing.expectEqual(@as(u64, 10), options.disk.latency_jitter_ns);
+    try std.testing.expectEqual(@as(usize, 3), options.network.?.nodes);
+    try std.testing.expectEqual(@as(usize, 2), options.network.?.service_nodes);
+    try std.testing.expectEqual(@as(usize, 32), options.network.?.path_capacity);
+    try std.testing.expectEqual(@as(usize, 1024 * 1024), options.task_stack_size);
+    try std.testing.expectEqual(@as(u64, 50), options.task_start_jitter_ns);
+    try std.testing.expect(!options.fiber_overflow_diagnostics);
 }
 
 var sim_case_deinit_count: u8 = 0;
