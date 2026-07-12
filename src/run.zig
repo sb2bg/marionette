@@ -628,9 +628,12 @@ fn runOnceWithSimCase(
             ) };
         },
     };
-    defer state.deinit();
+    var state_live = true;
+    defer if (state_live) state.deinit();
 
     scenario(&state) catch |err| {
+        state.deinit();
+        state_live = false;
         return .{ .failed = try failureFromWorld(
             allocator,
             options,
@@ -643,6 +646,8 @@ fn runOnceWithSimCase(
 
     for (state_checks) |check| {
         check.check(&state) catch |err| {
+            state.deinit();
+            state_live = false;
             return .{ .failed = try failureFromWorld(
                 allocator,
                 options,
@@ -656,6 +661,8 @@ fn runOnceWithSimCase(
 
     for (options.checks) |check| {
         check.check(&world) catch |err| {
+            state.deinit();
+            state_live = false;
             return .{ .failed = try failureFromWorld(
                 allocator,
                 options,
@@ -667,6 +674,8 @@ fn runOnceWithSimCase(
         };
     }
 
+    state.deinit();
+    state_live = false;
     const trace = try allocator.dupe(u8, world.traceBytes());
     errdefer allocator.free(trace);
     const owned_options = try cloneRunOptions(allocator, options);
@@ -703,9 +712,12 @@ fn runOnceWithStateLifecycle(
             null,
         ) };
     };
-    defer deinit_state(&state);
+    var state_live = true;
+    defer if (state_live) deinit_state(&state);
 
     scenario(&state) catch |err| {
+        deinit_state(&state);
+        state_live = false;
         return .{ .failed = try failureFromWorld(
             allocator,
             options,
@@ -718,6 +730,8 @@ fn runOnceWithStateLifecycle(
 
     for (state_checks) |check| {
         check.check(&state) catch |err| {
+            deinit_state(&state);
+            state_live = false;
             return .{ .failed = try failureFromWorld(
                 allocator,
                 options,
@@ -731,6 +745,8 @@ fn runOnceWithStateLifecycle(
 
     for (options.checks) |check| {
         check.check(&world) catch |err| {
+            deinit_state(&state);
+            state_live = false;
             return .{ .failed = try failureFromWorld(
                 allocator,
                 options,
@@ -742,6 +758,8 @@ fn runOnceWithStateLifecycle(
         };
     }
 
+    deinit_state(&state);
+    state_live = false;
     const trace = try allocator.dupe(u8, world.traceBytes());
     errdefer allocator.free(trace);
     const owned_options = try cloneRunOptions(allocator, options);
@@ -1419,6 +1437,45 @@ test "runSimCase: deinitializes pointer-valued apps after each replay" {
     switch (report) {
         .passed => try std.testing.expectEqual(@as(u8, 2), pointer_sim_app_deinit_count),
         .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+var teardown_trace_count: u8 = 0;
+
+const TeardownTraceApp = struct {
+    env: env_module.Env,
+
+    fn init(sim: World.Simulation) TeardownTraceApp {
+        return .{ .env = sim.env };
+    }
+
+    fn deinit(self: *TeardownTraceApp) void {
+        teardown_trace_count += 1;
+        self.env.record("app.deinit count={}", .{teardown_trace_count}) catch unreachable;
+    }
+};
+
+fn teardownTraceScenario(_: *SimCase(TeardownTraceApp)) !void {}
+
+test "runSimCase: includes app teardown in replay comparison" {
+    teardown_trace_count = 0;
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = .{},
+        .init = TeardownTraceApp.init,
+        .scenario = teardownTraceScenario,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedDeterminismMismatch,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.determinism_mismatch, failure.kind);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "app.deinit count=1") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "app.deinit count=2") != null);
+        },
     }
 }
 
