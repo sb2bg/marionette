@@ -1165,7 +1165,7 @@ test "io: killed processes reject saved node capabilities until restart" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA64, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{});
+    const sim = try world.simulate(.{ .network = .{ .nodes = 1 } });
     const saved_env = try sim.envForNode(0);
     const saved_io = saved_env.io();
     try registerNoopProcess(sim, 0);
@@ -1181,10 +1181,14 @@ test "io: killed processes reject saved node capabilities until restart" {
         error.ConcurrencyUnavailable,
         Io.concurrent(saved_io, Helper.identity, .{1}),
     );
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 0) catch unreachable;
+    try std.testing.expectError(error.NetworkDown, address.listen(saved_io, .{}));
 
     try sim.restartProcess(0);
     var file = try Io.Dir.cwd().createFile(saved_io, "after-restart", .{});
     file.close(saved_io);
+    var listener = try address.listen(saved_io, .{});
+    listener.deinit(saved_io);
 }
 
 test "io: manual restart invalidates process-local file metadata" {

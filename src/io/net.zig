@@ -151,6 +151,7 @@ pub fn Ops(comptime Backend: type) type {
             if (options.protocol != .tcp) return error.ProtocolUnsupportedBySystem;
 
             const backend = backendFromUserdata(userdata);
+            if (!backend.processIsAlive()) return error.NetworkDown;
             // Port 0 asks for an ephemeral port, per POSIX bind semantics;
             // the assigned port is surfaced through the returned socket's
             // address so callers can connect to it.
@@ -194,6 +195,7 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const backend_io = backend.io();
             defer resolved.close(backend_io);
+            if (!backend.processIsAlive()) return error.NetworkDown;
             lookupLiterals(backend, backend_io, host_name, resolved, options) catch |err| switch (err) {
                 error.Closed => unreachable, // `resolved` must not be closed until lookup returns
                 else => |other| return other,
@@ -296,6 +298,7 @@ pub fn Ops(comptime Backend: type) type {
             }
 
             const backend = backendFromUserdata(userdata);
+            if (!backend.processIsAlive()) return error.NetworkDown;
             const listener_ref = backend.findOpenListenerRef(address) orelse return error.ConnectionRefused;
             const listener_backend = listener_ref.backend;
             const listener = listener_ref.state;
@@ -574,6 +577,7 @@ pub fn Ops(comptime Backend: type) type {
         /// partition is a recorded roadmap gap.
         pub fn simNetShutdown(userdata: ?*anyopaque, handle: SocketHandle, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
             const backend = backendFromUserdata(userdata);
+            if (!backend.processIsAlive()) return error.NetworkDown;
             backend.world.record(
                 "io.net.shutdown handle={} how={s}",
                 .{ handle, @tagName(how) },

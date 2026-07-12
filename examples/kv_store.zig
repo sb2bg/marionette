@@ -14,6 +14,7 @@ const wal_path = "kv.wal";
 const scenario_write_count = 2;
 const Record = wal_record.Fixed(u32, 4);
 const record_size = Record.record_size;
+const sector_size = record_size / 2;
 const magic: u32 = 0x4d4b5631; // MKV1
 const committed_key: u32 = 1;
 const committed_value: u32 = 41;
@@ -23,10 +24,14 @@ const volatile_value: u32 = 99;
 pub const Case = mar.SimCase(KVStore);
 
 pub fn simulateOptions() mar.World.SimulateOptions {
-    return .{ .disk = .{
-        .sector_size = record_size,
-        .min_latency_ns = tick_ns,
-    } };
+    return .{
+        .disk = .{
+            // Each WAL record spans two sectors, so a torn write can land a
+            // truthful whole-sector prefix that strict recovery must reject.
+            .sector_size = sector_size,
+            .min_latency_ns = tick_ns,
+        },
+    };
 }
 
 pub fn init(sim: mar.Sim) !KVStore {
@@ -382,7 +387,7 @@ test "kv store: same app code runs on simulated and real disks" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{
-        .sector_size = record_size,
+        .sector_size = sector_size,
         .min_latency_ns = tick_ns,
     } });
     var sim_store = try writeAndRecover(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder());
@@ -396,7 +401,7 @@ test "kv store: same app code runs on simulated and real disks" {
         .allocator = std.testing.allocator,
         .root_dir = tmp.dir,
         .io = std.testing.io,
-        .disk = .{ .sector_size = record_size },
+        .disk = .{ .sector_size = sector_size },
     });
     defer production.deinit();
 

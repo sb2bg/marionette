@@ -792,6 +792,15 @@ pub fn Ops(comptime Backend: type) type {
         ) disk_module.DiskError!void {
             if (src.len == 0) return;
             const sector_size = try sectorSizeUsize(backend);
+            if (offset % backend.sector_size == 0 and src.len % sector_size == 0) {
+                try backend.disk.write(.{
+                    .path = path,
+                    .offset = offset,
+                    .bytes = src,
+                    .logical_len = logical_len,
+                });
+                return;
+            }
             const sector = try backend.allocOpScratch(sector_size);
             defer backend.freeOpScratch(sector);
 
