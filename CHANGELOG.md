@@ -26,7 +26,10 @@
   prefix of whole sectors, reorder is one consistently traced crash-global
   reversal, and scripted corruption rejects missing files. The WAL example now
   spans two sectors so its planted recovery bug depends on a real sector-prefix
-  tear instead of accidental byte tearing.
+  tear instead of accidental byte tearing. Reclassifies XITDB-001 as a
+  Marionette model bug: its minimized 7-byte-sector counterexample disappears
+  under the corrected whole-sector prefix model while the same crash-point
+  sweep continues to exercise real unacknowledged windows.
 
 - Canceling a task blocked in `Group.await` now cancels the group's members,
   waits for their completion, and resurfaces `error.Canceled` to the outer

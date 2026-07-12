@@ -125,18 +125,16 @@ test "xitdb data-region reordered writes preserve acknowledged history at realis
     try runDataRegionCrashSweep(.reordered);
 }
 
-test "marionette detects xitdb torn header corruption at sub-field granularity" {
+test "xitdb torn header recovery stays sector atomic at sub-field geometry" {
     const allocator = std.testing.allocator;
 
-    // This is a minimal external counterexample: one acknowledged transaction,
-    // one unacknowledged torn header write, then recovery corrupts previously
-    // acknowledged state. The 7-byte sector is deliberately non-realistic; see
-    // the 512/4096 test below for the hardware-plausible geometries checked so
-    // far.
+    // The committed-size field crosses this deliberately tiny sector boundary,
+    // but a torn write may still land only a prefix of whole sectors. The old
+    // byte-prefix model corrupted this field and produced a false positive.
     try std.testing.expect(committedSizeHeaderCrossesSector(7));
     const outcome = try runTornHeaderRecoveryCase(allocator, 0x70A1_0007, 7);
     defer allocator.free(outcome.trace);
-    try std.testing.expectEqual(TornOutcome.recovery_corrupted, outcome.result);
+    try std.testing.expectEqual(TornOutcome.recovered, outcome.result);
     try mar.expectTraceContains(outcome.trace, "disk.crash_write");
     try mar.expectTraceContains(outcome.trace, "path=xit-torn.db offset=28");
     try mar.expectTraceContains(outcome.trace, "result=torn");
@@ -753,8 +751,8 @@ fn makeFuzzPlan(
 }
 
 /// Run one planned crash-fault case. The last transaction in `plan` is the
-/// victim: it runs as a cooperative task while the main context sleeps to
-/// the crash point, so the crash can land mid-commit with pending writes.
+/// victim: it runs as a cooperative task while an operation-count crash is
+/// armed, so the crash can land mid-commit with pending writes.
 fn runFuzzCase(
     allocator: std.mem.Allocator,
     params: FuzzParams,
@@ -975,26 +973,22 @@ test "xitdb crash-fault fuzz holds acknowledged history at realistic sectors" {
     }
 }
 
-test "xitdb fuzzer shrinks the sub-field torn header failure to a readable repro" {
+test "xitdb fuzzer rejects the former sub-field torn header artifact" {
     const allocator = std.testing.allocator;
 
-    // Sector size 7 is the characterized XITDB-001 simulator boundary: the
-    // 8-byte committed-size header spans sectors, so a torn crash write can
-    // cut inside the field and corrupt recovery. The fuzzer must find it and
-    // reduce it to a minimal, readable operation sequence.
+    // Exhaust the same deliberately tiny sector profile that used to produce
+    // XITDB-001. Whole-sector prefix tears must preserve acknowledged history
+    // even when the header itself crosses a sector boundary.
     try std.testing.expect(committedSizeHeaderCrossesSector(7));
 
-    var found = false;
-    seeds: for (0..4) |i| {
+    var windows: usize = 0;
+    for (0..4) |i| {
         const seed = 0x5421_0000 + @as(u64, @intCast(i));
         var plan = try makeFuzzPlan(allocator, seed, 2);
         defer plan.deinit(allocator);
 
-        // Scan every crash point in the victim's commit path: the torn
-        // header window is only a slice of the commit, and the scan is the
-        // fuzzer's crash-point dimension made exhaustive. The scan is
-        // self-bounding: a budget past the victim's last operation never
-        // fires and reports `passed_no_window`.
+        // The scan is self-bounding: a budget past the victim's last operation
+        // never fires and reports `passed_no_window`.
         var crash_after: u64 = 0;
         while (true) : (crash_after += 1) {
             const params = FuzzParams{
@@ -1005,31 +999,12 @@ test "xitdb fuzzer shrinks the sub-field torn header failure to a readable repro
             };
             const outcome = try runFuzzCase(allocator, params, plan.items);
             if (outcome == .passed_no_window) break;
-            if (outcome != .failed) continue;
-
-            const original_len = plan.items.len;
-            try shrinkFuzzPlan(allocator, params, &plan);
-            try std.testing.expect(plan.items.len <= original_len);
-            // The known counterexample needs almost nothing: at most the
-            // victim plus a couple of acknowledged transactions.
-            try std.testing.expect(plan.items.len <= 3);
-            // The shrunk plan must still reproduce.
-            try std.testing.expectEqual(FuzzOutcome.failed, try runFuzzCase(allocator, params, plan.items));
-
-            var buffer: [4096]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try writeRepro(&writer, params, plan.items);
-            const repro = writer.buffered();
-            try std.testing.expect(std.mem.indexOf(u8, repro, "sector_size=7") != null);
-            try std.testing.expect(std.mem.indexOf(u8, repro, "fault=torn") != null);
-            try std.testing.expect(std.mem.indexOf(u8, repro, "victim") != null);
-
-            found = true;
-            break :seeds;
+            try std.testing.expect(outcome != .failed);
+            windows += 1;
         }
     }
 
-    try std.testing.expect(found);
+    try std.testing.expect(windows > 0);
 }
 
 fn hashInt(buffer: []const u8) HashInt {

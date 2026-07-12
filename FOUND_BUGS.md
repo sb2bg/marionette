@@ -39,7 +39,7 @@ result before making a claim about it.
 | KVDB-001  | kvdb    | Confirmed SUT bug  | Metadata-loss crash / corrupt root page      | Reopen could trust an invalid B-tree root and hit debug assertions instead of reporting corruption | Not fixed upstream                |
 | KVDB-002  | kvdb    | Confirmed SUT bug  | No-fault randomized synced puts              | Leaf insert could overwrite an existing entry's payload, making a committed key disappear          | Not fixed upstream                |
 | KVDB-003  | kvdb    | Confirmed SUT bug  | No-fault delete-heavy model workload         | Leaf delete rebalancing broke B+tree separator/order invariants, making unrelated keys unreachable | Not fixed upstream                |
-| XITDB-001 | xitdb   | Simulator boundary | 7-byte-sector torn committed-size header     | A sub-field tear can corrupt recovery, but the field is structurally atomic at realistic sectors   | Characterized; not a reported bug |
+| XITDB-001 | xitdb   | Harness/model bug  | 7-byte-sector torn committed-size header     | Rejected: the old byte-prefix tear violated Marionette's sector-atomic contract                     | Fixed in Marionette               |
 | XITDB-002 | xitdb   | Positive result    | 512/4096-byte data-region torn/reorder sweep | Acknowledged modeled history survived the tested realistic data-region crash faults                | No SUT bug found in this profile  |
 | DUSTY-001 | dusty   | Confirmed SUT bug  | Server crash with a pooled keep-alive conn   | Client connection pool never evicts a dead connection; the client can never recover                | Fixed upstream                    |
 | DUSTY-002 | dusty   | Confirmed SUT bug  | Graceful shutdown with an active handler     | `listen` drain busy-spins forever: the drain event latches set and is never reset                  | Fixed upstream                    |
@@ -188,30 +188,29 @@ The xitdb harness is pinned to
 deterministic `std.Io.File` backend with a model oracle for acknowledged
 history.
 
-### XITDB-001: Torn Committed-Size Header Boundary
+### XITDB-001: Rejected Byte-Tear Artifact
 
 **Project:** xitdb
 
-**Classification:** Simulator boundary
+**Classification:** Harness/model bug
 
-**Trigger:** A deliberately non-realistic 7-byte sector model tore the 8-byte
-committed file-size field at bytes 28-35 during an unacknowledged write.
+**Trigger:** The old simulator implementation landed half of a pending write in
+bytes, even though its public fault model promised a prefix of whole sectors. A
+deliberately tiny 7-byte sector made that byte prefix cut the 8-byte committed
+file-size field at bytes 28-35.
 
-**Symptom:** A torn write over the committed-size header could make recovery
-truncate or read according to a corrupted committed size, causing recovery to
-fail against the previously acknowledged model state.
+**Historical symptom:** A torn write over the committed-size header could make
+recovery truncate or read according to a corrupted committed size, causing
+recovery to fail against the previously acknowledged model state.
 
-**Why this is not counted as a SUT bug:** The committed-size field is at fixed
-offset 28-35, wholly inside sector 0 for realistic 512- and 4096-byte sector
-atomicity. Marionette reproduced the boundary only by making the atomic write
-granularity smaller than a real storage device's sector. That makes it a useful
-demonstration of the simulator's torn-write capability and of xitdb's implicit
-atomicity assumption, but not a hardware-realistic xitdb data-loss bug.
+**Why it was rejected:** Sector size did not excuse tearing within a sector.
+After Marionette began landing only a prefix of complete sectors, the focused
+reproduction and the exhaustive crash-point scan both recovered acknowledged
+history at 7-, 512-, and 4096-byte geometries. No xitdb change was needed.
 
-**What Marionette proved:** The harness can shrink and characterize a recovery
-counterexample precisely enough to distinguish "real SUT bug" from "simulator
-boundary." This result should be described as a sub-field atomicity boundary,
-not as xitdb data loss on normal disks.
+**Lesson:** A deterministic shrinker can minimize a simulator defect just as
+convincingly as a SUT defect. Counterexamples must be checked against the fault
+model's physical contract before they are reported upstream.
 
 ### XITDB-002: Realistic Data-Region Torn/Reorder Sweep Held
 
