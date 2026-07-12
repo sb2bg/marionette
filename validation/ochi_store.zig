@@ -25,6 +25,8 @@ const store_path = "/ochi";
 const day_ns = 24 * 60 * 60 * 1_000_000_000;
 const start_ns = 31 * day_ns;
 
+fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
+
 const OchiApp = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -185,6 +187,10 @@ test "Ochi storage survives flush, crash, and reopen under Marionette" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = 4096 } });
+    try sim.registerProcess(0, .{
+        .ptr = sim.control.world,
+        .restart = noopProcessRestart,
+    });
     var case: Case = .{
         .sim = sim,
         .app = try OchiApp.init(sim),
@@ -204,6 +210,7 @@ test "Ochi storage survives flush, crash, and reopen under Marionette" {
     });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try sim.restartProcess(0);
 
     case.app = try OchiApp.init(sim);
     app_live = true;
