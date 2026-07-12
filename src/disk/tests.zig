@@ -501,7 +501,7 @@ test "disk: crash can lose unflushed pending writes" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=1 landed=0 lost=1 torn=0") != null);
 }
 
-test "disk: crash can tear unflushed pending writes" {
+test "disk: torn writes land a prefix of whole sectors" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
@@ -511,9 +511,39 @@ test "disk: crash can tear unflushed pending writes" {
     });
     defer disk.deinit();
 
-    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "wxyz" });
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "WWWWYYYYZZZZ" });
     try disk.disk().sync(.{ .path = "wal.log" });
-    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "abcdefghijkl" });
+    try disk.control().setFaults(.{ .crash_torn_write_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    var buffer: [12]u8 = @splat(0);
+    try disk.disk().read(.{
+        .path = "wal.log",
+        .offset = 0,
+        .buffer = &buffer,
+    });
+
+    try std.testing.expectEqualStrings("abcdYYYYZZZZ", &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=2 path=wal.log kind=crash_torn_write rate=1/1 roll=0 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=2 path=wal.log offset=0 len=12 result=torn") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=1 landed=0 lost=0 torn=1") != null);
+}
+
+test "disk: a torn one-sector write does not damage durable truth" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    var disk = try SimDisk.init(&world, .{
+        .sector_size = 4,
+        .min_latency_ns = 10,
+    });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "safe" });
+    try disk.disk().sync(.{ .path = "wal.log" });
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "oops" });
     try disk.control().setFaults(.{ .crash_torn_write_rate = .always() });
     try disk.control().crash();
     try disk.control().restart();
@@ -525,10 +555,7 @@ test "disk: crash can tear unflushed pending writes" {
         .buffer = &buffer,
     });
 
-    try std.testing.expectEqualStrings("abyz", &buffer);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.fault op=2 path=wal.log kind=crash_torn_write rate=1/1 roll=0 fired=true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash_write op=2 path=wal.log offset=0 len=4 result=torn") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.crash pending_writes=1 landed=0 lost=0 torn=1") != null);
+    try std.testing.expectEqualStrings("safe", &buffer);
 }
 
 test "disk: crash can reorder unflushed pending writes" {

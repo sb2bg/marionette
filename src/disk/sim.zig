@@ -1233,7 +1233,9 @@ pub const SimDisk = struct {
     }
 
     fn applyTornWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
-        const torn_len = pending.bytes.len / 2;
+        const sector_size: usize = @intCast(self.options.sector_size);
+        const midpoint = pending.bytes.len / 2;
+        const torn_len = midpoint - midpoint % sector_size;
         if (torn_len == 0) return;
 
         const file = try self.getOrCreateFile(pending.path, pending.inode);
