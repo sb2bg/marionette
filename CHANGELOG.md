@@ -13,14 +13,15 @@
   across disk-latency suspension, guarded fiber-stack arithmetic is checked,
   network enqueue/dequeue publishes only after fallible trace recording, closed
   streams reclaim queued pooled frames, async/group storage honors dynamic
-  alignment, and trace-summary plus low-level world time/random state roll back
-  cleanly on allocation failure.
+  alignment, killed `Group.await` owners release their group state before the
+  fiber stack is destroyed, and trace-summary plus low-level world time/random
+  state roll back cleanly on allocation failure.
 
 - Routes scheduler timer jumps through automatic process/network fault
   boundaries and yields to work created at each intermediate boundary. App
   sleeps round to ticks, full-range task-start jitter and network-latency jitter
-  avoid overflow, beyond-clock process transitions stay inert, and failed
-  liveness transitions remain retryable.
+  avoid overflow, beyond-clock process and network transitions stay inert, and
+  failed liveness transitions remain retryable.
 
 - Makes the disk contract match its declared sector model: torn writes land a
   prefix of whole sectors, reorder is one consistently traced crash-global
