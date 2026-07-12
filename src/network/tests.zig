@@ -129,8 +129,37 @@ test "network: invalid durations are runtime errors" {
             .latency_jitter_ns = 11,
         }),
     );
+    try std.testing.expectError(
+        error.InvalidDuration,
+        sim.packetCore().send(0, 1, .{ .value = 1 }, .{
+            .min_latency_ns = 10,
+            .latency_jitter_ns = std.math.maxInt(clock_module.Duration) - 9,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidDuration,
+        sim.control().network.setFaults(.{
+            .min_latency_ns = 10,
+            .latency_jitter_ns = std.math.maxInt(clock_module.Duration) - 9,
+        }),
+    );
     // Misaligned `runFor` durations are harness misuse and assert rather
     // than returning an error; see the runFor misuse contract.
+}
+
+test "network: full-range latency jitter does not overflow its draw bound" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x1A7E, .tick_ns = 1 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    try sim.control.network.setLatency(.{
+        .min_latency_ns = 0,
+        .latency_jitter_ns = std.math.maxInt(clock_module.Duration),
+    });
+    const sender = try sim.endpoint(TestPayload, 0);
+    try sender.send(1, .{ .value = 1 });
+
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_u64") != null);
 }
 
 test "network: invalid drop rates are runtime errors" {

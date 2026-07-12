@@ -170,6 +170,9 @@ const SharedRuntime = struct {
         const tick_ns = self.world.clock().tick_ns;
         if (faults.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
         if (faults.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
+        if (std.math.maxInt(clock_module.Duration) - faults.min_latency_ns < faults.latency_jitter_ns) {
+            return error.InvalidDuration;
+        }
     }
 
     fn validateTickAlignedDuration(self: *const SharedRuntime, duration_ns: clock_module.Duration) NetworkError!void {
@@ -788,6 +791,20 @@ pub fn nextStreamDeliveryAtForControl(control: AnyNetworkControl, node: NodeId) 
     return try runtime.nextDeliveryAtFor(node);
 }
 
+fn sampleLatency(shared: *SharedRuntime) !clock_module.Duration {
+    const faults = shared.faults;
+    const tick_ns = shared.world.clock().tick_ns;
+    if (faults.latency_jitter_ns == 0) return faults.min_latency_ns;
+
+    const max_jitter_ticks = faults.latency_jitter_ns / tick_ns;
+    const jitter_ticks = if (max_jitter_ticks == std.math.maxInt(clock_module.Duration))
+        try shared.world.randomU64()
+    else
+        try shared.world.randomIntLessThan(clock_module.Duration, max_jitter_ticks + 1);
+    const jitter_ns = std.math.mul(clock_module.Duration, jitter_ticks, tick_ns) catch unreachable;
+    return std.math.add(clock_module.Duration, faults.min_latency_ns, jitter_ns) catch unreachable;
+}
+
 fn TypedRuntime(comptime Payload: type) type {
     const Handle = Endpoint(Payload);
     const Envelope = Handle.Envelope;
@@ -964,15 +981,7 @@ fn TypedRuntime(comptime Payload: type) type {
         }
 
         fn latency(self: *Self) !clock_module.Duration {
-            const faults = self.shared.faults;
-            const tick_ns = self.shared.world.clock().tick_ns;
-            if (faults.latency_jitter_ns == 0) return faults.min_latency_ns;
-
-            const jitter_ticks = try self.shared.world.randomIntLessThan(
-                clock_module.Duration,
-                faults.latency_jitter_ns / tick_ns + 1,
-            );
-            return faults.min_latency_ns + jitter_ticks * tick_ns;
+            return try sampleLatency(self.shared);
         }
 
         fn runForDeterministicFaults(self: *Self, duration_ns: clock_module.Duration) !void {
@@ -1316,15 +1325,7 @@ const SimByteRuntime = struct {
     }
 
     fn latency(self: *Self) !clock_module.Duration {
-        const faults = self.shared.faults;
-        const tick_ns = self.shared.world.clock().tick_ns;
-        if (faults.latency_jitter_ns == 0) return faults.min_latency_ns;
-
-        const jitter_ticks = try self.shared.world.randomIntLessThan(
-            clock_module.Duration,
-            faults.latency_jitter_ns / tick_ns + 1,
-        );
-        return faults.min_latency_ns + jitter_ticks * tick_ns;
+        return try sampleLatency(self.shared);
     }
 
     fn runForDeterministicFaults(self: *Self, duration_ns: clock_module.Duration) !void {

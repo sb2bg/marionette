@@ -459,6 +459,9 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             const tick_ns = self.world.clock().tick_ns;
             if (options.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
             if (options.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
+            if (std.math.maxInt(clock_module.Duration) - options.min_latency_ns < options.latency_jitter_ns) {
+                return error.InvalidDuration;
+            }
         }
 
         fn latency(self: *Self, options: SendOptions) !clock_module.Duration {
@@ -466,11 +469,13 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
 
             if (options.latency_jitter_ns == 0) return options.min_latency_ns;
 
-            const jitter_ticks = try self.world.randomIntLessThan(
-                clock_module.Duration,
-                options.latency_jitter_ns / tick_ns + 1,
-            );
-            return options.min_latency_ns + jitter_ticks * tick_ns;
+            const max_jitter_ticks = options.latency_jitter_ns / tick_ns;
+            const jitter_ticks = if (max_jitter_ticks == std.math.maxInt(clock_module.Duration))
+                try self.world.randomU64()
+            else
+                try self.world.randomIntLessThan(clock_module.Duration, max_jitter_ticks + 1);
+            const jitter_ns = std.math.mul(clock_module.Duration, jitter_ticks, tick_ns) catch unreachable;
+            return std.math.add(clock_module.Duration, options.min_latency_ns, jitter_ns) catch unreachable;
         }
 
         fn packetLessThan(a: Packet, b: Packet) bool {
@@ -690,6 +695,9 @@ pub fn NetworkSimulation(comptime Payload: type, comptime network_options: Netwo
             const tick_ns = packet_core.world.clock().tick_ns;
             if (faults.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
             if (faults.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
+            if (std.math.maxInt(clock_module.Duration) - faults.min_latency_ns < faults.latency_jitter_ns) {
+                return error.InvalidDuration;
+            }
         }
     };
 }
