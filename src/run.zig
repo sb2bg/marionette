@@ -600,15 +600,18 @@ fn runOnceWithSimCase(
     defer world.deinit();
     try recordRunContext(&world, options);
 
-    const sim = world.simulate(simulate_options) catch |err| {
-        return .{ .failed = try failureFromWorld(
-            allocator,
-            options,
-            .scenario_error,
-            &world,
-            err,
-            null,
-        ) };
+    const sim = world.simulate(simulate_options) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            return .{ .failed = try failureFromWorld(
+                allocator,
+                options,
+                .scenario_error,
+                &world,
+                err,
+                null,
+            ) };
+        },
     };
 
     var state: SimCase(App) = .{
@@ -1261,6 +1264,67 @@ test "runSimCase: forwards every simulate option" {
     try std.testing.expectEqual(@as(usize, 1024 * 1024), options.task_stack_size);
     try std.testing.expectEqual(@as(u64, 50), options.task_start_jitter_ns);
     try std.testing.expect(!options.fiber_overflow_diagnostics);
+}
+
+const FailSimDiskAllocation = struct {
+    backing: std.mem.Allocator,
+    failed: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (!self.failed and len == @sizeOf(@import("disk/root.zig").SimDisk)) {
+            self.failed = true;
+            return null;
+        }
+        return self.backing.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(memory, alignment, new_len, return_address);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.backing.rawRemap(memory, alignment, new_len, return_address);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, return_address);
+    }
+};
+
+test "runSimCase: simulation setup allocation errors remain runner errors" {
+    const App = struct {};
+    const Functions = struct {
+        fn init(_: World.Simulation) App {
+            return .{};
+        }
+
+        fn scenario(_: *SimCase(App)) !void {}
+    };
+
+    var failing = FailSimDiskAllocation{ .backing = std.testing.allocator };
+    try std.testing.expectError(error.OutOfMemory, runSimCase(.{
+        .allocator = failing.allocator(),
+        .seed = 1234,
+        .simulate = .{},
+        .init = Functions.init,
+        .scenario = Functions.scenario,
+    }));
+    try std.testing.expect(failing.failed);
 }
 
 var sim_case_deinit_count: u8 = 0;
