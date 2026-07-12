@@ -1886,7 +1886,32 @@ fn supportsClock(clock: Io.Clock) bool {
 /// Context and result are stored out-of-line because the caller's context
 /// buffer expires when the vtable call returns, while the result must
 /// survive until `await`/`cancel` collects it.
-const max_async_alignment = 16;
+const AlignedStorage = struct {
+    bytes: []u8,
+    alignment: std.mem.Alignment,
+
+    fn create(
+        allocator: std.mem.Allocator,
+        len: usize,
+        alignment: std.mem.Alignment,
+    ) error{OutOfMemory}!AlignedStorage {
+        if (len == 0) {
+            const address = alignment.backward(std.math.maxInt(usize));
+            return .{
+                .bytes = @as([*]u8, @ptrFromInt(address))[0..0],
+                .alignment = alignment,
+            };
+        }
+        const ptr = allocator.rawAlloc(len, alignment, @returnAddress()) orelse
+            return error.OutOfMemory;
+        return .{ .bytes = ptr[0..len], .alignment = alignment };
+    }
+
+    fn destroy(self: AlignedStorage, allocator: std.mem.Allocator) void {
+        if (self.bytes.len == 0) return;
+        allocator.rawFree(self.bytes, self.alignment, @returnAddress());
+    }
+};
 
 const GroupState = struct {
     backend: *Backend,
@@ -1920,7 +1945,7 @@ const GroupClosure = struct {
     state: ?*GroupState,
     task_id: u64 = std.math.maxInt(u64),
     start: *const fn (context: *const anyopaque) void,
-    context: []align(max_async_alignment) u8,
+    context: AlignedStorage,
 
     fn create(
         backend: *Backend,
@@ -1929,17 +1954,15 @@ const GroupClosure = struct {
         context_alignment: std.mem.Alignment,
         start: *const fn (context: *const anyopaque) void,
     ) error{OutOfMemory}!*GroupClosure {
-        std.debug.assert(context_alignment.toByteUnits() <= max_async_alignment);
-
         const closure = try backend.allocator.create(GroupClosure);
         errdefer backend.allocator.destroy(closure);
-        const context_copy = try backend.allocator.alignedAlloc(
-            u8,
-            .fromByteUnits(max_async_alignment),
+        const context_copy = try AlignedStorage.create(
+            backend.allocator,
             context.len,
+            context_alignment,
         );
-        errdefer backend.allocator.free(context_copy);
-        @memcpy(context_copy, context);
+        errdefer context_copy.destroy(backend.allocator);
+        @memcpy(context_copy.bytes, context);
         closure.* = .{
             .backend = backend,
             .state = state,
@@ -1950,7 +1973,7 @@ const GroupClosure = struct {
     }
 
     fn destroy(self: *GroupClosure, allocator: std.mem.Allocator) void {
-        allocator.free(self.context);
+        self.context.destroy(allocator);
         allocator.destroy(self);
     }
 
@@ -1962,7 +1985,7 @@ const GroupClosure = struct {
 
     fn run(raw: *anyopaque) void {
         const closure: *GroupClosure = @ptrCast(@alignCast(raw));
-        closure.start(closure.context.ptr);
+        closure.start(closure.context.bytes.ptr);
         if (closure.state) |state| state.completeTask();
         closure.state = null;
         releaseGroupClosure(closure);
@@ -1974,8 +1997,8 @@ const AsyncClosure = struct {
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
     task_id: u64 = 0,
     done: bool = false,
-    context: []align(max_async_alignment) u8,
-    result: []align(max_async_alignment) u8,
+    context: AlignedStorage,
+    result: AlignedStorage,
 
     fn create(
         backend: *Backend,
@@ -1985,17 +2008,14 @@ const AsyncClosure = struct {
         context_alignment: std.mem.Alignment,
         start: *const fn (context: *const anyopaque, result: *anyopaque) void,
     ) error{OutOfMemory}!*AsyncClosure {
-        std.debug.assert(result_alignment.toByteUnits() <= max_async_alignment);
-        std.debug.assert(context_alignment.toByteUnits() <= max_async_alignment);
-
         const closure = try backend.allocator.create(AsyncClosure);
         errdefer backend.allocator.destroy(closure);
-        const context_copy = try backend.allocator.alignedAlloc(u8, .fromByteUnits(max_async_alignment), context.len);
-        errdefer backend.allocator.free(context_copy);
-        const result = try backend.allocator.alignedAlloc(u8, .fromByteUnits(max_async_alignment), result_len);
-        errdefer backend.allocator.free(result);
+        const context_copy = try AlignedStorage.create(backend.allocator, context.len, context_alignment);
+        errdefer context_copy.destroy(backend.allocator);
+        const result = try AlignedStorage.create(backend.allocator, result_len, result_alignment);
+        errdefer result.destroy(backend.allocator);
 
-        @memcpy(context_copy, context);
+        @memcpy(context_copy.bytes, context);
         closure.* = .{
             .backend = backend,
             .start = start,
@@ -2006,8 +2026,8 @@ const AsyncClosure = struct {
     }
 
     fn destroy(self: *AsyncClosure, allocator: std.mem.Allocator) void {
-        allocator.free(self.context);
-        allocator.free(self.result);
+        self.context.destroy(allocator);
+        self.result.destroy(allocator);
         allocator.destroy(self);
     }
 
@@ -2022,7 +2042,7 @@ const AsyncClosure = struct {
     /// zeroed result after the owning process has been killed.
     fn cancelForKill(self: *AsyncClosure) void {
         if (self.done) return;
-        @memset(self.result, 0);
+        @memset(self.result.bytes, 0);
         self.done = true;
         if (self.backend.task_runtime) |runtime| {
             _ = runtime.wake(self.completionKey(), std.math.maxInt(usize));
@@ -2032,7 +2052,7 @@ const AsyncClosure = struct {
     /// Task entry: run the user function, then publish completion.
     fn run(raw: *anyopaque) void {
         const closure: *AsyncClosure = @ptrCast(@alignCast(raw));
-        closure.start(closure.context.ptr, closure.result.ptr);
+        closure.start(closure.context.bytes.ptr, closure.result.bytes.ptr);
         closure.done = true;
         const runtime = closure.backend.task_runtime orelse unreachable;
         _ = runtime.wake(closure.completionKey(), std.math.maxInt(usize));
@@ -2283,7 +2303,7 @@ fn simAwait(
         }
     }
 
-    @memcpy(result, closure.result[0..result.len]);
+    @memcpy(result, closure.result.bytes[0..result.len]);
     releaseClosure(closure);
 }
 

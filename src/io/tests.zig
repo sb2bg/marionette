@@ -247,6 +247,56 @@ test "io: world simulation runs async tasks deterministically" {
     try std.testing.expectEqualStrings(first_trace, second_trace);
 }
 
+test "io: async preserves over-aligned context and result storage" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const OverAligned = struct {
+        value: u64 align(64),
+    };
+    comptime std.debug.assert(@alignOf(OverAligned) == 64);
+
+    const Helper = struct {
+        fn addOne(value: OverAligned) OverAligned {
+            return .{ .value = value.value + 1 };
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA67, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var future = Io.async(io, Helper.addOne, .{OverAligned{ .value = 41 }});
+    const result = future.await(io);
+    try std.testing.expectEqual(@as(u64, 42), result.value);
+}
+
+test "io: task groups preserve over-aligned context storage" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const OverAligned = struct {
+        value: u64 align(64),
+    };
+    comptime std.debug.assert(@alignOf(OverAligned) == 64);
+
+    const Helper = struct {
+        fn write(value: OverAligned, output: *u64) void {
+            output.* = value.value;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA68, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var output: u64 = 0;
+    var group: Io.Group = .init;
+    try group.concurrent(io, Helper.write, .{ OverAligned{ .value = 42 }, &output });
+    try group.await(io);
+    try std.testing.expectEqual(@as(u64, 42), output);
+}
+
 test "io: task groups await deterministic completion and can be reused" {
     if (!fiber_supported) return error.SkipZigTest;
 
