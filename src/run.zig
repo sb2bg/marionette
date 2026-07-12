@@ -434,6 +434,7 @@ fn fallibleSimInit(comptime App: type, comptime init_app: anytype) fn (World.Sim
 fn appHasDeinit(comptime App: type) bool {
     return switch (@typeInfo(App)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(App, "deinit"),
+        .pointer => |pointer| pointer.size == .one and appHasDeinit(pointer.child),
         else => false,
     };
 }
@@ -1380,6 +1381,43 @@ test "runSimCase: initializes app from simulation and deinitializes each replay"
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "simcase.value value=1") != null);
             try std.testing.expect(std.mem.indexOf(u8, passed.trace, "simcase.check value=1") != null);
         },
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+var pointer_sim_app_deinit_count: u8 = 0;
+
+const PointerSimApp = struct {
+    allocator: std.mem.Allocator,
+
+    fn init(_: World.Simulation) !*PointerSimApp {
+        const app = try std.testing.allocator.create(PointerSimApp);
+        app.* = .{ .allocator = std.testing.allocator };
+        return app;
+    }
+
+    fn deinit(self: *PointerSimApp) void {
+        pointer_sim_app_deinit_count += 1;
+        self.allocator.destroy(self);
+    }
+};
+
+fn pointerSimAppScenario(_: *SimCase(*PointerSimApp)) !void {}
+
+test "runSimCase: deinitializes pointer-valued apps after each replay" {
+    pointer_sim_app_deinit_count = 0;
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = .{},
+        .init = PointerSimApp.init,
+        .scenario = pointerSimAppScenario,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => try std.testing.expectEqual(@as(u8, 2), pointer_sim_app_deinit_count),
         .failed => return error.UnexpectedRunFailure,
     }
 }
