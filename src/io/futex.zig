@@ -92,6 +92,7 @@ pub fn Ops(comptime Backend: type) type {
             timeout: Io.Timeout,
         ) Io.Cancelable!void {
             const backend = backendFromUserdata(userdata);
+            if (!backend.processIsAlive()) return error.Canceled;
             // A cancellation point delivers an armed request even when the
             // wait would otherwise complete without parking.
             if (backend.task_runtime) |runtime| {
@@ -134,6 +135,7 @@ pub fn Ops(comptime Backend: type) type {
 
         pub fn simFutexWaitUncancelable(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {
             const backend = backendFromUserdata(userdata);
+            if (!backend.processIsAlive()) return;
             if (@atomicLoad(u32, ptr, .monotonic) != expected) return;
 
             const wait_set = backend.futex_wait_set orelse @panic("sim futex wait requires an attached scheduler");
@@ -149,6 +151,7 @@ pub fn Ops(comptime Backend: type) type {
         pub fn simFutexWake(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
             if (max_waiters == 0) return;
             const backend = backendFromUserdata(userdata);
+            if (!backend.processIsAlive()) return;
             const wait_set = backend.futex_wait_set orelse return;
             const key = backend.futexWakeKey(ptr) orelse return;
             _ = wait_set.wake(key, max_waiters);

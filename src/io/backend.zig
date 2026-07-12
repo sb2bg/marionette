@@ -303,6 +303,7 @@ pub const Backend = struct {
     network_control: network_module.AnyNetworkControl = network_module.AnyNetworkControl.unavailable(),
     process_registry: ?*ProcessRegistry = null,
     process_node: ?network_module.NodeId = null,
+    process_alive: bool = true,
     next_network_node: network_module.NodeId = 0,
     futex_wait_set: ?FutexWaitSet = null,
     task_runtime: ?TaskRuntime = null,
@@ -569,6 +570,10 @@ pub const Backend = struct {
         };
     }
 
+    pub fn processIsAlive(self: *const Backend) bool {
+        return self.process_alive;
+    }
+
     pub fn attachFutexWaitSet(self: *Backend, wait_set: FutexWaitSet) void {
         self.futex_wait_set = wait_set;
     }
@@ -679,6 +684,7 @@ pub const Backend = struct {
     }
 
     pub fn allocateNetworkNode(self: *Backend) error{NetworkDown}!?network_module.NodeId {
+        if (!self.process_alive) return error.NetworkDown;
         const process_count = network_module.internal.processCountFromControl(self.network_control) orelse return null;
         if (self.process_node) |node| {
             if (@as(usize, node) >= process_count) return error.NetworkDown;
@@ -1147,6 +1153,7 @@ pub const Backend = struct {
     /// handles and cancel process-owned async closures; disk crash also marks
     /// cached file metadata stale so restart re-derives it from disk truth.
     pub fn killProcess(self: *Backend, options: KillOptions) void {
+        self.process_alive = false;
         var index: usize = 0;
         while (index < self.handles.items.len) {
             const entry = &self.handles.items[index];
@@ -1641,8 +1648,15 @@ pub const ProcessRuntime = struct {
         return &self.backends[node];
     }
 
-    pub fn io(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!Io {
-        return (try self.backendForNode(node)).io();
+    pub fn io(self: *ProcessRuntime, node: network_module.NodeId) error{ InvalidNode, ProcessKilled }!Io {
+        const backend = try self.backendForNode(node);
+        if (!backend.processIsAlive()) return error.ProcessKilled;
+        return backend.io();
+    }
+
+    pub fn revive(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!void {
+        const backend = try self.backendForNode(node);
+        backend.process_alive = true;
     }
 
     pub fn processCount(self: *const ProcessRuntime) usize {
@@ -1683,7 +1697,7 @@ pub const ProcessRuntime = struct {
 
     pub fn kill(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!void {
         const backend = try self.backendForNode(node);
-        backend.killProcess(.{});
+        backend.killProcess(.{ .invalidate_files = true });
         self.killProcessTasks(@intCast(node));
         self.sweepInactiveOpScratch();
         retireKilledGroupClosures(backend, self.task_control);
@@ -2033,6 +2047,11 @@ fn simAsync(
     context_alignment: std.mem.Alignment,
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
 ) ?*Io.AnyFuture {
+    const backend = backendFromUserdata(userdata);
+    if (!backend.processIsAlive()) {
+        @memset(result, 0);
+        return null;
+    }
     return simConcurrent(userdata, result.len, result_alignment, context, context_alignment, start) catch {
         // No task runtime attached: run eagerly on the caller, preserving
         // `async` semantics (concurrency is optional for it).
@@ -2093,6 +2112,7 @@ fn spawnGroupTask(
     context_alignment: std.mem.Alignment,
     start: *const fn (context: *const anyopaque) void,
 ) Io.ConcurrentError!void {
+    if (!backend.processIsAlive()) return error.ConcurrencyUnavailable;
     const runtime = backend.task_runtime orelse return error.ConcurrencyUnavailable;
     const acquired = acquireGroupState(backend, group) catch return error.ConcurrencyUnavailable;
     acquired.state.addTask();
@@ -2122,6 +2142,7 @@ fn simGroupAsync(
     start: *const fn (context: *const anyopaque) void,
 ) void {
     const backend = backendFromUserdata(userdata);
+    if (!backend.processIsAlive()) return;
     spawnGroupTask(backend, group, context, context_alignment, start) catch {
         start(context.ptr);
     };
@@ -2202,6 +2223,7 @@ fn simConcurrent(
     start: *const fn (context: *const anyopaque, result: *anyopaque) void,
 ) Io.ConcurrentError!*Io.AnyFuture {
     const backend = backendFromUserdata(userdata);
+    if (!backend.processIsAlive()) return error.ConcurrencyUnavailable;
     const runtime = backend.task_runtime orelse return error.ConcurrencyUnavailable;
 
     const closure = AsyncClosure.create(
@@ -2375,6 +2397,7 @@ fn simClockResolution(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.Resolutio
 
 fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     const backend = backendFromUserdata(userdata);
+    if (!backend.processIsAlive()) return error.Canceled;
     // A cancellation point delivers an armed request even for zero-length
     // sleeps that would return without parking.
     if (backend.task_runtime) |runtime| {

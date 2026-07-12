@@ -210,16 +210,22 @@ pub const ProcessSupervisor = struct {
             try self.noteKilled(node, "restart");
         }
 
+        try self.io_runtime.revive(node);
+        errdefer {
+            self.io_runtime.kill(node) catch @panic("failed to roll back partial process restart");
+            if (lifecycle.on_kill) |on_kill| on_kill(lifecycle.ptr);
+        }
+
         var env = self.base_env;
         env.io_backend = try self.io_runtime.io(node);
         try lifecycle.restart(lifecycle.ptr, env);
-        self.states[index] = .alive;
-        self.state_changed_at_ns[index] = self.world.now();
-        self.transition_schedules[index] = .pending;
         try self.world.recordFields("process.restart", &.{
             traceField("node", .{ .uint = node }),
             traceField("automatic", .{ .boolean = automatic }),
         });
+        self.states[index] = .alive;
+        self.state_changed_at_ns[index] = self.world.now();
+        self.transition_schedules[index] = .pending;
     }
 
     /// Disk-crash observer: kills every alive process, since a machine

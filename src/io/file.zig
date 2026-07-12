@@ -18,6 +18,7 @@ pub fn Ops(comptime Backend: type) type {
             sub_path: []const u8,
             kind: disk_module.LogicalPathKind,
         ) ![]u8 {
+            if (!backend.processIsAlive()) return error.AccessDenied;
             const path = backend.resolvePathAlloc(dir, sub_path, kind) catch |err| switch (err) {
                 error.OutOfMemory => return error.SystemResources,
                 error.InvalidDirHandle => return error.AccessDenied,
