@@ -1548,13 +1548,23 @@ test "io: scheduler timer jumps evolve process and network faults" {
 
     const State = struct {
         kills: u32 = 0,
+        restarted_task_ran_at: ?clock_module.Timestamp = null,
 
         fn onKill(raw: *anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.kills += 1;
         }
 
-        fn restart(_: *anyopaque, _: env_module.Env) anyerror!void {}
+        fn restartedTask(self: *@This(), clock: env_module.Clock) void {
+            if (self.restarted_task_ran_at == null) {
+                self.restarted_task_ran_at = clock.now();
+            }
+        }
+
+        fn restart(raw: *anyopaque, env: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            _ = try Io.concurrent(env.io(), restartedTask, .{ self, env.clock });
+        }
 
         fn sleep(io: Io) void {
             Io.sleep(io, .fromNanoseconds(100), .awake) catch unreachable;
