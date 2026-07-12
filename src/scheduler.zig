@@ -96,6 +96,9 @@ pub const TaskScheduler = struct {
     /// same automatic-fault boundaries as harness-driven jumps. Standalone
     /// scheduler tests leave this null and advance the low-level world.
     fault_evolution: ?env_module.FaultEvolutionControl = null,
+    /// Current timestamp when the scheduler last evolved the installed fault
+    /// participants, avoiding duplicate boundary events across partial jumps.
+    fault_evolution_boundary_ns: ?u64 = null,
 
     const MainWait = struct {
         key: WaitKey,
@@ -236,6 +239,7 @@ pub const TaskScheduler = struct {
 
     pub fn attachFaultEvolution(self: *Self, control: env_module.FaultEvolutionControl) void {
         self.fault_evolution = control;
+        self.fault_evolution_boundary_ns = null;
     }
 
     pub fn deinit(self: *Self) void {
@@ -526,7 +530,7 @@ pub const TaskScheduler = struct {
 
             const now = self.world.now();
             if (target > now) {
-                self.advanceClockTo(target) catch @panic("failed to advance to main wait deadline");
+                _ = self.advanceClockToward(target) catch @panic("failed to advance to main wait deadline");
             }
             self.wakeDueTasks() catch @panic("failed to wake due tasks during main-context wait");
 
@@ -841,8 +845,9 @@ pub const TaskScheduler = struct {
     fn advanceToNextTimer(self: *Self) !bool {
         const deadline = self.nextDeadline() orelse return false;
         const now = self.world.now();
+        var reached_deadline = true;
         if (deadline > now) {
-            try self.advanceClockTo(deadline);
+            reached_deadline = try self.advanceClockToward(deadline);
         }
         const wake_at = self.world.now();
 
@@ -865,17 +870,23 @@ pub const TaskScheduler = struct {
             try self.recordTimeout(task.id, task_deadline);
         }
 
-        return due.items.len > 0;
+        return !reached_deadline or due.items.len > 0;
     }
 
-    fn advanceClockTo(self: *Self, target_ns: u64) !void {
+    fn advanceClockToward(self: *Self, target_ns: u64) !bool {
         const now = self.world.now();
-        std.debug.assert(target_ns >= now);
+        std.debug.assert(target_ns > now);
         const duration_ns = target_ns - now;
         if (self.fault_evolution) |control| {
-            try control.runFor(duration_ns);
+            const reached_end = try control.advanceOneBoundaryToward(
+                target_ns,
+                self.fault_evolution_boundary_ns == now,
+            );
+            self.fault_evolution_boundary_ns = self.world.now();
+            return reached_end;
         } else {
             try self.world.runFor(duration_ns);
+            return true;
         }
     }
 

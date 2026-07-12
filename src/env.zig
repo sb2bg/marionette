@@ -556,6 +556,35 @@ pub const FaultEvolutionControl = struct {
         }
     }
 
+    /// Advance toward `end_ns`, stopping after the first automatic-fault
+    /// boundary. Returns whether the requested end was reached. The scheduler
+    /// uses this to run tasks made ready by a fault transition before time
+    /// advances again.
+    pub fn advanceOneBoundaryToward(
+        self: FaultEvolutionControl,
+        end_ns: clock_module.Timestamp,
+        current_boundary_evolved: bool,
+    ) !bool {
+        const now_ns = self.world.now();
+        std.debug.assert(end_ns > now_ns);
+        std.debug.assert((end_ns - now_ns) % self.world.clock().tick_ns == 0);
+
+        if (!current_boundary_evolved) try self.evolveAtCurrentBoundary();
+        const target_ns = (try self.nextBoundaryBeforeOrAt(end_ns)) orelse end_ns;
+        if (target_ns > self.world.now()) {
+            try self.world.runFor(target_ns - self.world.now());
+        }
+        try self.evolveAtCurrentBoundary();
+
+        const reached_end = target_ns == end_ns;
+        if (reached_end) {
+            for (self.participants()) |participant| {
+                try participant.finishRunFor();
+            }
+        }
+        return reached_end;
+    }
+
     fn participants(self: FaultEvolutionControl) [2]fault_evolution_module.Participant {
         return .{
             network_module.internal.faultEvolutionParticipantFromControl(self.network),

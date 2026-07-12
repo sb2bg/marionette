@@ -804,7 +804,7 @@ test "io: disk crash closes process-local std.Io.net listeners" {
     try std.testing.expectEqual(@as(usize, 0), server_backend.handles.items.len);
 
     try std.testing.expectError(
-        error.ConnectionRefused,
+        error.NetworkDown,
         address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }),
     );
     try std.testing.expectError(error.SocketNotListening, server.accept(server_io));
@@ -1575,7 +1575,9 @@ test "io: scheduler timer jumps evolve process and network faults" {
     });
     try sim.control.process.setDynamics(1, .{
         .crash_rate = .always(),
+        .restart_rate = .always(),
         .crash_stability_min_ns = 10,
+        .restart_stability_min_ns = 10,
     });
     try sim.control.network.setPartitionDynamics(.{
         .partition_rate = .always(),
@@ -1587,7 +1589,8 @@ test "io: scheduler timer jumps evolve process and network faults" {
     sleeper.await(io);
 
     try std.testing.expectEqual(@as(clock_module.Timestamp, 100), world.now());
-    try std.testing.expectEqual(@as(u32, 1), state.kills);
+    try std.testing.expectEqual(@as(u32, 5), state.kills);
+    try std.testing.expectEqual(@as(?clock_module.Timestamp, 20), state.restarted_task_ran_at);
     const trace = world.traceBytes();
     const run_to_crash = std.mem.indexOf(u8, trace, "world.run_for start_ns=0 duration_ns=10 end_ns=10").?;
     const crash = std.mem.indexOf(u8, trace, "process.kill node=1 reason=auto_crash").?;
