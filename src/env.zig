@@ -99,7 +99,8 @@ pub const Clock = struct {
     }
 
     fn worldClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) ClockError!void {
-        try worldClock(ptr).runFor(duration_ns);
+        const world = worldClock(ptr);
+        try world.runFor(world.clock().ceilDuration(duration_ns));
     }
 
     fn productionClockNow(ptr: *anyopaque) clock_module.Timestamp {
@@ -635,6 +636,21 @@ test "env: simulation routes through world capabilities" {
     _ = sim.env.io();
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
+}
+
+test "env: simulation clock sleep rounds up to tick resolution" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    try sim.env.clock.sleep(15);
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), sim.env.clock.now());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "world.run_for start_ns=0 duration_ns=20 end_ns=20",
+    ) != null);
 }
 
 test "env: simulation runFor without network jumps time in one event" {
