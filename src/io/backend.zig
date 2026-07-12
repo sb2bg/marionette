@@ -1187,6 +1187,7 @@ pub const Backend = struct {
 
         for (self.async_closures.items) |closure| closure.cancelForKill();
         for (self.group_closures.items) |closure| closure.cancelForKill();
+        self.releaseCompletedGroupStatesForKill();
         for (self.directory_handles.items) |*handle| handle.deinit(self.allocator);
         self.directory_handles.clearRetainingCapacity();
 
@@ -1197,6 +1198,22 @@ pub const Backend = struct {
             for (self.files.items) |file_meta| {
                 file_meta.stale = true;
             }
+        }
+    }
+
+    fn releaseCompletedGroupStatesForKill(self: *Backend) void {
+        // `killProcessTasks` destroys suspended fibers immediately after this
+        // backend teardown returns. Clear completed group tokens while their
+        // owning task stacks are still mapped; a task killed inside
+        // `Group.await` will never resume to release its state itself.
+        var index: usize = 0;
+        while (index < self.group_states.items.len) {
+            const state = self.group_states.items[index];
+            if (!state.done) {
+                index += 1;
+                continue;
+            }
+            releaseGroupState(state);
         }
     }
 

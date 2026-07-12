@@ -2137,6 +2137,43 @@ test "io: canceling Group.await cancels members and resurfaces Canceled" {
     try std.testing.expect(state.cancel_result_canceled);
 }
 
+const GroupAwaitKillState = struct {
+    member_futex: u32 = 0,
+};
+
+fn groupAwaitKillMember(io: Io, state: *GroupAwaitKillState) Io.Cancelable!void {
+    try io.futexWait(u32, &state.member_futex, 0);
+}
+
+fn groupAwaitKillOuter(io: Io, state: *GroupAwaitKillState) void {
+    var group: Io.Group = .init;
+    group.concurrent(io, groupAwaitKillMember, .{ io, state }) catch
+        @panic("group member spawn failed");
+    group.await(io) catch unreachable;
+}
+
+test "io: process kill releases a group whose awaiter is suspended" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x6A11, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+
+    var state: GroupAwaitKillState = .{};
+    var outer = try Io.concurrent(io, groupAwaitKillOuter, .{ io, &state });
+    try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
+    try std.testing.expectEqual(@as(usize, 1), backend.group_states.items.len);
+    try std.testing.expectEqual(@as(usize, 1), backend.group_closures.items.len);
+
+    try sim.killProcess(0);
+
+    try std.testing.expectEqual(@as(usize, 0), backend.group_states.items.len);
+    try std.testing.expectEqual(@as(usize, 0), backend.group_closures.items.len);
+    outer.await(io);
+}
+
 test "io: cancel of a task without cancellation points runs it to completion" {
     if (!fiber_supported) return error.SkipZigTest;
 
