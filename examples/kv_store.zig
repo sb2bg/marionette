@@ -30,7 +30,18 @@ pub fn simulateOptions() mar.World.SimulateOptions {
 }
 
 pub fn init(sim: mar.Sim) !KVStore {
+    try sim.registerProcess(0, .{
+        .ptr = sim.control.world,
+        .restart = noopProcessRestart,
+    });
     return try KVStore.init(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder());
+}
+
+fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
+
+fn restartAfterDiskCrash(case: *Case) !void {
+    try case.control().disk.restart();
+    try case.control().process.restart(0);
 }
 
 pub const checks = [_]mar.StateCheck(Case){
@@ -56,7 +67,7 @@ pub fn scenario(case: *Case) !void {
     try disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try store.put(volatile_key, volatile_value, .no_sync);
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try store.reopen();
     try disk.corruptSector(wal_path, record_size);
     try store.recover(.strict);
@@ -70,7 +81,7 @@ pub fn buggyScenario(case: *Case) !void {
     try disk.setFaults(.{ .crash_torn_write_rate = .always() });
     try store.put(volatile_key, volatile_value, .no_sync);
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try store.reopen();
     try store.recover(.buggy_accept_magic_only);
 }
@@ -88,7 +99,7 @@ fn runProbabilisticCrash(case: *Case, mode: RecoveryMode) !void {
     });
     try store.put(volatile_key, volatile_value, .no_sync);
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try store.reopen();
     try store.recover(mode);
 }

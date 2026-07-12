@@ -13,6 +13,15 @@ fn testIo(world: *World) Backend {
     return .init(std.testing.allocator, world, disk_module.Disk.unavailable(), 4096);
 }
 
+fn noopProcessRestart(_: *anyopaque, _: env_module.Env) anyerror!void {}
+
+fn registerNoopProcess(sim: World.Simulation, node: network_module.NodeId) !void {
+    try sim.registerProcess(node, .{
+        .ptr = sim.control.world,
+        .restart = noopProcessRestart,
+    });
+}
+
 const PostCreateStatFailDisk = struct {
     fn disk(self: *@This()) disk_module.Disk {
         return .{ .ptr = self, .vtable = &vtable };
@@ -1144,6 +1153,131 @@ test "io: process restart reruns registered initializer against durable state" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=restart") != null);
 }
 
+test "io: killed processes reject saved node capabilities until restart" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn identity(value: u32) u32 {
+            return value;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA64, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const saved_env = try sim.envForNode(0);
+    const saved_io = saved_env.io();
+    try registerNoopProcess(sim, 0);
+
+    try sim.killProcess(0);
+
+    try std.testing.expectError(error.ProcessKilled, sim.envForNode(0));
+    try std.testing.expectError(
+        error.AccessDenied,
+        Io.Dir.cwd().createFile(saved_io, "while-killed", .{}),
+    );
+    try std.testing.expectError(
+        error.ConcurrencyUnavailable,
+        Io.concurrent(saved_io, Helper.identity, .{1}),
+    );
+
+    try sim.restartProcess(0);
+    var file = try Io.Dir.cwd().createFile(saved_io, "after-restart", .{});
+    file.close(saved_io);
+}
+
+test "io: manual restart invalidates process-local file metadata" {
+    const State = struct {
+        observed_len: u64 = 0,
+
+        fn restart(raw: *anyopaque, env: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const io = env.io();
+            var file = try Io.Dir.cwd().openFile(io, "shared", .{ .mode = .read_only });
+            defer file.close(io);
+            self.observed_len = try file.length(io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA641, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_io = (try sim.envForNode(1)).io();
+
+    var file = try Io.Dir.cwd().createFile(node_zero_io, "shared", .{ .read = true });
+    try file.writePositionalAll(node_zero_io, "old!", 0);
+    try file.sync(node_zero_io);
+    file.close(node_zero_io);
+    try std.testing.expectEqual(@as(u64, 4), (try Io.Dir.cwd().statFile(node_zero_io, "shared", .{})).size);
+
+    var state: State = .{};
+    try sim.registerProcess(0, .{ .ptr = &state, .restart = State.restart });
+    try sim.killProcess(0);
+
+    var updater = try Io.Dir.cwd().openFile(node_one_io, "shared", .{ .mode = .read_write });
+    try updater.writePositionalAll(node_one_io, "new!", 4);
+    try updater.sync(node_one_io);
+    updater.close(node_one_io);
+
+    try sim.restartProcess(0);
+    try std.testing.expectEqual(@as(u64, 8), state.observed_len);
+}
+
+test "io: failed restart rolls back partial process resources" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        fail: bool = true,
+        kills: u32 = 0,
+        starts: u32 = 0,
+
+        fn onKill(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.kills += 1;
+        }
+
+        fn restart(raw: *anyopaque, env: env_module.Env) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4581) catch unreachable;
+            var listener = try address.listen(env.io(), .{});
+            if (self.fail) return error.RestartFailed;
+            listener.deinit(env.io());
+            self.starts += 1;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA642, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 1 } });
+    const saved_io = sim.env.io();
+    var state: State = .{};
+    try sim.registerProcess(0, .{
+        .ptr = &state,
+        .on_kill = State.onKill,
+        .restart = State.restart,
+    });
+
+    try sim.killProcess(0);
+    try std.testing.expectError(error.RestartFailed, sim.restartProcess(0));
+
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+    try std.testing.expectEqual(@as(usize, 0), backend.handles.items.len);
+    try std.testing.expectEqual(@as(u32, 2), state.kills);
+    try std.testing.expectError(error.ProcessKilled, sim.envForNode(0));
+    try std.testing.expectError(
+        error.AccessDenied,
+        Io.Dir.cwd().createFile(saved_io, "still-killed", .{}),
+    );
+
+    state.fail = false;
+    try sim.restartProcess(0);
+    try std.testing.expectEqual(@as(u32, 1), state.starts);
+}
+
 test "io: restarting an unregistered process does not kill it" {
     if (!fiber_supported) return error.SkipZigTest;
 
@@ -2170,6 +2304,7 @@ test "io: simulation streaming writes use disk pending-write crash semantics" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    try registerNoopProcess(sim, 0);
     const io = sim.env.io();
 
     var file = try Io.Dir.cwd().createFile(io, "pending.bin", .{ .read = true });
@@ -2186,6 +2321,7 @@ test "io: simulation streaming writes use disk pending-write crash semantics" {
     try sim.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try sim.restartProcess(0);
 
     // The crash killed the simulated process: the old handle is dead and the
     // file must be reopened, like a real restart.
@@ -2205,6 +2341,7 @@ test "io: file lengths re-derive from disk truth after a crash" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    try registerNoopProcess(sim, 0);
     const io = sim.env.io();
 
     var file = try Io.Dir.cwd().createFile(io, "length.bin", .{ .read = true });
@@ -2222,6 +2359,7 @@ test "io: file lengths re-derive from disk truth after a crash" {
     try sim.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try sim.restartProcess(0);
 
     // Before the crash-observer fix, the stale cached length (8) survived
     // the crash and reads exposed zero-filled phantom bytes.
@@ -2243,6 +2381,7 @@ test "io: crash rolls back unsynced deletion and preserves timestamps" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    try registerNoopProcess(sim, 0);
     const io = sim.env.io();
 
     {
@@ -2263,6 +2402,7 @@ test "io: crash rolls back unsynced deletion and preserves timestamps" {
     try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try sim.restartProcess(0);
 
     // The unsynced deletion was rolled back: the file is resurrected with
     // its durable contents and its pre-crash timestamp, not mtime zero.
@@ -2380,6 +2520,7 @@ test "io: atomic replace preserves logical length across crash" {
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = 4096 } });
+    try registerNoopProcess(sim, 0);
     const io = sim.env.io();
     const cwd = Io.Dir.cwd();
 
@@ -2396,6 +2537,7 @@ test "io: atomic replace preserves logical length across crash" {
     try sim.env.disk.syncDir(.{ .path = "." });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try sim.restartProcess(0);
 
     var reopened = try cwd.openFile(io, "catalog.json", .{ .mode = .read_only });
     defer reopened.close(io);
@@ -2508,6 +2650,7 @@ test "io: directories are shared across processes and obey metadata durability" 
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
     const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    try registerNoopProcess(sim, 1);
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
 
@@ -2518,6 +2661,7 @@ test "io: directories are shared across processes and obey metadata durability" 
     try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try sim.restartProcess(1);
 
     try std.testing.expectError(
         error.FileNotFound,
@@ -2529,6 +2673,7 @@ test "io: directory iteration excludes crash-lost file metadata" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
     const sim = try world.simulate(.{});
+    try registerNoopProcess(sim, 0);
     const io = sim.env.io();
 
     try Io.Dir.cwd().createDir(io, "root", .default_dir);
@@ -2539,6 +2684,7 @@ test "io: directory iteration excludes crash-lost file metadata" {
     try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
+    try sim.restartProcess(0);
 
     var root = try Io.Dir.cwd().openDir(io, "root", .{ .iterate = true });
     defer root.close(io);

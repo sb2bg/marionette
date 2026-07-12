@@ -161,11 +161,22 @@ fn runReportWithProfile(
 }
 
 pub fn init(sim: mar.Sim) !DurableBroadcast {
+    try sim.registerProcess(0, .{
+        .ptr = sim.control.world,
+        .restart = noopProcessRestart,
+    });
     return DurableBroadcast.init(
         sim.env,
         try sim.endpoint(MessagePayload, client_node_id),
         try sim.endpoints(MessagePayload, replica_count, 0),
     );
+}
+
+fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
+
+fn restartAfterDiskCrash(case: *Case) !void {
+    try case.control().disk.restart();
+    try case.control().process.restart(0);
 }
 
 pub fn scenario(case: *Case) !void {
@@ -186,7 +197,7 @@ pub fn crashRecoveryScenario(case: *Case) !void {
 
     try case.control().disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try case.control().disk.crash();
-    try case.control().disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.recover();
 
     try case.control().network.heal();
@@ -206,7 +217,7 @@ pub fn multiRecordScenario(case: *Case) !void {
     });
 
     try case.control().disk.crash();
-    try case.control().disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.recover();
 }
 
@@ -239,7 +250,7 @@ pub fn buggyScenario(case: *Case) !void {
     });
 
     try case.control().disk.crash();
-    try case.control().disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.recover();
 }
 
@@ -253,7 +264,7 @@ pub fn probabilisticBugScenario(case: *Case) !void {
     });
 
     try case.control().disk.crash();
-    try case.control().disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.recover();
 }
 

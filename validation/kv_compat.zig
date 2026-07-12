@@ -38,7 +38,18 @@ fn simulateOptions(sector_size: u64) mar.World.SimulateOptions {
 }
 
 fn initStore(sim: mar.Sim) !CompatStore {
+    try sim.registerProcess(0, .{
+        .ptr = sim.control.world,
+        .restart = noopProcessRestart,
+    });
     return try CompatStore.init(sim.env.io(), sim.env.recorder());
+}
+
+fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
+
+fn restartAfterDiskCrash(case: *Case) !void {
+    try case.control().disk.restart();
+    try case.control().process.restart(0);
 }
 
 pub const lifecycle_checks = [_]mar.StateCheck(Case){
@@ -60,7 +71,7 @@ pub fn fullLifecycle(case: *Case) !void {
     try store.put(2, 12);
     try store.commit();
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try store.reopen();
 }
 
@@ -79,7 +90,7 @@ pub fn crashBeforeRenameLostTmp(case: *Case) !void {
     try case.app.compactUntil(.tmp_synced);
     try disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.reopen();
 }
 
@@ -92,7 +103,7 @@ pub fn crashBeforeRenameSurvivingTmp(case: *Case) !void {
     try case.app.compactUntil(.tmp_synced);
     try disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.reopen();
 }
 
@@ -106,7 +117,7 @@ pub fn crashAfterRenameLostMetadata(case: *Case) !void {
     try case.app.compactUntil(.renamed);
     try disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.reopen();
 }
 
@@ -119,7 +130,7 @@ pub fn crashAfterRenameMetadataSurvives(case: *Case) !void {
     try case.app.compactUntil(.renamed);
     try disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.reopen();
 }
 
@@ -133,7 +144,7 @@ pub fn crashAfterTornTmpWrite(case: *Case) !void {
     try case.app.compactUntil(.tmp_written);
     try disk.setFaults(.{ .crash_torn_write_rate = .always() });
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.reopen();
 }
 
@@ -146,7 +157,7 @@ pub fn crashDuringWalClearMetadataLost(case: *Case) !void {
     try case.app.compactUntil(.wal_cleared_unsynced);
     try disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.reopen();
 }
 
@@ -159,7 +170,7 @@ pub fn crashDuringWalClearMetadataSurvives(case: *Case) !void {
     try case.app.compactUntil(.wal_cleared_unsynced);
     try disk.setFaults(.{ .crash_lost_metadata_rate = .never() });
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try case.app.reopen();
 }
 
@@ -187,7 +198,7 @@ pub fn recoveryWindowCrashPointSweep(case: *Case) !void {
     }
 
     try disk.crash();
-    try disk.restart();
+    try restartAfterDiskCrash(case);
     try store.reopen();
 }
 
