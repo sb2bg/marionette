@@ -312,7 +312,9 @@ pub const Backend = struct {
     next_group_id: usize = 1,
     futex_keys: std.ArrayList(FutexKeyEntry) = .empty,
     next_futex_key: usize = 1,
-    files: std.ArrayList(FileMeta) = .empty,
+    /// The index table may grow while file operations are suspended on disk
+    /// latency, so metadata lives in separately allocated, stable storage.
+    files: std.ArrayList(*FileMeta) = .empty,
     retired_file_paths: std.ArrayList([]u8) = .empty,
     directory_handles: std.ArrayList(DirectoryHandle) = .empty,
     handles: std.ArrayList(HandleEntry) = .empty,
@@ -483,7 +485,10 @@ pub const Backend = struct {
         self.group_closures.deinit(self.allocator);
         for (self.group_states.items) |state| self.allocator.destroy(state);
         self.group_states.deinit(self.allocator);
-        for (self.files.items) |*file_meta| file_meta.deinit(self.allocator);
+        for (self.files.items) |file_meta| {
+            file_meta.deinit(self.allocator);
+            self.allocator.destroy(file_meta);
+        }
         self.files.deinit(self.allocator);
         for (self.retired_file_paths.items) |path| self.allocator.free(path);
         self.retired_file_paths.deinit(self.allocator);
@@ -947,7 +952,7 @@ pub const Backend = struct {
     }
 
     pub fn fileMeta(self: *Backend, file_state: *const FileState) *FileMeta {
-        return &self.files.items[file_state.target.file];
+        return self.files.items[file_state.target.file];
     }
 
     pub fn fileDirectoryPath(file_state: *const FileState) ?[]const u8 {
@@ -1089,20 +1094,15 @@ pub const Backend = struct {
         errdefer self.allocator.free(owned_path);
         const inode = fileInodeForPath(path);
 
-        for (self.files.items, 0..) |*file_meta, index| {
-            if (!file_meta.deleted) continue;
-            self.allocator.free(file_meta.path);
-            file_meta.* = .{
-                .path = owned_path,
-                .inode = inode,
-            };
-            return index;
-        }
-
-        try self.files.append(self.allocator, .{
+        // Keep tombstones allocated: a disk operation that started before a
+        // delete may still hold this identity when it resumes.
+        const file_meta = try self.allocator.create(FileMeta);
+        errdefer self.allocator.destroy(file_meta);
+        file_meta.* = .{
             .path = owned_path,
             .inode = inode,
-        });
+        };
+        try self.files.append(self.allocator, file_meta);
         return self.files.items.len - 1;
     }
 
@@ -1187,7 +1187,7 @@ pub const Backend = struct {
             // Tombstones go stale too: a crash can roll back an unsynced
             // deletion, in which case the tombstoned entry must be revivable
             // with its timestamps intact.
-            for (self.files.items) |*file_meta| {
+            for (self.files.items) |file_meta| {
                 file_meta.stale = true;
             }
         }

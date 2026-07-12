@@ -1934,6 +1934,51 @@ test "io: simulation files use byte semantics over SimDisk" {
     try file.sync(io);
 }
 
+test "io: file metadata stays stable across table growth during disk latency" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        io: Io,
+        file: Io.File,
+        started: u32 = 0,
+
+        fn write(self: *@This()) void {
+            self.started = 1;
+            self.io.futexWake(u32, &self.started, std.math.maxInt(u32));
+            self.file.writePositionalAll(self.io, "data", 0) catch @panic("write failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xF11E, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{
+        .disk = .{ .sector_size = 4, .min_latency_ns = 100 },
+    });
+    const io = sim.env.io();
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+
+    var file = try Io.Dir.cwd().createFile(io, "target", .{});
+    defer file.close(io);
+    try std.testing.expectEqual(@as(usize, 1), backend.files.items.len);
+    try backend.files.shrinkAndFreePrecise(backend.allocator, backend.files.items.len);
+    const table_before = backend.files.items.ptr;
+    const target_meta = backend.files.items[0];
+
+    var scenario: Scenario = .{ .io = io, .file = file };
+    var writer = Io.async(io, Scenario.write, .{&scenario});
+    while (scenario.started == 0) {
+        io.futexWait(u32, &scenario.started, 0) catch unreachable;
+    }
+
+    _ = try backend.createFileMeta("growth-entry");
+    try std.testing.expect(table_before != backend.files.items.ptr);
+    try std.testing.expectEqual(target_meta, backend.files.items[0]);
+
+    writer.await(io);
+    try std.testing.expectEqual(@as(u64, 4), target_meta.len);
+    try std.testing.expectEqual(@as(u64, 4), try file.length(io));
+}
+
 test "io: simulation files support std.Io file readers and writers" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();

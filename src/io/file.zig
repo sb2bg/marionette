@@ -429,7 +429,7 @@ pub fn Ops(comptime Backend: type) type {
         }
 
         fn buildFileStat(backend: *Backend, file_index: usize) Io.File.Stat {
-            const meta = &backend.files.items[file_index];
+            const meta = backend.files.items[file_index];
             return .{
                 .inode = meta.inode,
                 .nlink = 1,
@@ -656,7 +656,7 @@ pub fn Ops(comptime Backend: type) type {
             path: []const u8,
         ) disk_module.DiskError!?usize {
             if (backend.findFileMetaIndex(path)) |index| {
-                const meta = &backend.files.items[index];
+                const meta = backend.files.items[index];
                 if (!meta.stale) return index;
 
                 const stat_result = backend.disk.stat(.{ .path = path }) catch |err| switch (err) {
@@ -678,7 +678,7 @@ pub fn Ops(comptime Backend: type) type {
             // has the file, revive the tombstone so the resurrected file
             // keeps its pre-crash timestamps.
             if (backend.findStaleDeletedFileMetaIndex(path)) |index| {
-                const meta = &backend.files.items[index];
+                const meta = backend.files.items[index];
                 const stat_result = backend.disk.stat(.{ .path = path }) catch |err| switch (err) {
                     error.FileNotFound, error.DiskUnavailable => {
                         meta.stale = false;
