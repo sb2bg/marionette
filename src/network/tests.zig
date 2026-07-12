@@ -759,6 +759,70 @@ test "composition network: runFor zero duration does not evolve faults" {
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, after, "network.clog from="));
 }
 
+test "composition network: automatic clog schedule beyond clock range stays inert" {
+    const start_ns = std.math.maxInt(clock_module.Timestamp) - 25;
+    var world = try World.init(std.testing.allocator, .{
+        .seed = 0xC106,
+        .start_ns = start_ns,
+        .tick_ns = 10,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 1, .path_capacity = 1 } });
+    try sim.control.network.setClogs(.{
+        .path_clog_rate = .always(),
+        .path_clog_duration_ns = 10,
+    });
+
+    try sim.control.runFor(20);
+
+    try std.testing.expectEqual(start_ns + 20, world.now());
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "automatic=true"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "active=false"));
+}
+
+test "composition network: automatic clog end beyond clock range stays inert" {
+    const start_ns = std.math.maxInt(clock_module.Timestamp) - 15;
+    var world = try World.init(std.testing.allocator, .{
+        .seed = 0xC106,
+        .start_ns = start_ns,
+        .tick_ns = 10,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 1, .path_capacity = 1 } });
+    try sim.control.network.setClogs(.{
+        .path_clog_rate = .always(),
+        .path_clog_duration_ns = 20,
+    });
+
+    try sim.control.runFor(10);
+
+    try std.testing.expectEqual(start_ns + 10, world.now());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "automatic=true") == null);
+}
+
+test "composition network: automatic partition beyond clock range stays inert" {
+    const start_ns = std.math.maxInt(clock_module.Timestamp) - 25;
+    var world = try World.init(std.testing.allocator, .{
+        .seed = 0xA661,
+        .start_ns = start_ns,
+        .tick_ns = 10,
+    });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 1 } });
+    try sim.control.network.setPartitionDynamics(.{
+        .partition_rate = .always(),
+        .partition_stability_min_ns = 30,
+    });
+
+    try sim.control.runFor(10);
+
+    try std.testing.expectEqual(start_ns + 10, world.now());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") == null);
+}
+
 fn randomAfterManualClogExpiry(advance_with_ticks: bool) !u64 {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();

@@ -25,6 +25,12 @@ const SimNetworkOptions = types.SimNetworkOptions;
 const default_byte_pool_options = types.default_byte_pool_options;
 const validateRate = types.validateRate;
 
+const AutoSchedule = union(enum) {
+    pending,
+    beyond_clock,
+    at: clock_module.Timestamp,
+};
+
 pub const SimByteSendResult = union(enum) {
     dropped,
     queued: clock_module.Timestamp,
@@ -59,14 +65,14 @@ const SharedRuntime = struct {
     byte_runtime: ?*SimByteRuntime = null,
     auto_partitioned_node: ?NodeId = null,
     auto_partition_changed_at_ns: clock_module.Timestamp = 0,
-    next_auto_partition_at_ns: ?clock_module.Timestamp = null,
+    auto_partition_schedule: AutoSchedule = .pending,
     last_fault_evolution_ns: clock_module.Timestamp = 0,
 
     const Link = struct {
         manual_enabled: bool = true,
         auto_enabled: bool = true,
         clogged_until: clock_module.Timestamp = 0,
-        next_auto_clog_at_ns: ?clock_module.Timestamp = null,
+        auto_clog_schedule: AutoSchedule = .pending,
 
         fn enabled(self: Link) bool {
             return self.manual_enabled and self.auto_enabled;
@@ -234,7 +240,7 @@ const SharedRuntime = struct {
         self.faults.unpartition_rate = options.unpartition_rate;
         self.faults.partition_stability_min_ns = options.partition_stability_min_ns;
         self.faults.unpartition_stability_min_ns = options.unpartition_stability_min_ns;
-        self.next_auto_partition_at_ns = null;
+        self.auto_partition_schedule = .pending;
         try self.world.record(
             "network.partition_dynamics partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}",
             .{
@@ -268,7 +274,7 @@ const SharedRuntime = struct {
         const until = self.world.now() + duration_ns;
         const link = &self.links[try self.pathIndex(from, to)];
         link.clogged_until = @max(link.clogged_until, until);
-        link.next_auto_clog_at_ns = null;
+        link.auto_clog_schedule = .pending;
         try self.world.record(
             "network.clog from={} to={} duration_ns={} until_ns={}",
             .{ from, to, duration_ns, link.clogged_until },
@@ -279,7 +285,7 @@ const SharedRuntime = struct {
         const link = &self.links[try self.pathIndex(from, to)];
         const active = link.clogged_until > self.world.now();
         link.clogged_until = 0;
-        link.next_auto_clog_at_ns = null;
+        link.auto_clog_schedule = .pending;
         try self.world.record("network.unclog from={} to={} active={}", .{ from, to, active });
     }
 
@@ -287,7 +293,7 @@ const SharedRuntime = struct {
         const clogged_count = self.cloggedLinkCount();
         for (self.links) |*link| {
             link.clogged_until = 0;
-            link.next_auto_clog_at_ns = null;
+            link.auto_clog_schedule = .pending;
         }
         try self.world.record("network.unclog_all clogged_count={}", .{clogged_count});
     }
@@ -317,7 +323,7 @@ const SharedRuntime = struct {
         self.auto_partitioned_node = null;
         self.auto_partition_changed_at_ns = self.world.now();
         self.clearAutoClogSchedules();
-        self.next_auto_partition_at_ns = null;
+        self.auto_partition_schedule = .pending;
         try self.world.record(
             "network.heal disabled_count={} down_count={} clogged_count={}",
             .{ disabled_count, down_count, clogged_count },
@@ -332,7 +338,7 @@ const SharedRuntime = struct {
         }
         self.auto_partitioned_node = null;
         self.auto_partition_changed_at_ns = self.world.now();
-        self.next_auto_partition_at_ns = null;
+        self.auto_partition_schedule = .pending;
         try self.world.record("network.heal_links disabled_count={}", .{disabled_count});
     }
 
@@ -350,7 +356,7 @@ const SharedRuntime = struct {
                 link.manual_enabled = true;
                 link.auto_enabled = true;
                 link.clogged_until = 0;
-                link.next_auto_clog_at_ns = null;
+                link.auto_clog_schedule = .pending;
             }
         }
         var revived_nodes: usize = 0;
@@ -371,7 +377,7 @@ const SharedRuntime = struct {
             const from: NodeId = @intCast(index / self.process_count);
             const to: NodeId = @intCast(index % self.process_count);
             link.clogged_until = 0;
-            link.next_auto_clog_at_ns = null;
+            link.auto_clog_schedule = .pending;
             try self.world.record("network.unclog from={} to={} active=false", .{ from, to });
         }
     }
@@ -420,11 +426,16 @@ const SharedRuntime = struct {
 
         const now_ns = self.world.now();
         for (self.links, 0..) |*link, index| {
-            if (link.next_auto_clog_at_ns == null or link.next_auto_clog_at_ns.? > now_ns) continue;
-            link.next_auto_clog_at_ns = null;
+            const at_ns = switch (link.auto_clog_schedule) {
+                .at => |value| value,
+                .pending, .beyond_clock => continue,
+            };
+            if (at_ns > now_ns) continue;
+            link.auto_clog_schedule = .pending;
             if (link.clogged_until > now_ns) continue;
             if (std.math.maxInt(clock_module.Timestamp) - now_ns < faults.path_clog_duration_ns) {
-                return error.InvalidDuration;
+                link.auto_clog_schedule = .beyond_clock;
+                continue;
             }
 
             const from: NodeId = @intCast(index / self.process_count);
@@ -440,24 +451,32 @@ const SharedRuntime = struct {
     fn fireDueAutoPartition(self: *SharedRuntime) !void {
         const faults = self.faults;
         if (self.auto_partitioned_node) |node| {
-            if (self.next_auto_partition_at_ns == null or self.next_auto_partition_at_ns.? > self.world.now()) return;
+            const at_ns = switch (self.auto_partition_schedule) {
+                .at => |value| value,
+                .pending, .beyond_clock => return,
+            };
+            if (at_ns > self.world.now()) return;
             self.clearAutoPartitionLinks();
             self.auto_partitioned_node = null;
             self.auto_partition_changed_at_ns = self.world.now();
-            self.next_auto_partition_at_ns = null;
+            self.auto_partition_schedule = .pending;
             try self.world.record("network.auto_heal node={}", .{node});
             return;
         }
 
         if (faults.partition_rate.numerator == 0) return;
-        if (self.next_auto_partition_at_ns == null or self.next_auto_partition_at_ns.? > self.world.now()) return;
+        const at_ns = switch (self.auto_partition_schedule) {
+            .at => |value| value,
+            .pending, .beyond_clock => return,
+        };
+        if (at_ns > self.world.now()) return;
 
         const isolated_index = try self.world.randomIntLessThan(usize, self.service_node_count);
         const isolated: NodeId = @intCast(isolated_index);
         self.applyAutoPartition(isolated);
         self.auto_partitioned_node = isolated;
         self.auto_partition_changed_at_ns = self.world.now();
-        self.next_auto_partition_at_ns = null;
+        self.auto_partition_schedule = .pending;
         try self.world.record(
             "network.auto_partition node={} isolated_count=1 connected_count={}",
             .{ isolated, self.process_count - 1 },
@@ -472,33 +491,37 @@ const SharedRuntime = struct {
         else
             now_ns;
         try self.ensureAutoClogSchedulesFrom(from_ns);
-        if (self.next_auto_partition_at_ns == null) {
+        if (self.auto_partition_schedule == .pending) {
             try self.scheduleAutoPartitionFrom(from_ns);
         }
     }
 
     fn ensureAutoClogSchedulesFrom(self: *SharedRuntime, from_ns: clock_module.Timestamp) !void {
         for (self.links) |*link| {
-            if (link.next_auto_clog_at_ns == null) {
+            if (link.auto_clog_schedule == .pending) {
                 try self.scheduleAutoClogFrom(link, from_ns);
             }
         }
     }
 
     fn clearAutoClogSchedules(self: *SharedRuntime) void {
-        for (self.links) |*link| link.next_auto_clog_at_ns = null;
+        for (self.links) |*link| link.auto_clog_schedule = .pending;
     }
 
     fn scheduleAutoClogFrom(self: *SharedRuntime, link: *Link, from_ns: clock_module.Timestamp) !void {
-        link.next_auto_clog_at_ns = null;
+        link.auto_clog_schedule = .pending;
         if (self.faults.path_clog_rate.numerator == 0) return;
         if (link.clogged_until != 0 and link.clogged_until >= from_ns) return;
         const ticks = try self.sampleNextOccurrenceTicks(self.faults.path_clog_rate);
-        link.next_auto_clog_at_ns = try addDurationTicks(from_ns, ticks, self.world.clock().tick_ns);
+        const at_ns = addDurationTicks(from_ns, ticks, self.world.clock().tick_ns) catch {
+            link.auto_clog_schedule = .beyond_clock;
+            return;
+        };
+        link.auto_clog_schedule = .{ .at = at_ns };
     }
 
     fn scheduleAutoPartitionFrom(self: *SharedRuntime, from_ns: clock_module.Timestamp) !void {
-        self.next_auto_partition_at_ns = null;
+        self.auto_partition_schedule = .pending;
         const rate = if (self.auto_partitioned_node == null)
             self.faults.partition_rate
         else
@@ -509,10 +532,17 @@ const SharedRuntime = struct {
             self.faults.partition_stability_min_ns
         else
             self.faults.unpartition_stability_min_ns;
-        const floor_ns = try addTimestamp(self.auto_partition_changed_at_ns, stability_ns);
+        const floor_ns = addTimestamp(self.auto_partition_changed_at_ns, stability_ns) catch {
+            self.auto_partition_schedule = .beyond_clock;
+            return;
+        };
         const eligible_from = if (floor_ns <= from_ns) from_ns else floor_ns - self.world.clock().tick_ns;
         const ticks = try self.sampleNextOccurrenceTicks(rate);
-        self.next_auto_partition_at_ns = try addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns);
+        const at_ns = addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns) catch {
+            self.auto_partition_schedule = .beyond_clock;
+            return;
+        };
+        self.auto_partition_schedule = .{ .at = at_ns };
     }
 
     fn sampleNextOccurrenceTicks(self: *SharedRuntime, rate: env_module.BuggifyRate) !u64 {
@@ -541,16 +571,20 @@ const SharedRuntime = struct {
             if (link.clogged_until > self.world.now() and link.clogged_until <= end_ns) {
                 next = minOptionalTimestamp(next, link.clogged_until);
             }
-            if (link.next_auto_clog_at_ns) |at_ns| {
-                if (at_ns > self.world.now() and at_ns <= end_ns) {
-                    next = minOptionalTimestamp(next, at_ns);
-                }
+            const auto_clog_at_ns = switch (link.auto_clog_schedule) {
+                .at => |value| value,
+                .pending, .beyond_clock => continue,
+            };
+            if (auto_clog_at_ns > self.world.now() and auto_clog_at_ns <= end_ns) {
+                next = minOptionalTimestamp(next, auto_clog_at_ns);
             }
         }
-        if (self.next_auto_partition_at_ns) |at_ns| {
-            if (at_ns > self.world.now() and at_ns <= end_ns) {
-                next = minOptionalTimestamp(next, at_ns);
-            }
+        const auto_partition_at_ns = switch (self.auto_partition_schedule) {
+            .at => |value| value,
+            .pending, .beyond_clock => return next,
+        };
+        if (auto_partition_at_ns > self.world.now() and auto_partition_at_ns <= end_ns) {
+            next = minOptionalTimestamp(next, auto_partition_at_ns);
         }
         return next;
     }
