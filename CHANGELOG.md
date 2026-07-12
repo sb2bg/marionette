@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Closes the simulator-TCB audit's runner and lifecycle gaps: `runSimCase`
+  forwards every simulation option, keeps setup OOM distinct from scenario
+  failure, accepts infallible scenarios, deinitializes pointer-valued apps
+  before replay comparison, and rejects empty fuzz campaigns. Process-scoped
+  `Env`/`Io` capabilities now fail while killed, manual restart invalidates
+  file caches, and a failed restart rolls back partial tasks and handles.
+
+- Hardens suspension and trace ownership. File metadata has stable allocation
+  across disk-latency suspension, guarded fiber-stack arithmetic is checked,
+  network enqueue/dequeue publishes only after fallible trace recording, closed
+  streams reclaim queued pooled frames, async/group storage honors dynamic
+  alignment, and trace-summary plus low-level world time/random state roll back
+  cleanly on allocation failure.
+
+- Routes scheduler timer jumps through automatic process/network fault
+  boundaries and yields to work created at each intermediate boundary. App
+  sleeps round to ticks, full-range task-start jitter and network-latency jitter
+  avoid overflow, beyond-clock process transitions stay inert, and failed
+  liveness transitions remain retryable.
+
+- Makes the disk contract match its declared sector model: torn writes land a
+  prefix of whole sectors, reorder is one consistently traced crash-global
+  reversal, and scripted corruption rejects missing files. The WAL example now
+  spans two sectors so its planted recovery bug depends on a real sector-prefix
+  tear instead of accidental byte tearing.
+
+- Canceling a task blocked in `Group.await` now cancels the group's members,
+  waits for their completion, and resurfaces `error.Canceled` to the outer
+  future.
+
 - Binding a simulated `std.Io.net` listener to port 0 now allocates an
   ephemeral port, matching POSIX bind semantics (issue #2). Ports come
   from the IANA dynamic range (49152-65535) via a rotating cursor shared

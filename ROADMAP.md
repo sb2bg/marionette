@@ -73,6 +73,8 @@ before broadening the surface again.
 - Check fiber stack-size arithmetic before mapping or placing canaries.
 - Sweep trace-summary and similar allocation-failure paths for leak,
   double-free, and stale-pointer rollback bugs.
+- Keep file-handle state and metadata paths alive while streaming operations
+  are suspended across concurrent delete or rename.
 
 ### 16h. Time, Fault, And Process Coherence
 
@@ -86,6 +88,9 @@ before broadening the surface again.
   succeeds.
 - Round app-facing simulated sleeps as documented and reject or safely handle
   unrepresentable deadlines and future fault timestamps.
+- Decide whether direct `Env.clock.sleep` is deliberately a low-level clock
+  mutation or must drive scheduler work and automatic fault evolution like
+  app-facing `std.Io` sleep; document or unify the two authorities.
 
 ### 16i. Runner And Configuration Integrity
 
@@ -287,6 +292,8 @@ microstep count or be barred so one pair cannot name two PRNG positions.
   suitable for artifacts, deduplication, and regression corpora.
 - Make the common path concise without hiding expanded simulator options from
   traces and replay capsules.
+- Own routine process lifecycle/reopen wiring so crash tests do not need an
+  empty restart callback merely to reactivate process-scoped capabilities.
 
 Defer domain-separated choice generation until exact replay exists. Changing
 generation before artifacts are durable makes old/new exploration behavior
