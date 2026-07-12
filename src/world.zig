@@ -904,6 +904,8 @@ pub const World = struct {
 
     /// Draw a traced `u64` from the world's seeded random stream.
     pub fn randomU64(self: *World) !u64 {
+        const rng_before = self.rng;
+        errdefer self.rng = rng_before;
         const value = self.rng.random().int(u64);
         try self.record("world.random_u64 value={}", .{value});
         return value;
@@ -911,6 +913,8 @@ pub const World = struct {
 
     /// Draw a traced boolean from the world's seeded random stream.
     pub fn randomBool(self: *World) !bool {
+        const rng_before = self.rng;
+        errdefer self.rng = rng_before;
         const value = self.rng.random().boolean();
         try self.record("world.random_bool value={}", .{value});
         return value;
@@ -918,6 +922,8 @@ pub const World = struct {
 
     /// Draw a traced unbiased integer in the range `0 <= value < less_than`.
     pub fn randomIntLessThan(self: *World, comptime T: type, less_than: T) !T {
+        const rng_before = self.rng;
+        errdefer self.rng = rng_before;
         const value = self.rng.random().intRangeLessThan(T, 0, less_than);
         try self.record(
             "world.random_int_less_than type={s} less_than={} value={}",
@@ -928,6 +934,8 @@ pub const World = struct {
 
     /// Advance the world by one simulation tick.
     pub fn tick(self: *World) !void {
+        const now_before = self.now();
+        errdefer self.sim_clock.now_ns = now_before;
         self.sim_clock.tick();
         try self.record("world.tick now_ns={}", .{self.now()});
     }
@@ -937,6 +945,7 @@ pub const World = struct {
     /// `duration_ns` must be an exact multiple of the world's tick size.
     pub fn runFor(self: *World, duration_ns: clock_module.Duration) !void {
         const start_ns = self.now();
+        errdefer self.sim_clock.now_ns = start_ns;
         self.sim_clock.runFor(duration_ns);
         try self.record(
             "world.run_for start_ns={} duration_ns={} end_ns={}",
@@ -1254,6 +1263,62 @@ test "world: randomIntLessThan records unbiased bounded draws" {
         const value = try world.randomIntLessThan(u64, 1_000_000);
         try std.testing.expect(value < 1_000_000);
     }
+}
+
+const TracedChoice = enum { integer, boolean, bounded };
+
+fn drawTracedChoice(world: *World, choice: TracedChoice) !u64 {
+    return switch (choice) {
+        .integer => try world.randomU64(),
+        .boolean => @intFromBool(try world.randomBool()),
+        .bounded => try world.randomIntLessThan(u64, 1_000_000),
+    };
+}
+
+fn fillTraceCapacity(world: *World) !void {
+    try world.trace_log.appendNTimes(
+        world.allocator,
+        0,
+        world.trace_log.capacity - world.trace_log.items.len,
+    );
+}
+
+test "world: trace allocation failure rolls back random draws" {
+    for (std.enums.values(TracedChoice)) |choice| {
+        var expected = try World.init(std.testing.allocator, .{ .seed = 0xA110C });
+        defer expected.deinit();
+        const expected_value = try drawTracedChoice(&expected, choice);
+
+        var world = try World.init(std.testing.allocator, .{ .seed = 0xA110C });
+        defer world.deinit();
+        try fillTraceCapacity(&world);
+
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        world.allocator = failing.allocator();
+        try std.testing.expectError(error.OutOfMemory, drawTracedChoice(&world, choice));
+        world.allocator = std.testing.allocator;
+
+        try std.testing.expectEqual(expected_value, try drawTracedChoice(&world, choice));
+    }
+}
+
+test "world: trace allocation failure rolls back clock movement" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xA110C, .tick_ns = 10 });
+    defer world.deinit();
+    try fillTraceCapacity(&world);
+
+    var tick_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    world.allocator = tick_failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, world.tick());
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
+
+    world.allocator = std.testing.allocator;
+    try fillTraceCapacity(&world);
+    var run_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    world.allocator = run_failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, world.runFor(20));
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
+    world.allocator = std.testing.allocator;
 }
 
 test "world: failed record rolls back bytes and event index" {
