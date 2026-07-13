@@ -15,7 +15,20 @@
   streams reclaim queued pooled frames, async/group storage honors dynamic
   alignment, killed `Group.await` owners release their group state before the
   fiber stack is destroyed, and trace-summary plus low-level world time/random
-  state roll back cleanly on allocation failure.
+  state roll back cleanly on allocation failure. Suspended file operations now
+  hold kill-safe path snapshots and streaming operations reacquire handles on
+  resume, closing concurrent rename/delete lifetime hazards.
+
+- Makes final stream delivery transactional: the I/O bridge borrows a ready
+  frame, reserves inbox capacity, publishes the network and `io.net` trace pair
+  atomically, and only then removes the frame. Allocation failure leaves the
+  original bytes queued for an exact retry.
+
+- Confines every `RealDisk` operation beneath its configured root by walking
+  parent components through non-following directory handles and refusing final
+  symlinks. Exclusive create plus non-following reopen closes the create race;
+  the regression covers every file surface and verifies outside data is
+  unchanged.
 
 - Routes scheduler timer jumps through automatic process/network fault
   boundaries and yields to work created at each intermediate boundary. App
@@ -40,7 +53,14 @@
   `e7a4f4b`: a dead pooled connection is evicted so the same client redials
   after server restart, and graceful shutdown with a parked keep-alive handler
   completes instead of timing out. The old DUSTY-001/002 scenarios remain as
-  positive regression coverage for the upstream fixes.
+  positive regression coverage for the upstream fixes. The fixed revision is
+  now pinned in `build.zig.zon`.
+
+- Removes the cancelled production endpoint bus, its deprecated
+  `Production.endpoint`/`byteEndpoint` methods, and the private FIFO/socket
+  transport. Production networking is host `std.Io.net`; Marionette endpoints
+  are simulation-only. This also removes the blocking host-`accept` test from
+  the ReleaseSafe gate.
 
 - Binding a simulated `std.Io.net` listener to port 0 now allocates an
   ephemeral port, matching POSIX bind semantics (issue #2). Ports come

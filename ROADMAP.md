@@ -65,17 +65,12 @@ before broadening the surface again.
 
 - Replace borrowed `FileMeta` pointers held across disk latency with stable
   identities or stable allocation.
-- Make pooled-message enqueue/dequeue and final stream-inbox delivery
-  transactional across allocation/trace failure, and reclaim queued frames for
-  retired network targets.
 - Retire killed async closures and never-started task adapters during the run,
   not only at world teardown.
 - Support valid over-aligned async/group arguments and results.
 - Check fiber stack-size arithmetic before mapping or placing canaries.
 - Sweep trace-summary and similar allocation-failure paths for leak,
   double-free, and stale-pointer rollback bugs.
-- Keep file-handle state and metadata paths alive while streaming operations
-  are suspended across concurrent delete or rename.
 
 ### 16h. Time, Fault, And Process Coherence
 
@@ -111,8 +106,6 @@ before broadening the surface again.
   trace recording.
 - Run the full suite in Debug, ReleaseSafe, and ReleaseFast.
 - Keep the pinned external SUT corpus release-blocking.
-- Bound or remove the deprecated production byte-endpoint loopback path so the
-  ReleaseSafe gate cannot hang in a blocking host `accept`.
 - Compile supported library surfaces for the advertised target matrix;
   unsupported targets must fail closed or be documented explicitly.
 
