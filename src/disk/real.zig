@@ -278,9 +278,11 @@ pub const RealDisk = struct {
                 .follow_symlinks = false,
             }) catch |err| return mapOpenReadError(err)
         else blk: {
-            parent = try self.openParent(options.path, false);
-            try self.rejectSymlink(parent.?.dir, parent.?.name, false);
-            break :blk parent.?.dir.openDir(self.io, parent.?.name, .{
+            var opened_parent = try self.openParent(options.path, false);
+            var transfer_parent = false;
+            defer if (!transfer_parent) opened_parent.deinit(self.io);
+            try self.rejectSymlink(opened_parent.dir, opened_parent.name, false);
+            const opened_dir = opened_parent.dir.openDir(self.io, opened_parent.name, .{
                 .iterate = true,
                 .follow_symlinks = false,
             }) catch |err| switch (err) {
@@ -288,6 +290,9 @@ pub const RealDisk = struct {
                 error.NotDir => return error.NotDir,
                 else => return mapOpenReadError(err),
             };
+            parent = opened_parent;
+            transfer_parent = true;
+            break :blk opened_dir;
         };
         defer if (parent) |*opened_parent| opened_parent.deinit(self.io);
         defer dir.close(self.io);
