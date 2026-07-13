@@ -55,9 +55,17 @@ pub const RealDisk = struct {
 
         @memset(options.buffer, 0);
 
-        var file = self.root.openFile(self.io, options.path, .{
+        var parent = self.openParent(options.path, false) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer parent.deinit(self.io);
+
+        var file = parent.dir.openFile(self.io, parent.name, .{
             .mode = .read_only,
             .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
         }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return mapOpenReadError(err),
@@ -75,14 +83,11 @@ pub const RealDisk = struct {
     fn write(self: *Self, options: Disk.Write) DiskError!void {
         try self.validatePath(options.path);
         try self.validateRange(options.offset, options.bytes.len);
-        try self.ensureParentDirs(options.path);
 
-        var file = self.root.createFile(self.io, options.path, .{
-            .read = true,
-            .truncate = false,
-        }) catch |err| {
-            return mapOpenWriteError(err);
-        };
+        var parent = try self.openParent(options.path, true);
+        defer parent.deinit(self.io);
+
+        var file = try self.openOrCreateFile(parent.dir, parent.name);
         defer file.close(self.io);
         const size_before = if (options.logical_len != null)
             (file.stat(self.io) catch return error.ReadError).size
@@ -105,9 +110,17 @@ pub const RealDisk = struct {
     fn sync(self: *Self, options: Disk.Sync) DiskError!void {
         try self.validatePath(options.path);
 
-        var file = self.root.openFile(self.io, options.path, .{
+        var parent = self.openParent(options.path, false) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer parent.deinit(self.io);
+
+        var file = parent.dir.openFile(self.io, parent.name, .{
             .mode = .read_write,
             .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
         }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return mapOpenWriteError(err),
@@ -130,9 +143,20 @@ pub const RealDisk = struct {
 
     fn stat(self: *Self, options: Disk.Stat) DiskError!Disk.StatResult {
         try self.validatePath(options.path);
-        const file_stat = self.root.statFile(self.io, options.path, .{}) catch |err| {
-            return mapStatError(err);
+
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+        var file = parent.dir.openFile(self.io, parent.name, .{
+            .mode = .read_only,
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            else => return mapOpenReadError(err),
         };
+        defer file.close(self.io);
+        const file_stat = file.stat(self.io) catch return error.ReadError;
         return .{ .inode = file_stat.inode, .size = file_stat.size };
     }
 
@@ -140,9 +164,14 @@ pub const RealDisk = struct {
         try self.validatePath(options.path);
         try validateByteRange(options.offset, options.buffer.len);
 
-        var file = self.root.openFile(self.io, options.path, .{
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+
+        var file = parent.dir.openFile(self.io, parent.name, .{
             .mode = .read_only,
             .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
         }) catch |err| switch (err) {
             error.FileNotFound => return error.FileNotFound,
             else => return mapOpenReadError(err),
@@ -157,9 +186,14 @@ pub const RealDisk = struct {
     fn setLength(self: *Self, options: Disk.SetLength) DiskError!void {
         try self.validatePath(options.path);
 
-        var file = self.root.openFile(self.io, options.path, .{
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+
+        var file = parent.dir.openFile(self.io, parent.name, .{
             .mode = .read_write,
             .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
         }) catch |err| switch (err) {
             error.FileNotFound => return error.FileNotFound,
             else => return mapOpenWriteError(err),
@@ -173,7 +207,11 @@ pub const RealDisk = struct {
 
     fn delete(self: *Self, options: Disk.Delete) DiskError!void {
         try self.validatePath(options.path);
-        self.root.deleteFile(self.io, options.path) catch |err| {
+
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+        try self.rejectSymlink(parent.dir, parent.name, false);
+        parent.dir.deleteFile(self.io, parent.name) catch |err| {
             return mapDeleteError(err);
         };
     }
@@ -181,8 +219,14 @@ pub const RealDisk = struct {
     fn rename(self: *Self, options: Disk.Rename) DiskError!void {
         try self.validatePath(options.old_path);
         try self.validatePath(options.new_path);
-        try self.ensureParentDirs(options.new_path);
-        std.Io.Dir.rename(self.root, options.old_path, self.root, options.new_path, self.io) catch |err| {
+
+        var old_parent = try self.openParent(options.old_path, false);
+        defer old_parent.deinit(self.io);
+        var new_parent = try self.openParent(options.new_path, true);
+        defer new_parent.deinit(self.io);
+        try self.rejectSymlink(old_parent.dir, old_parent.name, false);
+        try self.rejectSymlink(new_parent.dir, new_parent.name, true);
+        std.Io.Dir.rename(old_parent.dir, old_parent.name, new_parent.dir, new_parent.name, self.io) catch |err| {
             return mapRenameError(err);
         };
     }
@@ -190,7 +234,10 @@ pub const RealDisk = struct {
     fn createDir(self: *Self, options: Disk.CreateDir) DiskError!void {
         try validateLogicalPath(options.path, .directory);
         if (std.mem.eql(u8, options.path, ".")) return error.PathAlreadyExists;
-        self.root.createDir(self.io, options.path, .default_dir) catch |err| switch (err) {
+
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+        parent.dir.createDir(self.io, parent.name, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => return error.PathAlreadyExists,
             error.FileNotFound => return error.FileNotFound,
             error.NotDir => return error.NotDir,
@@ -200,10 +247,21 @@ pub const RealDisk = struct {
 
     fn statDir(self: *Self, options: Disk.StatDir) DiskError!Disk.StatDirResult {
         try validateLogicalPath(options.path, .directory);
-        const dir_stat = self.root.statFile(self.io, options.path, .{}) catch |err| {
-            return mapStatError(err);
+
+        if (std.mem.eql(u8, options.path, ".")) {
+            const dir_stat = self.root.stat(self.io) catch return error.ReadError;
+            return .{ .inode = dir_stat.inode, .mtime_ns = 0 };
+        }
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+        try self.rejectSymlink(parent.dir, parent.name, false);
+        var dir = parent.dir.openDir(self.io, parent.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            error.NotDir => return error.NotDir,
+            else => return mapOpenReadError(err),
         };
-        if (dir_stat.kind != .directory) return error.NotDir;
+        defer dir.close(self.io);
+        const dir_stat = dir.stat(self.io) catch return error.ReadError;
         return .{
             .inode = dir_stat.inode,
             .mtime_ns = 0,
@@ -212,11 +270,26 @@ pub const RealDisk = struct {
 
     fn readDir(self: *Self, options: Disk.ReadDir) DiskError!Disk.DirList {
         try validateLogicalPath(options.path, .directory);
-        var dir = self.root.openDir(self.io, options.path, .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound => return error.FileNotFound,
-            error.NotDir => return error.NotDir,
-            else => return mapOpenReadError(err),
+
+        var parent: ?Parent = null;
+        var dir = if (std.mem.eql(u8, options.path, "."))
+            self.root.openDir(self.io, ".", .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |err| return mapOpenReadError(err)
+        else blk: {
+            parent = try self.openParent(options.path, false);
+            try self.rejectSymlink(parent.?.dir, parent.?.name, false);
+            break :blk parent.?.dir.openDir(self.io, parent.?.name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound => return error.FileNotFound,
+                error.NotDir => return error.NotDir,
+                else => return mapOpenReadError(err),
+            };
         };
+        defer if (parent) |*opened_parent| opened_parent.deinit(self.io);
         defer dir.close(self.io);
 
         var entries: std.ArrayList(Disk.DirEntry) = .empty;
@@ -243,12 +316,85 @@ pub const RealDisk = struct {
         };
     }
 
-    fn ensureParentDirs(self: *Self, path: []const u8) DiskError!void {
-        const parent = std.fs.path.dirname(path) orelse return;
-        if (parent.len == 0) return;
-        self.root.createDirPath(self.io, parent) catch |err| {
-            return mapCreateDirError(err);
+    const Parent = struct {
+        dir: std.Io.Dir,
+        name: []const u8,
+        owned: bool,
+
+        fn deinit(parent: *Parent, io: std.Io) void {
+            if (parent.owned) parent.dir.close(io);
+        }
+    };
+
+    fn openParent(self: *Self, path: []const u8, create: bool) DiskError!Parent {
+        const parent_path = std.fs.path.dirname(path) orelse return .{
+            .dir = self.root,
+            .name = path,
+            .owned = false,
         };
+
+        var current = self.root;
+        var current_owned = false;
+        errdefer if (current_owned) current.close(self.io);
+
+        var components = std.mem.splitScalar(u8, parent_path, '/');
+        while (components.next()) |component| {
+            const next = current.openDir(self.io, component, .{
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound => if (create) create_dir: {
+                    current.createDir(self.io, component, .default_dir) catch |create_err| switch (create_err) {
+                        error.PathAlreadyExists => {},
+                        else => return mapCreateDirError(create_err),
+                    };
+                    break :create_dir current.openDir(self.io, component, .{
+                        .follow_symlinks = false,
+                    }) catch |open_err| return mapParentOpenError(open_err);
+                } else return error.FileNotFound,
+                else => return mapParentOpenError(err),
+            };
+            if (current_owned) current.close(self.io);
+            current = next;
+            current_owned = true;
+        }
+        return .{
+            .dir = current,
+            .name = std.fs.path.basename(path),
+            .owned = current_owned,
+        };
+    }
+
+    fn openOrCreateFile(self: *Self, parent: std.Io.Dir, name: []const u8) DiskError!std.Io.File {
+        return parent.openFile(self.io, name, .{
+            .mode = .read_write,
+            .allow_directory = false,
+            .follow_symlinks = false,
+            .resolve_beneath = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => parent.createFile(self.io, name, .{
+                .read = true,
+                .truncate = false,
+                .exclusive = true,
+                .resolve_beneath = true,
+            }) catch |create_err| switch (create_err) {
+                error.PathAlreadyExists => parent.openFile(self.io, name, .{
+                    .mode = .read_write,
+                    .allow_directory = false,
+                    .follow_symlinks = false,
+                    .resolve_beneath = true,
+                }) catch |open_err| return mapOpenWriteError(open_err),
+                else => return mapOpenWriteError(create_err),
+            },
+            else => return mapOpenWriteError(err),
+        };
+    }
+
+    fn rejectSymlink(self: *Self, parent: std.Io.Dir, name: []const u8, allow_missing: bool) DiskError!void {
+        const file_stat = parent.statFile(self.io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => if (allow_missing) return else return error.FileNotFound,
+            else => return mapStatError(err),
+        };
+        if (file_stat.kind == .sym_link) return error.InvalidPath;
     }
 
     fn validatePath(_: *const Self, path: []const u8) DiskError!void {
@@ -335,6 +481,18 @@ fn mapOpenReadError(err: std.Io.File.OpenError) DiskError {
         error.AccessDenied,
         error.PermissionDenied,
         error.IsDir,
+        error.NotDir,
+        error.SymLinkLoop,
+        => error.InvalidPath,
+        else => error.ReadError,
+    };
+}
+
+fn mapParentOpenError(err: std.Io.Dir.OpenError) DiskError {
+    return switch (err) {
+        error.FileNotFound => error.FileNotFound,
+        error.AccessDenied,
+        error.PermissionDenied,
         error.NotDir,
         error.SymLinkLoop,
         => error.InvalidPath,
@@ -560,4 +718,88 @@ test "disk: real disk logical_len trims padding without truncating existing byte
         .logical_len = 12,
     });
     try std.testing.expectEqual(@as(u64, 12), (try app_disk.stat(.{ .path = "data.bin" })).size);
+}
+
+test "disk: real disk rejects symlink escapes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(std.testing.io, "root", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "outside", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "outside/secret.bin",
+        .data = "safe",
+    });
+    try tmp.dir.symLink(std.testing.io, "../outside/secret.bin", "root/file-link", .{});
+    try tmp.dir.symLink(std.testing.io, "../outside", "root/dir-link", .{ .is_directory = true });
+
+    var root = try tmp.dir.openDir(std.testing.io, "root", .{});
+    defer root.close(std.testing.io);
+    var disk = try RealDisk.init(root, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    var aligned: [4]u8 = undefined;
+    var byte: [1]u8 = undefined;
+    try std.testing.expectError(error.InvalidPath, app_disk.read(.{
+        .path = "file-link",
+        .offset = 0,
+        .buffer = &aligned,
+    }));
+    try std.testing.expectError(error.InvalidPath, app_disk.write(.{
+        .path = "file-link",
+        .offset = 0,
+        .bytes = "evil",
+    }));
+    try std.testing.expectError(error.InvalidPath, app_disk.sync(.{ .path = "file-link" }));
+    try std.testing.expectError(error.InvalidPath, app_disk.stat(.{ .path = "file-link" }));
+    try std.testing.expectError(error.InvalidPath, app_disk.readSome(.{
+        .path = "file-link",
+        .offset = 0,
+        .buffer = &byte,
+    }));
+    try std.testing.expectError(error.InvalidPath, app_disk.setLength(.{
+        .path = "file-link",
+        .len = 0,
+    }));
+    try std.testing.expectError(error.InvalidPath, app_disk.delete(.{ .path = "file-link" }));
+    try std.testing.expectError(error.InvalidPath, app_disk.rename(.{
+        .old_path = "file-link",
+        .new_path = "renamed.bin",
+    }));
+    try app_disk.write(.{ .path = "normal.bin", .offset = 0, .bytes = "good" });
+    try std.testing.expectError(error.InvalidPath, app_disk.rename(.{
+        .old_path = "normal.bin",
+        .new_path = "file-link",
+    }));
+
+    try std.testing.expectError(error.InvalidPath, app_disk.read(.{
+        .path = "dir-link/secret.bin",
+        .offset = 0,
+        .buffer = &aligned,
+    }));
+    try std.testing.expectError(error.InvalidPath, app_disk.write(.{
+        .path = "dir-link/new.bin",
+        .offset = 0,
+        .bytes = "evil",
+    }));
+    try std.testing.expectError(error.InvalidPath, app_disk.createDir(.{ .path = "dir-link/new" }));
+    try std.testing.expectError(error.InvalidPath, app_disk.statDir(.{ .path = "dir-link" }));
+    try std.testing.expectError(error.InvalidPath, app_disk.readDir(.{
+        .path = "dir-link",
+        .allocator = std.testing.allocator,
+    }));
+
+    var normal: [4]u8 = undefined;
+    try app_disk.read(.{ .path = "normal.bin", .offset = 0, .buffer = &normal });
+    try std.testing.expectEqualStrings("good", &normal);
+
+    var outside: [4]u8 = undefined;
+    var outside_file = try tmp.dir.openFile(std.testing.io, "outside/secret.bin", .{});
+    defer outside_file.close(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 4), try outside_file.readPositionalAll(std.testing.io, &outside, 0));
+    try std.testing.expectEqualStrings("safe", &outside);
+    try std.testing.expectEqual(.sym_link, (try root.statFile(std.testing.io, "file-link", .{
+        .follow_symlinks = false,
+    })).kind);
 }
