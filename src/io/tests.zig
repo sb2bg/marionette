@@ -2295,6 +2295,97 @@ test "io: file metadata stays stable across table growth during disk latency" {
     try std.testing.expectEqual(@as(u64, 4), try file.length(io));
 }
 
+test "io: delete can retire a handle during a suspended streaming read" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        io: Io,
+        file: Io.File,
+        started: u32 = 0,
+        bytes: [4]u8 = undefined,
+
+        fn read(self: *@This()) usize {
+            self.started = 1;
+            self.io.futexWake(u32, &self.started, std.math.maxInt(u32));
+            var reader_buffer: [0]u8 = .{};
+            var reader = self.file.readerStreaming(self.io, &reader_buffer);
+            return reader.interface.readSliceShort(&self.bytes) catch @panic("read failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xDE1E7E, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{
+        .disk = .{ .sector_size = 4, .min_latency_ns = 100 },
+    });
+    const io = sim.env.io();
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+
+    var file = try Io.Dir.cwd().createFile(io, "retired-read", .{ .read = true });
+    try file.writePositionalAll(io, "data", 0);
+
+    var scenario: Scenario = .{ .io = io, .file = file };
+    var reader = Io.async(io, Scenario.read, .{&scenario});
+    while (scenario.started == 0) {
+        io.futexWait(u32, &scenario.started, 0) catch unreachable;
+    }
+
+    // This is the cache-commit portion of delete. It used to destroy the
+    // FileState retained by simFileReadStreaming while that call was parked.
+    backend.closeFileHandlesForIndex(0);
+    backend.discardFileMeta(0);
+
+    try std.testing.expectEqual(@as(usize, 4), reader.await(io));
+    try std.testing.expectEqualStrings("data", &scenario.bytes);
+    try std.testing.expect(backend.file(file.handle) == null);
+}
+
+test "io: rename can replace a path during a suspended streaming write" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        io: Io,
+        file: Io.File,
+        started: u32 = 0,
+
+        fn write(self: *@This()) void {
+            self.started = 1;
+            self.io.futexWake(u32, &self.started, std.math.maxInt(u32));
+            var writer_buffer: [0]u8 = .{};
+            var writer = self.file.writerStreaming(self.io, &writer_buffer);
+            writer.interface.writeAll("data") catch @panic("write failed");
+            writer.flush() catch @panic("flush failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA11A5, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{
+        .disk = .{ .sector_size = 4, .min_latency_ns = 100 },
+    });
+    const io = sim.env.io();
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+
+    var file = try Io.Dir.cwd().createFile(io, "old-name", .{});
+    defer file.close(io);
+
+    var scenario: Scenario = .{ .io = io, .file = file };
+    var writer = Io.async(io, Scenario.write, .{&scenario});
+    while (scenario.started == 0) {
+        io.futexWait(u32, &scenario.started, 0) catch unreachable;
+    }
+
+    // Rename used to free the pathname passed into the suspended disk write.
+    var prepared = try backend.prepareFileMetaRename("old-name", "new-name");
+    defer prepared.deinit(backend.allocator);
+    backend.commitFileMetaRename("new-name", &prepared);
+
+    writer.await(io);
+    try std.testing.expectEqualStrings("new-name", backend.files.items[0].path);
+    try std.testing.expectEqual(@as(u64, 4), backend.files.items[0].len);
+    try std.testing.expectEqual(@as(u64, 4), backend.file(file.handle).?.cursor);
+}
+
 test "io: simulation files support std.Io file readers and writers" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
