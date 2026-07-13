@@ -28,8 +28,6 @@ pub const internal = struct {
     pub const NetworkFaultOptions = types.NetworkFaultOptions;
     pub const NetworkSimulation = packet_core.NetworkSimulation;
     pub const SimByteDropReason = sim.SimByteDropReason;
-    pub const SimByteDroppedEnvelope = sim.SimByteDroppedEnvelope;
-    pub const SimByteReceiveResult = sim.SimByteReceiveResult;
     pub const SimByteSendResult = sim.SimByteSendResult;
     pub const UnstableNetwork = packet_core.UnstableNetwork;
 
@@ -39,6 +37,8 @@ pub const internal = struct {
     pub const faultEvolutionParticipantFromControl = control.internal.faultEvolutionParticipant;
     pub const initSimControl = sim.initSimControl;
     pub const nextStreamDeliveryAtForControl = sim.nextStreamDeliveryAtForControl;
+    pub const commitReadyStreamEventFromControl = sim.commitReadyStreamEventFromControl;
+    pub const peekReadyStreamEventFromControl = sim.peekReadyStreamEventFromControl;
     pub const processCountFromControl = sim.processCountFromControl;
     pub const sendStreamBytesFromControl = sim.sendStreamBytesFromControl;
 };

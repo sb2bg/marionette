@@ -2653,6 +2653,59 @@ test "TaskScheduler: std.Io.net latency uses network delivery deadline" {
     try expectTraceOrder(first, "io.net.deliver from=1 to=0", "io.net.read len=4");
 }
 
+test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation failure" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xAACE9D, .tick_ns = 10 });
+    defer world.deinit();
+
+    const network_control = try network_module.internal.initSimControl(&world, .{ .nodes = 2 });
+    try network_control.setLatency(.{ .min_latency_ns = 10 });
+
+    var io_runtime: io_internal.ProcessRuntime = undefined;
+    try io_runtime.init(std.testing.allocator, &world, disk_module.Disk.unavailable(), 4096, 2);
+    defer io_runtime.deinit();
+    io_runtime.attachNetworkControl(network_control);
+
+    const server_io = try io_runtime.io(0);
+    const client_io = try io_runtime.io(1);
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4570) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    const client_stream = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client_stream.close(client_io);
+    const server_stream = try server.accept(server_io);
+    defer server_stream.close(server_io);
+
+    const chunks: [1][]const u8 = .{"ping"};
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        try client_io.vtable.netWrite(client_io.userdata, client_stream.socket.handle, "", &chunks, 1),
+    );
+    try world.runFor(10);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const server_backend = try io_runtime.backendForNode(0);
+    server_backend.allocator = failing.allocator();
+    var read_bytes: [4]u8 = undefined;
+    var buffers: [1][]u8 = .{&read_bytes};
+    try std.testing.expectError(
+        error.SystemResources,
+        server_io.vtable.netRead(server_io.userdata, server_stream.socket.handle, &buffers),
+    );
+    server_backend.allocator = std.testing.allocator;
+
+    // Failed delivery did not publish either trace record or consume the
+    // pooled frame. A normal retry commits both once and returns the bytes.
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "io.net.deliver") == null);
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        try server_io.vtable.netRead(server_io.userdata, server_stream.socket.handle, &buffers),
+    );
+    try std.testing.expectEqualStrings("ping", &read_bytes);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "network.deliver id=0"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "io.net.deliver"));
+}
+
 test "TaskScheduler: std.Io.net graceful close drains delayed bytes before EOF" {
     if (!fiber.supported) return error.SkipZigTest;
 

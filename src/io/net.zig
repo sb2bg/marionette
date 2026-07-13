@@ -22,6 +22,12 @@ const stream_backpressure_wait_key = futex_module.stream_backpressure_wait_key;
 
 pub fn Ops(comptime Backend: type) type {
     return struct {
+        const StreamTarget = struct {
+            handle: SocketHandle,
+            connection: *Backend.ConnectionState,
+            payload: []const u8,
+        };
+
         fn backendFromUserdata(userdata: ?*anyopaque) *Backend {
             return @ptrCast(@alignCast(userdata.?));
         }
@@ -71,64 +77,91 @@ pub fn Ops(comptime Backend: type) type {
 
         fn drainNetworkReady(backend: *Backend, node: network_module.NodeId) Io.net.Stream.Reader.Error!void {
             while (true) {
-                const event = network_module.internal.receiveReadyStreamEventFromControl(backend.network_control, node) catch |err| {
+                const ready = network_module.internal.peekReadyStreamEventFromControl(backend.network_control, node) catch |err| {
                     return errors.mapNetworkReadError(err);
                 } orelse return;
 
-                switch (event) {
-                    .delivered => |envelope| {
+                switch (ready) {
+                    .delivered => |borrowed| {
+                        const target = streamTarget(backend, borrowed.message.bytes()) orelse {
+                            try discardReadyStreamEvent(backend, node, ready.id());
+                            continue;
+                        };
+
+                        target.connection.inbox.ensureUnusedCapacity(backend.allocator, target.payload.len) catch
+                            return error.SystemResources;
+
+                        const message = network_module.internal.commitReadyStreamEventFromControl(
+                            backend.network_control,
+                            node,
+                            ready.id(),
+                            .{ .delivered = .{ .target = @intCast(target.handle), .len = target.payload.len } },
+                        ) catch |err| return errors.mapNetworkReadError(err);
                         // Draining releases the pooled message and frees a
                         // path-queue slot even when the frame's target is
                         // gone or closed; the pool and queues are shared,
                         // so wake every backpressured writer in the world
                         // for every drained frame.
                         defer wakeBackpressuredWriters(backend);
-                        defer envelope.message.release();
+                        defer message.release();
 
-                        const bytes = envelope.message.bytes();
-                        if (bytes.len < stream_frame_handle_size) continue;
+                        target.connection.inbox.appendSliceAssumeCapacity(target.payload);
 
-                        const target_raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
-                        const target_handle = std.math.cast(SocketHandle, target_raw) orelse continue;
-                        const target = backend.connection(target_handle) orelse continue;
-                        if (target.closed) continue;
-
-                        target.inbox.appendSlice(backend.allocator, bytes[stream_frame_handle_size..]) catch return error.SystemResources;
-                        backend.world.record(
-                            "io.net.deliver from={} to={} handle={} len={}",
-                            .{ envelope.from, node, target_handle, bytes.len - stream_frame_handle_size },
-                        ) catch return error.SystemResources;
-
-                        backend.wakeConnection(target_handle, 1);
+                        backend.wakeConnection(target.handle, 1);
                     },
-                    .dropped => |dropped| {
-                        // A dropped envelope also releases its pooled
-                        // message; same rule as `.delivered`.
-                        defer wakeBackpressuredWriters(backend);
-                        defer dropped.message.release();
+                    .dropped => |borrowed| {
+                        const target = streamTarget(backend, borrowed.message.bytes()) orelse {
+                            try discardReadyStreamEvent(backend, node, ready.id());
+                            continue;
+                        };
 
-                        const bytes = dropped.message.bytes();
-                        if (bytes.len < stream_frame_handle_size) continue;
-
-                        const target_raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
-                        const target_handle = std.math.cast(SocketHandle, target_raw) orelse continue;
-                        const target = backend.connection(target_handle) orelse continue;
-                        if (target.closed) continue;
-
-                        const read_error: Io.net.Stream.Reader.Error = switch (dropped.reason) {
+                        const read_error: Io.net.Stream.Reader.Error = switch (borrowed.reason) {
                             .destination_down => error.NetworkDown,
                             .link_disabled => error.Timeout,
                         };
-                        if (target.read_error == null) target.read_error = read_error;
-                        backend.world.record(
-                            "io.net.delivery_error from={} to={} handle={} reason={s} error={s}",
-                            .{ dropped.from, dropped.to, target_handle, @tagName(dropped.reason), @errorName(read_error) },
-                        ) catch return error.SystemResources;
+                        const message = network_module.internal.commitReadyStreamEventFromControl(
+                            backend.network_control,
+                            node,
+                            ready.id(),
+                            .{ .delivery_error = .{
+                                .target = @intCast(target.handle),
+                                .error_name = @errorName(read_error),
+                            } },
+                        ) catch |err| return errors.mapNetworkReadError(err);
+                        // A dropped envelope also releases its pooled
+                        // message; same rule as `.delivered`.
+                        defer wakeBackpressuredWriters(backend);
+                        defer message.release();
+                        if (target.connection.read_error == null) target.connection.read_error = read_error;
 
-                        backend.wakeConnection(target_handle, 1);
+                        backend.wakeConnection(target.handle, 1);
                     },
                 }
             }
+        }
+
+        fn streamTarget(backend: *Backend, bytes: []const u8) ?StreamTarget {
+            if (bytes.len < stream_frame_handle_size) return null;
+            const raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
+            const handle = std.math.cast(SocketHandle, raw) orelse return null;
+            const connection = backend.connection(handle) orelse return null;
+            if (connection.closed) return null;
+            return .{
+                .handle = handle,
+                .connection = connection,
+                .payload = bytes[stream_frame_handle_size..],
+            };
+        }
+
+        fn discardReadyStreamEvent(backend: *Backend, node: network_module.NodeId, id: u64) Io.net.Stream.Reader.Error!void {
+            const message = network_module.internal.commitReadyStreamEventFromControl(
+                backend.network_control,
+                node,
+                id,
+                .none,
+            ) catch |err| return errors.mapNetworkReadError(err);
+            defer wakeBackpressuredWriters(backend);
+            message.release();
         }
 
         fn wakeBackpressuredWriters(backend: *Backend) void {

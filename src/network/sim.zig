@@ -41,16 +41,40 @@ pub const SimByteDropReason = enum {
     link_disabled,
 };
 
-pub const SimByteDroppedEnvelope = struct {
-    from: NodeId,
-    to: NodeId,
-    reason: SimByteDropReason,
-    message: ByteEndpoint.Message,
+/// Borrowed view of the next stream event. The runtime retains ownership of
+/// `message` until the matching event id is committed.
+pub const SimByteReadyEvent = union(enum) {
+    delivered: struct {
+        id: u64,
+        from: NodeId,
+        to: NodeId,
+        message: ByteEndpoint.Message,
+    },
+    dropped: struct {
+        id: u64,
+        from: NodeId,
+        to: NodeId,
+        reason: SimByteDropReason,
+        message: ByteEndpoint.Message,
+    },
+
+    pub fn id(self: SimByteReadyEvent) u64 {
+        return switch (self) {
+            inline else => |event| event.id,
+        };
+    }
 };
 
-pub const SimByteReceiveResult = union(enum) {
-    delivered: ByteEndpoint.Envelope,
-    dropped: SimByteDroppedEnvelope,
+pub const SimStreamReadyTrace = union(enum) {
+    none,
+    delivered: struct {
+        target: u64,
+        len: usize,
+    },
+    delivery_error: struct {
+        target: u64,
+        error_name: []const u8,
+    },
 };
 
 const SharedRuntime = struct {
@@ -813,10 +837,21 @@ pub fn discardStreamFramesFromControl(control: AnyNetworkControl, node: NodeId, 
     return runtime.discardStreamFrames(node, target);
 }
 
-pub fn receiveReadyStreamEventFromControl(control: AnyNetworkControl, node: NodeId) !?SimByteReceiveResult {
+pub fn peekReadyStreamEventFromControl(control: AnyNetworkControl, node: NodeId) !?SimByteReadyEvent {
     const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
     const runtime = try SimByteRuntime.getOrInit(shared);
-    return try runtime.receiveReadyEvent(node);
+    return try runtime.peekReadyEvent(node);
+}
+
+pub fn commitReadyStreamEventFromControl(
+    control: AnyNetworkControl,
+    node: NodeId,
+    expected_id: u64,
+    io_trace: SimStreamReadyTrace,
+) !ByteEndpoint.Message {
+    const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    return runtime.commitReadyEvent(node, expected_id, io_trace);
 }
 
 pub fn nextStreamDeliveryAtForControl(control: AnyNetworkControl, node: NodeId) !?clock_module.Timestamp {
@@ -1265,22 +1300,88 @@ const SimByteRuntime = struct {
         }
     }
 
-    fn receiveReadyEvent(self: *Self, node: NodeId) !?SimByteReceiveResult {
+    fn peekReadyEvent(self: *Self, node: NodeId) !?SimByteReadyEvent {
         try self.shared.validateNode(node);
         try self.shared.expireDeterministicFaults();
-        const event = try self.popReadyEventFor(node) orelse return null;
-        return switch (event) {
-            .delivered => |packet| .{ .delivered = .{
+        return try self.readyEventFor(node);
+    }
+
+    fn readyEventFor(self: *Self, node: NodeId) !?SimByteReadyEvent {
+        const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
+        const packet = self.queues[link_index].items[0];
+
+        if (self.shared.down_nodes[@intCast(packet.to)]) {
+            return .{ .dropped = .{
+                .id = packet.id,
                 .from = packet.from,
+                .to = packet.to,
+                .reason = .destination_down,
                 .message = packet.payload,
-            } },
-            .dropped => |dropped| .{ .dropped = .{
-                .from = dropped.packet.from,
-                .to = dropped.packet.to,
-                .reason = dropped.reason,
-                .message = dropped.packet.payload,
-            } },
-        };
+            } };
+        }
+
+        const link = self.shared.links[try self.shared.pathIndex(packet.from, packet.to)];
+        if (!link.enabled()) {
+            return .{ .dropped = .{
+                .id = packet.id,
+                .from = packet.from,
+                .to = packet.to,
+                .reason = .link_disabled,
+                .message = packet.payload,
+            } };
+        }
+
+        return .{ .delivered = .{
+            .id = packet.id,
+            .from = packet.from,
+            .to = packet.to,
+            .message = packet.payload,
+        } };
+    }
+
+    fn commitReadyEvent(
+        self: *Self,
+        node: NodeId,
+        expected_id: u64,
+        io_trace: SimStreamReadyTrace,
+    ) !ByteEndpoint.Message {
+        try self.shared.validateNode(node);
+        const event = (try self.readyEventFor(node)).?;
+        std.debug.assert(event.id() == expected_id);
+
+        switch (event) {
+            .delivered => |ready| switch (io_trace) {
+                .none => try self.shared.world.record(
+                    "network.deliver id={} from={} to={} now_ns={}",
+                    .{ ready.id, ready.from, ready.to, self.shared.world.now() },
+                ),
+                .delivered => |io| try self.shared.world.recordPair(
+                    "network.deliver id={} from={} to={} now_ns={}",
+                    .{ ready.id, ready.from, ready.to, self.shared.world.now() },
+                    "io.net.deliver from={} to={} handle={} len={}",
+                    .{ ready.from, ready.to, io.target, io.len },
+                ),
+                .delivery_error => unreachable,
+            },
+            .dropped => |ready| switch (io_trace) {
+                .none => try self.shared.world.record(
+                    "network.drop id={} from={} to={} reason={s}",
+                    .{ ready.id, ready.from, ready.to, @tagName(ready.reason) },
+                ),
+                .delivery_error => |io| try self.shared.world.recordPair(
+                    "network.drop id={} from={} to={} reason={s}",
+                    .{ ready.id, ready.from, ready.to, @tagName(ready.reason) },
+                    "io.net.delivery_error from={} to={} handle={} reason={s} error={s}",
+                    .{ ready.from, ready.to, io.target, @tagName(ready.reason), io.error_name },
+                ),
+                .delivered => unreachable,
+            },
+        }
+
+        const link_index = self.nextReadyLinkIndexFor(node).?;
+        const packet = self.queues[link_index].orderedRemove(0);
+        std.debug.assert(packet.id == expected_id);
+        return packet.payload;
     }
 
     fn nextDeliveryAtFor(self: *const Self, node: NodeId) !?clock_module.Timestamp {
@@ -1307,28 +1408,28 @@ const SimByteRuntime = struct {
     }
 
     fn popReadyEventFor(self: *Self, node: NodeId) !?ReadyEvent {
-        const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
-        const ready = self.queues[link_index].items[0];
-
-        if (self.shared.down_nodes[@intCast(ready.to)]) {
-            try self.shared.world.record("network.drop id={} from={} to={} reason=destination_down", .{ ready.id, ready.from, ready.to });
-            return .{ .dropped = .{
-                .packet = self.queues[link_index].orderedRemove(0),
-                .reason = .destination_down,
-            } };
+        const event = try self.readyEventFor(node) orelse return null;
+        switch (event) {
+            .delivered => |ready| {
+                try self.shared.world.record(
+                    "network.deliver id={} from={} to={} now_ns={}",
+                    .{ ready.id, ready.from, ready.to, self.shared.world.now() },
+                );
+                const link_index = self.nextReadyLinkIndexFor(node).?;
+                return .{ .delivered = self.queues[link_index].orderedRemove(0) };
+            },
+            .dropped => |ready| {
+                try self.shared.world.record(
+                    "network.drop id={} from={} to={} reason={s}",
+                    .{ ready.id, ready.from, ready.to, @tagName(ready.reason) },
+                );
+                const link_index = self.nextReadyLinkIndexFor(node).?;
+                return .{ .dropped = .{
+                    .packet = self.queues[link_index].orderedRemove(0),
+                    .reason = ready.reason,
+                } };
+            },
         }
-
-        const link = self.shared.links[try self.shared.pathIndex(ready.from, ready.to)];
-        if (!link.enabled()) {
-            try self.shared.world.record("network.drop id={} from={} to={} reason=link_disabled", .{ ready.id, ready.from, ready.to });
-            return .{ .dropped = .{
-                .packet = self.queues[link_index].orderedRemove(0),
-                .reason = .link_disabled,
-            } };
-        }
-
-        try self.shared.world.record("network.deliver id={} from={} to={} now_ns={}", .{ ready.id, ready.from, ready.to, self.shared.world.now() });
-        return .{ .delivered = self.queues[link_index].orderedRemove(0) };
     }
 
     fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
