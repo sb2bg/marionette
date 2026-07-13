@@ -388,10 +388,8 @@ Consequences, recorded so they are not relitigated:
   parity) are cancelled, not deferred. `docs/network-production.md` is
   retained as design history. If a real user ever needs cross-process
   `Endpoint(Message)`, that is a new decision made with that user.
-- The typed `Production.endpoint` in-process FIFO and its options/errors
-  are now removal candidates; prune them when touching that code, and
-  keep `Production.byteEndpoint`'s loopback slice only while a parity
-  test still uses it.
+- The typed FIFO, byte endpoint, framed loopback slice, and their private
+  transport helpers were removed in 0.6.
 - The 15j send-semantics convergence (silent drop plus a trace-visible
   `network.drop reason=queue_full` event) still applies to the simulated
   endpoint if endpoint usage grows; it is a sim-side contract change now.

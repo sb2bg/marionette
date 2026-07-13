@@ -4,10 +4,10 @@ Marionette is a deterministic I/O and simulation testing library for Zig.
 The long-term target is to become the deterministic `std.Io` implementation
 for Zig.
 
-The core promise: write production-shaped code against `std.Io` and narrow
-Marionette handles such as `Recorder` or `Endpoint(Message)`. In production,
-those handles route to direct operations. In simulation, they route through a
-controlled world that can replay the same execution from the same seed.
+The core promise: write production-shaped code against `std.Io`, `Recorder`,
+and application-owned protocol seams. In production those seams use host I/O;
+in simulation they receive Marionette endpoints and run through a controlled
+world that can replay the same execution from the same seed.
 
 Marionette is still experimental, but the core replay loop is real: seeded
 randomness, simulated time, trace logging, twice-and-compare replay, trace

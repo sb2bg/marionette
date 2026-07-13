@@ -274,7 +274,6 @@ test {
     _ = @import("env.zig");
     _ = @import("message_pool.zig");
     _ = @import("network/root.zig");
-    _ = @import("network/frame.zig");
     _ = @import("run.zig");
     _ = @import("run_types.zig");
     _ = @import("scheduler.zig");

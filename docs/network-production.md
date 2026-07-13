@@ -7,8 +7,10 @@
 > socket bus. This file is retained as design history because the analysis
 > (framing, pooling, reconnect, TigerBeetle's MessageBus) informed that
 > decision. The experimental adapters and their private socket runtime were
-> removed in 0.6. Nothing below is planned work. The current API direction
-> lives in `docs/network-api.md`.
+> removed in 0.6. Nothing below is planned work. Sections below retain the
+> terminology and proposed phases of that historical design; descriptions of
+> files or APIs are not statements about the current tree. The current API
+> direction lives in `docs/network-api.md`.
 
 This document was a forward-looking plan for the target shape of
 Marionette's production-side `Endpoint(Message)`, had it grown from a
@@ -75,9 +77,9 @@ every function signature that takes an endpoint and leak library internals
 into application code. The same `Endpoint(Message)` type is
 satisfied by two impls: a simulation impl backed by the deterministic
 packet bus, and a production impl backed by sockets. Production transport
-work goes behind the existing endpoint vtable in
-`src/network/endpoint.zig`, with the runtime in
-`src/network/production.zig`. No type signatures change in user-facing code.
+work would have gone behind the endpoint vtable in `src/network/endpoint.zig`,
+with a private production runtime. No type signatures would have changed in
+user-facing code.
 
 **Implementer-internal seam (deferred, not foreclosed).** Whether the
 production-side bus implementation is itself parametric on an internal IO
@@ -338,7 +340,8 @@ Each item ships on its own. Cross-process parity is the done-signal.
 2. **Buffer pool primitive.** Refcounted, preallocated pool. Pool exhaustion
    returns hard error. Lives in `src/message_pool.zig`. Used by both sim and
    prod once integrated.
-3. **Topology config and `Production.endpoint(Message, opts)`.** Started.
+3. **Topology config and `Production.endpoint(Message, opts)`.** Historical
+   prototype, removed in 0.6.
    Production endpoint accepts peers and self id. It still returns the same
    in-process FIFO behavior as today; the topology API change is the gate.
 4. **ByteEndpoint bridge.** Started. `ByteEndpoint` exists for sim and
@@ -348,16 +351,12 @@ Each item ships on its own. Cross-process parity is the done-signal.
    Marionette backend target without forcing them to use typed value-message
    endpoints directly; encoding above the byte surface is the library's own
    job (the codec/transport wrappers were removed in 0.6).
-5. **Internal network IO seam.** Started. `src/network/io.zig` defines the
-   internal listen/connect/read/write/close/time seam plus exact read/write
-   helpers and a fake backend that forces short reads/writes and close behavior.
-   Keep it internal; `Endpoint(Message)` signatures do not mention it. A host
-   socket adapter exists for the first loopback transport slice.
-6. **Single-peer end-to-end socket transport.** Started.
-   `Production.byteEndpoint` uses framed loopback sockets when `.listen` is
-   configured. The old in-process FIFO remains for same-process production
-   parity setups without `.listen`. Loopback only; reconnect, background
-   receive, and multi-peer connection management are still future work.
+5. **Internal network IO seam.** Historical prototype, removed in 0.6. It
+   covered listen/connect/read/write/close/time plus exact transfer helpers and
+   a fake backend for short I/O and close behavior.
+6. **Single-peer end-to-end socket transport.** Historical prototype, removed
+   in 0.6. It reached framed loopback sockets but not reconnect, background
+   receive, or multi-peer connection management.
 7. **Production-bus fake IO tests.** Add a small deterministic/fake IO backend
    for the production bus, focused on partial frame reads/writes, EOF
    mid-frame, reconnect timing, and close discipline. This tests production bus

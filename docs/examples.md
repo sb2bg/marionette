@@ -185,8 +185,6 @@ portable shapes Marionette needs:
 - Trace events for sends, drops, deliveries, accepts, commits, and checks.
 - A named `mar.StateCheck` that inspects structured `SimCase` state.
 - Rejection of conflicting same-version proposals.
-- A parity test that initializes the same `Replicas` type with simulated and
-  production-shaped network handles.
 
 The normal scenario writes one value to a quorum, commits it, and checks that
 committed replicas agree and that committed values were accepted by a quorum:

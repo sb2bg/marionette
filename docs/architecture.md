@@ -114,11 +114,7 @@ src/
     control.zig
     endpoint.zig
     sim.zig
-    production.zig
     packet_core.zig
-    frame.zig
-    io.zig
-    transport.zig
     types.zig
     tests.zig
 ```

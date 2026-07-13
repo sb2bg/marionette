@@ -16,9 +16,9 @@ service whose SUT imports only `std.Io.net`.
 
 Write production-shaped code against `std.Io` wherever possible, and add small
 Marionette handles only when the application actually needs them. In tests,
-drive `control` to inject faults. For the modeled file and local endpoint
-surfaces, the same application logic can run on the simulator and on production
-adapters.
+drive `control` to inject faults. `Production.env()` supplies host I/O and the
+rooted real disk; application-owned protocol seams receive Marionette endpoints
+only in simulation.
 
 ```zig
 const mar = @import("marionette");
@@ -260,9 +260,8 @@ It does not model arbitrary OS thread scheduling or memory-level concurrency;
 code that depends on those needs separate testing.
 Endpoints are simulation-only by decision: production networking is host
 `std.Io.net`, and a Marionette-owned cross-process transport was cancelled,
-not deferred (see the roadmap's "Endpoints Are Sim-Only" decision). The
-local same-process endpoints and experimental framed loopback paths that
-exist today are removal candidates, kept only while parity tests use them.
+not deferred (see the roadmap's "Endpoints Are Sim-Only" decision). The former
+same-process and framed-loopback production adapters were removed in 0.6.
 Queue suspension and broader scheduler parity are planned.
 
 Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows
