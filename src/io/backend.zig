@@ -289,6 +289,250 @@ const FileLockRegistry = struct {
     }
 };
 
+/// Coordinates pathname users with rename/delete without serializing
+/// operations on unrelated files. States are separately allocated so a task
+/// may safely park while the index grows.
+const PathGate = struct {
+    allocator: std.mem.Allocator,
+    states: std.ArrayList(*State) = .empty,
+    next_key: usize = 1,
+
+    const key_base = @as(usize, 1) << (@bitSizeOf(usize) - 5);
+
+    const Owner = struct {
+        backend: *anyopaque,
+        task_id: ?u64,
+
+        fn eql(a: Owner, b: Owner) bool {
+            return a.backend == b.backend and a.task_id == b.task_id;
+        }
+    };
+
+    const Waiter = struct {
+        owner: *anyopaque,
+        task_owned: bool,
+        ready: bool = false,
+    };
+
+    const State = struct {
+        path: []u8,
+        key: usize,
+        active: std.ArrayList(Owner) = .empty,
+        reservation: ?Owner = null,
+        waiters: std.ArrayList(*Waiter) = .empty,
+
+        fn deinit(state: *State, allocator: std.mem.Allocator) void {
+            allocator.free(state.path);
+            state.active.deinit(allocator);
+            for (state.waiters.items) |waiter| allocator.destroy(waiter);
+            state.waiters.deinit(allocator);
+            allocator.destroy(state);
+        }
+    };
+
+    fn init(allocator: std.mem.Allocator) PathGate {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(gate: *PathGate) void {
+        for (gate.states.items) |state| state.deinit(gate.allocator);
+        gate.states.deinit(gate.allocator);
+        gate.* = undefined;
+    }
+
+    fn find(gate: *PathGate, path: []const u8) ?*State {
+        for (gate.states.items) |state| {
+            if (std.mem.eql(u8, state.path, path)) return state;
+        }
+        return null;
+    }
+
+    fn getOrCreate(gate: *PathGate, path: []const u8) std.mem.Allocator.Error!*State {
+        if (gate.find(path)) |state| return state;
+        const state = try gate.allocator.create(State);
+        errdefer gate.allocator.destroy(state);
+        const owned_path = try gate.allocator.dupe(u8, path);
+        errdefer gate.allocator.free(owned_path);
+        state.* = .{
+            .path = owned_path,
+            .key = key_base + gate.next_key,
+        };
+        gate.next_key += 1;
+        try gate.states.append(gate.allocator, state);
+        return state;
+    }
+
+    fn owner(backend: *anyopaque, runtime: ?TaskRuntime) Owner {
+        return .{
+            .backend = backend,
+            .task_id = if (runtime) |task_runtime| task_runtime.currentTaskId() else null,
+        };
+    }
+
+    fn wait(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, state: *State) std.mem.Allocator.Error!void {
+        const task_runtime = runtime orelse @panic("pathname contention requires an attached task runtime");
+        const waiter = try gate.allocator.create(Waiter);
+        errdefer gate.allocator.destroy(waiter);
+        waiter.* = .{
+            .owner = backend,
+            .task_owned = task_runtime.inTask(),
+        };
+        try state.waiters.append(gate.allocator, waiter);
+        if (waiter.task_owned) {
+            task_runtime.block(futex_module.waitKey(.file_lock, state.key));
+        } else {
+            task_runtime.runUntilDone(&waiter.ready);
+        }
+        gate.removeWaiter(waiter);
+    }
+
+    fn acquire(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, path: []const u8) std.mem.Allocator.Error!void {
+        const lease_owner = owner(backend, runtime);
+        while (true) {
+            const state = try gate.getOrCreate(path);
+            errdefer gate.removeIfEmpty(state);
+            if (state.reservation == null) {
+                try state.active.append(gate.allocator, lease_owner);
+                return;
+            }
+            try gate.wait(backend, runtime, state);
+        }
+    }
+
+    fn release(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, path: []const u8) void {
+        const state = gate.find(path) orelse unreachable;
+        const lease_owner = owner(backend, runtime);
+        for (state.active.items, 0..) |candidate, index| {
+            if (!candidate.eql(lease_owner)) continue;
+            _ = state.active.swapRemove(index);
+            gate.wake(runtime, state);
+            gate.removeIfEmpty(state);
+            return;
+        }
+        unreachable;
+    }
+
+    fn reserve(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, first_path: []const u8, second_path: ?[]const u8) std.mem.Allocator.Error!void {
+        const reservation_owner = owner(backend, runtime);
+        var reserved = false;
+        errdefer if (reserved) gate.releaseReservation(runtime, first_path, second_path);
+        while (true) {
+            const first = try gate.getOrCreate(first_path);
+            errdefer gate.removeIfEmpty(first);
+            const second = if (second_path) |path|
+                if (std.mem.eql(u8, first_path, path)) first else try gate.getOrCreate(path)
+            else
+                null;
+            errdefer if (second) |state| if (state != first) gate.removeIfEmpty(state);
+            const blocked = if (first.reservation != null)
+                first
+            else if (second) |state|
+                if (state.reservation != null) state else null
+            else
+                null;
+            if (blocked) |state| {
+                try gate.wait(backend, runtime, state);
+                continue;
+            }
+            first.reservation = reservation_owner;
+            if (second) |state| state.reservation = reservation_owner;
+            reserved = true;
+            while (first.active.items.len != 0 or if (second) |state| state.active.items.len != 0 else false) {
+                const state = if (first.active.items.len != 0) first else second.?;
+                try gate.wait(backend, runtime, state);
+            }
+            return;
+        }
+    }
+
+    fn releaseReservation(gate: *PathGate, runtime: ?TaskRuntime, first_path: []const u8, second_path: ?[]const u8) void {
+        const first = gate.find(first_path) orelse unreachable;
+        first.reservation = null;
+        gate.wake(runtime, first);
+        if (second_path) |path| if (!std.mem.eql(u8, first_path, path)) {
+            const second = gate.find(path) orelse unreachable;
+            second.reservation = null;
+            gate.wake(runtime, second);
+            gate.removeIfEmpty(second);
+        };
+        gate.removeIfEmpty(first);
+    }
+
+    fn wake(_: *PathGate, runtime: ?TaskRuntime, state: *State) void {
+        for (state.waiters.items) |waiter| waiter.ready = true;
+        if (runtime) |task_runtime| {
+            _ = task_runtime.wake(futex_module.waitKey(.file_lock, state.key), std.math.maxInt(usize));
+        }
+    }
+
+    fn removeWaiter(gate: *PathGate, waiter: *Waiter) void {
+        for (gate.states.items) |state| {
+            for (state.waiters.items, 0..) |candidate, index| {
+                if (candidate != waiter) continue;
+                _ = state.waiters.swapRemove(index);
+                gate.allocator.destroy(waiter);
+                gate.removeIfEmpty(state);
+                return;
+            }
+        }
+        unreachable;
+    }
+
+    fn removeIfEmpty(gate: *PathGate, state: *State) void {
+        if (state.active.items.len != 0 or state.reservation != null or state.waiters.items.len != 0) return;
+        for (gate.states.items, 0..) |candidate, index| {
+            if (candidate != state) continue;
+            _ = gate.states.swapRemove(index);
+            state.deinit(gate.allocator);
+            return;
+        }
+        unreachable;
+    }
+
+    fn retireInactive(gate: *PathGate, backend: *anyopaque, control: ?ProcessTaskControl, runtime: ?TaskRuntime) void {
+        const task_control = control orelse return;
+        var state_index: usize = 0;
+        while (state_index < gate.states.items.len) {
+            const state = gate.states.items[state_index];
+            var changed = false;
+            var active_index: usize = 0;
+            while (active_index < state.active.items.len) {
+                const lease_owner = state.active.items[active_index];
+                if (lease_owner.backend != backend or lease_owner.task_id == null or task_control.taskActive(lease_owner.task_id.?)) {
+                    active_index += 1;
+                    continue;
+                }
+                _ = state.active.swapRemove(active_index);
+                changed = true;
+            }
+            if (state.reservation) |reservation_owner| {
+                if (reservation_owner.backend == backend and reservation_owner.task_id != null and !task_control.taskActive(reservation_owner.task_id.?)) {
+                    state.reservation = null;
+                    changed = true;
+                }
+            }
+            var waiter_index: usize = 0;
+            while (waiter_index < state.waiters.items.len) {
+                const waiter = state.waiters.items[waiter_index];
+                if (waiter.owner != backend or !waiter.task_owned) {
+                    waiter_index += 1;
+                    continue;
+                }
+                _ = state.waiters.swapRemove(waiter_index);
+                gate.allocator.destroy(waiter);
+                changed = true;
+            }
+            if (changed) gate.wake(runtime, state);
+            if (state.active.items.len == 0 and state.reservation == null and state.waiters.items.len == 0) {
+                _ = gate.states.swapRemove(state_index);
+                state.deinit(gate.allocator);
+            } else {
+                state_index += 1;
+            }
+        }
+    }
+};
+
 pub const FutexWaitResult = futex_module.FutexWaitResult;
 pub const FutexWaitSet = futex_module.FutexWaitSet;
 pub const ProcessId = @import("task.zig").ProcessId;
@@ -322,6 +566,7 @@ pub const Backend = struct {
     next_handle: SocketHandle = 1000,
     next_ephemeral_port: u16 = ephemeral_port_min,
     locks: FileLockRegistry,
+    path_gate: PathGate,
     /// Live operation-scoped buffers (sector scratch, path copies) held
     /// across disk-latency suspension points. A task killed while parked
     /// mid-operation never runs its defers, so these register here and any
@@ -473,6 +718,7 @@ pub const Backend = struct {
             .disk = disk,
             .sector_size = sector_size,
             .locks = .init(allocator),
+            .path_gate = .init(allocator),
         };
     }
 
@@ -496,6 +742,7 @@ pub const Backend = struct {
         for (self.directory_handles.items) |*handle| handle.deinit(self.allocator);
         self.directory_handles.deinit(self.allocator);
         self.locks.deinit();
+        self.path_gate.deinit();
         for (self.op_scratch.items) |entry| self.allocator.free(entry.buffer);
         self.op_scratch.deinit(self.allocator);
         self.* = undefined;
@@ -1262,14 +1509,20 @@ pub const Backend = struct {
         lock: Io.File.Lock,
         lock_nonblocking: bool,
     ) (std.mem.Allocator.Error || error{WouldBlock})!Io.File {
-        const lock_acquire_path = self.files.items[file_index].path;
-        try self.fileLockRegistry().acquire(
-            self,
-            self.task_runtime,
-            lock_acquire_path,
-            lock,
-            lock_nonblocking,
-        );
+        var lock_acquire_path = self.files.items[file_index].path;
+        while (true) {
+            try self.fileLockRegistry().acquire(
+                self,
+                self.task_runtime,
+                lock_acquire_path,
+                lock,
+                lock_nonblocking,
+            );
+            const current_path = self.files.items[file_index].path;
+            if (std.mem.eql(u8, lock_acquire_path, current_path)) break;
+            self.fileLockRegistry().release(self.task_runtime, lock_acquire_path, lock);
+            lock_acquire_path = current_path;
+        }
         errdefer self.fileLockRegistry().release(
             self.task_runtime,
             lock_acquire_path,
@@ -1305,6 +1558,29 @@ pub const Backend = struct {
     fn fileLockRegistry(self: *Backend) *FileLockRegistry {
         if (self.process_registry) |registry| return &registry.locks;
         return &self.locks;
+    }
+
+    fn pathGate(self: *Backend) *PathGate {
+        if (self.process_registry) |registry| return &registry.path_gate;
+        return &self.path_gate;
+    }
+
+    pub fn acquireFilePathLease(self: *Backend, path: []const u8) (std.mem.Allocator.Error || error{ProcessKilled})!void {
+        if (!self.process_alive) return error.ProcessKilled;
+        try self.pathGate().acquire(self, self.task_runtime, path);
+    }
+
+    pub fn releaseFilePathLease(self: *Backend, path: []const u8) void {
+        self.pathGate().release(self, self.task_runtime, path);
+    }
+
+    pub fn reserveFileMutationPaths(self: *Backend, first_path: []const u8, second_path: ?[]const u8) (std.mem.Allocator.Error || error{ProcessKilled})!void {
+        if (!self.process_alive) return error.ProcessKilled;
+        try self.pathGate().reserve(self, self.task_runtime, first_path, second_path);
+    }
+
+    pub fn releaseFileMutationPaths(self: *Backend, first_path: []const u8, second_path: ?[]const u8) void {
+        self.pathGate().releaseReservation(self.task_runtime, first_path, second_path);
     }
 
     pub fn reserveFileLockPath(self: *Backend, path: []const u8) (std.mem.Allocator.Error || error{WouldBlock})!void {
@@ -1444,8 +1720,9 @@ pub const Backend = struct {
         prepared.handle_paths.clearRetainingCapacity();
     }
 
-    fn retireFileLockWaiters(self: *Backend) void {
+    fn retireFileWaitersAndPathOwners(self: *Backend, task_control: ?ProcessTaskControl) void {
         self.fileLockRegistry().retireWaiters(self);
+        self.pathGate().retireInactive(self, task_control, self.task_runtime);
     }
 
     pub fn openDirectoryFileHandle(self: *Backend, path: []const u8) std.mem.Allocator.Error!Io.File {
@@ -1477,6 +1754,7 @@ pub const ProcessRegistry = struct {
     next_handle: SocketHandle = 1000,
     next_ephemeral_port: u16 = Backend.ephemeral_port_min,
     locks: FileLockRegistry,
+    path_gate: PathGate,
 
     const ListenerRegistration = struct {
         backend: *Backend,
@@ -1495,6 +1773,7 @@ pub const ProcessRegistry = struct {
         return .{
             .allocator = allocator,
             .locks = .init(allocator),
+            .path_gate = .init(allocator),
         };
     }
 
@@ -1502,6 +1781,7 @@ pub const ProcessRegistry = struct {
         self.futex_keys.deinit(self.allocator);
         self.listeners.deinit(self.allocator);
         self.locks.deinit();
+        self.path_gate.deinit();
         self.* = undefined;
     }
 
@@ -1705,7 +1985,7 @@ pub const ProcessRuntime = struct {
             backend.onDiskCrash();
             self.killProcessTasks(@intCast(index));
             retireKilledGroupClosures(backend, self.task_control);
-            backend.retireFileLockWaiters();
+            backend.retireFileWaitersAndPathOwners(self.task_control);
             backend.retireFutexKeysForBackend();
             backend.retireClosedNetHandlesAfterTaskKill();
         }
@@ -1716,9 +1996,9 @@ pub const ProcessRuntime = struct {
         const backend = try self.backendForNode(node);
         backend.killProcess(.{ .invalidate_files = true });
         self.killProcessTasks(@intCast(node));
-        self.sweepInactiveOpScratch();
         retireKilledGroupClosures(backend, self.task_control);
-        backend.retireFileLockWaiters();
+        backend.retireFileWaitersAndPathOwners(self.task_control);
+        self.sweepInactiveOpScratch();
         backend.retireFutexKeysForBackend();
         backend.retireClosedNetHandlesAfterTaskKill();
     }

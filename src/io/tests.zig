@@ -387,7 +387,7 @@ test "io: process kill sweeps disk op scratch from killed tasks" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA66, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{});
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
     const io = sim.env.io();
 
     var scenario: Scenario = .{ .sim = sim, .io = io };
@@ -398,6 +398,46 @@ test "io: process kill sweeps disk op scratch from killed tasks" {
     writer.await(io);
     try std.testing.expect(scenario.scratch_before_kill > 0);
     try std.testing.expectEqual(@as(usize, 0), scenario.scratch_after_kill);
+    const peer_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
+    try peer_backend.reserveFileMutationPaths("missing.txt", null);
+    peer_backend.releaseFileMutationPaths("missing.txt", null);
+}
+
+test "io: process kill releases shared pathname reservations" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        sim: World.Simulation,
+        io: Io,
+        reserved: u32 = 0,
+
+        fn reserve(self: *@This()) void {
+            const backend = world_module.internal.ioRuntime(self.sim).backendForNode(0) catch
+                @panic("missing process backend");
+            backend.reserveFileMutationPaths("held", null) catch @panic("path reserve failed");
+            self.reserved = 1;
+            self.io.futexWake(u32, &self.reserved, std.math.maxInt(u32));
+            Io.sleep(self.io, .fromNanoseconds(1_000), .awake) catch unreachable;
+            @panic("reserved task survived process kill");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x6A7E, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_zero_io = (try sim.envForNode(0)).io();
+    const node_one_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
+
+    var scenario: Scenario = .{ .sim = sim, .io = node_zero_io };
+    var reserver = Io.async(node_zero_io, Scenario.reserve, .{&scenario});
+    while (scenario.reserved == 0) {
+        node_zero_io.futexWait(u32, &scenario.reserved, 0) catch unreachable;
+    }
+
+    try sim.killProcess(0);
+    reserver.await(node_zero_io);
+    try node_one_backend.acquireFilePathLease("held");
+    node_one_backend.releaseFilePathLease("held");
 }
 
 test "io: task group completion keys are unique across processes" {
@@ -1111,10 +1151,17 @@ test "io: process kill from inside owned task completes as killed" {
     const Scenario = struct {
         sim: World.Simulation,
         after_kill_call: bool = false,
+        gate_rejected: bool = false,
 
         fn task(self: *@This()) void {
             self.sim.killProcess(0) catch @panic("self kill failed");
             self.after_kill_call = true;
+            const backend = world_module.internal.ioRuntime(self.sim).backendForNode(0) catch
+                @panic("missing process backend");
+            backend.reserveFileMutationPaths("after-kill", null) catch |err| switch (err) {
+                error.ProcessKilled => self.gate_rejected = true,
+                error.OutOfMemory => @panic("unexpected path gate OOM"),
+            };
         }
     };
 
@@ -1129,6 +1176,7 @@ test "io: process kill from inside owned task completes as killed" {
     future.await(io);
 
     try std.testing.expect(scenario.after_kill_call);
+    try std.testing.expect(scenario.gate_rejected);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=manual") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=killed") != null);
@@ -2384,6 +2432,130 @@ test "io: rename can replace a path during a suspended streaming write" {
     try std.testing.expectEqualStrings("new-name", backend.files.items[0].path);
     try std.testing.expectEqual(@as(u64, 4), backend.files.items[0].len);
     try std.testing.expectEqual(@as(u64, 4), backend.file(file.handle).?.cursor);
+}
+
+test "io: rename waits for streaming writes and redirects queued handle IO" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        const Self = @This();
+
+        io: Io,
+        file: Io.File,
+        first_started: u32 = 0,
+        rename_started: u32 = 0,
+        late_started: u32 = 0,
+
+        fn firstWrite(self: *Self) void {
+            self.first_started = 1;
+            self.io.futexWake(u32, &self.first_started, std.math.maxInt(u32));
+            self.file.writeStreamingAll(self.io, "ABCDEFGHIJ") catch @panic("first write failed");
+        }
+
+        fn rename(self: *Self) void {
+            self.rename_started = 1;
+            self.io.futexWake(u32, &self.rename_started, std.math.maxInt(u32));
+            Io.Dir.cwd().rename("source", Io.Dir.cwd(), "renamed", self.io) catch @panic("rename failed");
+        }
+
+        fn lateWrite(self: *Self) bool {
+            self.late_started = 1;
+            self.io.futexWake(u32, &self.late_started, std.math.maxInt(u32));
+            self.file.writePositionalAll(self.io, "Z", 11) catch return false;
+            return true;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA11CE, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4, .min_latency_ns = 100 } });
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var file = try cwd.createFile(io, "source", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcdefghijkl", 0);
+    var writer_buffer: [0]u8 = .{};
+    var writer = file.writerStreaming(io, &writer_buffer);
+    try writer.seekTo(1);
+
+    var scenario: Scenario = .{ .io = io, .file = file };
+    var first = Io.async(io, Scenario.firstWrite, .{&scenario});
+    while (scenario.first_started == 0) io.futexWait(u32, &scenario.first_started, 0) catch unreachable;
+    var rename = Io.async(io, Scenario.rename, .{&scenario});
+    while (scenario.rename_started == 0) io.futexWait(u32, &scenario.rename_started, 0) catch unreachable;
+    var late = Io.async(io, Scenario.lateWrite, .{&scenario});
+    while (scenario.late_started == 0) io.futexWait(u32, &scenario.late_started, 0) catch unreachable;
+
+    first.await(io);
+    rename.await(io);
+    try std.testing.expect(late.await(io));
+
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "source", .{}));
+    var reopened = try cwd.openFile(io, "renamed", .{ .mode = .read_only });
+    defer reopened.close(io);
+    var bytes: [12]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, bytes.len), try reopened.readPositionalAll(io, &bytes, 0));
+    try std.testing.expectEqualStrings("aABCDEFGHIJZ", &bytes);
+}
+
+test "io: delete waits for streaming writes and rejects queued handle IO" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        const Self = @This();
+
+        io: Io,
+        file: Io.File,
+        first_started: u32 = 0,
+        delete_started: u32 = 0,
+        late_started: u32 = 0,
+
+        fn firstWrite(self: *Self) void {
+            self.first_started = 1;
+            self.io.futexWake(u32, &self.first_started, std.math.maxInt(u32));
+            self.file.writeStreamingAll(self.io, "ABCDEFGHIJ") catch @panic("first write failed");
+        }
+
+        fn delete(self: *Self) void {
+            self.delete_started = 1;
+            self.io.futexWake(u32, &self.delete_started, std.math.maxInt(u32));
+            Io.Dir.cwd().deleteFile(self.io, "victim") catch @panic("delete failed");
+        }
+
+        fn lateWrite(self: *Self) bool {
+            self.late_started = 1;
+            self.io.futexWake(u32, &self.late_started, std.math.maxInt(u32));
+            self.file.writePositionalAll(self.io, "Z", 11) catch return false;
+            return true;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xDE1E7E, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4, .min_latency_ns = 100 } });
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var file = try cwd.createFile(io, "victim", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcdefghijkl", 0);
+    var writer_buffer: [0]u8 = .{};
+    var writer = file.writerStreaming(io, &writer_buffer);
+    try writer.seekTo(1);
+
+    var scenario: Scenario = .{ .io = io, .file = file };
+    var first = Io.async(io, Scenario.firstWrite, .{&scenario});
+    while (scenario.first_started == 0) io.futexWait(u32, &scenario.first_started, 0) catch unreachable;
+    var deletion = Io.async(io, Scenario.delete, .{&scenario});
+    while (scenario.delete_started == 0) io.futexWait(u32, &scenario.delete_started, 0) catch unreachable;
+    var late = Io.async(io, Scenario.lateWrite, .{&scenario});
+    while (scenario.late_started == 0) io.futexWait(u32, &scenario.late_started, 0) catch unreachable;
+
+    first.await(io);
+    deletion.await(io);
+    try std.testing.expect(!late.await(io));
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "victim", .{}));
 }
 
 test "io: simulation files support std.Io file readers and writers" {

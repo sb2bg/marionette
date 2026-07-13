@@ -134,8 +134,10 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.File.OpenError!Io.File {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .file) catch |err| return err;
-            var path_owned = true;
-            defer if (path_owned) backend.freeOpScratch(path);
+            defer backend.freeOpScratch(path);
+            backend.reserveFileMutationPaths(path, null) catch return error.SystemResources;
+            var path_reserved = true;
+            defer if (path_reserved) backend.releaseFileMutationPaths(path, null);
             if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) return error.IsDir;
             try requireParentDirectory(backend, path);
             const existing_index = findOrDiscoverFileMeta(backend, path) catch |err| {
@@ -143,6 +145,8 @@ pub fn Ops(comptime Backend: type) type {
             };
             const file_index = if (existing_index) |index| {
                 if (options.exclusive) return error.PathAlreadyExists;
+                backend.releaseFileMutationPaths(path, null);
+                path_reserved = false;
                 const file = backend.openFileHandle(
                     index,
                     options.read,
@@ -154,20 +158,25 @@ pub fn Ops(comptime Backend: type) type {
                     error.WouldBlock => return error.WouldBlock,
                 };
                 errdefer backend.retireFileHandle(file.handle);
+                const meta = backend.files.items[index];
+                if (meta.deleted) return error.FileNotFound;
                 if (options.truncate) {
-                    const old_len = backend.files.items[index].len;
+                    var reservation = acquireFilePathReservation(backend, meta) catch |err| switch (err) {
+                        error.OutOfMemory => return error.SystemResources,
+                        error.FileDeleted => return error.FileNotFound,
+                    };
+                    defer reservation.deinit();
+                    const old_len = meta.len;
                     backend.disk.setLength(.{
-                        .path = path,
+                        .path = reservation.path,
                         .len = 0,
                     }) catch |err| switch (err) {
                         error.FileNotFound => {},
                         else => return errors.mapDiskOpenError(err),
                     };
-                    backend.files.items[index].len = 0;
-                    if (old_len != 0) backend.files.items[index].mtime = backend.nowTimestamp();
+                    meta.len = 0;
+                    if (old_len != 0) meta.mtime = backend.nowTimestamp();
                 }
-                backend.freeOpScratch(path);
-                path_owned = false;
                 return file;
             } else b: {
                 backend.disk.write(.{ .path = path, .offset = 0, .bytes = &.{} }) catch |err| {
@@ -180,21 +189,24 @@ pub fn Ops(comptime Backend: type) type {
                 };
                 backend.files.items[index].len = stat_result.size;
                 backend.files.items[index].inode = stat_result.inode;
-                backend.freeOpScratch(path);
-                path_owned = false;
+                backend.releaseFileMutationPaths(path, null);
+                path_reserved = false;
                 break :b index;
             };
 
-            return backend.openFileHandle(
+            const file = backend.openFileHandle(
                 file_index,
                 options.read,
                 true,
                 options.lock,
                 options.lock_nonblocking,
-            ) catch |err| switch (err) {
+            ) catch |err| return switch (err) {
                 error.OutOfMemory => error.SystemResources,
                 error.WouldBlock => error.WouldBlock,
             };
+            errdefer backend.retireFileHandle(file.handle);
+            if (backend.files.items[file_index].deleted) return error.FileNotFound;
+            return file;
         }
 
         pub fn simDirOpenFile(
@@ -206,8 +218,10 @@ pub fn Ops(comptime Backend: type) type {
             if (options.path_only) return error.AccessDenied;
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
-            var path_owned = true;
-            defer if (path_owned) backend.freeOpScratch(path);
+            defer backend.freeOpScratch(path);
+            backend.acquireFilePathLease(path) catch return error.SystemResources;
+            var path_leased = true;
+            defer if (path_leased) backend.releaseFilePathLease(path);
             if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) {
                 if (!options.allow_directory or options.isWrite()) return error.IsDir;
                 return backend.openDirectoryFileHandle(path) catch return error.SystemResources;
@@ -215,18 +229,21 @@ pub fn Ops(comptime Backend: type) type {
             const file_index = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskOpenError(err);
             }) orelse return error.FileNotFound;
-            backend.freeOpScratch(path);
-            path_owned = false;
-            return backend.openFileHandle(
+            backend.releaseFilePathLease(path);
+            path_leased = false;
+            const file = backend.openFileHandle(
                 file_index,
                 options.isRead(),
                 options.isWrite(),
                 options.lock,
                 options.lock_nonblocking,
-            ) catch |err| switch (err) {
+            ) catch |err| return switch (err) {
                 error.OutOfMemory => error.SystemResources,
                 error.WouldBlock => error.WouldBlock,
             };
+            errdefer backend.retireFileHandle(file.handle);
+            if (backend.files.items[file_index].deleted) return error.FileNotFound;
+            return file;
         }
 
         pub fn simDirClose(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
@@ -254,6 +271,8 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
+            backend.acquireFilePathLease(path) catch return error.SystemResources;
+            defer backend.releaseFilePathLease(path);
             if (backend.disk.statDir(.{ .path = path })) |stat| {
                 return buildDirectoryStat(backend, stat);
             } else |err| switch (err) {
@@ -279,6 +298,8 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
+            backend.acquireFilePathLease(path) catch return error.SystemResources;
+            defer backend.releaseFilePathLease(path);
             if (backend.directoryExists(path) catch return error.FileNotFound) return;
             _ = (findOrDiscoverFileMeta(backend, path) catch {
                 return error.FileNotFound;
@@ -348,6 +369,8 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .file) catch |err| return err;
             defer backend.freeOpScratch(path);
+            backend.reserveFileMutationPaths(path, null) catch return error.SystemResources;
+            defer backend.releaseFileMutationPaths(path, null);
             if (backend.directoryExists(path) catch return error.FileNotFound) return error.IsDir;
             _ = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskDeleteError(err);
@@ -372,6 +395,8 @@ pub fn Ops(comptime Backend: type) type {
             defer backend.freeOpScratch(old_path);
             const new_path = resolvePath(backend, new_dir, new_sub_path, .file) catch |err| return err;
             defer backend.freeOpScratch(new_path);
+            backend.reserveFileMutationPaths(old_path, new_path) catch return error.SystemResources;
+            defer backend.releaseFileMutationPaths(old_path, new_path);
             if (backend.directoryExists(old_path) catch return error.FileNotFound) return error.IsDir;
             if (backend.directoryExists(new_path) catch return error.FileNotFound) return error.IsDir;
             const new_parent = std.fs.path.dirname(new_path) orelse ".";
@@ -477,9 +502,12 @@ pub fn Ops(comptime Backend: type) type {
             if (backend.fileMeta(state).deleted) return error.NotOpenForReading;
 
             const meta = backend.fileMeta(state);
+            var lease = acquireFilePathLease(backend, meta) catch |err| switch (err) {
+                error.OutOfMemory => return error.SystemResources,
+                error.FileDeleted => return error.NotOpenForReading,
+            };
+            defer lease.deinit();
             if (offset >= meta.len) return 0;
-            const path = snapshotFilePath(backend, meta) catch return error.SystemResources;
-            defer backend.freeOpScratch(path);
 
             var cursor = offset;
             var total: usize = 0;
@@ -488,7 +516,7 @@ pub fn Ops(comptime Backend: type) type {
                 if (cursor >= meta.len) break;
                 const available = @min(@as(u64, @intCast(buffer.len)), meta.len - cursor);
                 const read_len: usize = @intCast(available);
-                readDiskBytes(backend, path, buffer[0..read_len], cursor) catch |err| return errors.mapDiskReadError(err);
+                readDiskBytes(backend, lease.path, buffer[0..read_len], cursor) catch |err| return errors.mapDiskReadError(err);
                 cursor += read_len;
                 total += read_len;
                 if (read_len < buffer.len) break;
@@ -511,19 +539,22 @@ pub fn Ops(comptime Backend: type) type {
             if (backend.fileMeta(state).deleted) return error.NotOpenForWriting;
 
             const meta = backend.fileMeta(state);
-            const path = snapshotFilePath(backend, meta) catch return error.SystemResources;
-            defer backend.freeOpScratch(path);
+            var lease = acquireFilePathLease(backend, meta) catch |err| switch (err) {
+                error.OutOfMemory => return error.SystemResources,
+                error.FileDeleted => return error.NotOpenForWriting,
+            };
+            defer lease.deinit();
             var cursor = offset;
             var total: usize = 0;
 
-            writePart(backend, meta, path, header, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
+            writePart(backend, meta, lease.path, header, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
             if (data.len > 0) {
                 for (data[0 .. data.len - 1]) |bytes| {
-                    writePart(backend, meta, path, bytes, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
+                    writePart(backend, meta, lease.path, bytes, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
                 }
                 const pattern = data[data.len - 1];
                 for (0..splat) |_| {
-                    writePart(backend, meta, path, pattern, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
+                    writePart(backend, meta, lease.path, pattern, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
                 }
             }
             if (total != 0) meta.mtime = backend.nowTimestamp();
@@ -636,11 +667,12 @@ pub fn Ops(comptime Backend: type) type {
                 return;
             }
             if (backend.fileMeta(state).deleted) return error.AccessDenied;
-            const path = snapshotFilePath(backend, backend.fileMeta(state)) catch |err| {
-                return errors.mapDiskSyncError(err);
+            var lease = acquireFilePathLease(backend, backend.fileMeta(state)) catch |err| switch (err) {
+                error.OutOfMemory => return errors.mapDiskSyncError(error.OutOfMemory),
+                error.FileDeleted => return error.AccessDenied,
             };
-            defer backend.freeOpScratch(path);
-            backend.disk.sync(.{ .path = path }) catch |err| return errors.mapDiskSyncError(err);
+            defer lease.deinit();
+            backend.disk.sync(.{ .path = lease.path }) catch |err| return errors.mapDiskSyncError(err);
         }
 
         pub fn simFileSetLength(userdata: ?*anyopaque, file: Io.File, new_length: u64) Io.File.SetLengthError!void {
@@ -650,15 +682,16 @@ pub fn Ops(comptime Backend: type) type {
             if (Backend.fileDirectoryPath(state) != null) return error.AccessDenied;
             if (backend.fileMeta(state).deleted) return error.AccessDenied;
             const meta = backend.fileMeta(state);
-            const path = snapshotFilePath(backend, meta) catch |err| {
-                return errors.mapDiskSetLengthError(err);
+            var lease = acquireFilePathLease(backend, meta) catch |err| switch (err) {
+                error.OutOfMemory => return errors.mapDiskSetLengthError(error.OutOfMemory),
+                error.FileDeleted => return error.AccessDenied,
             };
-            defer backend.freeOpScratch(path);
+            defer lease.deinit();
             const old_len = meta.len;
             if (new_length > old_len) {
-                zeroDiskBytes(backend, path, old_len, new_length - old_len) catch return error.InputOutput;
+                zeroDiskBytes(backend, lease.path, old_len, new_length - old_len) catch return error.InputOutput;
             }
-            backend.disk.setLength(.{ .path = path, .len = new_length }) catch |err| switch (err) {
+            backend.disk.setLength(.{ .path = lease.path, .len = new_length }) catch |err| switch (err) {
                 error.FileNotFound => {
                     if (new_length != 0) return error.InputOutput;
                 },
@@ -782,6 +815,84 @@ pub fn Ops(comptime Backend: type) type {
             const path = try backend.allocOpScratch(meta.path.len);
             @memcpy(path, meta.path);
             return path;
+        }
+
+        const FilePathLease = struct {
+            backend: *Backend,
+            path: []u8,
+
+            fn deinit(lease: *FilePathLease) void {
+                lease.backend.releaseFilePathLease(lease.path);
+                lease.backend.freeOpScratch(lease.path);
+                lease.* = undefined;
+            }
+        };
+
+        const FilePathReservation = struct {
+            backend: *Backend,
+            path: []u8,
+
+            fn deinit(reservation: *FilePathReservation) void {
+                reservation.backend.releaseFileMutationPaths(reservation.path, null);
+                reservation.backend.freeOpScratch(reservation.path);
+                reservation.* = undefined;
+            }
+        };
+
+        fn acquireFilePathLease(
+            backend: *Backend,
+            meta: *const Backend.FileMeta,
+        ) (std.mem.Allocator.Error || error{FileDeleted})!FilePathLease {
+            while (true) {
+                if (!backend.processIsAlive() or meta.deleted) return error.FileDeleted;
+                const path = try snapshotFilePath(backend, meta);
+                backend.acquireFilePathLease(path) catch |err| {
+                    backend.freeOpScratch(path);
+                    return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        error.ProcessKilled => error.FileDeleted,
+                    };
+                };
+                if (!backend.processIsAlive() or meta.deleted) {
+                    backend.releaseFilePathLease(path);
+                    backend.freeOpScratch(path);
+                    return error.FileDeleted;
+                }
+                if (std.mem.eql(u8, path, meta.path)) return .{
+                    .backend = backend,
+                    .path = path,
+                };
+                backend.releaseFilePathLease(path);
+                backend.freeOpScratch(path);
+            }
+        }
+
+        fn acquireFilePathReservation(
+            backend: *Backend,
+            meta: *const Backend.FileMeta,
+        ) (std.mem.Allocator.Error || error{FileDeleted})!FilePathReservation {
+            while (true) {
+                if (!backend.processIsAlive() or meta.deleted) return error.FileDeleted;
+                const path = try snapshotFilePath(backend, meta);
+                backend.reserveFileMutationPaths(path, null) catch |err| {
+                    backend.freeOpScratch(path);
+                    return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        error.ProcessKilled => error.FileDeleted,
+                    };
+                };
+                if (!backend.processIsAlive() or meta.deleted) {
+                    backend.releaseFileMutationPaths(path, null);
+                    backend.freeOpScratch(path);
+                    return error.FileDeleted;
+                }
+                if (std.mem.eql(u8, path, meta.path)) return .{
+                    .backend = backend,
+                    .path = path,
+                };
+                backend.releaseFileMutationPaths(path, null);
+                backend.freeOpScratch(path);
+            }
         }
 
         fn readDiskBytes(
