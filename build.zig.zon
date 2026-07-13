@@ -20,8 +20,8 @@
             .lazy = true,
         },
         .dusty = .{
-            .url = "git+https://github.com/lalinsky/dusty#fd78c7e569508ad4d3efe882ef573d9e98706bc1",
-            .hash = "dusty-0.1.0-Qdw7Rj5bGwAU7Hfb70_6Ck9PJ3zYYxB8YxSibQT04PYx",
+            .url = "git+https://github.com/lalinsky/dusty#e7a4f4b24c2d3c36244a48617e992a3056c62622",
+            .hash = "dusty-0.1.0-Qdw7RpKkGwBUOpWaRSxO0vfX9mJHn9eywcPvqd9P1bOq",
             .lazy = true,
         },
         .beanstalkz = .{
