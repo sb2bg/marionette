@@ -1003,6 +1003,26 @@ pub const World = struct {
         self.event_index += 1;
     }
 
+    /// Append two trace records as one transaction. If either record fails,
+    /// neither remains visible and the next event index is restored.
+    pub fn recordPair(
+        self: *World,
+        comptime first_fmt: []const u8,
+        first_args: anytype,
+        comptime second_fmt: []const u8,
+        second_args: anytype,
+    ) (std.mem.Allocator.Error || TraceError)!void {
+        const start_len = self.trace_log.items.len;
+        const start_event_index = self.event_index;
+        errdefer {
+            self.trace_log.shrinkRetainingCapacity(start_len);
+            self.event_index = start_event_index;
+        }
+
+        try self.record(first_fmt, first_args);
+        try self.record(second_fmt, second_args);
+    }
+
     /// Append one preformatted line to the world's trace.
     ///
     /// This is for type-erased callbacks that cannot take a comptime format
@@ -1327,6 +1347,36 @@ test "world: trace allocation failure rolls back random draws" {
 
         try std.testing.expectEqual(expected_value, try drawTracedChoice(&world, choice));
     }
+}
+
+test "world: recordPair rolls back both records when the second allocation fails" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xA70C });
+    defer world.deinit();
+
+    // Leave room for the short first record while forcing the much larger
+    // second record to grow the trace buffer.
+    const first_record_room = 32;
+    try world.trace_log.appendNTimes(
+        world.allocator,
+        0,
+        world.trace_log.capacity - world.trace_log.items.len - first_record_room,
+    );
+    const trace_before = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(trace_before);
+    const event_before = world.nextEventIndex();
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    world.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        world.recordPair("first", .{}, "second payload={s}", .{"x" ** 1024}),
+    );
+    world.allocator = std.testing.allocator;
+
+    try std.testing.expectEqualStrings(trace_before, world.traceBytes());
+    try std.testing.expectEqual(event_before, world.nextEventIndex());
+    try world.record("retry", .{});
+    try std.testing.expectEqual(event_before + 1, world.nextEventIndex());
 }
 
 test "world: trace allocation failure rolls back clock movement" {
