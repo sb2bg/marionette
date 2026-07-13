@@ -144,21 +144,6 @@ pub const NetworkPartitionDynamicsOptions = network_module.NetworkPartitionDynam
 /// Runtime topology for a composition-root network simulation.
 pub const SimNetworkOptions = network_module.SimNetworkOptions;
 
-/// One peer in a production network topology.
-pub const ProductionPeer = network_module.ProductionPeer;
-
-/// Production endpoint construction options.
-pub const ProductionEndpointOptions = network_module.ProductionEndpointOptions;
-
-/// Bulk helper options for same-process production parity tests.
-pub const ProductionEndpointsOptions = network_module.ProductionEndpointsOptions;
-
-/// Errors returned while constructing production endpoints.
-pub const ProductionNetworkError = network_module.ProductionNetworkError;
-
-/// Errors returned while constructing production byte endpoints.
-pub const ProductionByteEndpointError = network_module.ProductionByteEndpointError;
-
 /// Typed app-facing process endpoint.
 pub const Endpoint = network_module.Endpoint;
 
@@ -290,8 +275,6 @@ test {
     _ = @import("message_pool.zig");
     _ = @import("network/root.zig");
     _ = @import("network/frame.zig");
-    _ = @import("network/io.zig");
-    _ = @import("network/transport.zig");
     _ = @import("run.zig");
     _ = @import("run_types.zig");
     _ = @import("scheduler.zig");

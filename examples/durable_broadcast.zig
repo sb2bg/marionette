@@ -17,13 +17,6 @@ const replica_count = 3;
 const quorum = 2;
 const client_node_id: mar.NodeId = replica_count;
 const max_messages = 96;
-const production_peers = [_]mar.ProductionPeer{
-    .{ .id = 0, .address = "127.0.0.1:4250" },
-    .{ .id = 1, .address = "127.0.0.1:4251" },
-    .{ .id = 2, .address = "127.0.0.1:4252" },
-    .{ .id = client_node_id, .address = "127.0.0.1:4253" },
-};
-
 const Op = struct {
     id: u64,
     value: u64,
@@ -591,49 +584,4 @@ test "durable broadcast: bug detected" {
         .scenario = buggyScenario,
         .checks = &checks,
     });
-}
-
-test "durable broadcast: same app code on simulated and production handles" {
-    var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xC0FFEE, .tick_ns = tick_ns });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{
-        .disk = .{ .sector_size = record_size, .min_latency_ns = tick_ns },
-        .network = .{
-            .nodes = replica_count + 1,
-            .service_nodes = replica_count,
-            .path_capacity = max_messages,
-        },
-    });
-    var sim_service = try writeBroadcastRecover(
-        sim.env,
-        try sim.endpoint(MessagePayload, client_node_id),
-        try sim.endpoints(MessagePayload, replica_count, 0),
-    );
-    try durableServiceIsSafe(&sim_service);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var production = try mar.Production.init(.{
-        .allocator = std.testing.allocator,
-        .root_dir = tmp.dir,
-        .io = std.testing.io,
-        .disk = .{ .sector_size = record_size },
-    });
-    defer production.deinit();
-
-    var prod_service = try writeBroadcastRecover(
-        production.env(),
-        try production.endpoint(MessagePayload, .{
-            .self = client_node_id,
-            .peers = &production_peers,
-            .listen = "127.0.0.1:4253",
-        }),
-        try production.endpoints(MessagePayload, replica_count, .{
-            .first_node = 0,
-            .peers = &production_peers,
-        }),
-    );
-    try durableServiceIsSafe(&prod_service);
 }

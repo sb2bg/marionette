@@ -6,17 +6,18 @@
 > is host `std.Io.net`, and Marionette will not ship its own production
 > socket bus. This file is retained as design history because the analysis
 > (framing, pooling, reconnect, TigerBeetle's MessageBus) informed that
-> decision. Nothing below is planned work. The current API direction lives
-> in `docs/network-api.md`.
+> decision. The experimental adapters and their private socket runtime were
+> removed in 0.6. Nothing below is planned work. The current API direction
+> lives in `docs/network-api.md`.
 
 This document was a forward-looking plan for the target shape of
 Marionette's production-side `Endpoint(Message)`, had it grown from a
 same-process FIFO into a real cross-process transport (formerly roadmap
 item 15, "App-facing typed network composition: production transport").
 
-The current production handle is documented in `docs/network-api.md`. The
-simulation network is documented in `docs/network.md`. This file covers the
-production-side architecture only.
+The current simulation network is documented in `docs/network.md`; production
+code uses host `std.Io.net`. This file covers only the removed, counterfactual
+production-side architecture.
 
 ## Why this is a real engineering project
 
@@ -184,10 +185,8 @@ const endpoint = try production.endpoint(Message, .{
 ```
 
 Simulation does not need this; `World.simulate(.{ .network = .{ .nodes = N }
-})` declares topology implicitly. Today `Production.endpoint(Message, opts)`
-accepts this topology shape and still returns a same-process FIFO endpoint.
-`Production.byteEndpoint(opts)` uses the socket-backed runtime when `.listen`
-is configured.
+})` declares topology implicitly. The experimental production adapters once
+accepted a peer-table shape here; those adapters no longer exist.
 
 This will be a deliberate divergence between production and simulation setup:
 production declares peer addresses and listener state, while simulation

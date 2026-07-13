@@ -82,11 +82,6 @@ pub const Sim = struct {
 
 pub const Production = struct {
     pub fn env(self: *Production) Env;
-    // Deprecated compatibility remnants; production networking uses std.Io.net.
-    pub fn endpoint(self: *Production, comptime Message: type, opts: ProductionEndpointOptions) !Endpoint(Message);
-    pub fn endpoints(self: *Production, comptime Message: type, comptime count: usize, opts: ProductionEndpointsOptions) ![count]Endpoint(Message);
-    pub fn byteEndpoint(self: *Production, opts: ProductionEndpointOptions) !ByteEndpoint;
-    pub fn byteEndpoints(self: *Production, comptime count: usize, opts: ProductionEndpointsOptions) ![count]ByteEndpoint;
 };
 ```
 
@@ -133,9 +128,8 @@ var server = try Server.init(server_env.io(), server_env.recorder());
 The design keeps `Env` non-generic and passes `Endpoint(Message)` as a sibling
 simulation handle. Production-shaped code that does not need all of `Env`
 should take `std.Io` and `Recorder` directly and use host `std.Io.net` behind
-its own protocol seam. The remaining `Production.endpoint` and
-`Production.byteEndpoint` methods are deprecated parity-test remnants and
-removal candidates.
+its own protocol seam. The deprecated production endpoint adapters were
+removed in 0.6.
 
 `ByteEndpoint` is the byte-oriented sibling for libraries that want Marionette
 behind their own protocol API. `send(to, bytes)` copies borrowed bytes before

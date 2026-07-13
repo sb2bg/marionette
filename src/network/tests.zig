@@ -3,7 +3,6 @@ const std = @import("std");
 const clock_module = @import("../clock.zig");
 const endpoint_module = @import("endpoint.zig");
 const packet_core = @import("packet_core.zig");
-const production = @import("production.zig");
 const sim_module = @import("sim.zig");
 const types = @import("types.zig");
 const World = @import("../world.zig").World;
@@ -11,14 +10,10 @@ const World = @import("../world.zig").World;
 const Endpoint = endpoint_module.Endpoint;
 const NetworkOptions = types.NetworkOptions;
 const NodeId = types.NodeId;
-const ProductionNetworkEntry = production.ProductionNetworkEntry;
-const ProductionPeer = production.ProductionPeer;
 const NetworkSimulation = packet_core.NetworkSimulation;
 const UnstableNetwork = packet_core.UnstableNetwork;
 const initSimControl = sim_module.initSimControl;
 const sendStreamBytesFromControl = sim_module.sendStreamBytesFromControl;
-const productionByteEndpoint = production.productionByteEndpoint;
-const productionEndpoint = production.productionEndpoint;
 
 const TestPayload = struct {
     value: u64,
@@ -477,67 +472,6 @@ test "composition network: endpoints for the same payload share one runtime" {
     try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
 }
 
-test "production endpoint: requires declared topology" {
-    var entries: std.ArrayList(ProductionNetworkEntry) = .empty;
-    defer entries.deinit(std.testing.allocator);
-
-    try std.testing.expectError(error.ProductionTopologyEmpty, productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
-        .self = 0,
-        .peers = &.{},
-    }));
-
-    const missing_self = [_]ProductionPeer{
-        .{ .id = 1, .address = "127.0.0.1:4241" },
-    };
-    try std.testing.expectError(error.ProductionTopologyMissingSelf, productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
-        .self = 0,
-        .peers = &missing_self,
-    }));
-
-    const duplicate_peer = [_]ProductionPeer{
-        .{ .id = 0, .address = "127.0.0.1:4240" },
-        .{ .id = 0, .address = "127.0.0.1:4241" },
-    };
-    try std.testing.expectError(error.ProductionTopologyDuplicatePeer, productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
-        .self = 0,
-        .peers = &duplicate_peer,
-    }));
-}
-
-test "production endpoint: topology-shaped handles still share in-process runtime" {
-    var entries: std.ArrayList(ProductionNetworkEntry) = .empty;
-    defer {
-        var index = entries.items.len;
-        while (index > 0) {
-            index -= 1;
-            const teardown = entries.items[index].teardown;
-            teardown.deinit(teardown.ptr, std.testing.allocator);
-        }
-        entries.deinit(std.testing.allocator);
-    }
-
-    const peers = [_]ProductionPeer{
-        .{ .id = 0, .address = "127.0.0.1:4240" },
-        .{ .id = 1, .address = "127.0.0.1:4241" },
-    };
-
-    const node_0 = try productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
-        .self = 0,
-        .peers = &peers,
-        .listen = peers[0].address,
-    });
-    const node_1 = try productionEndpoint(TestPayload, std.testing.allocator, &entries, .{
-        .self = 1,
-        .peers = &peers,
-        .listen = peers[1].address,
-    });
-
-    try node_0.send(1, .{ .value = 42 });
-    const envelope = (try node_1.receive()).?;
-    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
-    try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
-}
-
 test "composition byte endpoint: send copies borrowed bytes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
@@ -633,40 +567,6 @@ test "stream byte sends preserve delivery order under jitter" {
         try std.testing.expect(deliver_at >= delivery_floor);
         delivery_floor = deliver_at;
     }
-}
-
-test "production byte endpoint: topology-shaped handles share byte runtime" {
-    var entries: std.ArrayList(ProductionNetworkEntry) = .empty;
-    defer {
-        var index = entries.items.len;
-        while (index > 0) {
-            index -= 1;
-            const teardown = entries.items[index].teardown;
-            teardown.deinit(teardown.ptr, std.testing.allocator);
-        }
-        entries.deinit(std.testing.allocator);
-    }
-
-    const peers = [_]ProductionPeer{
-        .{ .id = 0, .address = "127.0.0.1:4240" },
-        .{ .id = 1, .address = "127.0.0.1:4241" },
-    };
-
-    const node_0 = try productionByteEndpoint(std.testing.allocator, null, &entries, .{
-        .self = 0,
-        .peers = &peers,
-    });
-    const node_1 = try productionByteEndpoint(std.testing.allocator, null, &entries, .{
-        .self = 1,
-        .peers = &peers,
-    });
-
-    try node_0.send(1, "prod");
-    const envelope = (try node_1.receive()).?;
-    defer envelope.message.release();
-
-    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
-    try std.testing.expectEqualStrings("prod", envelope.message.bytes());
 }
 
 test "composition network: receive advances only to global next delivery" {

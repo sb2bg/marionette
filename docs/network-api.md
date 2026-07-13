@@ -2,8 +2,8 @@
 
 This document describes the current simulation network API. Marionette
 endpoints are simulation-only; production networking uses host `std.Io.net`.
-The remaining local/socket-backed production endpoint adapters are deprecated
-compatibility code and removal candidates, not a supported parity contract.
+The former local/socket-backed production endpoint adapters were removed in
+0.6 rather than retained as an unsupported parity contract.
 
 Application code should put its protocol behind an application-owned seam.
 The composition root supplies simulated endpoints in tests and host networking
@@ -177,15 +177,8 @@ connection management are cancelled with it, not deferred.
 `docs/network-production.md` is retained as design history for the cancelled
 bus, not as a plan.
 
-What still exists today:
-
-- `Production.endpoint(Message, opts)` returns the same typed endpoint shape
-  as simulation over a local in-process adapter. It is a removal candidate;
-  prune it when touching that code.
-- `Production.byteEndpoint(opts)` uses the same local in-process adapter
-  unless `opts.listen` is set, which selects the socket-backed loopback slice
-  behind the same `ByteEndpoint` surface. It stays only while a parity test
-  still uses it.
+`Production` now exposes host `std.Io` through `Env`; it does not construct
+Marionette network endpoints.
 
 The standing rules:
 
