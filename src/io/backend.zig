@@ -312,7 +312,10 @@ const PathGate = struct {
         owner: *anyopaque,
         task_owned: bool,
         ready: bool = false,
+        aborted: bool = false,
     };
+
+    const Error = std.mem.Allocator.Error || error{ProcessKilled};
 
     const State = struct {
         path: []u8,
@@ -369,7 +372,7 @@ const PathGate = struct {
         };
     }
 
-    fn wait(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, state: *State) std.mem.Allocator.Error!void {
+    fn wait(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, state: *State) Error!void {
         const task_runtime = runtime orelse @panic("pathname contention requires an attached task runtime");
         const waiter = try gate.allocator.create(Waiter);
         errdefer gate.allocator.destroy(waiter);
@@ -383,10 +386,12 @@ const PathGate = struct {
         } else {
             task_runtime.runUntilDone(&waiter.ready);
         }
+        const aborted = waiter.aborted;
         gate.removeWaiter(waiter);
+        if (aborted) return error.ProcessKilled;
     }
 
-    fn acquire(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, path: []const u8) std.mem.Allocator.Error!void {
+    fn acquire(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, path: []const u8) Error!void {
         const lease_owner = owner(backend, runtime);
         while (true) {
             const state = try gate.getOrCreate(path);
@@ -412,7 +417,7 @@ const PathGate = struct {
         unreachable;
     }
 
-    fn reserve(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, first_path: []const u8, second_path: ?[]const u8) std.mem.Allocator.Error!void {
+    fn reserve(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, first_path: []const u8, second_path: ?[]const u8) Error!void {
         const reservation_owner = owner(backend, runtime);
         var reserved = false;
         errdefer if (reserved) gate.releaseReservation(runtime, first_path, second_path);
@@ -514,7 +519,13 @@ const PathGate = struct {
             var waiter_index: usize = 0;
             while (waiter_index < state.waiters.items.len) {
                 const waiter = state.waiters.items[waiter_index];
-                if (waiter.owner != backend or !waiter.task_owned) {
+                if (waiter.owner != backend) {
+                    waiter_index += 1;
+                    continue;
+                }
+                if (!waiter.task_owned) {
+                    waiter.aborted = true;
+                    changed = true;
                     waiter_index += 1;
                     continue;
                 }

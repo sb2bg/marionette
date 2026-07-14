@@ -440,6 +440,52 @@ test "io: process kill releases shared pathname reservations" {
     node_one_backend.releaseFilePathLease("held");
 }
 
+test "io: process kill aborts main-context pathname waits" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        const Self = @This();
+
+        sim: World.Simulation,
+        io: Io,
+        held: u32 = 0,
+
+        fn hold(self: *Self) void {
+            const backend = world_module.internal.ioRuntime(self.sim).backendForNode(1) catch
+                @panic("missing process backend");
+            backend.reserveFileMutationPaths("held", null) catch @panic("path reserve failed");
+            self.held = 1;
+            self.io.futexWake(u32, &self.held, std.math.maxInt(u32));
+            Io.sleep(self.io, .fromNanoseconds(100), .awake) catch unreachable;
+            backend.releaseFileMutationPaths("held", null);
+        }
+
+        fn killWaiter(self: *Self) void {
+            while (self.held == 0) {
+                self.io.futexWait(u32, &self.held, 0) catch unreachable;
+            }
+            self.sim.killProcess(0) catch @panic("process kill failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA80F7, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_one_io = (try sim.envForNode(1)).io();
+    const node_zero_backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+    const node_one_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
+
+    var scenario: Scenario = .{ .sim = sim, .io = node_one_io };
+    var holder = Io.async(node_one_io, Scenario.hold, .{&scenario});
+    var killer = Io.async(node_one_io, Scenario.killWaiter, .{&scenario});
+
+    try std.testing.expectError(error.ProcessKilled, node_zero_backend.acquireFilePathLease("held"));
+    killer.await(node_one_io);
+    holder.await(node_one_io);
+    try node_one_backend.acquireFilePathLease("held");
+    node_one_backend.releaseFilePathLease("held");
+}
+
 test "io: task group completion keys are unique across processes" {
     if (!fiber_supported) return error.SkipZigTest;
 
