@@ -16,8 +16,11 @@
   alignment, killed `Group.await` owners release their group state before the
   fiber stack is destroyed, and trace-summary plus low-level world time/random
   state roll back cleanly on allocation failure. Suspended file operations now
-  hold kill-safe path snapshots and streaming operations reacquire handles on
-  resume, closing concurrent rename/delete lifetime hazards.
+  hold kill-safe path snapshots, streaming operations reacquire handles on
+  resume, and per-path leases serialize pathname mutations with in-flight I/O.
+  Queued handle operations therefore follow a completed rename or reject a
+  completed deletion instead of recreating or writing through an obsolete
+  pathname.
 
 - Makes final stream delivery transactional: the I/O bridge borrows a ready
   frame, reserves inbox capacity, publishes the network and `io.net` trace pair
