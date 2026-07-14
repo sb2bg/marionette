@@ -479,6 +479,9 @@ test "io: process kill aborts main-context pathname waits" {
     var holder = Io.async(node_one_io, Scenario.hold, .{&scenario});
     var killer = Io.async(node_one_io, Scenario.killWaiter, .{&scenario});
 
+    while (scenario.held == 0) {
+        node_one_io.futexWait(u32, &scenario.held, 0) catch unreachable;
+    }
     try std.testing.expectError(error.ProcessKilled, node_zero_backend.acquireFilePathLease("held"));
     killer.await(node_one_io);
     holder.await(node_one_io);
