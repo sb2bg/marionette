@@ -375,12 +375,14 @@ const PathGate = struct {
     fn wait(gate: *PathGate, backend: *anyopaque, runtime: ?TaskRuntime, state: *State) Error!void {
         const task_runtime = runtime orelse @panic("pathname contention requires an attached task runtime");
         const waiter = try gate.allocator.create(Waiter);
-        errdefer gate.allocator.destroy(waiter);
+        var waiter_owned = true;
+        errdefer if (waiter_owned) gate.allocator.destroy(waiter);
         waiter.* = .{
             .owner = backend,
             .task_owned = task_runtime.inTask(),
         };
         try state.waiters.append(gate.allocator, waiter);
+        waiter_owned = false;
         if (waiter.task_owned) {
             task_runtime.block(futex_module.waitKey(.file_lock, state.key));
         } else {
