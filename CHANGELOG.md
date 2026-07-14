@@ -20,7 +20,9 @@
   resume, and per-path leases serialize pathname mutations with in-flight I/O.
   Queued handle operations therefore follow a completed rename or reject a
   completed deletion instead of recreating or writing through an obsolete
-  pathname.
+  pathname. Process kill retires task-owned gate state and aborts a
+  main-context pathname wait instead of letting a stale capability keep
+  driving the scheduler.
 
 - Makes final stream delivery transactional: the I/O bridge borrows a ready
   frame, reserves inbox capacity, publishes the network and `io.net` trace pair
