@@ -1,9 +1,9 @@
-//! Tiny database-over-byte-endpoint example.
+//! Tiny database-over-message-endpoint example.
 //!
 //! This intentionally uses a trivial binary wire format. The point is the
 //! pattern: the app owns its encoding and decodes typed requests and
-//! responses at the edge, while `ByteEndpoint` only moves bytes between
-//! nodes deterministically.
+//! responses at the edge, while the endpoint moves an owned, value-only
+//! message between nodes deterministically.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -11,6 +11,19 @@ const mar = @import("marionette");
 const server_node: mar.NodeId = 0;
 const client_node: mar.NodeId = 1;
 const max_frame_len = 9;
+
+const WireMessage = struct {
+    len: u8,
+    data: [max_frame_len]u8,
+
+    fn init(len: u8) WireMessage {
+        return .{ .len = len, .data = @splat(0) };
+    }
+
+    fn bytes(self: *const WireMessage) []const u8 {
+        return self.data[0..self.len];
+    }
+};
 
 const Db = struct {
     value: ?i64 = null,
@@ -56,13 +69,13 @@ const Response = union(ResponseTag) {
     empty,
 };
 
-fn encodeRequest(buffer: *[max_frame_len]u8, request: Request) []const u8 {
-    buffer[0] = @intFromEnum(std.meta.activeTag(request));
+fn encodeRequest(request: Request) WireMessage {
+    var message = WireMessage.init(if (request == .insert) 9 else 1);
+    message.data[0] = @intFromEnum(std.meta.activeTag(request));
     if (request == .insert) {
-        std.mem.writeInt(i64, buffer[1..][0..8], request.insert, .little);
-        return buffer[0..9];
+        std.mem.writeInt(i64, message.data[1..][0..8], request.insert, .little);
     }
-    return buffer[0..1];
+    return message;
 }
 
 fn decodeRequest(bytes: []const u8) !Request {
@@ -74,13 +87,13 @@ fn decodeRequest(bytes: []const u8) !Request {
     };
 }
 
-fn encodeResponse(buffer: *[max_frame_len]u8, response: Response) []const u8 {
-    buffer[0] = @intFromEnum(std.meta.activeTag(response));
+fn encodeResponse(response: Response) WireMessage {
+    var message = WireMessage.init(if (response == .row) 9 else 1);
+    message.data[0] = @intFromEnum(std.meta.activeTag(response));
     if (response == .row) {
-        std.mem.writeInt(i64, buffer[1..][0..8], response.row, .little);
-        return buffer[0..9];
+        std.mem.writeInt(i64, message.data[1..][0..8], response.row, .little);
     }
-    return buffer[0..1];
+    return message;
 }
 
 fn decodeResponse(bytes: []const u8) !Response {
@@ -95,18 +108,16 @@ fn decodeResponse(bytes: []const u8) !Response {
 
 const Server = struct {
     db: Db = .{},
-    endpoint: mar.ByteEndpoint,
+    endpoint: mar.Endpoint(WireMessage),
 
     /// Handle the next pending request, if any. Returns whether one arrived.
     fn step(self: *Server) !bool {
         const envelope = (try self.endpoint.receive()) orelse return false;
-        defer envelope.message.release();
 
         const request = try decodeRequest(envelope.message.bytes());
         const response = self.db.execute(request);
 
-        var buffer: [max_frame_len]u8 = undefined;
-        try self.endpoint.send(envelope.from, encodeResponse(&buffer, response));
+        try self.endpoint.send(envelope.from, encodeResponse(response));
         return true;
     }
 };
@@ -120,8 +131,8 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         .path_capacity = 8,
     } });
 
-    var server = Server{ .endpoint = try sim.byteEndpoint(server_node) };
-    const client = try sim.byteEndpoint(client_node);
+    var server = Server{ .endpoint = try sim.endpoint(WireMessage, server_node) };
+    const client = try sim.endpoint(WireMessage, client_node);
 
     try expectResponse(.pong, try roundTrip(&server, client, .ping));
     try expectResponse(.insert_one, try roundTrip(&server, client, .{ .insert = 41 }));
@@ -130,13 +141,11 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return try allocator.dupe(u8, world.traceBytes());
 }
 
-fn roundTrip(server: *Server, client: mar.ByteEndpoint, request: Request) !Response {
-    var buffer: [max_frame_len]u8 = undefined;
-    try client.send(server_node, encodeRequest(&buffer, request));
+fn roundTrip(server: *Server, client: mar.Endpoint(WireMessage), request: Request) !Response {
+    try client.send(server_node, encodeRequest(request));
     if (!try server.step()) return error.MissingRequest;
 
     const envelope = (try client.receive()) orelse return error.MissingResponse;
-    defer envelope.message.release();
 
     return try decodeResponse(envelope.message.bytes());
 }
@@ -158,7 +167,7 @@ fn expectResponse(expected: Response, actual: Response) !void {
     }
 }
 
-test "toy database: typed protocol over raw byte endpoint" {
+test "toy database: typed protocol over owned messages" {
     const trace = try runScenario(std.testing.allocator, 0xC0FFEE);
     defer std.testing.allocator.free(trace);
 

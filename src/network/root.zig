@@ -10,7 +10,6 @@ const sim = @import("sim.zig");
 const types = @import("types.zig");
 
 pub const AnyNetworkControl = control.AnyNetworkControl;
-pub const ByteEndpoint = endpoint.ByteEndpoint;
 pub const Endpoint = endpoint.Endpoint;
 pub const NetworkClogOptions = types.NetworkClogOptions;
 pub const NetworkError = types.NetworkError;
@@ -20,7 +19,6 @@ pub const NetworkOptions = types.NetworkOptions;
 pub const NetworkPartitionDynamicsOptions = types.NetworkPartitionDynamicsOptions;
 pub const NodeId = types.NodeId;
 pub const SimNetworkOptions = types.SimNetworkOptions;
-pub const default_byte_pool_options = types.default_byte_pool_options;
 
 /// Internal composition hooks for Marionette's world, I/O backend, and
 /// production environment.
@@ -31,7 +29,6 @@ pub const internal = struct {
     pub const SimByteSendResult = sim.SimByteSendResult;
     pub const UnstableNetwork = packet_core.UnstableNetwork;
 
-    pub const byteEndpointFromControl = sim.byteEndpointFromControl;
     pub const discardStreamFramesFromControl = sim.discardStreamFramesFromControl;
     pub const endpointFromControl = sim.endpointFromControl;
     pub const faultEvolutionParticipantFromControl = control.internal.faultEvolutionParticipant;
@@ -41,6 +38,7 @@ pub const internal = struct {
     pub const peekReadyStreamEventFromControl = sim.peekReadyStreamEventFromControl;
     pub const processCountFromControl = sim.processCountFromControl;
     pub const sendStreamBytesFromControl = sim.sendStreamBytesFromControl;
+    pub const streamLiveBuffersFromControl = sim.streamLiveBuffersFromControl;
 };
 
 test {

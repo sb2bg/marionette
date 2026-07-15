@@ -647,12 +647,6 @@ pub const World = struct {
             return try network_module.internal.endpointFromControl(Payload, self.control.network, node);
         }
 
-        /// Open one byte-payload simulated endpoint on `node`. Requires a
-        /// configured network (`error.NetworkUnavailable` otherwise).
-        pub fn byteEndpoint(self: Simulation, node: network_module.NodeId) !network_module.ByteEndpoint {
-            return try network_module.internal.byteEndpointFromControl(self.control.network, node);
-        }
-
         /// Open typed endpoints on `count` consecutive nodes starting at
         /// `first_node`.
         pub fn endpoints(
@@ -664,20 +658,6 @@ pub const World = struct {
             var handles: [count]network_module.Endpoint(Payload) = undefined;
             for (&handles, 0..) |*endpoint_handle, index| {
                 endpoint_handle.* = try self.endpoint(Payload, first_node + @as(network_module.NodeId, @intCast(index)));
-            }
-            return handles;
-        }
-
-        /// Open byte-payload endpoints on `count` consecutive nodes
-        /// starting at `first_node`.
-        pub fn byteEndpoints(
-            self: Simulation,
-            comptime count: usize,
-            first_node: network_module.NodeId,
-        ) ![count]network_module.ByteEndpoint {
-            var handles: [count]network_module.ByteEndpoint = undefined;
-            for (&handles, 0..) |*endpoint_handle, index| {
-                endpoint_handle.* = try self.byteEndpoint(first_node + @as(network_module.NodeId, @intCast(index)));
             }
             return handles;
         }

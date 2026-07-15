@@ -2,7 +2,6 @@
 
 const clock_module = @import("../clock.zig");
 const env_module = @import("../env.zig");
-const message_pool_module = @import("../message_pool.zig");
 
 /// Stable simulated node/process identifier.
 pub const NodeId = u16;
@@ -102,9 +101,4 @@ pub const SimNetworkOptions = struct {
     service_nodes: usize = 0,
     /// Maximum packets queued on one directed path.
     path_capacity: usize = 64,
-};
-/// Default buffer pool sizing for byte endpoints.
-pub const default_byte_pool_options: message_pool_module.Options = .{
-    .buffers = 64,
-    .buffer_size = 64 * 1024,
 };

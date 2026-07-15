@@ -147,12 +147,6 @@ pub const SimNetworkOptions = network_module.SimNetworkOptions;
 /// Typed app-facing process endpoint.
 pub const Endpoint = network_module.Endpoint;
 
-/// App-facing byte endpoint with explicit message ownership.
-pub const ByteEndpoint = network_module.ByteEndpoint;
-
-/// Default byte endpoint pool sizing.
-pub const default_byte_pool_options = network_module.default_byte_pool_options;
-
 /// Simulator-control network capability.
 pub const NetworkControl = network_module.AnyNetworkControl;
 
@@ -251,8 +245,11 @@ test "public roots hide internal wiring" {
 
     try std.testing.expect(!@hasDecl(public_api, "MessagePool"));
     try std.testing.expect(!@hasDecl(public_api, "NetworkFrame"));
+    try std.testing.expect(!@hasDecl(public_api, "ByteEndpoint"));
 
     try std.testing.expect(!@hasDecl(public_api, "SimIo"));
+    try std.testing.expect(!@hasDecl(public_api.Sim, "byteEndpoint"));
+    try std.testing.expect(!@hasDecl(public_api.Sim, "byteEndpoints"));
     try std.testing.expect(!@hasField(public_api.Sim, "io_runtime"));
     try std.testing.expect(!@hasField(public_api.Sim, "process_supervisor"));
 

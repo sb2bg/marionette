@@ -1,9 +1,17 @@
-//! App-facing typed and byte endpoint handles.
+//! App-facing typed endpoint handle.
 
-const message_pool_module = @import("../message_pool.zig");
 const NodeId = @import("types.zig").NodeId;
 
-/// Typed app-facing process endpoint.
+/// Experimental typed, simulation-only process endpoint.
+///
+/// `Message` is copied with ordinary Zig value semantics. Marionette does not
+/// serialize it, deep-copy referenced storage, or manage pointee lifetimes.
+/// Prefer value-only messages. If a message contains pointers or slices, their
+/// storage must remain valid and immutable for the simulation lifetime.
+///
+/// This models protocol-level message delivery. Use simulated `std.Io.net`
+/// when the system under test must also exercise its wire format, framing,
+/// partial I/O, or connection lifecycle.
 pub fn Endpoint(comptime Message: type) type {
     return struct {
         const Self = @This();
@@ -28,68 +36,24 @@ pub fn Endpoint(comptime Message: type) type {
             return self.self_node;
         }
 
-        /// Send one message to `to`. In simulation, loss, latency, and
-        /// topology faults apply; drops are trace-visible, not errors.
+        /// Submit one message to `to` without waiting for delivery.
+        ///
+        /// Success does not imply that the message was queued or delivered:
+        /// simulated loss and a down source silently drop it and record a
+        /// trace event. A queued message can still be dropped when received if
+        /// its destination is down or its directed link is disabled.
         pub fn send(self: Self, to: NodeId, message: Message) !void {
             try self.vtable.send(self.ptr, self.self_node, to, message);
         }
 
-        /// Return the next delivered message, advancing simulated time
-        /// to the next queued delivery when needed, or null when none is
-        /// pending.
+        /// Return one message delivered to this endpoint.
+        ///
+        /// When none is ready, simulation may advance to the earliest delivery
+        /// anywhere on this `Message` bus. `null` means that no message for this
+        /// endpoint is available at that scheduling boundary; it does not mean
+        /// the endpoint has no later packet, is closed, or reached EOF.
         pub fn receive(self: Self) !?Envelope {
             return try self.vtable.receive(self.ptr, self.self_node);
         }
     };
 }
-
-/// App-facing byte endpoint with explicit message ownership.
-pub const ByteEndpoint = struct {
-    ptr: *anyopaque,
-    self_node: NodeId,
-    vtable: *const VTable,
-
-    pub const Message = message_pool_module.Message;
-
-    /// One received message and the node that sent it.
-    pub const Envelope = struct {
-        from: NodeId,
-        message: Message,
-    };
-
-    pub const VTable = struct {
-        acquire: *const fn (*anyopaque, usize) anyerror!Message,
-        send_bytes: *const fn (*anyopaque, NodeId, NodeId, []const u8) anyerror!void,
-        send_message: *const fn (*anyopaque, NodeId, NodeId, Message) anyerror!void,
-        receive: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
-    };
-
-    /// This endpoint's own node id.
-    pub fn node(self: ByteEndpoint) NodeId {
-        return self.self_node;
-    }
-
-    /// Acquire an owned message buffer from this endpoint's runtime pool.
-    pub fn acquire(self: ByteEndpoint, len: usize) !Message {
-        return try self.vtable.acquire(self.ptr, len);
-    }
-
-    /// Copy borrowed bytes into the endpoint runtime before enqueueing.
-    pub fn send(self: ByteEndpoint, to: NodeId, bytes: []const u8) !void {
-        try self.vtable.send_bytes(self.ptr, self.self_node, to, bytes);
-    }
-
-    /// Enqueue an acquired message without copying.
-    ///
-    /// On success the endpoint runtime owns `message`; on error the caller
-    /// still owns it and must release it.
-    pub fn sendMessage(self: ByteEndpoint, to: NodeId, message: Message) !void {
-        try self.vtable.send_message(self.ptr, self.self_node, to, message);
-    }
-
-    /// Return the next message for this endpoint. The caller owns the returned
-    /// message and must release it.
-    pub fn receive(self: ByteEndpoint) !?Envelope {
-        return try self.vtable.receive(self.ptr, self.self_node);
-    }
-};

@@ -1,7 +1,7 @@
-//! Preallocated buffers for the production message bus.
+//! Preallocated buffers for the simulated byte-stream transport.
 //!
-//! The pool is intentionally independent of sockets and framing. The future
-//! bus can use it for bounded in-flight frame or payload storage.
+//! The pool bounds in-flight stream segments without allocating on every
+//! simulated network send.
 
 const std = @import("std");
 

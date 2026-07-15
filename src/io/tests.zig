@@ -4596,11 +4596,8 @@ test "io: closing a connection reclaims its queued stream frames" {
     client.await(scenario.client_io);
     server.await(scenario.server_io);
 
-    const endpoint = try sim.byteEndpoint(1);
-    var messages: [network_module.default_byte_pool_options.buffers]network_module.ByteEndpoint.Message = undefined;
-    var acquired: usize = 0;
-    defer for (messages[0..acquired]) |message| message.release();
-    while (acquired < messages.len) : (acquired += 1) {
-        messages[acquired] = try endpoint.acquire(1);
-    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
 }

@@ -12,7 +12,9 @@ const NetworkOptions = types.NetworkOptions;
 const NodeId = types.NodeId;
 const NetworkSimulation = packet_core.NetworkSimulation;
 const UnstableNetwork = packet_core.UnstableNetwork;
+const commitReadyStreamEventFromControl = sim_module.commitReadyStreamEventFromControl;
 const initSimControl = sim_module.initSimControl;
+const peekReadyStreamEventFromControl = sim_module.peekReadyStreamEventFromControl;
 const sendStreamBytesFromControl = sim_module.sendStreamBytesFromControl;
 
 const TestPayload = struct {
@@ -472,70 +474,42 @@ test "composition network: endpoints for the same payload share one runtime" {
     try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
 }
 
-test "composition byte endpoint: send copies borrowed bytes" {
+test "stream byte send copies borrowed bytes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    const node_0 = try sim.byteEndpoint(0);
-    const node_1 = try sim.byteEndpoint(1);
 
     var bytes = [_]u8{ 'p', 'i', 'n', 'g' };
-    try node_0.send(1, &bytes);
+    _ = try sendStreamBytesFromControl(sim.control.network, 0, 1, 1, &bytes, 0);
     bytes[0] = 'x';
+    try world.runFor(10);
 
-    const envelope = (try node_1.receive()).?;
-    defer envelope.message.release();
+    const ready = (try peekReadyStreamEventFromControl(sim.control.network, 1)).?;
+    const message = try commitReadyStreamEventFromControl(sim.control.network, 1, ready.id(), .none);
+    defer message.release();
 
-    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
-    try std.testing.expectEqualStrings("ping", envelope.message.bytes());
+    try std.testing.expectEqualStrings("ping", message.bytes());
 }
 
-test "composition byte endpoint: send acquired message transfers ownership" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    const node_0 = try sim.byteEndpoint(0);
-    const node_1 = try sim.byteEndpoint(1);
-
-    const message = try node_0.acquire(4);
-    @memcpy(message.bytes(), "pong");
-    try node_0.sendMessage(1, message);
-
-    const envelope = (try node_1.receive()).?;
-    defer envelope.message.release();
-
-    try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
-    try std.testing.expectEqualStrings("pong", envelope.message.bytes());
-}
-
-fn byteEndpointTraceAllocationFailureSweep(allocator: std.mem.Allocator) !void {
+fn streamTraceAllocationFailureSweep(allocator: std.mem.Allocator) !void {
     var world = try World.init(allocator, .{ .seed = 0xA110C, .tick_ns = 10 });
     defer world.deinit();
 
     const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
-    const sender = try sim.byteEndpoint(0);
-    const receiver = try sim.byteEndpoint(1);
 
-    const message = try sender.acquire(4);
-    var caller_owns_message = true;
-    defer if (caller_owns_message) message.release();
-    @memcpy(message.bytes(), "safe");
-
-    try sender.sendMessage(1, message);
-    caller_owns_message = false;
+    _ = try sendStreamBytesFromControl(sim.control.network, 0, 1, 1, "safe", 0);
     try world.runFor(10);
-
-    const envelope = (try receiver.receive()).?;
-    defer envelope.message.release();
-    try std.testing.expectEqualStrings("safe", envelope.message.bytes());
+    const ready = (try peekReadyStreamEventFromControl(sim.control.network, 1)).?;
+    const message = try commitReadyStreamEventFromControl(sim.control.network, 1, ready.id(), .none);
+    defer message.release();
+    try std.testing.expectEqualStrings("safe", message.bytes());
 }
 
-test "composition byte endpoint: trace allocation failures preserve message ownership" {
+test "stream byte transport: trace allocation failures preserve message ownership" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
-        byteEndpointTraceAllocationFailureSweep,
+        streamTraceAllocationFailureSweep,
         .{},
     );
 }
@@ -595,6 +569,53 @@ test "composition network: receive advances only to global next delivery" {
     try std.testing.expectEqual(@as(NodeId, 2), later.from);
     try std.testing.expectEqual(@as(u64, 20), later.message.value);
     try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
+}
+
+test "composition network: successful send may be fault-dropped" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sender = try sim.endpoint(TestPayload, 0);
+    const receiver = try sim.endpoint(TestPayload, 1);
+
+    try sim.control.network.setLossiness(.{ .drop_rate = .always() });
+    try sender.send(1, .{ .value = 42 });
+
+    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try receiver.receive());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=send_drop") != null);
+}
+
+test "composition network: path capacity returns EventQueueFull" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .path_capacity = 1 } });
+    const sender = try sim.endpoint(TestPayload, 0);
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 20 });
+    try sender.send(1, .{ .value = 1 });
+    try std.testing.expectError(error.EventQueueFull, sender.send(1, .{ .value = 2 }));
+    try sender.send(2, .{ .value = 3 });
+}
+
+test "composition network: ready packet uses node state when consumed" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sender = try sim.endpoint(TestPayload, 0);
+    const receiver = try sim.endpoint(TestPayload, 1);
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try sender.send(1, .{ .value = 42 });
+    try sim.control.network.setNode(1, false);
+    try sim.control.runFor(10);
+    try sim.control.network.setNode(1, true);
+
+    const envelope = (try receiver.receive()).?;
+    try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver") != null);
 }
 
 fn runCompositionClogTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {

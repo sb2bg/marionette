@@ -89,11 +89,6 @@ pub fn SimCase(comptime App: type) type {
             return try self.sim.endpoint(Payload, node);
         }
 
-        /// Open one byte-payload simulated endpoint on `node`.
-        pub fn byteEndpoint(self: *const Self, node: network_module.NodeId) !network_module.ByteEndpoint {
-            return try self.sim.byteEndpoint(node);
-        }
-
         /// Open typed endpoints on `count` consecutive nodes starting at
         /// `first_node`.
         pub fn endpoints(
@@ -103,16 +98,6 @@ pub fn SimCase(comptime App: type) type {
             first_node: network_module.NodeId,
         ) ![count]network_module.Endpoint(Payload) {
             return try self.sim.endpoints(Payload, count, first_node);
-        }
-
-        /// Open byte-payload endpoints on `count` consecutive nodes
-        /// starting at `first_node`.
-        pub fn byteEndpoints(
-            self: *const Self,
-            comptime count: usize,
-            first_node: network_module.NodeId,
-        ) ![count]network_module.ByteEndpoint {
-            return try self.sim.byteEndpoints(count, first_node);
         }
 
         /// Deinitialize the app state if it defines `deinit`; the
