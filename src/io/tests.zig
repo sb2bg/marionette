@@ -357,6 +357,38 @@ test "io: process kill completes owned task groups" {
     try std.testing.expectEqual(@as(usize, 0), backend.group_closures.items.len);
 }
 
+test "io: process kill retires task closures before futures are collected" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn neverRun(ran: *bool) u64 {
+            ran.* = true;
+            return 42;
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA5D, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
+
+    var ran = false;
+    var future = try Io.concurrent(io, Helper.neverRun, .{&ran});
+    try std.testing.expectEqual(@as(usize, 1), backend.async_closures.items.len);
+    try std.testing.expectEqual(@as(usize, 1), backend.async_futures.items.len);
+
+    try sim.killProcess(0);
+
+    try std.testing.expect(!ran);
+    try std.testing.expectEqual(@as(usize, 0), backend.async_closures.items.len);
+    // The result record follows the std.Io future lifetime and remains valid
+    // until collection, even though all task-only state is already gone.
+    try std.testing.expectEqual(@as(usize, 1), backend.async_futures.items.len);
+    try std.testing.expectEqual(@as(u64, 0), future.await(io));
+    try std.testing.expectEqual(@as(usize, 0), backend.async_futures.items.len);
+}
+
 test "io: process kill sweeps disk op scratch from killed tasks" {
     if (!fiber_supported) return error.SkipZigTest;
 

@@ -164,6 +164,10 @@ pub const TaskScheduler = struct {
         /// the `recancel` precondition assert.
         cancel_delivered: bool = false,
         cancel_protection: Io.CancelProtection = .unblocked,
+        /// Type-erasure adapter owned by this task until its entry starts.
+        /// A process kill can retire a ready task before `OpaqueEntry.run`
+        /// gets a chance to release the adapter itself.
+        opaque_entry: ?*OpaqueEntry = null,
         /// Seeded initial delay drawn at spawn when start jitter is
         /// enabled; the task parks this long before its entry runs.
         start_delay_ns: u64 = 0,
@@ -280,12 +284,14 @@ pub const TaskScheduler = struct {
         try self.opaque_entries.append(self.allocator, adapter);
         errdefer _ = self.opaque_entries.pop();
 
-        return try self.spawn(.{
+        const task_id = try self.spawn(.{
             .stack_size = self.task_stack_size,
             .entry = OpaqueEntry.run,
             .arg = adapter,
             .process_id = process_id,
         });
+        self.findTask(task_id).?.opaque_entry = adapter;
+        return task_id;
     }
 
     const OpaqueEntry = struct {
@@ -296,16 +302,12 @@ pub const TaskScheduler = struct {
             const adapter: *OpaqueEntry = @ptrCast(@alignCast(raw));
             const entry = adapter.entry;
             const arg = adapter.arg;
+            const task = scheduler.current orelse unreachable;
+            std.debug.assert(task.opaque_entry == adapter);
+            task.opaque_entry = null;
             // The adapter only exists to ferry the entry across `spawn`;
-            // release it as soon as the task is running so only never-run
-            // adapters remain for `deinit` to sweep.
-            for (scheduler.opaque_entries.items, 0..) |candidate, index| {
-                if (candidate == adapter) {
-                    _ = scheduler.opaque_entries.swapRemove(index);
-                    break;
-                }
-            }
-            scheduler.allocator.destroy(adapter);
+            // release it as soon as the task is running.
+            scheduler.releaseOpaqueEntry(adapter);
             entry(arg);
         }
     };
@@ -751,12 +753,24 @@ pub const TaskScheduler = struct {
         // active table can forget the full record while stable task ids remain
         // represented by `next_task_id` and `completed_task_count`.
         if (task.fiber_instance) |fiber_instance| fiber_instance.destroy();
+        if (task.opaque_entry) |adapter| self.releaseOpaqueEntry(adapter);
 
         for (self.tasks.items, 0..) |candidate, index| {
             if (candidate == task) {
                 _ = self.tasks.orderedRemove(index);
                 self.completed_task_count += 1;
                 self.allocator.destroy(task);
+                return;
+            }
+        }
+        unreachable;
+    }
+
+    fn releaseOpaqueEntry(self: *Self, adapter: *OpaqueEntry) void {
+        for (self.opaque_entries.items, 0..) |candidate, index| {
+            if (candidate == adapter) {
+                _ = self.opaque_entries.swapRemove(index);
+                self.allocator.destroy(adapter);
                 return;
             }
         }
@@ -1551,6 +1565,43 @@ test "TaskScheduler: completed tasks retire their active records" {
     try scheduler.runUntilIdle();
 
     try std.testing.expectEqual(@as(usize, 3), scheduler.completedCount());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.tasks.items.len);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.opaque_entries.items.len);
+}
+
+test "TaskScheduler: killing a never-started opaque task retires its adapter" {
+    if (!fiber.supported) return error.SkipZigTest;
+
+    const runtime_allocator = std.testing.allocator;
+
+    const world = try runtime_allocator.create(World);
+    errdefer runtime_allocator.destroy(world);
+    world.* = try World.init(runtime_allocator, .{ .seed = 0x0A0A, .tick_ns = 10 });
+    defer {
+        world.deinit();
+        runtime_allocator.destroy(world);
+    }
+
+    const scheduler = try runtime_allocator.create(TaskScheduler);
+    errdefer runtime_allocator.destroy(scheduler);
+    scheduler.* = TaskScheduler.init(runtime_allocator, world);
+    defer {
+        scheduler.deinit();
+        runtime_allocator.destroy(scheduler);
+    }
+
+    const Helper = struct {
+        fn run(_: *anyopaque) void {
+            @panic("killed opaque task unexpectedly started");
+        }
+    };
+
+    var context: u8 = 0;
+    _ = try scheduler.spawnOpaqueForProcess(3, Helper.run, &context);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.opaque_entries.items.len);
+
+    scheduler.killProcess(3);
+
     try std.testing.expectEqual(@as(usize, 0), scheduler.tasks.items.len);
     try std.testing.expectEqual(@as(usize, 0), scheduler.opaque_entries.items.len);
 }

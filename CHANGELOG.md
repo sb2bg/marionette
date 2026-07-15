@@ -30,7 +30,9 @@
   completed deletion instead of recreating or writing through an obsolete
   pathname. Process kill retires task-owned gate state and aborts a
   main-context pathname wait instead of letting a stale capability keep
-  driving the scheduler.
+  driving the scheduler. Killed async tasks now release their copied closure
+  contexts and never-started scheduler adapters immediately; only the future
+  result record remains until its required `await`/`cancel` collection.
 
 - Makes final stream delivery transactional: the I/O bridge borrows a ready
   frame, reserves inbox capacity, publishes the network and `io.net` trace pair

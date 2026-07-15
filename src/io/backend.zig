@@ -564,6 +564,10 @@ pub const Backend = struct {
     next_network_node: network_module.NodeId = 0,
     futex_wait_set: ?FutexWaitSet = null,
     task_runtime: ?TaskRuntime = null,
+    /// Future result records live until their caller awaits or cancels them.
+    async_futures: std.ArrayList(*AsyncFuture) = .empty,
+    /// Task-only async contexts are retired when their task completes or is
+    /// killed, independently of the corresponding future result record.
     async_closures: std.ArrayList(*AsyncClosure) = .empty,
     group_closures: std.ArrayList(*GroupClosure) = .empty,
     group_states: std.ArrayList(*GroupState) = .empty,
@@ -741,6 +745,8 @@ pub const Backend = struct {
         self.futex_keys.deinit(self.allocator);
         for (self.async_closures.items) |closure| closure.destroy(self.allocator);
         self.async_closures.deinit(self.allocator);
+        for (self.async_futures.items) |future| future.destroy(self.allocator);
+        self.async_futures.deinit(self.allocator);
         for (self.group_closures.items) |closure| closure.destroy(self.allocator);
         self.group_closures.deinit(self.allocator);
         for (self.group_states.items) |state| self.allocator.destroy(state);
@@ -1445,7 +1451,7 @@ pub const Backend = struct {
             index += 1;
         }
 
-        for (self.async_closures.items) |closure| closure.cancelForKill();
+        for (self.async_futures.items) |future| future.cancelForKill();
         for (self.group_closures.items) |closure| closure.cancelForKill();
         self.releaseCompletedGroupStatesForKill();
         for (self.directory_handles.items) |*handle| handle.deinit(self.allocator);
@@ -1997,6 +2003,7 @@ pub const ProcessRuntime = struct {
         for (self.backends, 0..) |*backend, index| {
             backend.onDiskCrash();
             self.killProcessTasks(@intCast(index));
+            retireKilledAsyncClosures(backend, self.task_control);
             retireKilledGroupClosures(backend, self.task_control);
             backend.retireFileWaitersAndPathOwners(self.task_control);
             backend.retireFutexKeysForBackend();
@@ -2009,6 +2016,7 @@ pub const ProcessRuntime = struct {
         const backend = try self.backendForNode(node);
         backend.killProcess(.{ .invalidate_files = true });
         self.killProcessTasks(@intCast(node));
+        retireKilledAsyncClosures(backend, self.task_control);
         retireKilledGroupClosures(backend, self.task_control);
         backend.retireFileWaitersAndPathOwners(self.task_control);
         self.sweepInactiveOpScratch();
@@ -2302,46 +2310,39 @@ const GroupClosure = struct {
     }
 };
 
-const AsyncClosure = struct {
+/// Stable result record returned through `Io.AnyFuture`.
+///
+/// Process kill completes the record with a zero value, but it must remain
+/// valid until a caller collects it through `await` or `cancel`.
+const AsyncFuture = struct {
     backend: *Backend,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
     task_id: u64 = 0,
     done: bool = false,
-    context: AlignedStorage,
     result: AlignedStorage,
 
     fn create(
         backend: *Backend,
         result_len: usize,
         result_alignment: std.mem.Alignment,
-        context: []const u8,
-        context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
-    ) error{OutOfMemory}!*AsyncClosure {
-        const closure = try backend.allocator.create(AsyncClosure);
-        errdefer backend.allocator.destroy(closure);
-        const context_copy = try AlignedStorage.create(backend.allocator, context.len, context_alignment);
-        errdefer context_copy.destroy(backend.allocator);
+    ) error{OutOfMemory}!*AsyncFuture {
+        const future = try backend.allocator.create(AsyncFuture);
+        errdefer backend.allocator.destroy(future);
         const result = try AlignedStorage.create(backend.allocator, result_len, result_alignment);
         errdefer result.destroy(backend.allocator);
 
-        @memcpy(context_copy.bytes, context);
-        closure.* = .{
+        future.* = .{
             .backend = backend,
-            .start = start,
-            .context = context_copy,
             .result = result,
         };
-        return closure;
+        return future;
     }
 
-    fn destroy(self: *AsyncClosure, allocator: std.mem.Allocator) void {
-        self.context.destroy(allocator);
+    fn destroy(self: *AsyncFuture, allocator: std.mem.Allocator) void {
         self.result.destroy(allocator);
         allocator.destroy(self);
     }
 
-    fn completionKey(self: *const AsyncClosure) usize {
+    fn completionKey(self: *const AsyncFuture) usize {
         return futex_module.waitKey(.task, @intCast(self.task_id));
     }
 
@@ -2350,7 +2351,7 @@ const AsyncClosure = struct {
     /// `std.Io`'s single-future ABI has no cancellation error channel here, so
     /// the least surprising simulator behavior is to unblock awaiters with a
     /// zeroed result after the owning process has been killed.
-    fn cancelForKill(self: *AsyncClosure) void {
+    fn cancelForKill(self: *AsyncFuture) void {
         if (self.done) return;
         @memset(self.result.bytes, 0);
         self.done = true;
@@ -2358,14 +2359,56 @@ const AsyncClosure = struct {
             _ = runtime.wake(self.completionKey(), std.math.maxInt(usize));
         }
     }
+};
 
-    /// Task entry: run the user function, then publish completion.
+/// Execution-only state for one scheduled async task.
+///
+/// Unlike `AsyncFuture`, this closure is not exposed to the caller. Its copied
+/// context can therefore be reclaimed as soon as the task completes or a
+/// process kill retires the task before it resumes.
+const AsyncClosure = struct {
+    backend: *Backend,
+    future: *AsyncFuture,
+    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    context: AlignedStorage,
+
+    fn create(
+        backend: *Backend,
+        future: *AsyncFuture,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    ) error{OutOfMemory}!*AsyncClosure {
+        const closure = try backend.allocator.create(AsyncClosure);
+        errdefer backend.allocator.destroy(closure);
+        const context_copy = try AlignedStorage.create(backend.allocator, context.len, context_alignment);
+        errdefer context_copy.destroy(backend.allocator);
+        @memcpy(context_copy.bytes, context);
+        closure.* = .{
+            .backend = backend,
+            .future = future,
+            .start = start,
+            .context = context_copy,
+        };
+        return closure;
+    }
+
+    fn destroy(self: *AsyncClosure, allocator: std.mem.Allocator) void {
+        self.context.destroy(allocator);
+        allocator.destroy(self);
+    }
+
+    /// Task entry: run the user function, then publish completion and release
+    /// the task-only closure while the future waits for collection.
     fn run(raw: *anyopaque) void {
         const closure: *AsyncClosure = @ptrCast(@alignCast(raw));
-        closure.start(closure.context.bytes.ptr, closure.result.bytes.ptr);
-        closure.done = true;
-        const runtime = closure.backend.task_runtime orelse unreachable;
-        _ = runtime.wake(closure.completionKey(), std.math.maxInt(usize));
+        const future = closure.future;
+        const backend = closure.backend;
+        closure.start(closure.context.bytes.ptr, future.result.bytes.ptr);
+        future.done = true;
+        const runtime = backend.task_runtime orelse unreachable;
+        _ = runtime.wake(future.completionKey(), std.math.maxInt(usize));
+        releaseAsyncClosure(closure);
     }
 };
 
@@ -2572,10 +2615,19 @@ fn simConcurrent(
     if (!backend.processIsAlive()) return error.ConcurrencyUnavailable;
     const runtime = backend.task_runtime orelse return error.ConcurrencyUnavailable;
 
-    const closure = AsyncClosure.create(
+    const future = AsyncFuture.create(
         backend,
         result_len,
         result_alignment,
+    ) catch return error.ConcurrencyUnavailable;
+    errdefer future.destroy(backend.allocator);
+
+    backend.async_futures.append(backend.allocator, future) catch return error.ConcurrencyUnavailable;
+    errdefer _ = backend.async_futures.pop();
+
+    const closure = AsyncClosure.create(
+        backend,
+        future,
         context,
         context_alignment,
         start,
@@ -2588,8 +2640,8 @@ fn simConcurrent(
     // A cooperative task is a unit of concurrency in the deterministic
     // simulation: it makes progress whenever the caller suspends, which is
     // what `concurrent` requires of single-threaded executors.
-    closure.task_id = try runtime.spawn(AsyncClosure.run, closure);
-    return @ptrCast(closure);
+    future.task_id = try runtime.spawn(AsyncClosure.run, closure);
+    return @ptrCast(future);
 }
 
 fn simAwait(
@@ -2600,21 +2652,21 @@ fn simAwait(
 ) void {
     _ = result_alignment;
     _ = backendFromUserdata(userdata);
-    const closure: *AsyncClosure = @ptrCast(@alignCast(any_future));
+    const future: *AsyncFuture = @ptrCast(@alignCast(any_future));
     // `await` is only called when `async` returned non-null, so a runtime
     // was attached at spawn time.
-    const runtime = closure.backend.task_runtime orelse unreachable;
+    const runtime = future.backend.task_runtime orelse unreachable;
 
-    if (!closure.done) {
+    if (!future.done) {
         if (runtime.inTask()) {
-            while (!closure.done) runtime.block(closure.completionKey());
+            while (!future.done) runtime.block(future.completionKey());
         } else {
-            runtime.runUntilDone(&closure.done);
+            runtime.runUntilDone(&future.done);
         }
     }
 
-    @memcpy(result, closure.result.bytes[0..result.len]);
-    releaseClosure(closure);
+    @memcpy(result, future.result.bytes[0..result.len]);
+    releaseFuture(future);
 }
 
 fn simCancel(
@@ -2623,26 +2675,38 @@ fn simCancel(
     result: []u8,
     result_alignment: std.mem.Alignment,
 ) void {
-    const closure: *AsyncClosure = @ptrCast(@alignCast(any_future));
-    if (!closure.done) {
+    const future: *AsyncFuture = @ptrCast(@alignCast(any_future));
+    if (!future.done) {
         // The awaited task receives `error.Canceled` at its next cancellation
         // point; cooperative tasks cannot be preempted mid-run, so a task
         // that never reaches one runs to completion.
-        const runtime = closure.backend.task_runtime orelse unreachable;
-        runtime.requestCancel(closure.task_id);
+        const runtime = future.backend.task_runtime orelse unreachable;
+        runtime.requestCancel(future.task_id);
     }
     simAwait(userdata, any_future, result, result_alignment);
 }
 
-fn releaseClosure(closure: *AsyncClosure) void {
+fn releaseFuture(future: *AsyncFuture) void {
+    const backend = future.backend;
+    for (backend.async_futures.items, 0..) |candidate, index| {
+        if (candidate == future) {
+            _ = backend.async_futures.swapRemove(index);
+            break;
+        }
+    }
+    future.destroy(backend.allocator);
+}
+
+fn releaseAsyncClosure(closure: *AsyncClosure) void {
     const backend = closure.backend;
     for (backend.async_closures.items, 0..) |candidate, index| {
         if (candidate == closure) {
             _ = backend.async_closures.swapRemove(index);
-            break;
+            closure.destroy(backend.allocator);
+            return;
         }
     }
-    closure.destroy(backend.allocator);
+    unreachable;
 }
 
 fn releaseGroupClosure(closure: *GroupClosure) void {
@@ -2674,6 +2738,23 @@ fn retireKilledGroupClosures(
             }
         }
         _ = self.group_closures.swapRemove(index);
+        closure.destroy(self.allocator);
+    }
+}
+
+fn retireKilledAsyncClosures(
+    self: *Backend,
+    task_control: ?ProcessTaskControl,
+) void {
+    const control = task_control orelse return;
+    var index: usize = 0;
+    while (index < self.async_closures.items.len) {
+        const closure = self.async_closures.items[index];
+        if (control.taskActive(closure.future.task_id)) {
+            index += 1;
+            continue;
+        }
+        _ = self.async_closures.swapRemove(index);
         closure.destroy(self.allocator);
     }
 }
