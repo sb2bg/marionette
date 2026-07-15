@@ -135,9 +135,9 @@ exposes an interior byte hole.
   API frees the shared resource.
 - Add no-fault differential tests against host `std.Io.net` for portable
   observable behavior.
-- Remove production endpoint remnants that no longer justify their maintenance
-  cost, or mark their temporary compatibility status consistently across the
-  public API and documentation.
+- Remove the redundant public `ByteEndpoint` facade while retaining the pooled
+  byte runtime privately for `std.Io.net`; document the exact experimental
+  `Endpoint(Message)` model and its non-parity boundary consistently.
 
 Do not add UDP, Unix sockets, or broader DNS in this release. Promote them only
 when a pinned SUT requires them; every simulated surface is a determinism
@@ -322,6 +322,13 @@ random scheduling on planted depth-one and depth-two bugs.
   read-only behavior, delayed writeback, and latent corruption.
 - Add a cluster/node builder over process lifecycle only when it simplifies a
   real multi-node SUT.
+- Keep `Endpoint(Message)` experimental until a pinned SUT demonstrates the
+  message-transport contract it needs. Promotion requires an owned or encoded
+  message representation plus explicit delivery/ordering, send acceptance,
+  receive readiness, close, cancellation/deadline, backpressure, peer-lifetime,
+  and transport-independent error semantics. Validate the same contract against
+  both the simulated adapter and the SUT's production adapter; test the real
+  codec, framing, and socket path separately through `std.Io.net`.
 - Add narrow extension hooks for custom resources, faults, events, and
   properties only after two independent users need them; do not expose mutable
   `World` internals as the plugin API.
@@ -361,26 +368,30 @@ capability.
 
 ## Standing Decisions
 
-### Endpoints Are Sim-Only (decided 2026-07, closes the production transport question)
+### Message And Stream Networking Are Sibling Surfaces (decided 2026-07)
 
-`Endpoint(Message)` and `ByteEndpoint` are simulation modeling tools: they
-exist so protocol logic can be tested above the wire, with per-message
-loss, reorder, and partition faults that a byte stream cannot express (a
-stream must deliver in order or die, so "drop message 3" is only
-meaningful at the message layer). Production networking is host
-`std.Io.net`; Marionette will not ship its own production socket bus.
+Marionette supports two deliberately different testing altitudes:
 
-This does not break the same-code contract; it locates it. The unit
-under test at the endpoint layer is the transport-independent protocol
-state machine, which runs unchanged in production behind the app's real
-transport glue. The glue is written against `std.Io.net` and is itself
-testable under the deterministic backend with stream-level faults. Apps
-that want literal endpoint parity can implement the `Endpoint(Message)`
-vtable over their own transport, or better, own their bus interface and
-adapt it to `mar.Endpoint` in tests only.
-Rationale: a Marionette-owned transport is a parallel networking stack
-whose adoption cost lands on users, which is the madsim failure mode
-(owning a mirror of an API surface you do not control) in reverse.
+- `std.Io.net` is the canonical literal same-code seam for socket-facing code.
+  It exercises codecs, framing, partial I/O, stream ordering, connection
+  lifecycle, and transport glue through the deterministic backend.
+- `Endpoint(Message)` is an experimental message-modeling seam for exploring
+  protocol and state-machine behavior above the wire. It can model independent
+  message loss, latency, reordering through delivery scheduling, and partitions
+  without forcing every model through a byte-stream abstraction.
+
+At the endpoint altitude, the same protocol/state-machine implementation can
+run behind an application-owned production transport and a Marionette adapter
+in simulation. That is a narrower promise than wire-path parity: the current
+endpoint does not serialize arbitrary Zig values and does not yet define a
+production-grade ownership, lifecycle, readiness, cancellation, or backpressure
+contract. Matching its vtable shape alone is not evidence of behavioral parity.
+
+Marionette will not ship its own production socket bus. Owning one would create
+a parallel networking stack whose adoption and maintenance costs land on users.
+If a real SUT later needs one shared message interface, its semantics and
+production adapter must drive the design; the 0.8 promotion gate records the
+required contract.
 
 Consequences, recorded so they are not relitigated:
 
@@ -388,8 +399,9 @@ Consequences, recorded so they are not relitigated:
   parity) are cancelled, not deferred. `docs/network-production.md` is
   retained as design history. If a real user ever needs cross-process
   `Endpoint(Message)`, that is a new decision made with that user.
-- The typed FIFO, byte endpoint, framed loopback slice, and their private
-  transport helpers were removed in 0.6.
+- `ByteEndpoint` is removed from the public surface in 0.6. Its byte-pool and
+  delivery machinery remain private implementation details of deterministic
+  `std.Io.net`; there is no second public byte-network API.
 - The 15j send-semantics convergence (silent drop plus a trace-visible
   `network.drop reason=queue_full` event) still applies to the simulated
   endpoint if endpoint usage grows; it is a sim-side contract change now.
