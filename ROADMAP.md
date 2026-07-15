@@ -84,9 +84,9 @@ before broadening the surface again.
   succeeds.
 - Round app-facing simulated sleeps as documented and reject or safely handle
   unrepresentable deadlines and future fault timestamps.
-- Decide whether direct `Env.clock.sleep` is deliberately a low-level clock
-  mutation or must drive scheduler work and automatic fault evolution like
-  app-facing `std.Io` sleep; document or unify the two authorities.
+- Route direct `Env.clock.sleep` through the same scheduler and automatic-fault
+  boundaries as app-facing `std.Io` sleep; keep `World.clock()` as the
+  documented low-level raw clock authority.
 
 ### 16i. Runner And Configuration Integrity
 

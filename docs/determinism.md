@@ -10,7 +10,8 @@ Marionette trace. If it does not, the library has failed.
 Simulated code must route non-deterministic behavior through Marionette
 interfaces:
 
-- Time through `Env.clock`, `Control`, or `World`.
+- Application time through scheduler-backed `Env.clock`; harness time through
+  `Control` or the explicitly low-level `World.clock()`.
 - Randomness through an environment, seeded `Random`, or `World`.
 - Disk through Marionette's `Disk` capability.
 - Network through Marionette `Endpoint` handles or node-scoped simulated

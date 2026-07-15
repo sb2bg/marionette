@@ -69,6 +69,37 @@ pub const internal = struct {
     }
 };
 
+const simulation_env_clock_vtable: env_module.Clock.VTable = .{
+    .now = simulationEnvClockNow,
+    .sleep = simulationEnvClockSleep,
+};
+
+/// Bind an app-facing clock to the same node-scoped scheduler authority as
+/// the environment's `std.Io`. Raw world-clock mutation remains available to
+/// harnesses through `World.clock()` and `SimControl`.
+fn simulationEnvClock(io: std.Io) env_module.Clock {
+    return .{
+        .ptr = io.userdata orelse unreachable,
+        .vtable = &simulation_env_clock_vtable,
+    };
+}
+
+fn simulationEnvClockBackend(ptr: *anyopaque) *io_module.internal.Backend {
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn simulationEnvClockNow(ptr: *anyopaque) clock_module.Timestamp {
+    return simulationEnvClockBackend(ptr).world.now();
+}
+
+fn simulationEnvClockSleep(
+    ptr: *anyopaque,
+    duration_ns: clock_module.Duration,
+) env_module.ClockError!void {
+    const io = simulationEnvClockBackend(ptr).io();
+    std.Io.sleep(io, .fromNanoseconds(duration_ns), .awake) catch |err| return err;
+}
+
 /// World-owned logical-process lifecycle supervisor.
 pub const ProcessSupervisor = struct {
     allocator: std.mem.Allocator,
@@ -218,6 +249,7 @@ pub const ProcessSupervisor = struct {
 
         var env = self.base_env;
         env.io_backend = try self.io_runtime.io(node);
+        env.clock = simulationEnvClock(env.io_backend);
         try lifecycle.restart(lifecycle.ptr, env);
         try self.world.recordFields("process.restart", &.{
             traceField("node", .{ .uint = node }),
@@ -638,6 +670,7 @@ pub const World = struct {
         pub fn envForNode(self: Simulation, node: network_module.NodeId) !env_module.Env {
             var env = self.env;
             env.io_backend = try self.ioRuntime().io(node);
+            env.clock = simulationEnvClock(env.io_backend);
             return env;
         }
 
@@ -828,11 +861,12 @@ pub const World = struct {
         sim_io.attachProcessTaskControl(scheduler_module.processTaskControl(scheduler));
         sim_disk.attachLatencyRuntime(scheduler_module.diskLatencyRuntime(scheduler));
 
+        const base_io = try sim_io.io(0);
         const base_env: env_module.Env = .{
-            .io_backend = (try sim_io.io(0)),
+            .io_backend = base_io,
             .memory = sim_allocation.allocator(),
             .disk = sim_disk.disk(),
-            .clock = env_module.Clock.fromWorld(self),
+            .clock = simulationEnvClock(base_io),
             .random = env_module.Random.fromWorld(self),
             .tracer = env_module.Tracer.fromWorld(self),
             .buggify_enabled = true,

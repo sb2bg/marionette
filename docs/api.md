@@ -24,6 +24,16 @@ caller explicitly ticks or sleeps it; application code reads time through
 environment's `io()`). Production code reads host time through the `std.Io`
 its composition root already owns; Marionette does not wrap host time.
 
+`env.clock.sleep(duration)` is an app-facing scheduler operation in
+simulation, with the same authority as sleeping through `env.io()`. Inside a
+task it parks that task; from the scenario/main context it drives runnable
+tasks and timer deadlines up to the requested time. Both paths round to the
+world's tick resolution and evolve automatic process/network faults at every
+crossed boundary. A clock retained from a killed node returns
+`error.Canceled`. In contrast, `World.clock()` exposes the deliberately
+low-level `SimClock` for harness code that wants raw clock mutation without
+scheduler or fault-evolution work.
+
 All timestamps and durations are nanoseconds:
 
 ```zig

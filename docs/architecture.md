@@ -165,6 +165,11 @@ Current behavior:
 - `tick()` advances by the world's configured tick duration.
 - `runFor(duration)` advances through deterministic event and fault-evolution
   boundaries, and may jump across spans where no boundary exists.
+- `Env.clock.sleep(duration)` shares the node-scoped `std.Io` scheduler
+  authority: it parks an in-task caller or drives tasks from the main context,
+  rounds to tick resolution, and crosses the same automatic-fault boundaries.
+- `World.clock()` is the explicit low-level escape hatch. Its `SimClock`
+  mutators move raw virtual time without running tasks or evolving faults.
 - Time-evolved subsystems implement one private participant contract. The
   simulator records `fault_evolution.boundary` before invoking the fixed
   network and process participants, then asks the same participants for the

@@ -15,7 +15,7 @@ const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
-pub const ClockError = std.mem.Allocator.Error || world_module.TraceError;
+pub const ClockError = std.mem.Allocator.Error || world_module.TraceError || std.Io.Cancelable;
 pub const RandomError = std.mem.Allocator.Error || world_module.TraceError;
 pub const TracerError = std.mem.Allocator.Error || world_module.TraceError;
 
@@ -58,14 +58,23 @@ pub const Clock = struct {
         return self.vtable.now(self.ptr);
     }
 
-    /// Sleep for `duration_ns`. In simulation this advances virtual time
-    /// (rounded up to the clock's tick resolution) without blocking the
-    /// host; in production it blocks the calling thread.
+    /// Sleep for `duration_ns`. `World.simulate` supplies a scheduler-backed
+    /// clock: it rounds up to the world's tick resolution, parks the current
+    /// task (or drives the scheduler from the main context), and evolves
+    /// automatic faults at crossed boundaries. A killed process or delivered
+    /// cancellation request returns `error.Canceled`. Production blocks the
+    /// calling thread.
     pub fn sleep(self: Clock, duration_ns: clock_module.Duration) ClockError!void {
         try self.vtable.sleep(self.ptr, duration_ns);
     }
 
-    /// Build the simulation clock view over a world's virtual time.
+    /// Build a low-level clock view over a world's virtual time.
+    ///
+    /// This constructor advances the world directly and does not run scheduler
+    /// work or automatic fault evolution. `World.simulate` deliberately uses
+    /// its node-scoped I/O-backed clock instead. Application code should take
+    /// `Env.clock`; harnesses that want raw time mutation can use
+    /// `World.clock()` or `SimControl` explicitly.
     pub fn fromWorld(world: *World) Clock {
         return .{ .ptr = world, .vtable = &world_clock_vtable };
     }
@@ -636,6 +645,58 @@ test "env: simulation clock sleep rounds up to tick resolution" {
         world.traceBytes(),
         "world.run_for start_ns=0 duration_ns=20 end_ns=20",
     ) != null);
+}
+
+test "env: simulation clock sleep runs tasks and automatic fault boundaries" {
+    if (!@import("fiber.zig").supported) return error.SkipZigTest;
+
+    const State = struct {
+        world: *World,
+        io: std.Io,
+        woke_at_ns: ?clock_module.Timestamp = null,
+
+        fn sleeper(self: *@This()) void {
+            std.Io.sleep(self.io, .fromNanoseconds(20), .awake) catch
+                @panic("background sleep failed");
+            self.woke_at_ns = self.world.now();
+        }
+    };
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xC10C, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{
+        .network = .{ .nodes = 2, .service_nodes = 2, .path_capacity = 4 },
+    });
+    try sim.control.process.setDynamics(1, .{
+        .crash_rate = .always(),
+        .crash_stability_min_ns = 10,
+    });
+
+    var state: State = .{ .world = &world, .io = sim.env.io() };
+    var future = std.Io.async(state.io, State.sleeper, .{&state});
+
+    try sim.env.clock.sleep(40);
+    future.await(state.io);
+
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 40), world.now());
+    try std.testing.expectEqual(@as(?clock_module.Timestamp, 20), state.woke_at_ns);
+    const trace = world.traceBytes();
+    const process_kill = std.mem.indexOf(u8, trace, "process.kill node=1 reason=auto_crash").?;
+    const task_timeout = std.mem.indexOf(u8, trace, "scheduler.timeout task=0 deadline_ns=20").?;
+    try std.testing.expect(process_kill < task_timeout);
+}
+
+test "env: killed node clock rejects sleep through stale capability" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xC10D, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const node_env = try sim.envForNode(1);
+    try sim.killProcess(1);
+
+    try std.testing.expectError(error.Canceled, node_env.clock.sleep(10));
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
 }
 
 test "env: simulation runFor without network jumps time in one event" {

@@ -51,10 +51,13 @@
   unchanged.
 
 - Routes scheduler timer jumps through automatic process/network fault
-  boundaries and yields to work created at each intermediate boundary. App
-  sleeps round to ticks, full-range task-start jitter and network-latency jitter
-  avoid overflow, beyond-clock process and network transitions stay inert, and
-  failed liveness transitions remain retryable.
+  boundaries and yields to work created at each intermediate boundary. Direct
+  `Env.clock.sleep` now shares that node-scoped scheduler authority with
+  app-facing `std.Io` sleep, while `World.clock()` remains the explicit raw
+  harness clock. App sleeps round to ticks, stale killed-node clocks return
+  `error.Canceled`, full-range task-start jitter and network-latency jitter
+  avoid overflow, beyond-clock process and network transitions stay inert,
+  and failed liveness transitions remain retryable.
 
 - Makes the disk contract match its declared sector model: torn writes land a
   prefix of whole sectors, reorder is one consistently traced crash-global
