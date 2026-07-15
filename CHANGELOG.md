@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Clarifies the two supported network-testing altitudes. Node-scoped
+  `std.Io.net` is the canonical literal same-code path for codecs, framing,
+  partial I/O, and stream lifecycle; experimental `Endpoint(Message)` remains
+  a protocol-modeling surface with an explicitly documented shallow-copy and
+  delivery contract. The redundant public `ByteEndpoint` facade is removed
+  while its pooled byte machinery remains private to deterministic
+  `std.Io.net`.
+
 - Closes the simulator-TCB audit's runner and lifecycle gaps: `runSimCase`
   forwards every simulation option, keeps setup OOM distinct from scenario
   failure, accepts infallible scenarios, deinitializes pointer-valued apps

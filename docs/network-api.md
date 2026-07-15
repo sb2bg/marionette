@@ -1,9 +1,11 @@
 # Network API Direction
 
-This document describes the current simulation network API. Marionette
-endpoints are simulation-only; production networking uses host `std.Io.net`.
-The former local/socket-backed production endpoint adapters were removed in
-0.6 rather than retained as an unsupported parity contract.
+This document describes Marionette's two network-testing altitudes. Node-scoped
+`std.Io.net` is the canonical literal same-code surface. Experimental typed
+endpoints model protocol behavior above the wire; production uses an
+application-owned transport seam. The former Marionette-owned production
+endpoint adapters were removed in 0.6 rather than retained as an unsupported
+parity contract.
 
 Application code should put its protocol behind an application-owned seam.
 The composition root supplies simulated endpoints in tests and host networking
@@ -11,9 +13,9 @@ in production.
 
 ## Current Status
 
-The app-facing network surface is `mar.Endpoint(Message)`. An endpoint is bound
-to one `NodeId`, so application code can only send as that node and can only
-receive messages addressed to that node:
+The experimental app-facing message surface is `mar.Endpoint(Message)`. An
+endpoint is bound to one `NodeId`, so application code can only send as that
+node and can only receive messages addressed to that node:
 
 ```zig
 const Message = union(enum) {
@@ -43,15 +45,64 @@ seeded drops, latency, node and link state, and deterministic delivery order.
 Older packet-core wrappers remain confined to low-level network tests; public
 examples should use the composition-root endpoint API.
 
-## Two Surfaces
+`Endpoint(Message)` is a protocol-level simulation tool, not a wire transport.
+`Message` is copied with ordinary Zig value semantics: inline values are copied,
+but pointers, slices, and handles still refer to their original storage.
+Marionette does not serialize messages, retain referenced storage, or manage
+pointee lifetimes. Prefer value-only messages. If references are unavoidable,
+their storage must remain valid and immutable for the entire simulation.
 
-The network API has two separate surfaces:
+The current operation contract is intentionally narrow:
 
-- App-facing authority: `mar.Endpoint(Message)`.
-- Simulator-control authority: `control.network`.
+- `send(to, message)` is synchronous and does not wait for delivery. Success
+  does not prove that the message was queued: seeded loss and a down source are
+  successful, trace-visible drops. A queued message may still be dropped when
+  received if its destination is down or its directed link is disabled.
+- Capacity is bounded per directed `(from, to)` path. A full path currently
+  returns `error.EventQueueFull`.
+- Delivery order is scheduled timestamp followed by packet id. Independent
+  latency jitter can therefore reorder messages, even on one directed path.
+  There is no separate reorder operation and no duplication or corruption
+  fault today.
+- `receive()` may advance time to the earliest delivery anywhere on the same
+  typed bus. `null` means no message for this endpoint is available at that bus
+  scheduling boundary. It does not mean that the endpoint has no later packet,
+  is closed, or has reached EOF.
+- The destination and directed-link state are checked when a ready packet is
+  consumed by `receive()`, not merely when its scheduled timestamp passes.
+- Typed endpoint node state is controlled by `control.network.setNode` and is
+  separate from process-supervisor state. `killProcess(node)` alone does not
+  mark a typed endpoint node down.
 
-Application code should use endpoints. Test scenarios and simulation harnesses
-should use simulator control.
+Endpoint handles are borrowed from their simulation and must not outlive it.
+The current surface has no close, EOF, deadline, cancellation, delivery
+acknowledgement, or backpressure contract. Use simulated `std.Io.net` when the
+system under test must exercise serialization, framing, partial I/O, stream
+ordering, or connection lifecycle.
+
+## Two Network Altitudes
+
+The two data paths make different, complementary guarantees:
+
+- Node-scoped `std.Io.net` exercises the same socket-facing application code,
+  codec, framing, partial-I/O handling, and connection lifecycle used with host
+  I/O.
+- `mar.Endpoint(Message)` explores protocol/state-machine behavior under the
+  documented message model. It does not exercise production serialization or
+  transport code.
+
+Both paths share simulator-owned topology and fault authority, but neither is
+implemented as a wrapper around the other.
+
+## Two Authorities
+
+Each data path remains separate from simulator-control authority:
+
+- Application authority: `std.Io.net` or `mar.Endpoint(Message)`.
+- Harness authority: `control.network`.
+
+Application code uses the appropriate data path. Test scenarios and simulation
+harnesses use simulator control.
 
 This split keeps production-shaped code portable without giving it test-only
 powers such as partitioning the network, stopping nodes, or changing drop rates.
@@ -73,7 +124,7 @@ This is deliberately not a field on `Env`. `Env` is one non-generic type, while
 `Endpoint(Message)` is message-specialized. Keeping the typed endpoint beside
 `Env` avoids making every function that accepts `Env` generic.
 
-Simulation setup wires node-scoped endpoints into production-shaped code:
+Simulation setup wires node-scoped endpoints into protocol/state-machine code:
 
 ```zig
 const Case = mar.SimCase(Service);
@@ -137,43 +188,15 @@ The important constraint is that fault orchestration is separate from the
 app-shaped send path. App `send` takes only `to` and `message`; the endpoint's
 own `NodeId` is the sender.
 
-## Byte Endpoint
-
-`ByteEndpoint` is the byte-oriented app surface for code that already owns a
-wire protocol. It has the same node-scoped shape as `Endpoint(Message)`, but it
-makes byte ownership explicit:
-
-- `send(to, bytes)` copies borrowed bytes before returning.
-- `acquire(len)` returns a pool-owned buffer.
-- `sendMessage(to, message)` transfers an acquired buffer on success.
-- `receive()` returns `{ from, message }`; the caller must release the message.
-
-This is the intended integration point for future Zig networking/RPC libraries
-that want Marionette as a test backend without exposing `Endpoint(Message)` to
-their users.
-
-Encoding and decoding are deliberately the app's job. Marionette moves bytes
-deterministically; the wire format, its buffers, and its receive-value
-lifetimes belong to the protocol that owns them. The intended shape is:
-
-```zig
-const endpoint = try sim.byteEndpoint(server_node);
-
-var buffer: [max_frame_len]u8 = undefined;
-try endpoint.send(client_node, encodeResponse(&buffer, response));
-
-const envelope = (try endpoint.receive()) orelse return;
-defer envelope.message.release();
-try apply(envelope.from, try decodeRequest(envelope.message.bytes()));
-```
-
 ## Production Path
 
-Endpoints are simulation-only. The "Endpoints Are Sim-Only" decision in
-`ROADMAP.md` (2026-07) cancelled the production transport work outright:
-production networking is host `std.Io.net`, and Marionette will not ship its
-own production socket bus. Reconnect, background receive, and multi-peer
-connection management are cancelled with it, not deferred.
+The sibling-network-surfaces decision in `ROADMAP.md` (2026-07) cancelled
+Marionette's production transport work outright. Socket-facing production code
+uses host `std.Io.net`; message-oriented applications own their production
+transport interface and may adapt it to an endpoint in simulation. Matching the
+current endpoint vtable alone does not establish behavioral parity. Marionette
+will not ship reconnect, background receive, or multi-peer connection machinery
+for a generic production bus.
 `docs/network-production.md` is retained as design history for the cancelled
 bus, not as a plan.
 
@@ -183,7 +206,9 @@ Marionette network endpoints.
 The standing rules:
 
 - Keep app-facing network requirements narrow.
-- Route production through host IO at the composition root.
+- Route socket-facing production through host I/O at the composition root.
+- Keep message-oriented production transport application-owned until a real
+  SUT drives a shared contract.
 - Route simulation through deterministic simulator machinery.
 - Keep simulator-control operations out of production service code.
 
@@ -235,9 +260,10 @@ network API. These are intentionally unresolved:
   TCP stream subset is tracked separately as a simulator capability; it
   currently covers scheduler-backed accept/read suspension, latency,
   send-time loss, and delivery-time partition/heal behavior. It preserves
-  in-order bytes within a connection and is not the first stable typed endpoint
-  API.
+  in-order bytes within a connection and remains distinct from the typed
+  message model.
 - Cross-process simulation.
 
-The first stable app-facing network is narrow enough to test a small multi-node
-service, then grow from real examples.
+The typed endpoint remains experimental until a pinned SUT drives an owned or
+encoded representation and explicit delivery, readiness, lifecycle,
+cancellation, backpressure, and error semantics.

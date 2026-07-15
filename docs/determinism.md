@@ -13,7 +13,8 @@ interfaces:
 - Time through `Env.clock`, `Control`, or `World`.
 - Randomness through an environment, seeded `Random`, or `World`.
 - Disk through Marionette's `Disk` capability.
-- Network through Marionette `Endpoint` handles.
+- Network through Marionette `Endpoint` handles or node-scoped simulated
+  `std.Io.net` obtained from `sim.envForNode(node).io()`.
 - Cooperative scheduling through Marionette's task scheduler.
 
 Do not call host sources directly from simulated code.
@@ -27,7 +28,8 @@ These are banned in simulated code:
 - `std.crypto.random`
 - Host thread APIs such as `std.Thread.*`
 - Filesystem calls outside Marionette's `Disk` capability.
-- Network calls outside Marionette `Endpoint` handles.
+- Host network calls that bypass a Marionette endpoint or node-scoped simulated
+  `std.Io.net` backend.
 - Pointer identity as a source of ordering or hashing.
 - Hash map iteration order unless explicitly sorted or otherwise stabilized.
 

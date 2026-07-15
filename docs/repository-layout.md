@@ -13,11 +13,11 @@ unit tests. Put code here when it is about making Zig `std.Io` operations run
 under Marionette-controlled production or simulation authorities. Keep
 subsystem tests in `src/io/tests.zig`.
 
-`src/network/` contains deterministic network simulation. It owns typed and
-byte endpoints, the packet core, network control hooks, and network tests. Add
-protocol-neutral simulation behavior here; production code uses host
-`std.Io.net`. Add application-specific network scenarios under `examples/` or
-`validation/` instead.
+`src/network/` contains deterministic network simulation. It owns experimental
+typed endpoints, the packet core, private pooled stream delivery, network
+control hooks, and network tests. Add protocol-neutral simulation behavior
+here; production socket code uses host `std.Io.net`. Add application-specific
+network scenarios under `examples/` or `validation/` instead.
 
 `src/disk/` contains the app-facing disk capability, deterministic disk model,
 simulation implementation, production adapter, disk controls, fault behavior,

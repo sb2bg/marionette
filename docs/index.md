@@ -234,11 +234,12 @@ Passing runs return traces for persistence, diffing, or external tooling.
 Marionette is early. This is a `0.x` release: there is no API stability
 guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
 `Control`, `SimCase`, `runSimCase` / `expectSim*`,
-`Disk`, `SimDisk`, `RealDisk`, `Production`, `Recorder`, and the app-facing
-`Endpoint(Message)` shape. Everything else may change as the simulator grows.
+`Disk`, `SimDisk`, `RealDisk`, `Production`, and `Recorder`. The public
+`Endpoint(Message)` message-modeling surface remains experimental while its
+ownership and transport contract are validated against a real SUT.
 
 The simulator currently models clock, deterministic randomness, disk, a
-directory-aware `std.Io.File`/`Dir` subset, typed endpoint networking, a narrow scheduler-backed
+directory-aware `std.Io.File`/`Dir` subset, experimental typed message modeling, a narrow scheduler-backed
 `std.Io.net` stream subset with deterministic latency, timeout, partition,
 healing behavior, and literal-only host lookup (an unmodified
 `std.http.Client` runs against simulated servers; real DNS stays
@@ -258,10 +259,12 @@ points following `std.Io`'s one-shot protocol. A one-shot
 prove the core makes progress once faults stop.
 It does not model arbitrary OS thread scheduling or memory-level concurrency;
 code that depends on those needs separate testing.
-Endpoints are simulation-only by decision: production networking is host
-`std.Io.net`, and a Marionette-owned cross-process transport was cancelled,
-not deferred (see the roadmap's "Endpoints Are Sim-Only" decision). The former
-same-process and framed-loopback production adapters were removed in 0.6.
+Networking has two sibling testing altitudes. Node-scoped `std.Io.net` is the
+canonical literal same-code path for codecs, framing, partial I/O, and stream
+lifecycle. Experimental `Endpoint(Message)` explores protocol/state-machine
+behavior above the wire; production uses an application-owned transport seam,
+and Marionette does not claim that the real transport runs through the endpoint
+model. The former Marionette-owned production adapters were removed in 0.6.
 Queue suspension and broader scheduler parity are planned.
 
 Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows

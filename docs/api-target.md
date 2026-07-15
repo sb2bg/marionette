@@ -1,16 +1,17 @@
 # API Target Spec
 
 This is the current target shape for Marionette examples and public API. It is
-intentionally narrower than a full production networking stack. Endpoints are
-simulation-only; production networking uses host `std.Io.net`. See
-[Network API Direction](network-api.md).
+intentionally narrower than a full production networking stack. `std.Io.net`
+is the literal same-code network seam; experimental typed endpoints model
+protocol behavior above an application-owned transport seam. See [Network API
+Direction](network-api.md).
 
 ## Core Principles
 
-Production-shaped storage code should receive `std.Io`, a root `std.Io.Dir`,
-and any small Marionette handles it actually needs, such as `Recorder` or
-`Endpoint(Message)`. `Env` is the composition-root bundle that supplies those
-handles.
+Production-shaped code should receive `std.Io`, a root `std.Io.Dir`, and any
+small stable capabilities it actually needs, such as `Recorder`. Experimental
+protocol models may receive `Endpoint(Message)` in simulation. `Env` is the
+composition-root bundle for the stable environment handles.
 
 Simulation tests should usually use `SimCase(App)`: the app initializer
 receives `Sim`, app state lives at `case.app`, and scenarios use
@@ -59,6 +60,7 @@ pub const ProcessLifecycle = struct {
     restart: *const fn (*anyopaque, Env) anyerror!void,
 };
 
+/// Experimental message-modeling surface; not a wire-parity contract.
 pub fn Endpoint(comptime Message: type) type;
 
 pub const SimNetworkOptions = struct {
@@ -76,8 +78,6 @@ pub const Sim = struct {
     pub fn restartProcess(self: Sim, node: NodeId) !void;
     pub fn endpoint(self: Sim, comptime Message: type, node: NodeId) !Endpoint(Message);
     pub fn endpoints(self: Sim, comptime Message: type, comptime count: usize, first_node: NodeId) ![count]Endpoint(Message);
-    pub fn byteEndpoint(self: Sim, node: NodeId) !ByteEndpoint;
-    pub fn byteEndpoints(self: Sim, comptime count: usize, first_node: NodeId) ![count]ByteEndpoint;
 };
 
 pub const Production = struct {
@@ -126,24 +126,20 @@ var server = try Server.init(server_env.io(), server_env.recorder());
 ```
 
 The design keeps `Env` non-generic and passes `Endpoint(Message)` as a sibling
-simulation handle. Production-shaped code that does not need all of `Env`
-should take `std.Io` and `Recorder` directly and use host `std.Io.net` behind
-its own protocol seam. The deprecated production endpoint adapters were
-removed in 0.6.
-
-`ByteEndpoint` is the byte-oriented sibling for libraries that want Marionette
-behind their own protocol API. `send(to, bytes)` copies borrowed bytes before
-returning; `acquire(len)` plus `sendMessage(to, message)` transfers an acquired
-pool buffer without a second copy; `receive()` returns a releasable message that
-the caller must release. Wire formats and typed protocol adapters are the
-app's job; Marionette does not ship codec or transport wrappers.
+simulation handle. This endpoint is an experimental protocol-modeling tool,
+not a promise that production serialization or transport code is exercised.
+Production-shaped socket code should take `std.Io` and use `std.Io.net`.
+Message-oriented applications should own their transport interface and adapt
+it to a Marionette endpoint in tests until a real SUT justifies a shared public
+message-transport contract. The deprecated production endpoint adapters and
+redundant public `ByteEndpoint` facade were removed in 0.6.
 
 ## Example Shape
 
 Network-shaped examples should split into:
 
-- A production-shaped type that holds `env`, typed node endpoints, and app
-  state.
+- A protocol/state-machine type that holds the narrow message seam it needs and
+  no simulator-control authority.
 - `SimCase(App)`, where `init(sim: Sim)` wires endpoints into the app and
   scenarios use `case.control()` for simulator-only authority.
 - Free check functions that inspect `*const SimCase(App)` or the app state

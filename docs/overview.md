@@ -5,9 +5,11 @@ The long-term target is to become the deterministic `std.Io` implementation
 for Zig.
 
 The core promise: write production-shaped code against `std.Io`, `Recorder`,
-and application-owned protocol seams. In production those seams use host I/O;
-in simulation they receive Marionette endpoints and run through a controlled
-world that can replay the same execution from the same seed.
+and application-owned protocol seams. Node-scoped `std.Io.net` runs literal
+socket-facing code against host I/O in production and Marionette in simulation.
+Experimental typed endpoints instead model the message-level behavior behind
+an application-owned transport seam; they preserve protocol/state-machine code,
+not the production codec or transport implementation.
 
 Marionette is still experimental, but the core replay loop is real: seeded
 randomness, simulated time, trace logging, twice-and-compare replay, trace

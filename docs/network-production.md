@@ -1,10 +1,10 @@
 # Production Network Transport: Design History
 
-> **Status: historical.** The work this document scoped was cancelled
-> outright by the "Endpoints Are Sim-Only" decision in `ROADMAP.md`
-> (2026-07): endpoints are simulation modeling tools, production networking
-> is host `std.Io.net`, and Marionette will not ship its own production
-> socket bus. This file is retained as design history because the analysis
+> **Status: historical and superseded.** The work this document scoped was
+> cancelled by the sibling-network-surfaces decision in `ROADMAP.md`
+> (2026-07): `std.Io.net` is the literal same-code socket seam, typed endpoints
+> are experimental message-modeling tools, and Marionette will not ship its own
+> production socket bus. This file is retained as design history because its analysis
 > (framing, pooling, reconnect, TigerBeetle's MessageBus) informed that
 > decision. The experimental adapters and their private socket runtime were
 > removed in 0.6. Nothing below is planned work. Sections below retain the

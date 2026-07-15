@@ -209,54 +209,41 @@ node-local clock views with skew and drift. What I don't want is each node
 holding an independent uncontrolled clock. That way lies the usual distributed
 systems nightmare without any of the determinism upside.
 
-### 15. The "production network" seam: TigerBeetle has two, Marionette has one
+### 15. Message-level and wire-level testing cover different code
 
-TigerBeetle's production transport is `MessageBusType(IO)`: a parametric type
-where the IO backend is swappable. Their fuzz harness uses the *same*
-MessageBus with a deterministic IO backend. VOPR uses a *separate* simpler
-MessageBus (`testing/cluster/message_bus.zig`) that bypasses sockets entirely
-and routes through an in-memory `Network` packet simulator. Two seams, chosen
-deliberately: the parametric form keeps message_bus_fuzz exercising the real
-bus code, and the separate VOPR form avoids paying the cost of simulating TCP
-in software for full-cluster runs.
+TigerBeetle deliberately uses two network seams. VOPR replaces the production
+`MessageBus` with a simpler simulated bus and explores a weak contract in which
+complete messages may be dropped, duplicated, reordered, partitioned, or
+non-Byzantine corrupted. The same replica and state-machine implementation
+runs, but the production socket bus does not. A separate fuzz target exercises
+that real bus's framing, buffers, and connection state machine.
 
-Marionette already has one seam at the right level: the `Endpoint(Message)`
-vtable. The current production impl is a same-process FIFO; the simulation
-impl is the deterministic packet bus. Both satisfy the same vtable. Reading
-TigerBeetle, I considered switching to a parametric `Endpoint(Message, IO)`
-shape and decided against it. The vtable already gives us the swappability;
-adding a generic IO type would force every user to choose an IO backend at
-the call site, which leaks library internals into user code.
+That split is honest because TigerBeetle's simulated packets are owned,
+serialized message buffers and the protocol explicitly tolerates the simulated
+delivery model. It does not imply that an arbitrary shallow-copied language
+value is a transport-independent message.
 
-The substantive lesson is what *fills* the production impl, not the seam
-shape. TigerBeetle's MessageBus is a small product unto itself: length-prefixed
-framing with header and body checksums, a refcounted preallocated message
-pool, lazy outbound connect with seeded jittered backoff, async close that
-drains in-flight operations before the socket goes away, peer-type inference
-that lets a connection start unknown and resolve to replica or client, and
-silent-drop send semantics on unreachable peers and full queues. Most of this
-is general transport discipline, not VSR-specific.
+Marionette should preserve both useful altitudes without owning a production
+networking stack:
 
-For Marionette this means item 15 on the roadmap is not "wire up sockets" but
-a sequence of independent primitives: framing, buffer pool, topology config,
-single-peer transport, reconnect, bounded queues. Each ships on its own. The
-done-signal is a cross-process parity test, not a socket primitive landing.
+- `std.Io.net` runs literal socket-facing code through deterministic byte-stream
+  semantics and covers codecs, framing, partial I/O, connection lifecycle, and
+  backpressure.
+- Experimental `Endpoint(Message)` explores protocol/state-machine behavior at
+  message altitude. Its current payload copy and send/receive semantics are a
+  simulation model, not production transport parity.
 
-One concrete API consequence: TigerBeetle's bus drops messages silently on
-full per-peer queues and unreachable peers. The application retries. Marionette
-today returns `error.EventQueueFull` from sim's `send`. We should converge on
-silent-drop in both impls; full queues become a trace-visible fault, not a
-return value. This is the cleanest way to keep sim and prod behaviorally
-identical at the call site. The full design lives in
-`docs/network-production.md`.
+The future message-transport contract is therefore driven by a real SUT, not
+by rebuilding the cancelled generic production bus. Promotion requires owned
+or encoded messages and explicit delivery, ordering, readiness, lifecycle,
+cancellation, backpressure, and error semantics. Until then, an application can
+own the common protocol seam, adapt it to a Marionette endpoint in simulation,
+and test its real transport separately through `std.Io.net`.
 
-*2026-07 update: the roadmap's "Endpoints Are Sim-Only" decision cancelled
-the production bus this lesson scoped; production networking is host
-`std.Io.net`, and `docs/network-production.md` is retained as design
-history. The analysis above is what informed that decision. The send-
-semantics convergence in the previous paragraph survives as a sim-side
-contract change: silent drop plus a trace-visible `network.drop
-reason=queue_full` event, applied if endpoint usage grows.*
+One possible future contract change remains worth evaluating with that SUT:
+TigerBeetle silently drops on full per-peer queues and relies on protocol retry,
+while Marionette currently returns `error.EventQueueFull`. The roadmap keeps
+send-semantics convergence open rather than claiming parity prematurely.
 
 ## What not to copy
 

@@ -54,8 +54,8 @@ Marionette currently has:
   per-link queues, seeded packet loss, tick-aligned latency, process up/down
   state, directed link filters, simple partitions, and stable
   `(deliver_at, packet_id)` delivery order.
-- `mar.Endpoint(Message)`, an app-facing typed process endpoint returned by
-  simulation and production setup.
+- Experimental `mar.Endpoint(Message)`, a typed process-model endpoint returned
+  by simulation setup.
 - A narrow scheduler-backed `std.Io.net` TCP-stream subset whose empty
   `accept` and `read` operations suspend, and whose bytes can traverse the
   shared network latency, loss, clog, and partition model.
@@ -224,9 +224,9 @@ test "single request is replayable" {
 ```
 
 The same composition-root pattern is now used for networked examples: build a
-simulation, pass `sim.envForNode(node)` plus node-scoped `Endpoint(Message)`
-handles into the production-shaped code, and keep `sim.control` in the
-harness.
+simulation, pass `sim.envForNode(node)` into literal same-code socket paths or
+node-scoped `Endpoint(Message)` handles into protocol models, and keep
+`sim.control` in the harness.
 
 ## Production Cost And BUGGIFY
 

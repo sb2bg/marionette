@@ -61,9 +61,10 @@ same discipline in a generic API, not the same product-specific surface.
 
 ## Current API
 
-The current app-facing type is `mar.Endpoint(Message)`. Simulation setup
-creates the backing topology and returns node-scoped typed endpoints from the composition
-root:
+The experimental app-facing type is `mar.Endpoint(Message)`. It is a
+protocol-level simulation surface, not a wire transport. Simulation setup
+creates the backing topology and returns node-scoped typed endpoints from the
+composition root:
 
 ```zig
 const sim = try world.simulate(.{ .network = .{
@@ -84,8 +85,13 @@ which ids are replicas/services and which ids are clients. Clients still
 participate in the topology and can be partitioned from services, but automatic
 node isolation chooses from the service prefix.
 
-`Message` is user-owned data. Marionette only schedules and traces the packet
-metadata:
+`Message` is user-owned data. Marionette copies it with ordinary Zig value
+semantics and only schedules and traces the packet metadata. Inline values are
+copied, but pointers, slices, and handles still refer to their original
+storage. Marionette does not serialize messages, deep-copy pointees, retain
+referenced storage, or clean it up. Prefer value-only messages. If references
+are unavoidable, their storage must remain valid and immutable for the entire
+simulation:
 
 ```zig
 const Message = struct {
@@ -108,8 +114,21 @@ while (try receiver.receive()) |envelope| {
 }
 ```
 
-`receive` advances simulated time when needed and returns `null` when the
-endpoint has no pending messages.
+`send` is synchronous and does not wait for delivery. Success does not prove
+that a message was queued: configured loss and a down source are successful,
+trace-visible drops. A queued message can still be dropped when received if
+its destination is down or its directed link is disabled.
+
+`receive` may advance simulated time to the earliest delivery anywhere on the
+same typed bus. `null` means that this endpoint has no message available at
+that bus scheduling boundary. It does not mean that the endpoint has no later
+packet, is closed, or reached EOF. A ready message for another endpoint can
+therefore cause `null` even while this endpoint has a later queued message.
+
+Endpoint handles are borrowed from their simulation and must not outlive it.
+The current API has no close, EOF, deadline, cancellation, acknowledgement, or
+backpressure contract. Use simulated `std.Io.net` when tests must cover the
+wire format, framing, partial I/O, stream ordering, or connection lifecycle.
 
 Application-shaped code sends and drains through typed endpoints, while fault
 orchestration goes through `sim.control.network`. The packet core underneath
@@ -152,21 +171,25 @@ id and records:
 network.drop id=<id> from=1 to=2 reason=source_down
 ```
 
-A down destination drops ready packets at delivery time:
+A down destination drops ready packets when `receive` consumes them:
 
 ```text
 network.drop id=<id> from=0 to=1 reason=destination_down
 ```
 
-Queued packets are not removed when a node goes down. If the destination is
-restarted before delivery time, the packet can still be delivered. That keeps
-process state as another deterministic delivery gate, like directed link
-state, without trying to model full process-local storage or restart behavior
-yet.
+Queued packets are not removed when a node goes down. Destination state is
+checked when a ready packet is consumed, not merely when its scheduled
+timestamp passes. An overdue packet can therefore be delivered if the node is
+marked up again before `receive` consumes it.
+
+Typed endpoint node state is controlled by `control.network.setNode` and is
+separate from the process supervisor. `killProcess(node)` alone kills that
+process's tasks and I/O handles; it does not mark its typed endpoint node down.
 
 ## Link Filters
 
-Links are directed. A disabled link drops ready packets at delivery time:
+Links are directed. A disabled link drops ready packets when `receive`
+consumes them:
 
 ```zig
 try sim.control.network.setLink(0, 1, false);
@@ -261,6 +284,12 @@ That is the same basic tie-breaker discipline Marionette uses elsewhere:
 simulated time first, stable id second. Pointers, host thread scheduling, hash
 map iteration order, and wall-clock time must never decide delivery order.
 
+Each directed `(from, to)` path has its own bounded queue. A full path
+currently returns `error.EventQueueFull`; it does not consume capacity on
+another path. Latency is sampled independently per send, so jitter can reorder
+messages even on one directed path. There is no separate reorder operation and
+no duplication or corruption fault in the current model.
+
 ## Time
 
 Network latency is measured in nanoseconds, but it must align with the
@@ -269,6 +298,9 @@ the packet core rejects `min_latency_ns` and `latency_jitter_ns` values that
 are not whole multiples of the world's tick. Long `sim.control.runFor(...)`
 calls may still jump between deterministic boundaries instead of iterating
 every tick in the interval.
+
+Typed endpoints default to one world tick of latency. `setLatency` may set the
+minimum to zero explicitly when immediate delivery is the intended model.
 
 When using composition-root simulation, prefer:
 

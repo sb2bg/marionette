@@ -549,8 +549,9 @@ undone: an armed `crashAfterOps` budget stays armed, and app-level
 
 ## Network
 
-`mar.Endpoint(Message)` is a simulation-only app-facing network handle.
-Production code uses host `std.Io.net`; simulator-control faults remain on
+`mar.Endpoint(Message)` is an experimental, simulation-only message handle.
+It tests protocol behavior above the wire under its documented delivery model.
+Production socket code uses host `std.Io.net`; simulator-control faults remain on
 `control.network`.
 
 See [Network Model](network.md) for the design contract and current limits.
@@ -580,10 +581,21 @@ while (try receiver.receive()) |envelope| {
 }
 ```
 
-`send` records `network.send` or `network.drop`. `receive` records
-`network.deliver`, advances world time when the next queued packet is in the
-future for that endpoint, and returns `null` when the endpoint has no pending
-messages.
+`Message` is copied with ordinary Zig value semantics. Inline values are
+copied; pointers, slices, and handles still reference their original storage.
+Prefer value-only messages. Referenced storage must otherwise remain valid and
+immutable for the simulation lifetime.
+
+`send` records `network.send` or `network.drop` and does not wait for delivery.
+Successful sends can be silently dropped by configured faults. `receive`
+records `network.deliver` and may advance world time to the next delivery
+anywhere on the same typed bus. A `null` result means that this endpoint has no
+message at that bus scheduling boundary; it does not mean that the endpoint has
+no later packet, is closed, or reached EOF. The surface does not model close,
+deadlines, cancellation, acknowledgements, or backpressure.
+
+Use simulated `std.Io.net` when the system under test must exercise its wire
+format, framing, partial I/O, stream ordering, or connection lifecycle.
 
 Latency values must align with the world's tick size because simulated
 delivery and fault-evolution boundaries are tick-aligned.

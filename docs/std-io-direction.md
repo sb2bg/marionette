@@ -186,8 +186,8 @@ connection with `error.Timeout`; healing permits deterministic retries on the
 same stream. Destination-down delivery maps to `error.NetworkDown`; richer
 connection-reset behavior, external host networking, DNS, and datagrams
 remain future work. A Marionette-owned production transport is not: the
-roadmap's "Endpoints Are Sim-Only" decision cancelled it, and production
-networking is host `std.Io.net`.
+roadmap's sibling-network-surfaces decision cancelled it, and production
+socket networking is host `std.Io.net`.
 
 Graceful close does not discard delayed bytes already accepted by the shared
 network runtime. A reader drains pending deliveries before observing EOF.
@@ -278,20 +278,18 @@ work should keep in view:
 
 ## Existing Primitives
 
-The current Marionette network types are not wasted.
+The experimental `Endpoint(Message)` remains useful for modeling protocols
+directly above the wire. It does not serialize its payload or exercise a real
+codec, framing implementation, or socket transport, so it carries a narrower
+same-protocol-code guarantee than `std.Io.net`'s literal same-code path.
 
-`Endpoint(Message)` and `ByteEndpoint` are explicit-control primitives. They
-are useful for modeling protocols directly, testing framed transports, and
-building examples before the `std.Io` ecosystem is ready. The transport and
-codec wrappers that once sat above them were removed in 0.6: wire formats
-belong to the app, not the simulator.
+The redundant public `ByteEndpoint` facade was removed in 0.6. Its pooled byte
+runtime remains a private part of deterministic `std.Io.net`, not a second API
+for applications to adopt.
 
-As `std.Io` matures, these types should become the precise Marionette-native
-path, while ordinary libraries use `std.Io` directly.
-
-The naming should avoid future confusion. If `std.Io.net` becomes the normal
-network surface, Marionette's typed in-process network should likely be
-documented as a message bus rather than "the network."
+Promotion of the typed endpoint into a stable message-transport interface is
+SUT-gated in the roadmap. A real integration must drive its ownership,
+delivery, readiness, lifecycle, cancellation, and backpressure semantics.
 
 ## Env, Io, and Tracing
 
@@ -391,9 +389,7 @@ outside the simulator.
 
 ## Open Questions
 
-- What exact API registers external network mocks, and how much should it model
-  before users ask for more?
-- Should `Endpoint(Message)` be renamed or documented as `MessageBus(Message)`
-  before public users depend on it?
+- Which real SUT, if any, justifies promoting the experimental typed endpoint
+  into a stable message-transport contract?
 - Which additional `std.Io` operations should be implemented only when a real
   validation target requires them?
