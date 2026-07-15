@@ -23,10 +23,11 @@ pub const TidyStepOptions = struct {
 /// Add the `marionette-tidy` executable to a build.
 pub fn addTidyExecutable(
     b: *std.Build,
+    root_source_file: std.Build.LazyPath,
     options: TidyExecutableOptions,
 ) *std.Build.Step.Compile {
     const tidy_mod = b.createModule(.{
-        .root_source_file = b.path("src/main_tidy.zig"),
+        .root_source_file = root_source_file,
         .target = options.target orelse b.graph.host,
         .optimize = options.optimize orelse .Debug,
     });
@@ -38,8 +39,12 @@ pub fn addTidyExecutable(
 }
 
 /// Add a run step that fails when banned non-deterministic calls are found.
-pub fn addTidyStep(b: *std.Build, options: TidyStepOptions) *std.Build.Step.Run {
-    const tidy_exe = options.tidy_exe orelse addTidyExecutable(b, .{
+pub fn addTidyStep(
+    b: *std.Build,
+    root_source_file: std.Build.LazyPath,
+    options: TidyStepOptions,
+) *std.Build.Step.Run {
+    const tidy_exe = options.tidy_exe orelse addTidyExecutable(b, root_source_file, .{
         .target = options.target,
         .optimize = options.optimize,
     });

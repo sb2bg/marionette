@@ -57,10 +57,9 @@ Marionette enforces determinism in four layers.
    own exact or prefix bans through `addTidyStep`.
 
    ```zig
-   // Expose src/build_support.zig from the dependency as marionette_build.
-   const marionette = @import("marionette_build");
+   const marionette_build = @import("marionette");
 
-   const tidy = marionette.addTidyStep(b, .{
+   const tidy = marionette_build.addTidyStep(b, .{
        .paths = &.{ "src", "examples", "tests" },
        .extra_patterns = &.{
            .{ .needle = "std.heap.page_allocator", .reason = "pass an allocator explicitly" },
@@ -68,6 +67,10 @@ Marionette enforces determinism in four layers.
    });
    test_step.dependOn(&tidy.step);
    ```
+
+   The imported build API locates its own dependency and gives the executable a
+   dependency-owned path to Marionette's tidy entry point. Scan paths remain
+   relative to the consuming project.
 
 3. Twice-and-compare runtime detector.
 

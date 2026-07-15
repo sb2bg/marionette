@@ -1,6 +1,37 @@
 const std = @import("std");
 const build_support = @import("src/build_support.zig");
 
+pub const TidyPattern = build_support.TidyPattern;
+pub const TidyAllow = build_support.TidyAllow;
+pub const TidyExecutableOptions = build_support.TidyExecutableOptions;
+pub const TidyStepOptions = build_support.TidyStepOptions;
+
+/// Add Marionette's tidy executable to a consuming build.
+pub fn addTidyExecutable(
+    b: *std.Build,
+    options: TidyExecutableOptions,
+) *std.Build.Step.Compile {
+    const marionette = b.dependencyFromBuildZig(@This(), .{});
+    return build_support.addTidyExecutable(
+        b,
+        marionette.path("src/main_tidy.zig"),
+        options,
+    );
+}
+
+/// Add a tidy run step whose source belongs to the Marionette dependency.
+pub fn addTidyStep(
+    b: *std.Build,
+    options: TidyStepOptions,
+) *std.Build.Step.Run {
+    const marionette = b.dependencyFromBuildZig(@This(), .{});
+    return build_support.addTidyStep(
+        b,
+        marionette.path("src/main_tidy.zig"),
+        options,
+    );
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -296,7 +327,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = tests_mod });
     const run_tests = b.addRunArtifact(tests);
 
-    const tidy = build_support.addTidyStep(b, .{
+    const tidy = build_support.addTidyStep(b, b.path("src/main_tidy.zig"), .{
         .paths = &.{ "src", "examples", "tests", "validation" },
         .extra_allowed = &.{
             .{ .path = "tests/release_symbol_probe.zig", .needle = "std.process" },
@@ -315,6 +346,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_validate_std_io_net_kv.step);
     test_step.dependOn(&run_validate_kv_compat.step);
     test_step.dependOn(&tidy.step);
+
+    const run_tidy_consumer_test = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+        "test",
+        "--build-file",
+        b.pathFromRoot("build_tests/tidy_consumer/build.zig"),
+        "--cache-dir",
+        b.pathFromRoot(".zig-cache/tidy-consumer"),
+    });
+    test_step.dependOn(&run_tidy_consumer_test.step);
 
     // The fiber overflow diagnostics are POSIX-only and their subprocess
     // test must execute the crash binary it builds, so wire it only when

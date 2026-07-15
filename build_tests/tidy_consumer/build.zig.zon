@@ -1,0 +1,16 @@
+.{
+    .name = .marionette_tidy_consumer,
+    .version = "0.0.0",
+    .fingerprint = 0xef2d7cdba10bbe32,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .marionette = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

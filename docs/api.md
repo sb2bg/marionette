@@ -924,13 +924,15 @@ simulated failures.
 
 ## Build Support
 
-`src/build_support.zig` exposes a helper for wiring `marionette-tidy` into a
-build. Expose that file from your dependency as a build module, then import it:
+Marionette's `build.zig` exports a helper for wiring `marionette-tidy` into a
+consuming build. Importing that build API lets the helper locate its own
+dependency, so the executable source resolves inside Marionette rather than
+inside your package:
 
 ```zig
-const marionette = @import("marionette_build");
+const marionette_build = @import("marionette");
 
-const tidy = marionette.addTidyStep(b, .{
+const tidy = marionette_build.addTidyStep(b, .{
     .paths = &.{ "src", "examples", "tests" },
 });
 test_step.dependOn(&tidy.step);
@@ -941,7 +943,7 @@ exits non-zero when banned non-deterministic calls are found. Projects can add
 their own exact or prefix bans and file-level or pattern-level allow entries:
 
 ```zig
-const tidy = marionette.addTidyStep(b, .{
+const tidy = marionette_build.addTidyStep(b, .{
     .paths = &.{ "src", "examples", "tests" },
     .extra_patterns = &.{
         .{

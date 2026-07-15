@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Exports the tidy build helper through Marionette's dependency `build.zig`.
+  The helper locates its own dependency, so `src/main_tidy.zig` resolves inside
+  Marionette while scan paths continue to resolve inside the consuming
+  package; a nested consumer build now guards that boundary.
+
 - Clarifies the two supported network-testing altitudes. Node-scoped
   `std.Io.net` is the canonical literal same-code path for codecs, framing,
   partial I/O, and stream lifecycle; experimental `Endpoint(Message)` remains
