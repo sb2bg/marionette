@@ -20,7 +20,8 @@ const WireMessage = struct {
         return .{ .len = len, .data = @splat(0) };
     }
 
-    fn bytes(self: *const WireMessage) []const u8 {
+    fn bytes(self: *const WireMessage) ![]const u8 {
+        if (self.len > self.data.len) return error.InvalidFrame;
         return self.data[0..self.len];
     }
 };
@@ -114,7 +115,7 @@ const Server = struct {
     fn step(self: *Server) !bool {
         const envelope = (try self.endpoint.receive()) orelse return false;
 
-        const request = try decodeRequest(envelope.message.bytes());
+        const request = try decodeRequest(try envelope.message.bytes());
         const response = self.db.execute(request);
 
         try self.endpoint.send(envelope.from, encodeResponse(response));
@@ -147,7 +148,7 @@ fn roundTrip(server: *Server, client: mar.Endpoint(WireMessage), request: Reques
 
     const envelope = (try client.receive()) orelse return error.MissingResponse;
 
-    return try decodeResponse(envelope.message.bytes());
+    return try decodeResponse(try envelope.message.bytes());
 }
 
 fn decodeTag(comptime Tag: type, value: u8) !Tag {
@@ -173,4 +174,10 @@ test "toy database: typed protocol over owned messages" {
 
     try std.testing.expect(std.mem.indexOf(u8, trace, "network.send") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "network.deliver") != null);
+}
+
+test "toy database: malformed owned message length is rejected" {
+    var message = WireMessage.init(1);
+    message.len = max_frame_len + 1;
+    try std.testing.expectError(error.InvalidFrame, message.bytes());
 }

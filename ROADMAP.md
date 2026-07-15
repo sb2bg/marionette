@@ -135,9 +135,6 @@ exposes an interior byte hole.
   API frees the shared resource.
 - Add no-fault differential tests against host `std.Io.net` for portable
   observable behavior.
-- Remove the redundant public `ByteEndpoint` facade while retaining the pooled
-  byte runtime privately for `std.Io.net`; document the exact experimental
-  `Endpoint(Message)` model and its non-parity boundary consistently.
 
 Do not add UDP, Unix sockets, or broader DNS in this release. Promote them only
 when a pinned SUT requires them; every simulated surface is a determinism
@@ -402,9 +399,9 @@ Consequences, recorded so they are not relitigated:
 - `ByteEndpoint` is removed from the public surface in 0.6. Its byte-pool and
   delivery machinery remain private implementation details of deterministic
   `std.Io.net`; there is no second public byte-network API.
-- The 15j send-semantics convergence (silent drop plus a trace-visible
-  `network.drop reason=queue_full` event) still applies to the simulated
-  endpoint if endpoint usage grows; it is a sim-side contract change now.
+- Queue-full behavior remains `error.EventQueueFull`. Whether a future message
+  transport instead uses silent, trace-visible drops is a candidate to evaluate
+  with the pinned SUT that drives the stable contract; it is not settled now.
 
 ### The std.Io Seam Is The Product
 

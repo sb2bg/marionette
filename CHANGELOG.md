@@ -156,12 +156,11 @@
   same type).
 - Removes `ByteTransport`, `CodecTransport`, and the `codec` namespace
   (including `CodecRecvLifetime` and `default_codec_encode_buffer_size`).
-  These were convenience wrappers over `ByteEndpoint` with a single
-  in-repo consumer, and a codec interface is a serialization concern that
-  belongs to the app, not the simulator. `Endpoint(Message)` and
-  `ByteEndpoint` are unchanged; code using the wrappers should encode and
-  decode at the `ByteEndpoint` edge instead, as the toy SQL example now
-  demonstrates.
+  These were convenience wrappers with a single in-repo consumer, and a codec
+  interface is a serialization concern that belongs to the app, not the
+  simulator. The toy SQL example now encodes into an owned, value-only
+  `Endpoint(Message)` payload; the redundant public byte-endpoint facade is
+  removed as described above.
 - Adds the pinned lazy beanstalkz validation (`validate-beanstalkz`): the
   unmodified `g41797/beanstalkz` work-queue client runs against a
   harness-owned in-memory beanstalkd speaking the text protocol over
