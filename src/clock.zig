@@ -1,15 +1,8 @@
-//! Time sources for production and deterministic simulation.
-//!
-//! Production time is the only place in Marionette that may touch host time.
-//! Simulated time is explicit state and only advances when
-//! the caller ticks or sleeps the simulated clock.
+//! Explicit time state for deterministic simulation.
 
 const std = @import("std");
 
-/// Nanoseconds since an implementation-defined epoch.
-///
-/// `ProductionClock` uses Zig's host IO clock. `SimClock` uses the simulated
-/// world's epoch, which defaults to zero.
+/// Nanoseconds since the simulated world's epoch, which defaults to zero.
 pub const Timestamp = u64;
 
 /// Duration in nanoseconds.
@@ -17,37 +10,6 @@ pub const Duration = u64;
 
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns: Duration = 1;
-
-/// Production clock backed by the host `std.Io` provided at construction.
-///
-/// This is intentionally small: `now()` reads wall-clock time and
-/// `sleep()` blocks the current thread. It is the only Marionette clock
-/// implementation allowed to read host time, and it does so only through
-/// the injected `std.Io`, never a global.
-pub const ProductionClock = struct {
-    io: std.Io,
-
-    /// Construct a production clock over the host `std.Io`.
-    pub fn init(io: std.Io) ProductionClock {
-        return .{ .io = io };
-    }
-
-    /// Return the current wall-clock timestamp in nanoseconds.
-    pub fn now(self: *const ProductionClock) Timestamp {
-        const timestamp = std.Io.Clock.real.now(self.io);
-        std.debug.assert(timestamp.nanoseconds >= 0);
-        return @intCast(timestamp.nanoseconds);
-    }
-
-    /// Block the current thread for `duration_ns` nanoseconds.
-    pub fn sleep(self: *ProductionClock, duration_ns: Duration) void {
-        std.Io.sleep(
-            self.io,
-            .fromNanoseconds(duration_ns),
-            .awake,
-        ) catch unreachable;
-    }
-};
 
 /// Deterministic clock for simulation tests.
 ///

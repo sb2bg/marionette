@@ -305,8 +305,8 @@ hashes, the hash algorithm must be named and stable.
 - All time movement routes through the world's clock.
 - Ready operations use a stable `(ready_at, op_id)` ordering.
 - Host filesystem calls are not part of the simulator model.
-- Disk APIs must not call `std.crypto.random`, `/dev/urandom`, or wall-clock
-  time.
+- Disk APIs must not construct a host `std.Io`, read `/dev/urandom`, or use
+  wall-clock time as an input.
 - Tests must compare same-seed disk traces byte-for-byte.
 - Checksums and record validation belong to user code in Phase 1. Marionette
   may corrupt, tear, lose, or error operations, but it should not infer storage

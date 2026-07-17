@@ -44,19 +44,35 @@ pub const Allow = struct {
 // named bans, clear replacements, narrow allowlist entries, and tests for each
 // rule shape. Marionette should stay focused on deterministic-simulation hazards first.
 pub const default_patterns = [_]Pattern{
-    .{ .needle = "std.time", .reason = "use Env.clock or World.clock()", .match = .prefix },
     .{ .needle = "std.Thread", .reason = "use Marionette cooperative tasks; do not use host threads in simulated code", .match = .prefix },
-    .{ .needle = "std.crypto.random", .reason = "use seeded Marionette randomness", .match = .prefix },
-    .{ .needle = "std.fs.cwd", .reason = "route filesystem access through Marionette disk authority" },
-    .{ .needle = "std.fs.openFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
-    .{ .needle = "std.fs.createFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
-    .{ .needle = "std.fs.copyFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
-    .{ .needle = "std.fs.deleteFileAbsolute", .reason = "route filesystem access through Marionette disk authority" },
-    .{ .needle = "std.net", .reason = "use caller-provided std.Io.net or Marionette Endpoint handles", .match = .prefix },
     .{ .needle = "std.posix", .reason = "route host access through Marionette authorities or caller-provided std.Io", .match = .prefix },
-    .{ .needle = "std.process", .reason = "process state is host state; receive configuration from the composition root", .match = .prefix },
+    .{ .needle = "std.os", .reason = "route host access through Marionette authorities or caller-provided std.Io", .match = .prefix },
+    .{ .needle = "std.Io.Threaded", .reason = "use Env.io(); do not construct a second host I/O authority", .match = .prefix },
+    .{ .needle = "std.Io.Evented", .reason = "use Env.io(); do not construct a second host I/O authority", .match = .prefix },
+    .{ .needle = "std.Io.Dispatch", .reason = "use Env.io(); do not construct a second host I/O authority", .match = .prefix },
+    .{ .needle = "std.Io.Kqueue", .reason = "use Env.io(); do not construct a second host I/O authority", .match = .prefix },
+    .{ .needle = "std.Io.Uring", .reason = "use Env.io(); do not construct a second host I/O authority", .match = .prefix },
+    .{ .needle = "std.process.getUserInfo", .reason = "receive host user state from the composition root" },
+    .{ .needle = "std.process.getBaseAddress", .reason = "host address state is nondeterministic" },
+    .{ .needle = "std.process.totalSystemMemory", .reason = "receive host resource state from the composition root" },
+    .{ .needle = "std.process.cleanExit", .reason = "process termination belongs at the composition root" },
+    .{ .needle = "std.process.raiseFileDescriptorLimit", .reason = "host process mutation belongs at the composition root" },
+    .{ .needle = "std.process.fatal", .reason = "process termination belongs at the composition root" },
+    .{ .needle = "std.process.abort", .reason = "process termination belongs at the composition root" },
+    .{ .needle = "std.process.exit", .reason = "process termination belongs at the composition root" },
+    .{ .needle = "std.process.lockMemory", .reason = "host process mutation belongs at the composition root" },
+    .{ .needle = "std.process.unlockMemory", .reason = "host process mutation belongs at the composition root" },
+    .{ .needle = "std.process.lockMemoryAll", .reason = "host process mutation belongs at the composition root" },
+    .{ .needle = "std.process.unlockMemoryAll", .reason = "host process mutation belongs at the composition root" },
+    .{ .needle = "std.process.protectMemory", .reason = "host process mutation belongs at the composition root" },
     .{ .needle = "std.heap.page_allocator", .reason = "pass an allocator explicitly" },
+    .{ .needle = "std.heap.smp_allocator", .reason = "pass an allocator explicitly" },
+    .{ .needle = "std.heap.c_allocator", .reason = "pass an allocator explicitly" },
+    .{ .needle = "std.heap.wasm_allocator", .reason = "pass an allocator explicitly" },
+    .{ .needle = "std.heap.brk_allocator", .reason = "pass an allocator explicitly" },
     .{ .needle = "std.Options.debug_io", .reason = "use the std.Io provided by the composition root" },
+    .{ .needle = "std.debug.print", .reason = "record through Env or write through an injected std.Io stream" },
+    .{ .needle = "std.log", .reason = "configure logging with an injected deterministic sink", .match = .prefix },
 };
 
 pub const default_allowed = [_]Allow{
@@ -65,9 +81,19 @@ pub const default_allowed = [_]Allow{
     // documented exception to allocator discipline.
     .{ .path = "src/fiber.zig", .needle = "std.posix" },
     .{ .path = "src/fiber_guard_diagnostics.zig", .needle = "std.posix" },
-    // CLI entry points own argument parsing and exit codes.
-    .{ .path = "src/main_run.zig", .needle = "std.process" },
-    .{ .path = "src/main_tidy.zig", .needle = "std.process" },
+    // Composition roots and reporting harnesses own exit status and stderr.
+    .{ .path = "src/main_run.zig", .needle = "std.process.exit" },
+    .{ .path = "src/main_run.zig", .needle = "std.debug.print" },
+    .{ .path = "src/main_tidy.zig", .needle = "std.process.exit" },
+    .{ .path = "src/main_tidy.zig", .needle = "std.debug.print" },
+    .{ .path = "src/run.zig", .needle = "std.debug.print" },
+    .{ .path = "tests/determinism.zig", .needle = "std.debug.print" },
+    .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.debug.print" },
+    .{ .path = "tests/fuzz.zig", .needle = "std.debug.print" },
+    .{ .path = "tests/switch_inline_bench.zig", .needle = "std.debug.print" },
+    .{ .path = "validation/dusty_http.zig", .needle = "std.debug.print" },
+    .{ .path = "validation/nightly_seed_sweep.zig", .needle = "std.debug.print" },
+    .{ .path = "validation/xitdb_durability.zig", .needle = "std.debug.print" },
 };
 
 pub const Options = struct {
@@ -374,13 +400,13 @@ test "tidy flags banned patterns" {
         std.testing.allocator,
         &result,
         "src/bad.zig",
-        "const now = std.time.nanoTimestamp();\n",
+        "const host = std.os;\n",
         .{},
     );
 
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
     try std.testing.expectEqual(@as(usize, 1), result.violations.items[0].line);
-    try std.testing.expectEqual(@as(usize, 13), result.violations.items[0].column);
+    try std.testing.expectEqualStrings("std.os", result.violations.items[0].pattern.needle);
 }
 
 test "tidy flags prefix patterns" {
@@ -391,12 +417,12 @@ test "tidy flags prefix patterns" {
         std.testing.allocator,
         &result,
         "src/bad.zig",
-        "fn bad() void { std.time.sleep(1); }\n",
+        "fn bad() void { std.posix.getpid(); }\n",
         .{},
     );
 
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.time", result.violations.items[0].pattern.needle);
+    try std.testing.expectEqualStrings("std.posix", result.violations.items[0].pattern.needle);
 }
 
 test "tidy flags host threads" {
@@ -420,20 +446,20 @@ test "tidy flags host threads" {
     try std.testing.expectEqualStrings("std.Thread", result.violations.items[0].pattern.needle);
 }
 
-test "tidy flags direct network access" {
+test "tidy flags construction of another host io backend" {
     var result: ScanResult = .{};
     defer result.deinit(std.testing.allocator);
 
     try scanSourceForPath(
         std.testing.allocator,
         &result,
-        "src/bad_network.zig",
-        "fn bad(address: std.net.Address) void { _ = address; }\n",
+        "src/bad_io.zig",
+        "const host = std.Io.Threaded.global_single_threaded;\n",
         .{},
     );
 
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.net", result.violations.items[0].pattern.needle);
+    try std.testing.expectEqualStrings("std.Io.Threaded", result.violations.items[0].pattern.needle);
 }
 
 test "tidy ignores comments and string literals" {
@@ -444,8 +470,8 @@ test "tidy ignores comments and string literals" {
         std.testing.allocator,
         &result,
         "src/comment.zig",
-        \\// std.time.nanoTimestamp()
-        \\const text = "std.crypto.random";
+        \\// std.os.linux.getpid()
+        \\const text = "std.debug.print";
         \\
     ,
         .{},
@@ -462,7 +488,7 @@ test "tidy allows wrapper files to mention banned patterns" {
         std.testing.allocator,
         &result,
         "./src/host_clock.zig",
-        "const now = std.time.nanoTimestamp();\n",
+        "const pid = std.os.linux.getpid();\n",
         .{ .allowed = &.{.{ .path = "src/host_clock.zig" }} },
     );
 
@@ -476,16 +502,16 @@ test "tidy allows specific patterns without exempting the whole file" {
     try scanSourceForPath(
         std.testing.allocator,
         &result,
-        "src/custom_clock.zig",
-        \\const now = std.time.nanoTimestamp();
-        \\const random = std.crypto.random;
+        "src/custom_host.zig",
+        \\const pid = std.os.linux.getpid();
+        \\const debug_io = std.Options.debug_io;
         \\
     ,
-        .{ .allowed = &.{.{ .path = "src/custom_clock.zig", .needle = "std.time" }} },
+        .{ .allowed = &.{.{ .path = "src/custom_host.zig", .needle = "std.os" }} },
     );
 
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.crypto.random", result.violations.items[0].pattern.needle);
+    try std.testing.expectEqualStrings("std.Options.debug_io", result.violations.items[0].pattern.needle);
 }
 
 test "tidy identifies aliases when matching patterns" {
@@ -496,8 +522,8 @@ test "tidy identifies aliases when matching patterns" {
         std.testing.allocator,
         &result,
         "src/alias.zig",
-        \\const time = std.time;
-        \\const now = time.nanoTimestamp();
+        \\const os = std.os;
+        \\const pid = os.linux.getpid();
         \\
     ,
         .{},
@@ -505,7 +531,7 @@ test "tidy identifies aliases when matching patterns" {
 
     try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
     try std.testing.expectEqual(@as(usize, 1), result.violations.items[0].line);
-    try std.testing.expectEqual(@as(usize, 14), result.violations.items[0].column);
+    try std.testing.expectEqual(@as(usize, 12), result.violations.items[0].column);
     try std.testing.expectEqual(@as(usize, 2), result.violations.items[1].line);
     try std.testing.expectEqual(@as(usize, 13), result.violations.items[1].column);
 }
@@ -531,6 +557,94 @@ test "tidy identifies aliases to host threads" {
     try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
     try std.testing.expectEqualStrings("std.Thread", result.violations.items[0].pattern.needle);
     try std.testing.expectEqualStrings("std.Thread", result.violations.items[1].pattern.needle);
+}
+
+test "tidy allows time constants and caller-provided io clocks and randomness" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/capabilities.zig",
+        \\const second = std.time.ns_per_s;
+        \\fn work(io: std.Io) void {
+        \\    _ = std.Io.Dir.cwd();
+        \\    _ = std.Io.File.stdout();
+        \\    _ = std.Io.Clock.awake.now(io);
+        \\    var source: std.Random.IoSource = .{ .io = io };
+        \\    _ = source.interface().int(u64);
+        \\}
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
+}
+
+test "tidy allows io-backed process operations but flags ambient host queries" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/process.zig",
+        \\fn work(io: std.Io, buffer: []u8) !void {
+        \\    _ = try std.process.currentPath(io, buffer);
+        \\    _ = try std.process.totalSystemMemory();
+        \\}
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
+    try std.testing.expectEqualStrings("std.process.totalSystemMemory", result.violations.items[0].pattern.needle);
+}
+
+test "tidy flags global debug and log sinks" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/output.zig",
+        \\fn bad() void {
+        \\    std.debug.print("bad", .{});
+        \\    std.log.info("bad", .{});
+        \\}
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
+    try std.testing.expectEqualStrings("std.debug.print", result.violations.items[0].pattern.needle);
+    try std.testing.expectEqualStrings("std.log", result.violations.items[1].pattern.needle);
+}
+
+test "tidy flags ambient allocator singletons" {
+    var result: ScanResult = .{};
+    defer result.deinit(std.testing.allocator);
+
+    try scanSourceForPath(
+        std.testing.allocator,
+        &result,
+        "src/allocation.zig",
+        \\const a = std.heap.page_allocator;
+        \\const b = std.heap.smp_allocator;
+        \\const c = std.heap.c_allocator;
+        \\const d = std.heap.wasm_allocator;
+        \\const e = std.heap.brk_allocator;
+        \\
+    ,
+        .{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 5), result.violations.items.len);
 }
 
 test "tidy accepts caller-provided patterns" {

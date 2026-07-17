@@ -343,7 +343,7 @@ asserts the table never records a commit it did not store.
 
 - Keep examples focused and readable.
 - Prefer one clear service behavior over a broad feature tour.
-- Route time and randomness through Marionette interfaces.
+- Route time and randomness through the environment's `std.Io`.
 - Return or expose traces so tests can compare replay behavior.
-- Avoid `std.time`, unseeded randomness, threads, filesystem, and network
-  calls in simulated example code.
+- Avoid independent host I/O backends, raw OS calls, unseeded randomness, and
+  host threads in simulated example code.

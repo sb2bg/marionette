@@ -94,7 +94,7 @@ fn runLateAckScenario(case: *Case, mode: CompletionMode) !void {
 
     _ = try queue.lease(first_worker, lease_duration_ns);
 
-    const extra_delay_ticks = 1 + try queue.env.random.intLessThan(u8, 3);
+    const extra_delay_ticks = 1 + randomIntLessThan(queue.env.io(), u8, 3);
     try case.control().runFor((profile.lease_ticks + extra_delay_ticks) * ns_per_ms);
     try queue.expireDue();
 
@@ -169,7 +169,7 @@ const RetryQueue = struct {
 
         self.state = .leased;
         self.lease_owner = worker;
-        self.lease_deadline_ns = self.env.clock.now() + duration_ns;
+        self.lease_deadline_ns = now(self.env.io()) + duration_ns;
         try self.env.record(
             "queue.lease job={} worker={} deadline_ns={}",
             .{ self.job_id, worker, self.lease_deadline_ns },
@@ -178,7 +178,7 @@ const RetryQueue = struct {
     }
 
     fn expireDue(self: *RetryQueue) !void {
-        if (self.state != .leased or self.env.clock.now() < self.lease_deadline_ns) return;
+        if (self.state != .leased or now(self.env.io()) < self.lease_deadline_ns) return;
 
         const previous_owner = self.lease_owner;
         self.state = .ready;
@@ -186,7 +186,7 @@ const RetryQueue = struct {
         self.lease_deadline_ns = 0;
         try self.env.record(
             "queue.timeout job={} worker={} now_ns={}",
-            .{ self.job_id, previous_owner, self.env.clock.now() },
+            .{ self.job_id, previous_owner, now(self.env.io()) },
         );
     }
 
@@ -231,3 +231,12 @@ const RetryQueue = struct {
         );
     }
 };
+
+fn now(io: std.Io) mar.Timestamp {
+    return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+}
+
+fn randomIntLessThan(io: std.Io, comptime T: type, less_than: T) T {
+    var source: std.Random.IoSource = .{ .io = io };
+    return @intCast(source.interface().intRangeLessThan(u64, 0, less_than));
+}

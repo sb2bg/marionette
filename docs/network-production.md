@@ -50,7 +50,8 @@ The closest fully-realized example in the Zig ecosystem. Studied in detail in
 - One `MessageBusType(IO)` per process, parametric on an IO backend so fuzz
   tests can swap a deterministic IO.
 - Identity is asymmetric: `ProcessID = union { replica: u8, client: u128 }`.
-- Topology declared at init as `[]const std.net.Address`.
+- Topology declared at init as a list of network addresses (the Zig 0.16
+  equivalent is `[]const std.Io.net.IpAddress`).
 - Wire format: u32 size, header checksum, body checksum, VSR header.
 - Pool of refcounted messages preallocated at startup; sender obtains via
   `bus.get_message`, fills, calls `send_message_to_replica` or
@@ -395,7 +396,7 @@ they do not get rediscussed.
 
 - General-purpose RPC: no request/response correlation, no service discovery,
   no client libraries.
-- TLS, real DNS, arbitrary `std.net` compatibility.
+- TLS, real DNS, arbitrary `std.Io.net` compatibility.
 - Stream or datagram primitives as part of this production endpoint transport.
   A separate deterministic `std.Io.net` stream subset is tracked in
   `docs/std-io-direction.md` and the roadmap; it is a simulator surface, not
@@ -403,8 +404,8 @@ they do not get rediscussed.
 - A drop-in replacement for Tokio, libuv, or any general-purpose async
   runtime.
 
-If a user needs any of the above, they should reach for `std.net` directly
-and not use `Endpoint(Message)` for that workload.
+If a user needs any of the above, they should use a production host `std.Io`
+directly and not use `Endpoint(Message)` for that workload.
 
 ## Deviations from TigerBeetle
 

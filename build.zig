@@ -329,11 +329,6 @@ pub fn build(b: *std.Build) void {
 
     const tidy = build_support.addTidyStep(b, b.path("src/main_tidy.zig"), .{
         .paths = &.{ "src", "examples", "tests", "validation" },
-        .extra_allowed = &.{
-            .{ .path = "tests/release_symbol_probe.zig", .needle = "std.process" },
-            .{ .path = "tests/fiber_overflow_crash.zig", .needle = "std.process" },
-            .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.process" },
-        },
         .target = target,
         .optimize = optimize,
     });

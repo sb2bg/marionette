@@ -144,7 +144,8 @@ fn scenario(case: *Case) !void {
 ```
 
 The application-shaped code depends on narrow handles such as `Recorder` plus
-typed endpoints, not on `control`, `World`, `std.net`, or the packet core.
+typed endpoints, not on `control`, `World`, a separately constructed host
+`std.Io`, or the packet core.
 
 Ordinary `std.Io.net` code gets node identity from the simulation environment
 rather than from each socket. `sim.env` is node 0 for compatibility; multi-node
@@ -256,7 +257,7 @@ network API. These are intentionally unresolved:
 - Backpressure semantics.
 - TLS.
 - Real DNS.
-- Arbitrary `std.net` compatibility. A narrow deterministic `std.Io.net`
+- Arbitrary `std.Io.net` compatibility. A narrow deterministic `std.Io.net`
   TCP stream subset is tracked separately as a simulator capability; it
   currently covers scheduler-backed accept/read suspension, latency,
   send-time loss, and delivery-time partition/heal behavior. It preserves

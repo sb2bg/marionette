@@ -15,8 +15,6 @@ const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
-pub const ClockError = std.mem.Allocator.Error || world_module.TraceError || std.Io.Cancelable;
-pub const RandomError = std.mem.Allocator.Error || world_module.TraceError;
 pub const TracerError = std.mem.Allocator.Error || world_module.TraceError;
 
 pub const BuggifyError = fault_module.BuggifyError;
@@ -39,175 +37,6 @@ pub const ProcessDynamicsOptions = struct {
     /// Minimum simulated time a process stays killed before an automatic
     /// restart may fire. Must be tick-aligned.
     restart_stability_min_ns: clock_module.Duration = 0,
-};
-
-/// App-facing time authority. Simulation clocks read and advance the
-/// world's virtual time; production clocks read host time.
-pub const Clock = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        now: *const fn (*anyopaque) clock_module.Timestamp,
-        sleep: *const fn (*anyopaque, clock_module.Duration) ClockError!void,
-    };
-
-    /// Current timestamp in nanoseconds: virtual time in simulation,
-    /// host monotonic time in production.
-    pub fn now(self: Clock) clock_module.Timestamp {
-        return self.vtable.now(self.ptr);
-    }
-
-    /// Sleep for `duration_ns`. `World.simulate` supplies a scheduler-backed
-    /// clock: it rounds up to the world's tick resolution, parks the current
-    /// task (or drives the scheduler from the main context), and evolves
-    /// automatic faults at crossed boundaries. A killed process or delivered
-    /// cancellation request returns `error.Canceled`. Production blocks the
-    /// calling thread.
-    pub fn sleep(self: Clock, duration_ns: clock_module.Duration) ClockError!void {
-        try self.vtable.sleep(self.ptr, duration_ns);
-    }
-
-    /// Build a low-level clock view over a world's virtual time.
-    ///
-    /// This constructor advances the world directly and does not run scheduler
-    /// work or automatic fault evolution. `World.simulate` deliberately uses
-    /// its node-scoped I/O-backed clock instead. Application code should take
-    /// `Env.clock`; harnesses that want raw time mutation can use
-    /// `World.clock()` or `SimControl` explicitly.
-    pub fn fromWorld(world: *World) Clock {
-        return .{ .ptr = world, .vtable = &world_clock_vtable };
-    }
-
-    /// Build the production clock view over host time.
-    pub fn fromProduction(clock: *clock_module.ProductionClock) Clock {
-        return .{ .ptr = clock, .vtable = &production_clock_vtable };
-    }
-
-    const world_clock_vtable: VTable = .{
-        .now = worldClockNow,
-        .sleep = worldClockSleep,
-    };
-
-    const production_clock_vtable: VTable = .{
-        .now = productionClockNow,
-        .sleep = productionClockSleep,
-    };
-
-    fn worldClock(ptr: *anyopaque) *World {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn productionClock(ptr: *anyopaque) *clock_module.ProductionClock {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn worldClockNow(ptr: *anyopaque) clock_module.Timestamp {
-        return worldClock(ptr).now();
-    }
-
-    fn worldClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) ClockError!void {
-        const world = worldClock(ptr);
-        try world.runFor(world.clock().ceilDuration(duration_ns));
-    }
-
-    fn productionClockNow(ptr: *anyopaque) clock_module.Timestamp {
-        return productionClock(ptr).now();
-    }
-
-    fn productionClockSleep(ptr: *anyopaque, duration_ns: clock_module.Duration) ClockError!void {
-        productionClock(ptr).sleep(duration_ns);
-    }
-};
-
-/// App-facing randomness authority. Simulation draws come from the world's
-/// seeded stream and are traced for replay; production draws come from host
-/// entropy and are untraced.
-pub const Random = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        random_u64: *const fn (*anyopaque) RandomError!u64,
-        boolean: *const fn (*anyopaque) RandomError!bool,
-        int_less_than_u64: *const fn (*anyopaque, u64) RandomError!u64,
-    };
-
-    /// Draw a `u64` from this environment's random authority.
-    ///
-    /// Simulation draws come from the world's seeded stream and are traced;
-    /// production draws come from host entropy and are untraced.
-    pub fn randomU64(self: Random) RandomError!u64 {
-        return self.vtable.random_u64(self.ptr);
-    }
-
-    /// Draw a boolean from this environment's random authority.
-    ///
-    /// Simulation draws come from the world's seeded stream and are traced;
-    /// production draws come from host entropy and are untraced.
-    pub fn boolean(self: Random) RandomError!bool {
-        return self.vtable.boolean(self.ptr);
-    }
-
-    /// Draw an unbiased integer in the range `0 <= value < less_than`.
-    pub fn intLessThan(self: Random, comptime T: type, less_than: T) RandomError!T {
-        const value = try self.vtable.int_less_than_u64(self.ptr, @intCast(less_than));
-        return @intCast(value);
-    }
-
-    /// Build the simulation random view over a world's seeded stream.
-    pub fn fromWorld(world: *World) Random {
-        return .{ .ptr = world, .vtable = &world_random_vtable };
-    }
-
-    /// Build the production random view over a host entropy source.
-    pub fn fromProduction(source: *std.Random.IoSource) Random {
-        return .{ .ptr = source, .vtable = &production_random_vtable };
-    }
-
-    const world_random_vtable: VTable = .{
-        .random_u64 = worldRandomU64,
-        .boolean = worldRandomBool,
-        .int_less_than_u64 = worldRandomIntLessThanU64,
-    };
-
-    const production_random_vtable: VTable = .{
-        .random_u64 = productionRandomU64,
-        .boolean = productionRandomBool,
-        .int_less_than_u64 = productionRandomIntLessThanU64,
-    };
-
-    fn worldRandom(ptr: *anyopaque) *World {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn productionRandom(ptr: *anyopaque) *std.Random.IoSource {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn worldRandomU64(ptr: *anyopaque) RandomError!u64 {
-        return worldRandom(ptr).randomU64();
-    }
-
-    fn worldRandomBool(ptr: *anyopaque) RandomError!bool {
-        return worldRandom(ptr).randomBool();
-    }
-
-    fn worldRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) RandomError!u64 {
-        return worldRandom(ptr).randomIntLessThan(u64, less_than);
-    }
-
-    fn productionRandomU64(ptr: *anyopaque) RandomError!u64 {
-        return productionRandom(ptr).interface().int(u64);
-    }
-
-    fn productionRandomBool(ptr: *anyopaque) RandomError!bool {
-        return productionRandom(ptr).interface().boolean();
-    }
-
-    fn productionRandomIntLessThanU64(ptr: *anyopaque, less_than: u64) RandomError!u64 {
-        return productionRandom(ptr).interface().intRangeLessThan(u64, 0, less_than);
-    }
 };
 
 /// App-facing trace authority. Simulation tracers append to the world's
@@ -300,16 +129,13 @@ pub const Recorder = struct {
 
 var noop_tracer_ctx: u8 = 0;
 
-/// The capability bundle handed to application code: I/O, allocation, disk,
-/// clock, randomness, and tracing, each backed by simulation or production
-/// authorities without the app knowing which. See the API doc's `Env`
-/// section for the full contract.
+/// The capability bundle handed to application code. `io_backend` is the
+/// authority for I/O, clocks, sleeps, and randomness; allocation, modeled
+/// disk operations, and tracing remain explicit sibling capabilities.
 pub const Env = struct {
     io_backend: std.Io = .failing,
     memory: std.mem.Allocator,
     disk: disk_module.Disk,
-    clock: Clock,
-    random: Random,
     tracer: Tracer,
     buggify_enabled: bool = false,
 
@@ -355,7 +181,12 @@ pub const Env = struct {
         // that would have rolled zero.
         if (rate.numerator == 0) return false;
 
-        const roll = try self.random.intLessThan(u32, rate.denominator);
+        var source: std.Random.IoSource = .{ .io = self.io() };
+        const roll: u32 = @intCast(source.interface().intRangeLessThan(
+            u64,
+            0,
+            rate.denominator,
+        ));
         const fired = roll < rate.numerator;
         try self.record(
             "buggify hook={s} rate={}/{} roll={} fired={}",
@@ -366,14 +197,12 @@ pub const Env = struct {
 };
 
 /// Composition root for production capabilities: host I/O, a real disk
-/// rooted below a caller-owned directory, host clock and entropy, and
-/// host I/O. `env()` returns the app-facing view.
+/// rooted below a caller-owned directory, allocation, and tracing.
+/// `env()` returns the app-facing view.
 pub const Production = struct {
     allocator: std.mem.Allocator,
     io_backend: std.Io,
     disk: disk_module.RealDisk,
-    clock: clock_module.ProductionClock,
-    random_source: std.Random.IoSource,
     tracer: Tracer,
 
     pub const Options = struct {
@@ -394,8 +223,6 @@ pub const Production = struct {
             .allocator = options.allocator,
             .io_backend = options.io,
             .disk = try disk_module.RealDisk.init(options.root_dir, options.io, options.disk),
-            .clock = .init(options.io),
-            .random_source = .{ .io = options.io },
             .tracer = options.tracer orelse .none(),
         };
     }
@@ -407,8 +234,6 @@ pub const Production = struct {
             .io_backend = self.io_backend,
             .memory = self.allocator,
             .disk = self.disk.disk(),
-            .clock = .fromProduction(&self.clock),
-            .random = .fromProduction(&self.random_source),
             .tracer = self.tracer,
         };
     }
@@ -624,12 +449,15 @@ test "env: simulation routes through world capabilities" {
 
     const sim = try world.simulate(.{});
     try sim.control.tick();
-    _ = try sim.env.random.intLessThan(u64, 100);
+    var random_source: std.Random.IoSource = .{ .io = sim.env.io() };
+    _ = random_source.interface().intRangeLessThan(u64, 0, 100);
 
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), sim.env.clock.now());
-    _ = sim.env.io();
+    try std.testing.expectEqual(
+        @as(i96, 10),
+        std.Io.Clock.awake.now(sim.env.io()).nanoseconds,
+    );
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "io.random len=8 digest=") != null);
 }
 
 test "env: simulation clock sleep rounds up to tick resolution" {
@@ -637,9 +465,12 @@ test "env: simulation clock sleep rounds up to tick resolution" {
     defer world.deinit();
 
     const sim = try world.simulate(.{});
-    try sim.env.clock.sleep(15);
+    try std.Io.sleep(sim.env.io(), .fromNanoseconds(15), .awake);
 
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), sim.env.clock.now());
+    try std.testing.expectEqual(
+        @as(i96, 20),
+        std.Io.Clock.awake.now(sim.env.io()).nanoseconds,
+    );
     try std.testing.expect(std.mem.indexOf(
         u8,
         world.traceBytes(),
@@ -676,7 +507,7 @@ test "env: simulation clock sleep runs tasks and automatic fault boundaries" {
     var state: State = .{ .world = &world, .io = sim.env.io() };
     var future = std.Io.async(state.io, State.sleeper, .{&state});
 
-    try sim.env.clock.sleep(40);
+    try std.Io.sleep(sim.env.io(), .fromNanoseconds(40), .awake);
     future.await(state.io);
 
     try std.testing.expectEqual(@as(clock_module.Timestamp, 40), world.now());
@@ -695,7 +526,10 @@ test "env: killed node clock rejects sleep through stale capability" {
     const node_env = try sim.envForNode(1);
     try sim.killProcess(1);
 
-    try std.testing.expectError(error.Canceled, node_env.clock.sleep(10));
+    try std.testing.expectError(
+        error.Canceled,
+        std.Io.sleep(node_env.io(), .fromNanoseconds(10), .awake),
+    );
     try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
 }
 
@@ -826,8 +660,9 @@ test "env: production exposes production authorities" {
     _ = env.io();
     const memory = try env.allocator().alloc(u8, 4);
     defer env.allocator().free(memory);
-    _ = env.clock.now();
-    _ = try env.random.intLessThan(u8, 10);
+    _ = std.Io.Clock.awake.now(env.io());
+    var random_source: std.Random.IoSource = .{ .io = env.io() };
+    _ = random_source.interface().intRangeLessThan(u8, 0, 10);
     try env.disk.write(.{ .path = "prod/wal.log", .offset = 0, .bytes = "abcd" });
     try env.disk.sync(.{ .path = "prod/wal.log" });
     var buffer: [4]u8 = @splat(0);
@@ -843,7 +678,7 @@ test "env: simulation buggify is traced" {
     const sim = try world.simulate(.{});
     _ = try sim.env.buggify(.drop_packet, .percent(20));
 
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than type=u64 less_than=100") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "io.random len=8 digest=") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=drop_packet rate=20/100 roll=") != null);
 }
 
@@ -897,6 +732,6 @@ test "env: simulation buggify rejects invalid runtime rates" {
         error.InvalidRate,
         sim.env.buggify(.bad_rate, .{ .numerator = 2, .denominator = 1 }),
     );
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_int_less_than") == null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "io.random") == null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "buggify hook=bad_rate") == null);
 }

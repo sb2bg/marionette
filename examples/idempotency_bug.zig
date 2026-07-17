@@ -25,7 +25,10 @@ pub fn init(sim: mar.Sim) PaymentService {
 pub fn scenario(case: *Case) !void {
     const service = &case.app;
     const env = service.env;
-    const alice_request_id = try env.random.intLessThan(u32, 10_000);
+    var random_source: std.Random.IoSource = .{ .io = env.io() };
+    const alice_request_id: u32 = @intCast(
+        random_source.interface().intRangeLessThan(u64, 0, 10_000),
+    );
     const reuse_request_id = try env.buggify(.reuse_request_id_across_accounts, .oneIn(8));
     const bob_request_id = if (reuse_request_id) alice_request_id else alice_request_id + 1;
 

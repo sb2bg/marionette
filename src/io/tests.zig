@@ -1734,15 +1734,15 @@ test "io: scheduler timer jumps evolve process and network faults" {
             self.kills += 1;
         }
 
-        fn restartedTask(self: *@This(), clock: env_module.Clock) void {
+        fn restartedTask(self: *@This(), io: Io) void {
             if (self.restarted_task_ran_at == null) {
-                self.restarted_task_ran_at = clock.now();
+                self.restarted_task_ran_at = @intCast(Io.Clock.awake.now(io).nanoseconds);
             }
         }
 
         fn restart(raw: *anyopaque, env: env_module.Env) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            _ = try Io.concurrent(env.io(), restartedTask, .{ self, env.clock });
+            _ = try Io.concurrent(env.io(), restartedTask, .{ self, env.io() });
         }
 
         fn sleep(io: Io) void {

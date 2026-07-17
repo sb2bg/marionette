@@ -13,8 +13,8 @@ if (try env.buggify(.drop_packet, .percent(20))) {
 
 Production envs should construct `Env` with buggify disabled, so
 `env.buggify` always returns `false`. Simulation envs returned by
-`world.simulate` draw through the world's single PRNG according to the supplied
-`BuggifyRate` and record
+`world.simulate` draw through `env.io()` into the world's single PRNG according
+to the supplied `BuggifyRate` and record
 `buggify hook=<name> rate=<n>/<d> roll=<value> fired=<bool>` in the trace.
 Invalid runtime rates return `error.InvalidRate` before any random draw or
 hook trace event.
@@ -29,8 +29,10 @@ production behavior.
 
 ```zig
 pub fn sendPacket(env: anytype, packet_id: u64) !void {
-    const latency_ns = try env.random.intLessThan(mar.Duration, 1_000);
-    try env.clock.sleep(latency_ns);
+    const io = env.io();
+    var source: std.Random.IoSource = .{ .io = io };
+    const latency_ns = source.interface().intRangeLessThan(u64, 0, 1_000);
+    try std.Io.sleep(io, .fromNanoseconds(latency_ns), .awake);
 
     if (try env.buggify(.drop_packet, .percent(20))) {
         return SendError.PacketDropped;

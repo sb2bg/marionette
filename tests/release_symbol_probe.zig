@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
 
     const env = production.env();
     if (try env.buggify(.release_probe, .always())) return error.ProductionBuggifyFired;
-    _ = env.clock.now();
-    _ = try env.random.randomU64();
+    _ = std.Io.Clock.awake.now(env.io());
+    var random_source: std.Random.IoSource = .{ .io = env.io() };
+    _ = random_source.interface().int(u64);
 }

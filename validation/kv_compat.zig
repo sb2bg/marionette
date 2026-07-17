@@ -188,7 +188,12 @@ pub fn recoveryWindowCrashPointSweep(case: *Case) !void {
     });
 
     const phase_count = @typeInfo(CompactPhase).@"enum".fields.len;
-    const choice = try case.env().random.intLessThan(u8, phase_count + 1);
+    var random_source: std.Random.IoSource = .{ .io = case.env().io() };
+    const choice: u8 = @intCast(random_source.interface().intRangeLessThan(
+        u64,
+        0,
+        phase_count + 1,
+    ));
     if (choice == 0) {
         try store.recorder.record("kv_compat.sweep crash_point=no_compaction", .{});
     } else {

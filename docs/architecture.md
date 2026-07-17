@@ -75,7 +75,7 @@ Marionette currently has:
 - Fixed-seed trace comparison tests.
 - Many-seed deterministic fuzz-style tests.
 - An AST-based tidy linter for obvious nondeterministic calls, including
-  simple const aliases such as `const time = std.time;`.
+  simple const aliases such as `const os = std.os;`.
 
 Marionette does not yet have:
 
@@ -130,24 +130,21 @@ authorities at the top of the program instead of reaching for host globals.
 The intended storage application shape is to accept `std.Io`, a root
 `std.Io.Dir`, and optionally `mar.Recorder`. Code should accept all of
 `mar.Env` only when it genuinely needs Marionette-specific capabilities such as
-simulated random hooks or clock access.
+BUGGIFY, modeled allocation/disk operations, or trace recording.
 Marionette should not auto-detect the environment from globals, environment
 variables, thread-locals, or build flags.
 
-Marionette still owns small interfaces for time and randomness
-because they are needed now and they are not fully solved by `std.Io`. For disk
-files, the public teaching surface is now `std.Io`: `Env.io()` supplies a
-deterministic backend in simulation and the host backend in production. For
-networking, app code can receive typed `Endpoint(Message)` handles or use the
-narrow scheduler-backed `std.Io.net` stream subset. See
-[std.Io Direction](std-io-direction.md) for the destination architecture. The
-migration plan is:
+`Env.io()` is the time, randomness, file, network, and scheduling seam: it
+supplies a deterministic backend in simulation and the host backend in
+production. App code can also receive typed `Endpoint(Message)` handles for
+protocol modeling. See [std.Io Direction](std-io-direction.md) for the
+destination architecture. The migration plan is:
 
 - Keep Marionette's public effect surface narrow while `std.Io` is unstable.
 - Model disk and network behind adapters that can wrap `std.Io` when its shape
   settles.
-- Avoid promising compatibility with arbitrary direct `std.fs`, `std.net`, or
-  OS calls.
+- Avoid promising compatibility with every `std.Io` operation or with raw OS
+  calls that bypass it.
 - Track Zig master and expect API churn before Zig 1.0.
 
 If `std.Io` changes, Marionette should absorb that churn inside adapters, not
@@ -156,8 +153,8 @@ make every user rewrite their simulation tests.
 ## Time Model
 
 Simulation time is an integer nanosecond virtual clock. There is exactly one
-clock authority per `World`, and simulated code should receive that authority
-instead of calling `std.time`.
+clock authority per `World`; application code reaches it through the
+caller-provided `std.Io` instead of constructing a host I/O backend.
 
 Current behavior:
 
@@ -165,7 +162,7 @@ Current behavior:
 - `tick()` advances by the world's configured tick duration.
 - `runFor(duration)` advances through deterministic event and fault-evolution
   boundaries, and may jump across spans where no boundary exists.
-- `Env.clock.sleep(duration)` shares the node-scoped `std.Io` scheduler
+- `std.Io.sleep(env.io(), duration, .awake)` uses the node-scoped scheduler
   authority: it parks an in-task caller or drives tasks from the main context,
   rounds to tick resolution, and crosses the same automatic-fault boundaries.
 - `World.clock()` is the explicit low-level escape hatch. Its `SimClock`
@@ -193,16 +190,20 @@ There is exactly one seeded PRNG per `World`. Every simulator choice must draw
 from it: packet latency, disk latency, BUGGIFY, crash timing, workload
 generation, scheduling choices, and future shrink decisions.
 
+Application random bytes, including `std.Random.IoSource` and
+`std.Io.randomSecure`, flow through `Env.io()` into that PRNG and are recorded
+as `io.random` events. BUGGIFY uses the same path.
+
 Current `World.unsafeUntracedRandom()` exposes a raw deterministic
 `std.Random` view for rare cases that need the full standard API. Draws
 through that view are deterministic, but not automatically traced. The unsafe
 name is intentional. Simulator decisions should use traced helpers such as
 `randomU64()`, `randomBool()`, and `randomIntLessThan()`.
 
-Direct `std.crypto.random`, unseeded randomness, `/dev/urandom`, wall-clock
-seeding, and host entropy are banned inside simulated code. The tidy linter is
-the first guard. Twice-and-compare trace replay is the backstop. A future
-paranoid mode should make simulator-incompatible effects fail loudly.
+Independent host I/O backends, unseeded PRNGs, `/dev/urandom`, wall-clock
+seeding, and raw host entropy are banned inside simulated code. The tidy
+linter is the first guard. Twice-and-compare trace replay is the backstop. A
+future paranoid mode should make simulator-incompatible effects fail loudly.
 
 ## Smallest User Program
 
@@ -213,8 +214,10 @@ const std = @import("std");
 const mar = @import("marionette");
 
 fn client(env: anytype) !u64 {
-    const latency_ns = try env.random.intLessThan(u64, 1_000_000);
-    try env.clock.sleep(latency_ns);
+    const io = env.io();
+    var source: std.Random.IoSource = .{ .io = io };
+    const latency_ns = source.interface().intRangeLessThan(u64, 0, 1_000_000);
+    try std.Io.sleep(io, .fromNanoseconds(latency_ns), .awake);
     return latency_ns;
 }
 

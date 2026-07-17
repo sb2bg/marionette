@@ -50,14 +50,18 @@
   the regression covers every file surface and verifies outside data is
   unchanged.
 
-- Routes scheduler timer jumps through automatic process/network fault
-  boundaries and yields to work created at each intermediate boundary. Direct
-  `Env.clock.sleep` now shares that node-scoped scheduler authority with
-  app-facing `std.Io` sleep, while `World.clock()` remains the explicit raw
-  harness clock. App sleeps round to ticks, stale killed-node clocks return
-  `error.Canceled`, full-range task-start jitter and network-latency jitter
-  avoid overflow, beyond-clock process and network transitions stay inert,
-  and failed liveness transitions remain retryable.
+- Makes `Env.io()` the single application-facing authority for clocks, sleeps,
+  and randomness, removing the parallel `Env.clock` / `Env.random` interfaces
+  and routing BUGGIFY draws through `std.Random.IoSource`. Scheduler timer
+  jumps cross automatic process/network fault boundaries and yield to work
+  created at each intermediate boundary, while `World.clock()` remains the
+  explicit raw harness clock. App sleeps round to ticks, stale killed-node I/O
+  returns `error.Canceled`, full-range task-start jitter and network-latency
+  jitter avoid overflow, beyond-clock process and network transitions stay
+  inert, and failed liveness transitions remain retryable. Tidy now targets
+  Zig 0.16's real escape hatches—alternate host I/O backends, raw OS access,
+  global logging, host-only process queries, threads, and ambient allocators—
+  instead of obsolete time, entropy, filesystem, and network APIs.
 
 - Makes the disk contract match its declared sector model: torn writes land a
   prefix of whole sectors, reorder is one consistently traced crash-global

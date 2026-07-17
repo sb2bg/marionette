@@ -69,18 +69,6 @@ pub const Env = env_module.Env;
 /// Production capability composition root.
 pub const Production = env_module.Production;
 
-/// App-facing clock capability.
-pub const EnvClock = env_module.Clock;
-
-/// Errors returned by clock capabilities.
-pub const ClockError = env_module.ClockError;
-
-/// App-facing random capability.
-pub const EnvRandom = env_module.Random;
-
-/// Errors returned by random capabilities.
-pub const EnvRandomError = env_module.RandomError;
-
 /// App-facing trace capability.
 pub const Tracer = env_module.Tracer;
 

@@ -16,23 +16,21 @@ const value = random.int(u64);
 
 The same seed produces the same stream within a single Zig version.
 
-## `Clock`
+## Time Through `std.Io`
 
 Simulated time is owned by the world. `mar.SimClock` advances only when the
-caller explicitly ticks or sleeps it; application code reads time through
-`env.clock` (or, in `std.Io`-shaped code, `std.Io.Clock.*` over the
-environment's `io()`). Production code reads host time through the `std.Io`
-its composition root already owns; Marionette does not wrap host time.
+caller explicitly advances the simulation; application code reads time with
+`std.Io.Clock.*` over `env.io()`. Production code uses the same calls over the
+host `std.Io` its composition root already owns.
 
-`env.clock.sleep(duration)` is an app-facing scheduler operation in
-simulation, with the same authority as sleeping through `env.io()`. Inside a
-task it parks that task; from the scenario/main context it drives runnable
-tasks and timer deadlines up to the requested time. Both paths round to the
-world's tick resolution and evolve automatic process/network faults at every
-crossed boundary. A clock retained from a killed node returns
-`error.Canceled`. In contrast, `World.clock()` exposes the deliberately
-low-level `SimClock` for harness code that wants raw clock mutation without
-scheduler or fault-evolution work.
+`std.Io.sleep(env.io(), duration, .awake)` is the app-facing scheduler
+operation. Inside a task it parks that task; from the scenario/main context it
+drives runnable tasks and timer deadlines up to the requested time. Both paths
+round to the world's tick resolution and evolve automatic process/network
+faults at every crossed boundary. Sleeping through an I/O capability retained
+from a killed node returns `error.Canceled`. In contrast, `World.clock()`
+exposes the deliberately low-level `SimClock` for harness code that wants raw
+clock mutation without scheduler or fault-evolution work.
 
 All timestamps and durations are nanoseconds:
 
@@ -50,21 +48,23 @@ clock, random hooks, or other simulator capabilities can take `mar.Env`:
 
 ```zig
 fn service(env: anytype) !void {
-    const now = env.clock.now();
-    const jitter = try env.random.intLessThan(mar.Duration, 1_000);
+    const io = env.io();
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    var random_source: std.Random.IoSource = .{ .io = io };
+    const jitter = random_source.interface().intRangeLessThan(u64, 0, 1_000);
     if (try env.buggify(.slow_path, .oneIn(10))) {
-        try env.clock.sleep(jitter);
+        try std.Io.sleep(io, .fromNanoseconds(jitter), .awake);
     }
     _ = .{ now, jitter };
 }
 ```
 
-`mar.Env` is the concrete harness-facing capability bundle. Its disk, clock,
-random, and tracer authorities are fields, not lazy accessors. `env.io()`
-returns the backing `std.Io`: host I/O in production envs, and Marionette's
-current deterministic backend in simulation envs. `env.recorder()` returns a
-narrow structured recording capability for code that should not depend on all
-of `Env`.
+`mar.Env` is the concrete harness-facing capability bundle. `env.io()` is the
+single authority for I/O, clocks, sleeps, and random bytes: host I/O in
+production envs, and Marionette's current deterministic backend in simulation
+envs. The allocator, modeled `Disk`, and tracer are explicit sibling
+capabilities. `env.recorder()` returns a narrow structured recording
+capability for code that should not depend on all of `Env`.
 
 Production-shaped libraries should prefer taking the smallest capabilities they
 need. For example, code that only needs I/O and trace events can accept
@@ -200,11 +200,13 @@ const index = try world.randomIntLessThan(u64, 1_000_000);
 `randomIntLessThan` uses Zig's rejection-sampling bounded integer helper, so it
 does not teach modulo bias.
 
-Application code should usually use `env.random` instead of receiving the
-whole `World`:
+Application code should draw through an `std.Random.IoSource` over `env.io()`
+instead of receiving the whole `World`. The simulation backend records an
+`io.random` event for each byte draw:
 
 ```zig
-const latency_ns = try env.random.intLessThan(u64, 1_000_000);
+var source: std.Random.IoSource = .{ .io = env.io() };
+const latency_ns = source.interface().intRangeLessThan(u64, 0, 1_000_000);
 ```
 
 ## Allocation
@@ -974,5 +976,5 @@ const tidy = marionette_build.addTidyStep(b, .{
 
 The current linter is AST-based: it ignores comments and string literals,
 supports exact and prefix dotted-path bans, and catches simple const aliases
-such as `const time = std.time`. It does not yet perform full semantic import
+such as `const os = std.os`. It does not yet perform full semantic import
 resolution.

@@ -43,12 +43,12 @@ pub fn expectSimFailure(opts: anytype) !void;
 
 pub const Env = struct {
     io_backend: std.Io,
+    memory: std.mem.Allocator,
     disk: Disk,
-    clock: EnvClock,
-    random: EnvRandom,
     tracer: Tracer,
     buggify_enabled: bool,
     pub fn io(self: Env) std.Io;
+    pub fn allocator(self: Env) std.mem.Allocator;
     pub fn recorder(self: Env) Recorder;
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void;
 };
