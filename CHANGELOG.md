@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.0 - Unreleased
+## v0.6.0 - 2026-07-17
 
 - Exports the tidy build helper through Marionette's dependency `build.zig`.
   The helper locates its own dependency, so `src/main_tidy.zig` resolves inside
