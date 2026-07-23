@@ -133,6 +133,12 @@ pub fn Ops(comptime Backend: type) type {
                         defer wakeBackpressuredWriters(backend);
                         defer message.release();
                         if (target.connection.read_error == null) target.connection.read_error = read_error;
+                        target.connection.read_failed = true;
+                        _ = network_module.internal.discardStreamFramesFromControl(
+                            backend.network_control,
+                            node,
+                            @intCast(target.handle),
+                        );
 
                         backend.wakeConnection(target.handle, 1);
                     },
@@ -145,7 +151,10 @@ pub fn Ops(comptime Backend: type) type {
             const raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
             const handle = std.math.cast(SocketHandle, raw) orelse return null;
             const connection = backend.connection(handle) orelse return null;
-            if (connection.closed) return null;
+            if (connection.closed or
+                connection.read_shutdown or
+                connection.read_error != null or
+                connection.read_failed) return null;
             return .{
                 .handle = handle,
                 .connection = connection,
@@ -184,7 +193,9 @@ pub fn Ops(comptime Backend: type) type {
             if (options.protocol != .tcp) return error.ProtocolUnsupportedBySystem;
 
             const backend = backendFromUserdata(userdata);
+            try takeCancel(backend);
             if (!backend.processIsAlive()) return error.NetworkDown;
+            if (options.reuse_address) return error.OptionUnsupported;
             // Port 0 asks for an ephemeral port, per POSIX bind semantics;
             // the assigned port is surfaced through the returned socket's
             // address so callers can connect to it.
@@ -198,7 +209,11 @@ pub fn Ops(comptime Backend: type) type {
             const node = backend.allocateNetworkNode() catch return error.NetworkDown;
             const listener = backend.allocator.create(Backend.ListenerState) catch return error.SystemResources;
             errdefer backend.allocator.destroy(listener);
-            listener.* = .{ .address = bound_address, .node = node };
+            listener.* = .{
+                .address = bound_address,
+                .node = node,
+                .backlog = options.kernel_backlog,
+            };
             errdefer listener.pending.deinit(backend.allocator);
 
             const handle = backend.createHandle(.{ .listener = listener }) catch return error.SystemResources;
@@ -329,22 +344,46 @@ pub fn Ops(comptime Backend: type) type {
             if (options.protocol) |protocol| {
                 if (protocol != .tcp) return error.ProtocolUnsupportedBySystem;
             }
+            switch (options.timeout) {
+                .none => {},
+                .duration, .deadline => return error.OptionUnsupported,
+            }
 
             const backend = backendFromUserdata(userdata);
+            try takeCancel(backend);
             if (!backend.processIsAlive()) return error.NetworkDown;
             const listener_ref = backend.findOpenListenerRef(address) orelse return error.ConnectionRefused;
             const listener_backend = listener_ref.backend;
             const listener = listener_ref.state;
+            if (listener.pending.items.len >= listener.backlog) return error.ConnectionRefused;
             const client_node = backend.allocateNetworkNode() catch return error.NetworkDown;
+            if (client_node) |from_node| {
+                if (listener.node) |to_node| {
+                    const path_state = network_module.internal.streamPathStateFromControl(
+                        backend.network_control,
+                        from_node,
+                        to_node,
+                    ) catch return error.NetworkDown;
+                    switch (path_state) {
+                        .available => {},
+                        .source_down => return error.NetworkDown,
+                        .destination_down, .link_disabled => return error.HostUnreachable,
+                    }
+                }
+            }
 
             const client = backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
             errdefer backend.allocator.destroy(client);
+            var client_address = address.*;
+            client_address.setPort(
+                backend.allocateEphemeralPort(&client_address) catch return error.AddressUnavailable,
+            );
             client.* = .{ .address = address.*, .node = client_node };
             errdefer client.inbox.deinit(backend.allocator);
 
             const server = listener_backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
             errdefer listener_backend.allocator.destroy(server);
-            server.* = .{ .address = listener.address, .node = listener.node };
+            server.* = .{ .address = client_address, .node = listener.node };
             errdefer server.inbox.deinit(listener_backend.allocator);
 
             const client_handle = backend.createHandle(.{ .connection = client }) catch return error.SystemResources;
@@ -409,7 +448,7 @@ pub fn Ops(comptime Backend: type) type {
             const handle = state.pending.orderedRemove(0);
             return .{
                 .handle = handle,
-                .address = state.address,
+                .address = (backend.connection(handle) orelse return error.SocketNotListening).address,
             };
         }
 
@@ -421,6 +460,7 @@ pub fn Ops(comptime Backend: type) type {
                 backend.retireClosedNetHandleIfIdle(src);
                 return error.SocketUnconnected;
             }
+            if (connection.read_shutdown) return 0;
             if (connection.node) |node| try drainNetworkReady(backend, node);
             while (connection.inbox.items.len == 0) {
                 const deadline_ns = if (connection.node) |node| try nextNetworkDeliveryAt(backend, node) else null;
@@ -428,8 +468,12 @@ pub fn Ops(comptime Backend: type) type {
                     connection.read_error = null;
                     return err;
                 }
+                if (connection.read_failed) return 0;
                 const peer_closed = if (connection.peer) |peer_ref|
-                    if (peer_ref.backend.connection(peer_ref.handle)) |peer| peer.closed else true
+                    if (peer_ref.backend.connection(peer_ref.handle)) |peer|
+                        peer.closed or peer.write_shutdown
+                    else
+                        true
                 else
                     true;
                 if (peer_closed and deadline_ns == null) return 0;
@@ -477,7 +521,7 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             try takeCancel(backend);
             const connection = backend.connection(dest) orelse return error.SocketUnconnected;
-            if (connection.closed) return error.SocketUnconnected;
+            if (connection.closed or connection.write_shutdown) return error.SocketUnconnected;
             const peer_ref = connection.peer orelse return error.SocketUnconnected;
             const peer = peer_ref.backend.connection(peer_ref.handle) orelse return error.ConnectionResetByPeer;
             if (peer.closed) return error.ConnectionResetByPeer;
@@ -501,19 +545,22 @@ pub fn Ops(comptime Backend: type) type {
                             frame.items
                         else blk: {
                             segment.clearRetainingCapacity();
-                            segment.appendNTimes(backend.allocator, 0, stream_frame_handle_size) catch
+                            segment.appendNTimes(backend.allocator, 0, stream_frame_handle_size) catch {
+                                if (offset > 0) return offset;
                                 return error.SystemResources;
+                            };
                             std.mem.writeInt(
                                 u64,
                                 segment.items[0..stream_frame_handle_size],
                                 @intCast(peer_ref.handle),
                                 .little,
                             );
-                            segment.appendSlice(backend.allocator, payload[offset..][0..segment_len]) catch
+                            segment.appendSlice(backend.allocator, payload[offset..][0..segment_len]) catch {
+                                if (offset > 0) return offset;
                                 return error.SystemResources;
+                            };
                             break :blk segment.items;
                         };
-                        offset += segment_len;
 
                         while (true) {
                             // The peer can close or die while this writer is
@@ -521,9 +568,18 @@ pub fn Ops(comptime Backend: type) type {
                             // it before every attempt so a stale pointer is
                             // never dereferenced and a dead peer surfaces as
                             // a reset instead of a silent retry.
-                            const live_peer = peer_ref.backend.connection(peer_ref.handle) orelse
+                            const live_peer = peer_ref.backend.connection(peer_ref.handle) orelse {
+                                if (offset > 0) return offset;
                                 return error.ConnectionResetByPeer;
-                            if (live_peer.closed) return error.ConnectionResetByPeer;
+                            };
+                            if (live_peer.closed or
+                                live_peer.read_shutdown or
+                                live_peer.read_error != null or
+                                live_peer.read_failed)
+                            {
+                                if (offset > 0) return offset;
+                                return error.ConnectionResetByPeer;
+                            }
 
                             const send_result = network_module.internal.sendStreamBytesFromControl(
                                 backend.network_control,
@@ -544,8 +600,10 @@ pub fn Ops(comptime Backend: type) type {
                                 // TCP, and surfaces through deadlock
                                 // detection.
                                 error.PoolExhausted, error.EventQueueFull => {
-                                    const wait_set = backend.futex_wait_set orelse
+                                    const wait_set = backend.futex_wait_set orelse {
+                                        if (offset > 0) return offset;
                                         return errors.mapNetworkWriteError(err);
+                                    };
                                     connection.waiters += 1;
                                     const wait_result = wait_set.blockUntilCancelable(
                                         stream_backpressure_wait_key,
@@ -559,26 +617,38 @@ pub fn Ops(comptime Backend: type) type {
                                             // as the read park: never skip
                                             // retiring a closed idle handle.
                                             if (connection.closed) backend.retireClosedNetHandleIfIdle(dest);
+                                            if (offset > 0) return offset;
                                             return error.Canceled;
                                         },
                                     }
                                     if (connection.closed) {
                                         backend.retireClosedNetHandleIfIdle(dest);
+                                        if (offset > 0) return offset;
                                         return error.SocketUnconnected;
                                     }
                                     continue;
                                 },
-                                else => return errors.mapNetworkWriteError(err),
+                                else => {
+                                    if (offset > 0) return offset;
+                                    return errors.mapNetworkWriteError(err);
+                                },
                             };
 
                             switch (send_result) {
                                 .queued => |deliver_at| {
                                     connection.delivery_floor_ns = deliver_at;
                                     peer_ref.backend.wakeConnection(peer_ref.handle, 1);
+                                    offset += segment_len;
                                 },
                                 .dropped => {
                                     if (live_peer.read_error == null) live_peer.read_error = error.Timeout;
+                                    live_peer.read_failed = true;
                                     peer_ref.backend.wakeConnection(peer_ref.handle, 1);
+                                    // The transport accepted this segment but
+                                    // cannot preserve a reliable byte stream.
+                                    // Stop before any suffix can be exposed.
+                                    offset += segment_len;
+                                    return offset;
                                 },
                             }
                             break;
@@ -603,19 +673,41 @@ pub fn Ops(comptime Backend: type) type {
             }
         }
 
-        /// Shutdown is local-only in simulation: it closes the handle and the
-        /// peer observes EOF/reset structurally, without a FIN traversing the
-        /// network model. A shutdown during a partition therefore succeeds
-        /// and is trace-visible; peer-side visibility that respects the
-        /// partition is a recorded roadmap gap.
+        /// Shutdown is local-only in simulation: direction state changes
+        /// immediately, without a FIN traversing the network model.
         pub fn simNetShutdown(userdata: ?*anyopaque, handle: SocketHandle, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
             const backend = backendFromUserdata(userdata);
+            try takeCancel(backend);
             if (!backend.processIsAlive()) return error.NetworkDown;
+            const connection = backend.connection(handle) orelse return error.SocketUnconnected;
+            if (connection.closed) return error.SocketUnconnected;
             backend.world.record(
                 "io.net.shutdown handle={} how={s}",
                 .{ handle, @tagName(how) },
             ) catch return error.SystemResources;
-            simNetClose(userdata, (&handle)[0..1]);
+            switch (how) {
+                .recv => connection.read_shutdown = true,
+                .send => connection.write_shutdown = true,
+                .both => {
+                    connection.read_shutdown = true;
+                    connection.write_shutdown = true;
+                },
+            }
+            if (connection.read_shutdown) {
+                connection.inbox.clearRetainingCapacity();
+                if (connection.node) |node| {
+                    _ = network_module.internal.discardStreamFramesFromControl(
+                        backend.network_control,
+                        node,
+                        @intCast(handle),
+                    );
+                }
+            }
+            backend.wakeConnection(handle, std.math.maxInt(usize));
+            if (connection.peer) |peer| {
+                peer.backend.wakeConnection(peer.handle, std.math.maxInt(usize));
+            }
+            wakeBackpressuredWriters(backend);
         }
     };
 }

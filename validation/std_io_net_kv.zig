@@ -77,20 +77,22 @@ const Scenario = struct {
         // no client task can run between this signal and accept parking.
         self.record("std_io_net_kv.server.accept_waiting", .{});
         self.signal(&self.accept_waiting);
-        const stream = self.listener.accept(self.server_io) catch @panic("std_io_net_kv accept failed");
-        defer stream.close(self.server_io);
-        self.record("std_io_net_kv.server.accepted", .{});
+        var request_index: usize = 0;
+        while (request_index < self.requestLimit()) {
+            const stream = self.listener.accept(self.server_io) catch @panic("std_io_net_kv accept failed");
+            self.record("std_io_net_kv.server.accepted", .{});
 
-        for (0..self.requestLimit()) |request_index| {
-            self.server.serveOne(self.server_io, stream) catch @panic("std_io_net_kv serve failed");
-            self.record(
-                "std_io_net_kv.server.response request_index={} revision={} applied_puts={}",
-                .{ request_index, self.server.revision, self.server.applied_puts },
-            );
-
-            if (request_index == 0 and self.faulted()) {
-                self.signal(&self.response_queued);
+            const connection_limit: usize = if (self.faulted() and request_index == 0) 1 else self.requestLimit() - request_index;
+            for (0..connection_limit) |_| {
+                self.server.serveOne(self.server_io, stream) catch @panic("std_io_net_kv serve failed");
+                self.record(
+                    "std_io_net_kv.server.response request_index={} revision={} applied_puts={}",
+                    .{ request_index, self.server.revision, self.server.applied_puts },
+                );
+                if (request_index == 0 and self.faulted()) self.signal(&self.response_queued);
+                request_index += 1;
             }
+            stream.close(self.server_io);
         }
     }
 
@@ -115,6 +117,10 @@ const Scenario = struct {
                         self.record("std_io_net_kv.client.timeout request_id=7", .{});
                         self.signal(&self.client_timed_out);
                         self.waitFor(&self.network_healed);
+                        client.deinit();
+                        client = sut.Client.connect(self.client_io, self.address) catch
+                            @panic("std_io_net_kv reconnect failed");
+                        self.record("std_io_net_kv.client.reconnected", .{});
                     },
                     else => @panic("unexpected first PUT error"),
                 };

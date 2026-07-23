@@ -809,6 +809,151 @@ test "io: duplicate listeners are rejected across process backends" {
     try std.testing.expectError(error.AddressInUse, address.listen(client_io, .{}));
 }
 
+test "io: listen rejects unsupported address reuse instead of ignoring it" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA62, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4578) catch unreachable;
+    try std.testing.expectError(
+        error.OptionUnsupported,
+        address.listen(io, .{ .reuse_address = true }),
+    );
+}
+
+test "io: listener backlog refuses excess pending connections" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA63, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4579) catch unreachable;
+    var server = try address.listen(server_io, .{ .kernel_backlog = 1 });
+    defer server.deinit(server_io);
+
+    const first = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer first.close(client_io);
+    try std.testing.expectError(
+        error.ConnectionRefused,
+        address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }),
+    );
+
+    const accepted_first = try server.accept(server_io);
+    defer accepted_first.close(server_io);
+    const second = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer second.close(client_io);
+    const accepted_second = try server.accept(server_io);
+    defer accepted_second.close(server_io);
+}
+
+test "io: connect observes node and link availability" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA66, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4582) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    try sim.control.network.partition(&.{0}, &.{1});
+    try std.testing.expectError(
+        error.HostUnreachable,
+        address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }),
+    );
+    try sim.control.network.heal();
+
+    try sim.control.network.setNode(0, false);
+    try std.testing.expectError(
+        error.HostUnreachable,
+        address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }),
+    );
+    try sim.control.network.setNode(0, true);
+
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+}
+
+test "io: accept returns the connecting peer address" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA64, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+
+    try std.testing.expect(accepted.socket.address.getPort() >= Backend.ephemeral_port_min);
+    try std.testing.expect(accepted.socket.address.getPort() != address.getPort());
+}
+
+test "io: directional stream shutdown preserves the opposite direction" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA65, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4581) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+
+    try accepted.shutdown(server_io, .send);
+    const server_payload: [1][]const u8 = .{"nope"};
+    try std.testing.expectError(
+        error.SocketUnconnected,
+        server_io.vtable.netWrite(
+            server_io.userdata,
+            accepted.socket.handle,
+            "",
+            &server_payload,
+            1,
+        ),
+    );
+
+    var client_buffer: [1]u8 = undefined;
+    var client_buffers: [1][]u8 = .{&client_buffer};
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try client_io.vtable.netRead(client_io.userdata, client.socket.handle, &client_buffers),
+    );
+
+    const client_payload: [1][]const u8 = .{"ok"};
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try client_io.vtable.netWrite(
+            client_io.userdata,
+            client.socket.handle,
+            "",
+            &client_payload,
+            1,
+        ),
+    );
+    var server_buffer: [2]u8 = undefined;
+    var server_buffers: [1][]u8 = .{&server_buffer};
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try server_io.vtable.netRead(server_io.userdata, accepted.socket.handle, &server_buffers),
+    );
+    try std.testing.expectEqualStrings("ok", &server_buffer);
+}
+
 test "io: listen on port 0 allocates distinct ephemeral ports" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA6A, .tick_ns = 10 });
     defer world.deinit();
@@ -2160,6 +2305,50 @@ test "io: cancel unparks a task blocked in net accept" {
 
     try std.testing.expect(state.accept_canceled);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver task=0") != null);
+}
+
+test "io: armed cancellation reaches immediate net operations" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn listen(io: Io) anyerror!void {
+            const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4681) catch unreachable;
+            var server = try address.listen(io, .{});
+            defer server.deinit(io);
+        }
+
+        fn connect(io: Io, address: Io.net.IpAddress) anyerror!void {
+            const stream = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+            stream.close(io);
+        }
+
+        fn shutdown(io: Io, stream: Io.net.Stream) anyerror!void {
+            try stream.shutdown(io, .both);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xCA11, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4680) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+
+    var listen_future = try Io.concurrent(client_io, Helper.listen, .{client_io});
+    try std.testing.expectError(error.Canceled, listen_future.cancel(client_io));
+
+    var connect_future = try Io.concurrent(client_io, Helper.connect, .{ client_io, address });
+    try std.testing.expectError(error.Canceled, connect_future.cancel(client_io));
+
+    var shutdown_future = try Io.concurrent(client_io, Helper.shutdown, .{ client_io, client });
+    try std.testing.expectError(error.Canceled, shutdown_future.cancel(client_io));
 }
 
 const GroupCancelState = struct {
@@ -4264,6 +4453,7 @@ const StartRace = struct {
     fn serverTask(self: *StartRace) void {
         const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4710) catch unreachable;
         var listener = address.listen(self.server_io, .{}) catch |err| {
+            if (err == error.Canceled) return;
             std.debug.panic("start race listen failed: {}", .{err});
         };
         defer listener.deinit(self.server_io);
@@ -4473,6 +4663,7 @@ const BackpressureTeardown = struct {
     client_io: Io,
     kill_server_process: bool,
     write_error: ?anyerror = null,
+    written_before_error: usize = 0,
 
     fn serverTask(self: *BackpressureTeardown) void {
         const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4721) catch unreachable;
@@ -4528,12 +4719,18 @@ const BackpressureTeardown = struct {
                 1,
             ) catch |err| {
                 self.write_error = err;
+                self.written_before_error = written;
                 return;
             };
         }
     }
 
-    fn run(kill_server_process: bool) !?anyerror {
+    const Outcome = struct {
+        write_error: ?anyerror,
+        written_before_error: usize,
+    };
+
+    fn run(kill_server_process: bool) !Outcome {
         var world = try World.init(std.testing.allocator, .{ .seed = 0xBACD, .tick_ns = 10 });
         defer world.deinit();
 
@@ -4558,18 +4755,25 @@ const BackpressureTeardown = struct {
         server_future.await(server_io);
         killer_future.await(client_io);
         try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-        return scenario.write_error;
+        return .{
+            .write_error = scenario.write_error,
+            .written_before_error = scenario.written_before_error,
+        };
     }
 };
 
 test "io: peer close wakes a writer parked on stream backpressure" {
-    const write_error = try BackpressureTeardown.run(false);
-    try std.testing.expectEqual(@as(anyerror, error.ConnectionResetByPeer), write_error.?);
+    const outcome = try BackpressureTeardown.run(false);
+    try std.testing.expectEqual(@as(anyerror, error.ConnectionResetByPeer), outcome.write_error.?);
+    try std.testing.expect(outcome.written_before_error > 0);
+    try std.testing.expect(outcome.written_before_error < 96 * 1024);
 }
 
 test "io: process kill wakes a writer parked on stream backpressure" {
-    const write_error = try BackpressureTeardown.run(true);
-    try std.testing.expectEqual(@as(anyerror, error.ConnectionResetByPeer), write_error.?);
+    const outcome = try BackpressureTeardown.run(true);
+    try std.testing.expectEqual(@as(anyerror, error.ConnectionResetByPeer), outcome.write_error.?);
+    try std.testing.expect(outcome.written_before_error > 0);
+    try std.testing.expect(outcome.written_before_error < 96 * 1024);
 }
 
 test "io: closing a connection reclaims its queued stream frames" {

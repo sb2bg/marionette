@@ -37,6 +37,7 @@ pub const internal = struct {
     pub const commitReadyStreamEventFromControl = sim.commitReadyStreamEventFromControl;
     pub const peekReadyStreamEventFromControl = sim.peekReadyStreamEventFromControl;
     pub const processCountFromControl = sim.processCountFromControl;
+    pub const streamPathStateFromControl = sim.streamPathStateFromControl;
     pub const sendStreamBytesFromControl = sim.sendStreamBytesFromControl;
     pub const streamLiveBuffersFromControl = sim.streamLiveBuffersFromControl;
 };

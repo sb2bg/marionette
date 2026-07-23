@@ -654,6 +654,7 @@ pub const Backend = struct {
     pub const ListenerState = struct {
         address: Io.net.IpAddress,
         node: ?network_module.NodeId = null,
+        backlog: u31,
         pending: std.ArrayList(SocketHandle) = .empty,
         closed: bool = false,
         waiters: usize = 0,
@@ -664,8 +665,11 @@ pub const Backend = struct {
         node: ?network_module.NodeId = null,
         inbox: std.ArrayList(u8) = .empty,
         read_error: ?Io.net.Stream.Reader.Error = null,
+        read_failed: bool = false,
         peer: ?SocketRef = null,
         delivery_floor_ns: u64 = 0,
+        read_shutdown: bool = false,
+        write_shutdown: bool = false,
         closed: bool = false,
         waiters: usize = 0,
     };

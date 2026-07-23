@@ -816,6 +816,28 @@ pub fn processCountFromControl(control: AnyNetworkControl) ?usize {
     return shared.process_count;
 }
 
+pub const StreamPathState = enum {
+    available,
+    source_down,
+    destination_down,
+    link_disabled,
+};
+
+pub fn streamPathStateFromControl(
+    control: AnyNetworkControl,
+    from: NodeId,
+    to: NodeId,
+) !StreamPathState {
+    const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
+    try shared.validateNode(from);
+    try shared.validateNode(to);
+    try shared.expireDeterministicFaults();
+    if (shared.down_nodes[@intCast(from)]) return .source_down;
+    if (shared.down_nodes[@intCast(to)]) return .destination_down;
+    if (!shared.links[try shared.pathIndex(from, to)].enabled()) return .link_disabled;
+    return .available;
+}
+
 pub fn sendStreamBytesFromControl(
     control: AnyNetworkControl,
     from: NodeId,
