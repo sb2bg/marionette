@@ -42,6 +42,7 @@ nav:
       - BUGGIFY: buggify.md
       - Network Model: network.md
       - Network API Direction: network-api.md
+      - std.Io.net Conformance: std-io-net-conformance.md
       - Production Network Transport: network-production.md
       - std.Io Direction: std-io-direction.md
       - std.Io.net Client/Server Example: std-io-net-example.md

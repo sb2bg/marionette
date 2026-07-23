@@ -13,6 +13,10 @@ in production.
 
 ## Current Status
 
+The supported `std.Io.net` operation and option classifications are recorded
+in [`std-io-net-conformance.md`](std-io-net-conformance.md). Unsupported
+options fail explicitly rather than being silently ignored.
+
 The experimental app-facing message surface is `mar.Endpoint(Message)`. An
 endpoint is bound to one `NodeId`, so application code can only send as that
 node and can only receive messages addressed to that node:

@@ -18,7 +18,7 @@ Item-level status for Marionette's own defects lives in
 External SUT findings remain separately characterized in
 [`FOUND_BUGS.md`](https://github.com/sb2bg/marionette/blob/main/FOUND_BUGS.md).
 
-Last updated during the post-`v0.5.0` simulator trustworthiness audit.
+Last updated for the post-`v0.6.0` `std.Io.net` contract work.
 
 ---
 
@@ -43,7 +43,7 @@ SUT or user-facing proof does not advance the north star.
 
 ---
 
-## Current Target: 0.6.0 - Simulator TCB Closure
+## Released: 0.6.0 - Simulator TCB Closure
 
 **Theme:** the simulator must not lie because its own ownership, time,
 lifecycle, or runner machinery is unsound.
@@ -111,7 +111,7 @@ before broadening the surface again.
 
 ---
 
-## 0.6.1 - Truthful std.Io.net Contracts
+## Current Target: 0.6.1 - Truthful std.Io.net Contracts
 
 **Theme:** every supported stream operation means what Zig's `std.Io` contract
 says it means; abstractions and intentional divergences are explicit.

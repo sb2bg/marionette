@@ -224,6 +224,7 @@ Passing runs return traces for persistence, diffing, or external tooling.
 - [Determinism](determinism.md)
 - [Examples](examples.md)
 - [Roadmap](roadmap.md)
+- [`std.Io.net` conformance](std-io-net-conformance.md)
 - [Prior art](prior-art.md)
 - [TigerBeetle Lessons](tigerbeetle-lessons.md)
 - [Releasing](releasing.md)
