@@ -37,12 +37,20 @@ const AutoSchedule = union(enum) {
 
 pub const SimByteSendResult = union(enum) {
     dropped,
-    queued: clock_module.Timestamp,
+    queued: struct {
+        id: u64,
+        deliver_at: clock_module.Timestamp,
+    },
 };
 
 pub const SimByteDropReason = enum {
     destination_down,
     link_disabled,
+};
+
+pub const SimProbeResult = union(enum) {
+    delivered,
+    dropped: SimByteDropReason,
 };
 
 /// Borrowed view of the next stream event. The runtime retains ownership of
@@ -851,6 +859,41 @@ pub fn sendStreamBytesFromControl(
     return try runtime.sendBytesAtOrAfter(from, to, bytes, minimum_delivery_at, target);
 }
 
+pub fn sendStreamProbeFromControl(
+    control: AnyNetworkControl,
+    from: NodeId,
+    to: NodeId,
+) !SimByteSendResult {
+    const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    return try runtime.sendBytesAtOrAfter(from, to, &.{}, 0, null);
+}
+
+pub fn commitReadyStreamProbeFromControl(
+    control: AnyNetworkControl,
+    node: NodeId,
+    expected_id: u64,
+) !SimProbeResult {
+    const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    return try runtime.commitReadyProbe(node, expected_id);
+}
+
+pub fn streamProbeReadyAtFromControl(
+    control: AnyNetworkControl,
+    id: u64,
+) !clock_module.Timestamp {
+    const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    return try runtime.probeReadyAt(id);
+}
+
+pub fn discardStreamPacketFromControl(control: AnyNetworkControl, id: u64) bool {
+    const shared = sharedFromControl(control) orelse return false;
+    const runtime = shared.byte_runtime orelse return false;
+    return runtime.discardPacket(id);
+}
+
 pub fn discardStreamFramesFromControl(control: AnyNetworkControl, node: NodeId, target: u64) usize {
     const shared = sharedFromControl(control) orelse return 0;
     const runtime = shared.byte_runtime orelse return 0;
@@ -1259,7 +1302,76 @@ const SimByteRuntime = struct {
         while (index > 0 and packetLessThan(queue.items[index], queue.items[index - 1])) : (index -= 1) {
             std.mem.swap(Packet, &queue.items[index], &queue.items[index - 1]);
         }
-        return .{ .queued = deliver_at };
+        return .{ .queued = .{
+            .id = packet_id,
+            .deliver_at = deliver_at,
+        } };
+    }
+
+    fn discardPacket(self: *Self, id: u64) bool {
+        for (self.queues) |*queue| {
+            for (queue.items, 0..) |packet, index| {
+                if (packet.id != id) continue;
+                const removed = queue.orderedRemove(index);
+                removed.payload.release();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn probeReadyAt(self: *Self, id: u64) !clock_module.Timestamp {
+        try self.shared.expireDeterministicFaults();
+        for (self.queues, 0..) |queue, link_index| {
+            for (queue.items) |packet| {
+                if (packet.id != id) continue;
+                if (packet.stream_target != null) return error.PacketNotProbe;
+                return @max(packet.deliver_at, self.shared.links[link_index].clogged_until);
+            }
+        }
+        return error.PacketNotFound;
+    }
+
+    fn commitReadyProbe(self: *Self, node: NodeId, expected_id: u64) !SimProbeResult {
+        try self.shared.validateNode(node);
+        try self.shared.expireDeterministicFaults();
+        for (self.queues, 0..) |*queue, link_index| {
+            var packet_index: ?usize = null;
+            for (queue.items, 0..) |packet, index| {
+                if (packet.id == expected_id and packet.to == node) {
+                    packet_index = index;
+                    break;
+                }
+            }
+            const index = packet_index orelse continue;
+            const packet = queue.items[index];
+            if (packet.stream_target != null) return error.PacketNotProbe;
+            const link = self.shared.links[link_index];
+            if (@max(packet.deliver_at, link.clogged_until) > self.shared.world.now())
+                return error.ProbeNotReady;
+
+            const result: SimProbeResult = if (self.shared.down_nodes[@intCast(packet.to)])
+                .{ .dropped = .destination_down }
+            else if (!link.enabled())
+                .{ .dropped = .link_disabled }
+            else
+                .delivered;
+
+            switch (result) {
+                .delivered => try self.shared.world.record(
+                    "network.deliver id={} from={} to={} now_ns={}",
+                    .{ packet.id, packet.from, packet.to, self.shared.world.now() },
+                ),
+                .dropped => |reason| try self.shared.world.record(
+                    "network.drop id={} from={} to={} reason={s}",
+                    .{ packet.id, packet.from, packet.to, @tagName(reason) },
+                ),
+            }
+            const removed = queue.orderedRemove(index);
+            removed.payload.release();
+            return result;
+        }
+        return error.ProbeNotReady;
     }
 
     fn discardStreamFrames(self: *Self, node: NodeId, target: u64) usize {
@@ -1371,6 +1483,7 @@ const SimByteRuntime = struct {
         for (self.queues, 0..) |queue, index| {
             const packet = if (queue.items.len == 0) continue else queue.items[0];
             if (packet.to != node) continue;
+            if (packet.stream_target == null) continue;
             const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
             if (best == null or ready_at < best.?) best = ready_at;
         }
@@ -1384,6 +1497,9 @@ const SimByteRuntime = struct {
             if (queue.items.len == 0) continue;
             const packet = queue.items[0];
             if (packet.to != node) continue;
+            // Connect owns payload-free probes transactionally. Readers must
+            // never mistake one for a malformed stream frame and consume it.
+            if (packet.stream_target == null) continue;
             if (packet.deliver_at > self.shared.world.now()) continue;
             if (self.shared.links[index].clogged_until > self.shared.world.now()) continue;
             if (best_index == null or packetLessThan(packet, best_packet)) {

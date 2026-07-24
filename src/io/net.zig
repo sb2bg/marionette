@@ -38,6 +38,38 @@ pub fn Ops(comptime Backend: type) type {
             if (runtime.takeCancelRequest()) return error.Canceled;
         }
 
+        fn connectTimeoutDeadlineNs(
+            backend: *Backend,
+            timeout: Io.Timeout,
+        ) error{OptionUnsupported}!?u64 {
+            const timestamp = switch (timeout) {
+                .none => return null,
+                .duration => |duration| blk: {
+                    if (!simulatedClockSupported(duration.clock)) return error.OptionUnsupported;
+                    break :blk Io.Timestamp.fromNanoseconds(
+                        std.math.add(
+                            i96,
+                            @intCast(backend.world.now()),
+                            duration.raw.nanoseconds,
+                        ) catch std.math.maxInt(i96),
+                    );
+                },
+                .deadline => |deadline| blk: {
+                    if (!simulatedClockSupported(deadline.clock)) return error.OptionUnsupported;
+                    break :blk deadline.raw;
+                },
+            };
+            if (timestamp.nanoseconds <= 0) return 0;
+            return std.math.cast(u64, timestamp.nanoseconds) orelse std.math.maxInt(u64);
+        }
+
+        fn simulatedClockSupported(clock: Io.Clock) bool {
+            return switch (clock) {
+                .real, .awake, .boot => true,
+                .cpu_process, .cpu_thread => false,
+            };
+        }
+
         /// Append a writev-style payload to `list`: the header, then each data
         /// slice, then `splat` repetitions of the final slice. Mirrors std.Io's
         /// scatter/splat write encoding.
@@ -179,6 +211,29 @@ pub fn Ops(comptime Backend: type) type {
             }
         }
 
+        fn discardConnectProbe(
+            backend: *Backend,
+            destination_backend: *Backend,
+            destination_node: network_module.NodeId,
+            id: u64,
+        ) void {
+            if (!network_module.internal.discardStreamPacketFromControl(
+                backend.network_control,
+                id,
+            )) return;
+            wakeBackpressuredWriters(backend);
+            destination_backend.wakeConnectionsForNode(destination_node);
+        }
+
+        fn wakeAfterConnectProbeRemoval(
+            backend: *Backend,
+            destination_backend: *Backend,
+            destination_node: network_module.NodeId,
+        ) void {
+            wakeBackpressuredWriters(backend);
+            destination_backend.wakeConnectionsForNode(destination_node);
+        }
+
         fn nextNetworkDeliveryAt(backend: *Backend, node: network_module.NodeId) Io.net.Stream.Reader.Error!?u64 {
             return network_module.internal.nextStreamDeliveryAtForControl(backend.network_control, node) catch |err| {
                 return errors.mapNetworkReadError(err);
@@ -195,7 +250,6 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             try takeCancel(backend);
             if (!backend.processIsAlive()) return error.NetworkDown;
-            if (options.reuse_address) return error.OptionUnsupported;
             // Port 0 asks for an ephemeral port, per POSIX bind semantics;
             // the assigned port is surfaced through the returned socket's
             // address so callers can connect to it.
@@ -344,21 +398,24 @@ pub fn Ops(comptime Backend: type) type {
             if (options.protocol) |protocol| {
                 if (protocol != .tcp) return error.ProtocolUnsupportedBySystem;
             }
-            switch (options.timeout) {
-                .none => {},
-                .duration, .deadline => return error.OptionUnsupported,
-            }
 
             const backend = backendFromUserdata(userdata);
             try takeCancel(backend);
             if (!backend.processIsAlive()) return error.NetworkDown;
-            const listener_ref = backend.findOpenListenerRef(address) orelse return error.ConnectionRefused;
-            const listener_backend = listener_ref.backend;
-            const listener = listener_ref.state;
-            if (listener.pending.items.len >= listener.backlog) return error.ConnectionRefused;
+            const timeout_at = try connectTimeoutDeadlineNs(backend, options.timeout);
+            if (timeout_at) |deadline| {
+                if (deadline <= backend.world.now()) return error.Timeout;
+            }
+
+            const initial_listener_ref = backend.findOpenListenerRef(address) orelse return error.ConnectionRefused;
+            const listener_backend = initial_listener_ref.backend;
+            const listener_handle = initial_listener_ref.handle;
+            const listener_node = initial_listener_ref.state.node;
+            if (initial_listener_ref.state.pending.items.len >= initial_listener_ref.state.backlog)
+                return error.ConnectionRefused;
             const client_node = backend.allocateNetworkNode() catch return error.NetworkDown;
             if (client_node) |from_node| {
-                if (listener.node) |to_node| {
+                if (listener_node) |to_node| {
                     const path_state = network_module.internal.streamPathStateFromControl(
                         backend.network_control,
                         from_node,
@@ -369,8 +426,105 @@ pub fn Ops(comptime Backend: type) type {
                         .source_down => return error.NetworkDown,
                         .destination_down, .link_disabled => return error.HostUnreachable,
                     }
+
+                    const send_result = network_module.internal.sendStreamProbeFromControl(
+                        backend.network_control,
+                        from_node,
+                        to_node,
+                    ) catch |err| return errors.mapNetworkConnectError(err);
+                    switch (send_result) {
+                        .dropped => return error.NetworkDown,
+                        .queued => |queued| {
+                            backend.registerConnectProbe(
+                                queued.id,
+                                listener_backend,
+                                to_node,
+                            ) catch {
+                                discardConnectProbe(
+                                    backend,
+                                    listener_backend,
+                                    to_node,
+                                    queued.id,
+                                );
+                                return error.SystemResources;
+                            };
+                            defer backend.releaseConnectProbe(queued.id);
+                            var probe_pending = true;
+                            defer if (probe_pending) {
+                                discardConnectProbe(
+                                    backend,
+                                    listener_backend,
+                                    to_node,
+                                    queued.id,
+                                );
+                            };
+
+                            probe_wait: while (true) {
+                                const ready_at = network_module.internal.streamProbeReadyAtFromControl(
+                                    backend.network_control,
+                                    queued.id,
+                                ) catch return error.NetworkDown;
+                                const wait_until = if (timeout_at) |deadline|
+                                    @min(deadline, ready_at)
+                                else
+                                    ready_at;
+                                if (wait_until > backend.world.now()) {
+                                    if (backend.futex_wait_set) |wait_set| {
+                                        const wait_result = wait_set.blockUntilCancelable(
+                                            backend.connectProbeWaitKey(queued.id),
+                                            wait_until,
+                                        );
+                                        switch (wait_result) {
+                                            .woken => {},
+                                            .timed_out => {},
+                                            .canceled => return error.Canceled,
+                                        }
+                                    } else {
+                                        backend.world.runFor(wait_until - backend.world.now()) catch
+                                            return error.NetworkDown;
+                                    }
+                                    if (!backend.processIsAlive()) return error.NetworkDown;
+                                    // Explicit wakes are spurious for probes,
+                                    // and clogs may have changed while time
+                                    // advanced. Recompute readiness and timeout
+                                    // ordering before committing anything.
+                                    continue;
+                                }
+                                if (!backend.processIsAlive()) return error.NetworkDown;
+                                if (timeout_at) |deadline| {
+                                    // Scheduler deadlines round up to the world
+                                    // tick. Preserve the requested ordering
+                                    // even when a sub-tick timeout and probe
+                                    // readiness become runnable together.
+                                    if (deadline < ready_at and deadline <= backend.world.now())
+                                        return error.Timeout;
+                                }
+                                if (ready_at > backend.world.now()) continue;
+
+                                const probe_result = network_module.internal.commitReadyStreamProbeFromControl(
+                                    backend.network_control,
+                                    to_node,
+                                    queued.id,
+                                ) catch return error.NetworkDown;
+                                probe_pending = false;
+                                wakeAfterConnectProbeRemoval(
+                                    backend,
+                                    listener_backend,
+                                    to_node,
+                                );
+                                switch (probe_result) {
+                                    .delivered => break :probe_wait,
+                                    .dropped => return error.HostUnreachable,
+                                }
+                            }
+                        },
+                    }
                 }
             }
+
+            const listener = listener_backend.listener(listener_handle) orelse return error.ConnectionRefused;
+            if (listener.closed) return error.ConnectionRefused;
+            if (listener.pending.items.len >= listener.backlog) return error.ConnectionRefused;
 
             const client = backend.allocator.create(Backend.ConnectionState) catch return error.SystemResources;
             errdefer backend.allocator.destroy(client);
@@ -405,7 +559,7 @@ pub fn Ops(comptime Backend: type) type {
                 "io.net.connect handle={} port={}",
                 .{ client_handle, address.getPort() },
             ) catch return error.SystemResources;
-            listener_backend.wakeListener(listener_ref.handle, 1);
+            listener_backend.wakeListener(listener_handle, 1);
             return .{
                 .handle = client_handle,
                 .address = address.*,
@@ -635,8 +789,8 @@ pub fn Ops(comptime Backend: type) type {
                             };
 
                             switch (send_result) {
-                                .queued => |deliver_at| {
-                                    connection.delivery_floor_ns = deliver_at;
+                                .queued => |queued| {
+                                    connection.delivery_floor_ns = queued.deliver_at;
                                     peer_ref.backend.wakeConnection(peer_ref.handle, 1);
                                     offset += segment_len;
                                 },

@@ -535,7 +535,7 @@ test "stream byte sends preserve delivery order under jitter" {
             delivery_floor,
         );
         const deliver_at = switch (result) {
-            .queued => |timestamp| timestamp,
+            .queued => |queued| queued.deliver_at,
             .dropped => return error.TestUnexpectedResult,
         };
         try std.testing.expect(deliver_at >= delivery_floor);

@@ -2256,6 +2256,8 @@ const NetScenario = struct {
     read_bytes: [4]u8 = undefined,
     read_len: usize = 0,
     read_error: ?Io.net.Stream.Reader.Error = null,
+    network_control: ?network_module.AnyNetworkControl = null,
+    drop_write: bool = false,
 
     fn acceptor(_: *TaskScheduler, arg: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(arg));
@@ -2298,6 +2300,10 @@ const NetScenario = struct {
         const stream = self.address.connect(self.client_io, .{ .mode = .stream, .protocol = .tcp }) catch @panic("connect failed");
         defer {
             if (self.close_client) stream.close(self.client_io);
+        }
+        if (self.drop_write) {
+            self.network_control.?.setLossiness(.{ .drop_rate = .always() }) catch
+                @panic("set write loss failed");
         }
 
         while (!self.reader_started) {
@@ -2513,7 +2519,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
     const network_control = try network_module.internal.initSimControl(world, .{ .nodes = 2 });
     switch (kind) {
         .latency, .latency_close => try network_control.setLatency(.{ .min_latency_ns = 30 }),
-        .drop => try network_control.setLossiness(.{ .drop_rate = .always() }),
+        .drop => {},
         .accept, .exchange => {},
     }
 
@@ -2538,6 +2544,8 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
         .address = address,
         .server = server,
         .close_client = kind == .latency_close,
+        .network_control = network_control,
+        .drop_write = kind == .drop,
     };
 
     _ = try scheduler.spawn(.{
@@ -2559,7 +2567,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
             try std.testing.expect(scenario.read_error == null);
             try std.testing.expectEqual(@as(usize, 4), scenario.read_len);
             try std.testing.expectEqualStrings("ping", &scenario.read_bytes);
-            try std.testing.expectEqual(@as(u64, 30), world.now());
+            try std.testing.expectEqual(@as(u64, 60), world.now());
         },
         .drop => {
             try std.testing.expectEqual(error.Timeout, scenario.read_error.?);
@@ -2631,7 +2639,7 @@ fn runNetworkPartitionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     try std.testing.expectEqual(error.Timeout, scenario.first_read_error.?);
     try std.testing.expectEqual(error.ConnectionResetByPeer, scenario.second_write_error.?);
     try std.testing.expectEqual(@as(usize, 0), scenario.second_read_len);
-    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expectEqual(@as(u64, 60), world.now());
 
     return try allocator.dupe(u8, world.traceBytes());
 }
@@ -2695,10 +2703,11 @@ test "TaskScheduler: std.Io.net latency uses network delivery deadline" {
 
     try std.testing.expectEqualStrings(first, second);
     try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=0 from=1 to=0 deliver_at=30 latency_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=1 from=1 to=0 deliver_at=60 latency_ns=30") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "scheduler.timeout task=") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver from=1 to=0") != null);
-    try expectTraceOrder(first, "network.send id=0 from=1 to=0", "scheduler.timeout task=");
-    try expectTraceOrder(first, "scheduler.timeout task=", "io.net.deliver from=1 to=0");
+    const data_send_index = std.mem.indexOf(u8, first, "network.send id=1 from=1 to=0").?;
+    _ = try expectTraceOrderAfter(first, data_send_index, "scheduler.timeout task=", "io.net.deliver from=1 to=0");
     try expectTraceOrder(first, "io.net.deliver from=1 to=0", "io.net.read len=4");
 }
 
@@ -2707,8 +2716,6 @@ test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation fa
     defer world.deinit();
 
     const network_control = try network_module.internal.initSimControl(&world, .{ .nodes = 2 });
-    try network_control.setLatency(.{ .min_latency_ns = 10 });
-
     var io_runtime: io_internal.ProcessRuntime = undefined;
     try io_runtime.init(std.testing.allocator, &world, disk_module.Disk.unavailable(), 4096, 2);
     defer io_runtime.deinit();
@@ -2723,6 +2730,7 @@ test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation fa
     defer client_stream.close(client_io);
     const server_stream = try server.accept(server_io);
     defer server_stream.close(server_io);
+    try network_control.setLatency(.{ .min_latency_ns = 10 });
 
     const chunks: [1][]const u8 = .{"ping"};
     try std.testing.expectEqual(
@@ -2744,14 +2752,14 @@ test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation fa
 
     // Failed delivery did not publish either trace record or consume the
     // pooled frame. A normal retry commits both once and returns the bytes.
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=1") == null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "io.net.deliver") == null);
     try std.testing.expectEqual(
         @as(usize, 4),
         try server_io.vtable.netRead(server_io.userdata, server_stream.socket.handle, &buffers),
     );
     try std.testing.expectEqualStrings("ping", &read_bytes);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "network.deliver id=0"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "network.deliver id=1"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "io.net.deliver"));
 }
 
@@ -2764,7 +2772,7 @@ test "TaskScheduler: std.Io.net graceful close drains delayed bytes before EOF" 
     defer std.testing.allocator.free(second);
 
     try std.testing.expectEqualStrings(first, second);
-    try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=0 from=1 to=0 deliver_at=30 latency_ns=30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=1 from=1 to=0 deliver_at=60 latency_ns=30") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver from=1 to=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read len=4") != null);
 }
@@ -2778,7 +2786,7 @@ test "TaskScheduler: std.Io.net dropped write replays and surfaces read timeout"
     defer std.testing.allocator.free(second);
 
     try std.testing.expectEqualStrings(first, second);
-    try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=0 from=1 to=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=1 from=1 to=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver") == null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read_error error=Timeout") != null);
 }
@@ -2793,14 +2801,14 @@ test "TaskScheduler: std.Io.net partition loss terminates the reliable stream" {
 
     try std.testing.expectEqualStrings(first, second);
     try std.testing.expect(std.mem.indexOf(u8, first, "network.partition left_count=1 right_count=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=0 from=1 to=0 reason=link_disabled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=1 from=1 to=0 reason=link_disabled") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.delivery_error from=1 to=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.partition.read_error error=Timeout") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "network.heal disabled_count=2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=2") == null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.partition.read_after_heal len=0") != null);
-    try expectTraceOrder(first, "network.send id=0 from=1 to=0", "network.partition left_count=1 right_count=1");
-    try expectTraceOrder(first, "network.partition left_count=1 right_count=1", "network.drop id=0 from=1 to=0 reason=link_disabled");
-    try expectTraceOrder(first, "network.drop id=0 from=1 to=0 reason=link_disabled", "io.net.partition.read_error error=Timeout");
+    try expectTraceOrder(first, "network.send id=1 from=1 to=0", "network.partition left_count=1 right_count=1");
+    try expectTraceOrder(first, "network.partition left_count=1 right_count=1", "network.drop id=1 from=1 to=0 reason=link_disabled");
+    try expectTraceOrder(first, "network.drop id=1 from=1 to=0 reason=link_disabled", "io.net.partition.read_error error=Timeout");
     try expectTraceOrder(first, "io.net.partition.read_error error=Timeout", "network.heal disabled_count=2");
 }

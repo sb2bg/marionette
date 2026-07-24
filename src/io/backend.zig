@@ -589,6 +589,9 @@ pub const Backend = struct {
     /// mid-operation never runs its defers, so these register here and any
     /// killed-task survivors are swept after task retirement.
     op_scratch: std.ArrayList(OpScratch) = .empty,
+    /// Queued connect probes owned by suspended tasks. Process kill destroys
+    /// fibers without running defers, so probe ownership must also live here.
+    connect_probes: std.ArrayList(ConnectProbe) = .empty,
 
     pub const HandleEntry = struct {
         handle: SocketHandle,
@@ -632,6 +635,12 @@ pub const Backend = struct {
     const OpScratch = struct {
         buffer: []u8,
         task_id: ?u64,
+    };
+
+    const ConnectProbe = struct {
+        id: u64,
+        destination_backend: *Backend,
+        destination_node: network_module.NodeId,
     };
 
     const FutexKeyEntry = struct {
@@ -768,6 +777,11 @@ pub const Backend = struct {
         self.path_gate.deinit();
         for (self.op_scratch.items) |entry| self.allocator.free(entry.buffer);
         self.op_scratch.deinit(self.allocator);
+        // The shared byte runtime owns queued packets and is registered after
+        // the process runtime when first used, so world teardown destroys it
+        // first. Kill paths discard probes while the network is live; ordinary
+        // teardown only releases this process-local ownership ledger.
+        self.connect_probes.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -812,6 +826,41 @@ pub const Backend = struct {
     fn currentTaskId(self: *Backend) ?u64 {
         const runtime = self.task_runtime orelse return null;
         return runtime.currentTaskId();
+    }
+
+    pub fn registerConnectProbe(
+        self: *Backend,
+        id: u64,
+        destination_backend: *Backend,
+        destination_node: network_module.NodeId,
+    ) std.mem.Allocator.Error!void {
+        try self.connect_probes.append(self.allocator, .{
+            .id = id,
+            .destination_backend = destination_backend,
+            .destination_node = destination_node,
+        });
+    }
+
+    pub fn releaseConnectProbe(self: *Backend, id: u64) void {
+        for (self.connect_probes.items, 0..) |probe, index| {
+            if (probe.id != id) continue;
+            _ = self.connect_probes.swapRemove(index);
+            return;
+        }
+    }
+
+    fn discardConnectProbes(self: *Backend) void {
+        var discarded_any = false;
+        for (self.connect_probes.items) |probe| {
+            if (network_module.internal.discardStreamPacketFromControl(self.network_control, probe.id)) {
+                discarded_any = true;
+                probe.destination_backend.wakeConnectionsForNode(probe.destination_node);
+            }
+        }
+        self.connect_probes.clearRetainingCapacity();
+        if (discarded_any) if (self.futex_wait_set) |wait_set| {
+            _ = wait_set.wake(futex_module.stream_backpressure_wait_key, std.math.maxInt(usize));
+        };
     }
 
     fn sweepInactiveOpScratch(self: *Backend, task_control: ?ProcessTaskControl) void {
@@ -933,6 +982,13 @@ pub const Backend = struct {
         return futex_module.waitKey(.connection, @intCast(handle));
     }
 
+    /// Connect probes are timer-driven and never explicitly woken. Keep their
+    /// keys in the sleep namespace so packet ids cannot alias socket handles
+    /// (or the connection-tagged global stream-backpressure key).
+    pub fn connectProbeWaitKey(_: *Backend, id: u64) usize {
+        return futex_module.waitKey(.sleep, @as(usize, @intCast(id)) + 1);
+    }
+
     pub fn sleepWaitKey(_: *Backend) usize {
         return futex_module.waitKey(.sleep, 0);
     }
@@ -943,6 +999,21 @@ pub const Backend = struct {
         if (self.futex_wait_set) |wait_set| {
             _ = wait_set.wake(self.connectionWaitKey(handle), count);
         }
+    }
+
+    /// Removing a connect probe can expose an already-ready data frame at the
+    /// head of the same directed path. Its original targeted wake may already
+    /// have been consumed while the probe hid the frame, so wake every reader
+    /// on the destination node to make it recompute network readiness.
+    pub fn wakeConnectionsForNode(self: *Backend, node: network_module.NodeId) void {
+        for (self.handles.items) |entry| switch (entry.state) {
+            .connection => |connection_state| {
+                if (connection_state.node == node) {
+                    self.wakeConnection(entry.handle, std.math.maxInt(usize));
+                }
+            },
+            .listener, .file => {},
+        };
     }
 
     /// Wake tasks blocked on a listener handle becoming ready, if a
@@ -1424,6 +1495,7 @@ pub const Backend = struct {
     /// cached file metadata stale so restart re-derives it from disk truth.
     pub fn killProcess(self: *Backend, options: KillOptions) void {
         self.process_alive = false;
+        self.discardConnectProbes();
         var index: usize = 0;
         while (index < self.handles.items.len) {
             const entry = &self.handles.items[index];

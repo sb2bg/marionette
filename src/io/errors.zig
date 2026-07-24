@@ -25,6 +25,21 @@ pub fn mapNetworkWriteError(err: anyerror) Io.net.Stream.Writer.Error {
     };
 }
 
+pub fn mapNetworkConnectError(err: anyerror) Io.net.IpAddress.ConnectError {
+    return switch (err) {
+        error.OutOfMemory,
+        error.EventQueueFull,
+        error.PoolExhausted,
+        => error.SystemResources,
+        error.InvalidNode => error.NetworkUnreachable,
+        error.NetworkUnavailable,
+        error.InvalidDuration,
+        error.InvalidRate,
+        => error.NetworkDown,
+        else => error.NetworkDown,
+    };
+}
+
 pub fn mapDiskReadError(err: disk_module.DiskError) Io.File.ReadPositionalError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,

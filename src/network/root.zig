@@ -27,6 +27,7 @@ pub const internal = struct {
     pub const NetworkSimulation = packet_core.NetworkSimulation;
     pub const SimByteDropReason = sim.SimByteDropReason;
     pub const SimByteSendResult = sim.SimByteSendResult;
+    pub const SimProbeResult = sim.SimProbeResult;
     pub const UnstableNetwork = packet_core.UnstableNetwork;
 
     pub const discardStreamFramesFromControl = sim.discardStreamFramesFromControl;
@@ -39,6 +40,10 @@ pub const internal = struct {
     pub const processCountFromControl = sim.processCountFromControl;
     pub const streamPathStateFromControl = sim.streamPathStateFromControl;
     pub const sendStreamBytesFromControl = sim.sendStreamBytesFromControl;
+    pub const sendStreamProbeFromControl = sim.sendStreamProbeFromControl;
+    pub const commitReadyStreamProbeFromControl = sim.commitReadyStreamProbeFromControl;
+    pub const discardStreamPacketFromControl = sim.discardStreamPacketFromControl;
+    pub const streamProbeReadyAtFromControl = sim.streamProbeReadyAtFromControl;
     pub const streamLiveBuffersFromControl = sim.streamLiveBuffersFromControl;
 };
 

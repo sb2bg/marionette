@@ -809,17 +809,21 @@ test "io: duplicate listeners are rejected across process backends" {
     try std.testing.expectError(error.AddressInUse, address.listen(client_io, .{}));
 }
 
-test "io: listen rejects unsupported address reuse instead of ignoring it" {
+test "io: listen accepts abstracted address reuse without weakening active bind exclusivity" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA62, .tick_ns = 10 });
     defer world.deinit();
 
     const sim = try world.simulate(.{});
     const io = sim.env.io();
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4578) catch unreachable;
-    try std.testing.expectError(
-        error.OptionUnsupported,
-        address.listen(io, .{ .reuse_address = true }),
-    );
+    var server = try address.listen(io, .{ .reuse_address = true });
+    try std.testing.expectError(error.AddressInUse, address.listen(io, .{ .reuse_address = true }));
+    server.deinit(io);
+
+    // The model has no kernel TIME_WAIT state, so immediate rebind is the
+    // observable reuse behavior it can represent.
+    var rebound = try address.listen(io, .{ .reuse_address = true });
+    defer rebound.deinit(io);
 }
 
 test "io: listener backlog refuses excess pending connections" {
@@ -877,6 +881,484 @@ test "io: connect observes node and link availability" {
     defer client.close(client_io);
     const accepted = try server.accept(server_io);
     defer accepted.close(server_io);
+}
+
+test "io: connect traverses simulated latency" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA67, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4583) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+
+    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "network.send id=0 from=1 to=0 deliver_at=30 latency_ns=30",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "network.deliver id=0 from=1 to=0 now_ns=30",
+    ) != null);
+}
+
+test "io: connect waits for a clogged path to become ready" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA6E, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try sim.control.network.clog(1, 0, 40);
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4588) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+
+    try std.testing.expectEqual(@as(u64, 40), world.now());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "network.unclog from=1 to=0 active=false",
+    ) != null);
+}
+
+test "io: connect timeout rolls back its queued probe" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA68, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4584) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    try std.testing.expectError(
+        error.Timeout,
+        address.connect(client_io, .{
+            .mode = .stream,
+            .protocol = .tcp,
+            .timeout = .{ .duration = .{
+                .raw = .fromNanoseconds(25),
+                .clock = .awake,
+            } },
+        }),
+    );
+
+    // The scheduler rounds the wake to a world tick, but a timeout whose raw
+    // deadline precedes delivery still wins when both become runnable at 30.
+    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+
+    try std.testing.expectError(
+        error.Timeout,
+        address.connect(client_io, .{
+            .mode = .stream,
+            .protocol = .tcp,
+            .timeout = .{ .deadline = .{
+                .raw = .fromNanoseconds(50),
+                .clock = .boot,
+            } },
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 50), world.now());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+}
+
+test "io: connect probe registration failure rolls back network ownership" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA6D, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4587) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const client_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
+    client_backend.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.SystemResources,
+        address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }),
+    );
+    client_backend.allocator = std.testing.allocator;
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+}
+
+test "io: canceling an in-flight connect reclaims its probe" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn connect(io: Io, address: Io.net.IpAddress) anyerror!void {
+            const stream = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+            stream.close(io);
+        }
+
+        fn cancel(io: Io, future: *Io.Future(anyerror!void)) void {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            _ = future.cancel(io) catch {};
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA69, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4585) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    var connect_future = try Io.concurrent(client_io, Helper.connect, .{ client_io, address });
+    var cancel_future = try Io.concurrent(client_io, Helper.cancel, .{ client_io, &connect_future });
+    cancel_future.await(client_io);
+
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver") != null);
+}
+
+test "io: process kill reclaims an in-flight connect probe without running task defers" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn connect(io: Io, address: Io.net.IpAddress) void {
+            const stream = address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch
+                @panic("connect unexpectedly resumed after process kill");
+            stream.close(io);
+            @panic("connect task survived process kill");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA6F, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    try registerNoopProcess(sim, 1);
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4589) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    var connect_future = Io.async(client_io, Helper.connect, .{ client_io, address });
+    try Io.sleep(server_io, .fromNanoseconds(10), .awake);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+
+    try sim.killProcess(1);
+    connect_future.await(server_io);
+    const client_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
+    try std.testing.expectEqual(@as(usize, 0), client_backend.connect_probes.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
+
+    try sim.restartProcess(1);
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    const restarted_io = (try sim.envForNode(1)).io();
+    const client = try address.connect(restarted_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(restarted_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+}
+
+test "io: world teardown owns queued probes after abandoning a connect task" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn connect(io: Io, address: Io.net.IpAddress) void {
+            const stream = address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch return;
+            stream.close(io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA70, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4591) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    var connect_future = Io.async(client_io, Helper.connect, .{ client_io, address });
+    _ = &connect_future;
+    try Io.sleep(server_io, .fromNanoseconds(10), .awake);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+    // Function exit intentionally leaves the task suspended. The byte runtime
+    // releases its packet before process backends release their ownership
+    // ledgers; teardown must not call back through the destroyed runtime.
+}
+
+test "io: partitioning an in-flight connect prevents publication" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        sim: World.Simulation,
+        io: Io,
+        address: Io.net.IpAddress,
+        connect_error: ?anyerror = null,
+
+        fn connect(self: *@This()) void {
+            const stream = self.address.connect(self.io, .{ .mode = .stream, .protocol = .tcp }) catch |err| {
+                self.connect_error = err;
+                return;
+            };
+            stream.close(self.io);
+        }
+
+        fn partition(self: *@This()) void {
+            Io.sleep(self.io, .fromNanoseconds(10), .awake) catch unreachable;
+            self.sim.control.network.partition(&.{0}, &.{1}) catch @panic("partition failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA6C, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4586) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+    var state = State{ .sim = sim, .io = client_io, .address = address };
+    var connect_future = try Io.concurrent(client_io, State.connect, .{&state});
+    var partition_future = try Io.concurrent(client_io, State.partition, .{&state});
+    connect_future.await(client_io);
+    partition_future.await(client_io);
+
+    try std.testing.expectEqual(@as(anyerror, error.HostUnreachable), state.connect_error.?);
+    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+
+    try sim.control.network.heal();
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+}
+
+test "io: connect probe removal wakes a reader hidden behind the probe" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        client_io: Io,
+        server_io: Io,
+        address: Io.net.IpAddress,
+        accepted: Io.net.Stream,
+        connected: bool = false,
+        connect_error: ?anyerror = null,
+        read_byte: u8 = 0,
+
+        fn connect(self: *@This()) void {
+            const stream = self.address.connect(self.client_io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+            }) catch |err| {
+                self.connect_error = err;
+                return;
+            };
+            self.connected = true;
+            stream.close(self.client_io);
+        }
+
+        fn read(self: *@This()) void {
+            var buffers: [1][]u8 = .{std.mem.asBytes(&self.read_byte)};
+            const read_len = self.server_io.vtable.netRead(
+                self.server_io.userdata,
+                self.accepted.socket.handle,
+                &buffers,
+            ) catch |err| std.debug.panic("hidden reader failed: {}", .{err});
+            if (read_len != 1) @panic("hidden reader returned a short read");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA71, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 8 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4592) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try listener.accept(server_io);
+    defer accepted.close(server_io);
+
+    var state: State = .{
+        .client_io = client_io,
+        .server_io = server_io,
+        .address = address,
+        .accepted = accepted,
+    };
+    var connect_future = Io.async(client_io, State.connect, .{&state});
+    try Io.sleep(client_io, .fromNanoseconds(10), .awake);
+
+    const payload: [1][]const u8 = .{"x"};
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try client_io.vtable.netWrite(
+            client_io.userdata,
+            client.socket.handle,
+            "",
+            &payload,
+            1,
+        ),
+    );
+    var read_future = Io.async(server_io, State.read, .{&state});
+    connect_future.await(client_io);
+    read_future.await(server_io);
+
+    try std.testing.expect(state.connected);
+    try std.testing.expect(state.connect_error == null);
+    try std.testing.expectEqual(@as(u8, 'x'), state.read_byte);
+    const second = try listener.accept(server_io);
+    second.close(server_io);
+}
+
+test "io: connect probe wait keys cannot alias live connection handles" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        io: Io,
+        address: Io.net.IpAddress,
+        connected: bool = false,
+        connect_error: ?anyerror = null,
+
+        fn connect(self: *@This()) void {
+            const stream = self.address.connect(self.io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+            }) catch |err| {
+                self.connect_error = err;
+                return;
+            };
+            self.connected = true;
+            stream.close(self.io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA72, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4593) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try listener.accept(server_io);
+    defer accepted.close(server_io);
+
+    // Packet ids and socket handles are independent monotonic namespaces.
+    // Advance the byte-runtime id to the live client handle so the next probe
+    // would collide under the old connection-tagged wait-key encoding.
+    const client_handle: usize = @intCast(client.socket.handle);
+    for (1..client_handle) |expected_id| {
+        const result = try network_module.internal.sendStreamBytesFromControl(
+            sim.control.network,
+            1,
+            0,
+            @intCast(accepted.socket.handle),
+            "x",
+            0,
+        );
+        const queued = switch (result) {
+            .queued => |queued| queued,
+            .dropped => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(u64, @intCast(expected_id)), queued.id);
+        try std.testing.expect(
+            network_module.internal.discardStreamPacketFromControl(
+                sim.control.network,
+                queued.id,
+            ),
+        );
+    }
+
+    var state: State = .{ .io = client_io, .address = address };
+    var connect_future = Io.async(client_io, State.connect, .{&state});
+    try Io.sleep(client_io, .fromNanoseconds(10), .awake);
+
+    // A write wakes the existing client connection immediately. It must not
+    // wake the delayed probe whose packet id happens to equal that handle.
+    const payload: [1][]const u8 = .{"y"};
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try server_io.vtable.netWrite(
+            server_io.userdata,
+            accepted.socket.handle,
+            "",
+            &payload,
+            1,
+        ),
+    );
+    connect_future.await(client_io);
+
+    try std.testing.expect(state.connected);
+    try std.testing.expect(state.connect_error == null);
+    const second = try listener.accept(server_io);
+    second.close(server_io);
 }
 
 test "io: accept returns the connecting peer address" {
@@ -952,6 +1434,10 @@ test "io: directional stream shutdown preserves the opposite direction" {
         try server_io.vtable.netRead(server_io.userdata, accepted.socket.handle, &server_buffers),
     );
     try std.testing.expectEqualStrings("ok", &server_buffer);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
 }
 
 test "io: listen on port 0 allocates distinct ephemeral ports" {
