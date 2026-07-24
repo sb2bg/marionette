@@ -4,6 +4,7 @@ const std = @import("std");
 
 pub const determinism = @import("determinism.zig");
 pub const fuzz = @import("fuzz.zig");
+pub const net_differential = @import("net_differential.zig");
 pub const trace_summary = @import("trace_summary.zig");
 
 test "tests: fixed-seed determinism" {
