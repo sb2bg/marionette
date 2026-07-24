@@ -175,17 +175,16 @@ retry and keeps a planted duplicate-apply mode as a replayable failure. This is
 ordinary production-shaped code, but it is maintained in this repository and
 is not counted as a third-party SUT finding.
 
-The next slice routes stream writes through the shared byte-message runtime when
-network control is attached. Stream payloads are framed with the destination
-socket handle, delivered through the existing loss/latency/link/clog machinery,
-and demultiplexed back into socket inboxes. Delayed stream bytes wake readers
-through the scheduler's timed wait path. Send-time dropped stream bytes wake the
-peer and surface as `error.Timeout` on the next empty read. Delivery-time
-link/partition drops preserve enough frame metadata to wake the affected
-connection with `error.Timeout`; healing permits deterministic retries on the
-same stream. Destination-down delivery maps to `error.NetworkDown`; richer
-connection-reset behavior, external host networking, DNS, and datagrams
-remain future work. A Marionette-owned production transport is not: the
+Stream connects and writes route through the shared byte-message runtime when
+network control is attached. Connection probes and framed payloads traverse
+the existing latency/link/clog machinery, while stream loss is terminal so a
+reliable stream never exposes an interior byte hole. Delayed stream bytes wake
+readers through the scheduler's timed wait path. Send-time and delivery-time
+faults preserve enough frame metadata to wake the affected connection with
+stream-shaped errors; destination-down delivery maps to `error.NetworkDown`.
+Connect duration/deadline timeouts and cancellation roll back unpublished
+attempts. External host networking, broader DNS, and datagrams remain future
+work. A Marionette-owned production transport is not: the
 roadmap's sibling-network-surfaces decision cancelled it, and production
 socket networking is host `std.Io.net`.
 

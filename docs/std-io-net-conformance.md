@@ -21,10 +21,11 @@ This ledger classifies Marionette's simulated `std.Io.net` surface against Zig
 | `listen` mode `.stream`, protocol `.tcp` | Exact | Creates a process-scoped listener. |
 | Other listen modes or protocols | Unsupported | Returns the corresponding mode/protocol error. |
 | `listen.kernel_backlog` | Abstracted | Bounds pending, unaccepted connections; excess connects are refused deterministically. |
-| `listen.reuse_address = true` | Unsupported | Returns `error.OptionUnsupported`. |
+| `listen.reuse_address = true` | Abstracted | Accepted, while active-bind exclusivity remains enforced. The simulator has no kernel `TIME_WAIT` state to bypass. |
 | Listen port `0` | Exact | Assigns a deterministic address from the IANA dynamic port range. |
-| `connect` mode `.stream`, protocol `.tcp` | Abstracted | Connects to an existing simulated listener, assigns a deterministic client port, and rejects a down source, down destination, or disabled link. Establishment does not yet traverse simulated latency. |
-| `connect.timeout` other than `.none` | Unsupported | Returns `error.OptionUnsupported` rather than silently ignoring the timeout. |
+| `connect` mode `.stream`, protocol `.tcp` | Abstracted | Queues establishment through the deterministic network, assigns a deterministic client port, observes latency, and rejects a down source, down destination, disabled link, or full backlog before publishing either endpoint. |
+| `connect.timeout` duration or deadline | Exact | Bounds queued establishment in simulated time and returns `error.Timeout`; failure rolls back the probe and unpublished socket state. |
+| Connect cancellation | Exact | Cancellation at entry or while establishment is queued returns `error.Canceled` and rolls back the attempt. |
 | `accept` | Exact | Blocks cancelably and returns the connecting peer address. |
 | Stream read/write ordering | Abstracted | Writes are segmented into ordered frames. Readers receive only a contiguous prefix. Loss terminally fails that receive stream; later frames are discarded. |
 | Partial write progress | Exact | Once a write prefix is accepted, a later cancellation, reset, or resource failure returns the accepted byte count. |
@@ -40,6 +41,7 @@ UDP, Unix-domain sockets, non-literal DNS, broader socket-option parity, and
 kernel-specific readiness behavior are unsupported. They should be added only
 when a pinned system under test requires them.
 
-The remaining material stream-contract gap is connect establishment latency:
-connect must become a queued deterministic network event before latency and
-timeouts can be classified as exact or abstracted.
+The no-fault differential test runs the same portable bidirectional exchange,
+accepted-peer check, and send-half-close/EOF scenario against host
+`std.Io.net` and Marionette. Fault behavior remains an explicit simulator
+abstraction rather than an attempt to reproduce one host kernel.

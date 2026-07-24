@@ -18,7 +18,7 @@ Item-level status for Marionette's own defects lives in
 External SUT findings remain separately characterized in
 [`FOUND_BUGS.md`](https://github.com/sb2bg/marionette/blob/main/FOUND_BUGS.md).
 
-Last updated for the post-`v0.6.0` `std.Io.net` contract work.
+Last updated for completed `v0.6.1` `std.Io.net` contract work.
 
 ---
 
@@ -111,7 +111,7 @@ before broadening the surface again.
 
 ---
 
-## Current Target: 0.6.1 - Truthful std.Io.net Contracts
+## Completed: 0.6.1 - Truthful std.Io.net Contracts
 
 **Theme:** every supported stream operation means what Zig's `std.Io` contract
 says it means; abstractions and intentional divergences are explicit.
@@ -142,7 +142,7 @@ contract we then maintain.
 
 ---
 
-## 0.6.2 - Disk Semantics v1
+## Current Target: 0.6.2 - Disk Semantics v1
 
 **Theme:** name and test the atomicity and durability promises applications
 may rely on.
