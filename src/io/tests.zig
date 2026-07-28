@@ -1269,6 +1269,156 @@ test "io: partitioning an in-flight connect prevents publication" {
     defer accepted.close(server_io);
 }
 
+test "io: source node loss aborts in-flight connect publication and permits recovery" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        io: Io,
+        address: Io.net.IpAddress,
+        connected: bool = false,
+        connect_error: ?anyerror = null,
+
+        fn connect(self: *@This()) void {
+            const stream = self.address.connect(self.io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+            }) catch |err| {
+                self.connect_error = err;
+                return;
+            };
+            self.connected = true;
+            stream.close(self.io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4596) catch unreachable;
+    var listener = try address.listen(server_io, .{ .kernel_backlog = 1 });
+    defer listener.deinit(server_io);
+
+    var state: State = .{ .io = client_io, .address = address };
+    var connect_future = Io.async(client_io, State.connect, .{&state});
+    try Io.sleep(server_io, .fromNanoseconds(10), .awake);
+    try sim.control.network.setNode(1, false);
+    connect_future.await(server_io);
+
+    try std.testing.expect(!state.connected);
+    try std.testing.expectEqual(@as(anyerror, error.NetworkDown), state.connect_error.?);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+    const runtime = world_module.internal.ioRuntime(sim);
+    const client_backend = try runtime.backendForNode(1);
+    const server_backend = try runtime.backendForNode(0);
+    try std.testing.expectEqual(@as(usize, 0), client_backend.handles.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client_backend.connect_probes.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server_backend.listener(listener.socket.handle).?.pending.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(world.traceBytes(), "io.net.connect"),
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, world.traceBytes(), "reason=source_down") != null,
+    );
+
+    try sim.control.network.setNode(1, true);
+    const recovered = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer recovered.close(client_io);
+    const accepted = try listener.accept(server_io);
+    defer accepted.close(server_io);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(world.traceBytes(), "io.net.connect"),
+    );
+}
+
+test "io: competing connect probes publish in delivery order independent of task order" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const ConnectResult = struct {
+        connected: bool = false,
+        connect_error: ?anyerror = null,
+    };
+    const State = struct {
+        io: Io,
+        address: Io.net.IpAddress,
+        earlier_probe: ConnectResult = .{},
+        later_probe: ConnectResult = .{},
+
+        fn finishConnect(self: *@This(), result: *ConnectResult) void {
+            const stream = self.address.connect(self.io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+            }) catch |err| {
+                result.connect_error = err;
+                return;
+            };
+            result.connected = true;
+            stream.close(self.io);
+        }
+
+        // Spawned first so this task has the lower scheduler id, but its
+        // probe is sent later and therefore receives the later packet id.
+        fn connectLater(self: *@This()) void {
+            Io.sleep(self.io, .fromNanoseconds(20), .awake) catch
+                @panic("delayed connect sleep failed");
+            self.finishConnect(&self.later_probe);
+        }
+
+        // Spawned second, but sends the probe at time zero.
+        fn connectEarlier(self: *@This()) void {
+            self.finishConnect(&self.earlier_probe);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try sim.control.network.clog(1, 0, 100);
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4597) catch unreachable;
+    var listener = try address.listen(server_io, .{ .kernel_backlog = 1 });
+    defer listener.deinit(server_io);
+    var state: State = .{ .io = client_io, .address = address };
+
+    var later_probe_future = try Io.concurrent(client_io, State.connectLater, .{&state});
+    var earlier_probe_future = try Io.concurrent(client_io, State.connectEarlier, .{&state});
+    later_probe_future.await(client_io);
+    earlier_probe_future.await(client_io);
+
+    try std.testing.expect(state.earlier_probe.connected);
+    try std.testing.expect(state.earlier_probe.connect_error == null);
+    try std.testing.expect(!state.later_probe.connected);
+    try std.testing.expectEqual(
+        @as(anyerror, error.ConnectionRefused),
+        state.later_probe.connect_error.?,
+    );
+    const accepted = try listener.accept(server_io);
+    defer accepted.close(server_io);
+
+    const trace = world.traceBytes();
+    const earlier_delivery = std.mem.indexOf(u8, trace, "network.deliver id=0").?;
+    const later_delivery = std.mem.indexOf(u8, trace, "network.deliver id=1").?;
+    try std.testing.expect(earlier_delivery < later_delivery);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+}
+
 test "io: connect probe removal wakes a reader hidden behind the probe" {
     if (!fiber_supported) return error.SkipZigTest;
 

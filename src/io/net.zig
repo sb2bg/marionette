@@ -222,6 +222,7 @@ pub fn Ops(comptime Backend: type) type {
                 id,
             )) return;
             wakeBackpressuredWriters(backend);
+            backend.wakeConnectProbes();
             destination_backend.wakeConnectionsForNode(destination_node);
         }
 
@@ -231,6 +232,7 @@ pub fn Ops(comptime Backend: type) type {
             destination_node: network_module.NodeId,
         ) void {
             wakeBackpressuredWriters(backend);
+            backend.wakeConnectProbes();
             destination_backend.wakeConnectionsForNode(destination_node);
         }
 
@@ -505,7 +507,24 @@ pub fn Ops(comptime Backend: type) type {
                                     backend.network_control,
                                     to_node,
                                     queued.id,
-                                ) catch return error.NetworkDown;
+                                ) catch |err| switch (err) {
+                                    error.ProbeOrderBlocked => {
+                                        const wait_set = backend.futex_wait_set orelse
+                                            return error.NetworkDown;
+                                        const wait_result = wait_set.blockUntilCancelable(
+                                            backend.connectProbeWaitKey(queued.id),
+                                            timeout_at,
+                                        );
+                                        switch (wait_result) {
+                                            .woken => {},
+                                            .timed_out => return error.Timeout,
+                                            .canceled => return error.Canceled,
+                                        }
+                                        if (!backend.processIsAlive()) return error.NetworkDown;
+                                        continue :probe_wait;
+                                    },
+                                    else => return error.NetworkDown,
+                                };
                                 probe_pending = false;
                                 wakeAfterConnectProbeRemoval(
                                     backend,
@@ -514,7 +533,10 @@ pub fn Ops(comptime Backend: type) type {
                                 );
                                 switch (probe_result) {
                                     .delivered => break :probe_wait,
-                                    .dropped => return error.HostUnreachable,
+                                    .dropped => |reason| switch (reason) {
+                                        .source_down => return error.NetworkDown,
+                                        .destination_down, .link_disabled => return error.HostUnreachable,
+                                    },
                                 }
                             }
                         },

@@ -48,9 +48,15 @@ pub const SimByteDropReason = enum {
     link_disabled,
 };
 
+pub const SimProbeDropReason = enum {
+    source_down,
+    destination_down,
+    link_disabled,
+};
+
 pub const SimProbeResult = union(enum) {
     delivered,
-    dropped: SimByteDropReason,
+    dropped: SimProbeDropReason,
 };
 
 /// Scheduler-facing notification used when a harness mutation makes queued
@@ -1374,11 +1380,22 @@ const SimByteRuntime = struct {
             const index = packet_index orelse continue;
             const packet = queue.items[index];
             if (packet.stream_target != null) return error.PacketNotProbe;
+
+            // Connect probes form their own ordered publication domain within
+            // a directed path. Reader-owned stream frames must not block them,
+            // but a later (deliver_at, id) probe cannot publish before an
+            // earlier probe merely because its task ran first.
+            for (queue.items[0..index]) |earlier| {
+                if (earlier.stream_target == null) return error.ProbeOrderBlocked;
+            }
+
             const link = self.shared.links[link_index];
             if (@max(packet.deliver_at, link.clogged_until) > self.shared.world.now())
                 return error.ProbeNotReady;
 
-            const result: SimProbeResult = if (self.shared.down_nodes[@intCast(packet.to)])
+            const result: SimProbeResult = if (self.shared.down_nodes[@intCast(packet.from)])
+                .{ .dropped = .source_down }
+            else if (self.shared.down_nodes[@intCast(packet.to)])
                 .{ .dropped = .destination_down }
             else if (!link.enabled())
                 .{ .dropped = .link_disabled }

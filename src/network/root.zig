@@ -27,6 +27,7 @@ pub const internal = struct {
     pub const NetworkSimulation = packet_core.NetworkSimulation;
     pub const SimByteDropReason = sim.SimByteDropReason;
     pub const SimByteSendResult = sim.SimByteSendResult;
+    pub const SimProbeDropReason = sim.SimProbeDropReason;
     pub const SimProbeResult = sim.SimProbeResult;
     pub const StreamWaitObserver = sim.StreamWaitObserver;
     pub const UnstableNetwork = packet_core.UnstableNetwork;
