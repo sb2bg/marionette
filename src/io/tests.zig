@@ -1342,6 +1342,58 @@ test "io: source node loss aborts in-flight connect publication and permits reco
     );
 }
 
+test "io: transient source node loss before probe readiness is not latched" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        io: Io,
+        address: Io.net.IpAddress,
+        connected: bool = false,
+        connect_error: ?anyerror = null,
+
+        fn connect(self: *@This()) void {
+            const stream = self.address.connect(self.io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+            }) catch |err| {
+                self.connect_error = err;
+                return;
+            };
+            self.connected = true;
+            stream.close(self.io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4599) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+
+    var state: State = .{ .io = client_io, .address = address };
+    var connect_future = Io.async(client_io, State.connect, .{&state});
+    try Io.sleep(server_io, .fromNanoseconds(10), .awake);
+    try sim.control.network.setNode(1, false);
+    try Io.sleep(server_io, .fromNanoseconds(10), .awake);
+    try sim.control.network.setNode(1, true);
+    connect_future.await(server_io);
+
+    try std.testing.expect(state.connected);
+    try std.testing.expect(state.connect_error == null);
+    const accepted = try listener.accept(server_io);
+    defer accepted.close(server_io);
+    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+}
+
 test "io: competing connect probes publish in delivery order independent of task order" {
     if (!fiber_supported) return error.SkipZigTest;
 
@@ -1408,6 +1460,99 @@ test "io: competing connect probes publish in delivery order independent of task
     );
     const accepted = try listener.accept(server_io);
     defer accepted.close(server_io);
+
+    const trace = world.traceBytes();
+    const earlier_delivery = std.mem.indexOf(u8, trace, "network.deliver id=0").?;
+    const later_delivery = std.mem.indexOf(u8, trace, "network.deliver id=1").?;
+    try std.testing.expect(earlier_delivery < later_delivery);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+}
+
+test "io: ordered probe follower preserves delivery at an equal timeout deadline" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const ConnectResult = struct {
+        connected: bool = false,
+        connect_error: ?anyerror = null,
+    };
+    const State = struct {
+        io: Io,
+        address: Io.net.IpAddress,
+        earlier_probe: ConnectResult = .{},
+        finite_follower: ConnectResult = .{},
+
+        fn finishConnect(
+            self: *@This(),
+            result: *ConnectResult,
+            timeout: Io.Timeout,
+        ) void {
+            const stream = self.address.connect(self.io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+                .timeout = timeout,
+            }) catch |err| {
+                result.connect_error = err;
+                return;
+            };
+            result.connected = true;
+            stream.close(self.io);
+        }
+
+        // Spawned first so this task has the lower scheduler id, but its
+        // delayed send receives the later packet id. Seed zero selects it
+        // first when both probes become runnable at the clog deadline.
+        fn connectFiniteFollower(self: *@This()) void {
+            Io.sleep(self.io, .fromNanoseconds(20), .awake) catch
+                @panic("delayed finite connect sleep failed");
+            self.finishConnect(&self.finite_follower, .{ .deadline = .{
+                .raw = .fromNanoseconds(100),
+                .clock = .awake,
+            } });
+        }
+
+        fn connectEarlier(self: *@This()) void {
+            self.finishConnect(&self.earlier_probe, .{ .deadline = .{
+                .raw = .fromNanoseconds(100),
+                .clock = .awake,
+            } });
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try sim.control.network.clog(1, 0, 100);
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4598) catch unreachable;
+    var listener = try address.listen(server_io, .{ .kernel_backlog = 2 });
+    defer listener.deinit(server_io);
+    var state: State = .{ .io = client_io, .address = address };
+
+    var follower_future = try Io.concurrent(
+        client_io,
+        State.connectFiniteFollower,
+        .{&state},
+    );
+    var earlier_future = try Io.concurrent(client_io, State.connectEarlier, .{&state});
+    follower_future.await(client_io);
+    earlier_future.await(client_io);
+
+    try std.testing.expect(state.earlier_probe.connected);
+    try std.testing.expect(state.earlier_probe.connect_error == null);
+    try std.testing.expect(state.finite_follower.connected);
+    try std.testing.expect(state.finite_follower.connect_error == null);
+    try std.testing.expectEqual(@as(u64, 100), world.now());
+
+    const first = try listener.accept(server_io);
+    defer first.close(server_io);
+    const second = try listener.accept(server_io);
+    defer second.close(server_io);
 
     const trace = world.traceBytes();
     const earlier_delivery = std.mem.indexOf(u8, trace, "network.deliver id=0").?;

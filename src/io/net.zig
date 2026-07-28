@@ -511,13 +511,23 @@ pub fn Ops(comptime Backend: type) type {
                                     error.ProbeOrderBlocked => {
                                         const wait_set = backend.futex_wait_set orelse
                                             return error.NetworkDown;
+                                        // This probe has already won its
+                                        // readiness-versus-timeout comparison
+                                        // above. An earlier ready probe must
+                                        // commit first, but reapplying the raw
+                                        // deadline here would turn equality
+                                        // into a timeout solely because this
+                                        // task ran first at the shared
+                                        // timestamp. Park until the earlier
+                                        // probe is removed; that path wakes
+                                        // every registered follower.
                                         const wait_result = wait_set.blockUntilCancelable(
                                             backend.connectProbeWaitKey(queued.id),
-                                            timeout_at,
+                                            null,
                                         );
                                         switch (wait_result) {
                                             .woken => {},
-                                            .timed_out => return error.Timeout,
+                                            .timed_out => unreachable,
                                             .canceled => return error.Canceled,
                                         }
                                         if (!backend.processIsAlive()) return error.NetworkDown;

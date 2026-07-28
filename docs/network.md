@@ -184,9 +184,11 @@ marked up again before `receive` consumes it.
 
 Queued connect probes are the deliberate exception to ordinary packet source
 semantics: connect publication is a transaction boundary, so it rechecks the
-source node as well as the destination and directed link. A source that goes
-down while a connect is in flight produces `error.NetworkDown` without
-publishing either socket endpoint or consuming listener backlog.
+source node as well as the destination and directed link when the ready probe is
+consumed. A source that is down at that point produces `error.NetworkDown`
+without publishing either socket endpoint or consuming listener backlog.
+Transient source loss that is restored before probe consumption is not latched,
+matching the consume-time destination and link model above.
 
 Connect probes on one directed path commit in `(deliver_at, packet_id)` order.
 That ordering domain contains probes only. Reader-owned stream frames remain
