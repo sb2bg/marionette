@@ -182,15 +182,16 @@ pub const TaskScheduler = struct {
                 const latest_representable_delay = remaining - remaining % tick_ns;
                 const effective_delay = @min(task.start_delay_ns, latest_representable_delay);
                 const wake_at = now + effective_delay;
-                // The park shares the sleep key namespace (keyed by task id,
-                // so nothing wakes it); a spurious wake must not start the
-                // task early. At the clock ceiling, clamp to the latest
-                // representable tick instead of overflowing the timestamp.
+                // Task-start waits use the even half of the sleep-key payload
+                // space; explicitly woken connect probes use the odd half. A
+                // spurious wake must still not start the task early. At the
+                // clock ceiling, clamp to the latest representable tick
+                // instead of overflowing the timestamp.
                 // Not a cancellation point: an armed cancel is delivered at
                 // the task's first real one.
                 while (scheduler.world.now() < wake_at) {
                     _ = scheduler.blockCurrentUntil(
-                        futex_module.waitKey(.sleep, task.id + 1),
+                        futex_module.taskStartWaitKey(task.id),
                         wake_at,
                     );
                 }

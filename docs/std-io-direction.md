@@ -90,10 +90,14 @@ intentionally narrow, but socket bytes can route through the shared
 `NetworkControl` byte runtime when simulation network control is attached.
 Latency and send-time loss use that shared fault core directly. If a queued
 stream frame reaches its delivery time while its directed link is partitioned,
-the frame is dropped and the affected empty read observes `error.Timeout`;
-after `heal()`, a retry on the same connection can flow normally. Clogs also
-share the packet runtime, but richer connection-reset and node-down behavior
-remains intentionally narrow.
+the frame is dropped and the affected empty read observes `error.Timeout`.
+That receive direction is then terminal: queued suffix frames are discarded,
+and retry after `heal()` requires a fresh connection. Clogs also share the
+packet runtime. Explicit `unclog`, `unclogAll`, `heal`, and core-liveness
+restoration wake scheduler-backed stream and connect waiters so readiness is
+recomputed at the control event rather than the superseded clog deadline.
+Process resets discard the killed endpoint's delayed outbound frames before
+surfacing a terminal `error.ConnectionResetByPeer` to the peer.
 
 The stream adapter preserves byte order within each connection. It does not
 inject byte-stream reordering because the modeled transport is TCP; message

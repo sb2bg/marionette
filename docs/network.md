@@ -267,7 +267,10 @@ try sim.control.network.heal();
 ```
 
 `heal` restores default network state by re-enabling links and marking nodes
-up, and it clears active clogs. Use `healLinks` when a scenario needs to clear
+up, and it clears active clogs. Clearing clogs through `unclog`, `unclogAll`,
+`heal`, or core-liveness restoration wakes scheduler-backed stream reads and
+connects so they recompute readiness immediately rather than sleeping until
+the old clog deadline. Use `healLinks` when a scenario needs to clear
 link filters without changing node state or path clogs.
 
 This is deliberately simple. Later network work can add asymmetric partitions,

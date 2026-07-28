@@ -19,6 +19,7 @@ pub const internal = struct {
     pub const onDiskCrashOpaque = backend.onDiskCrashOpaque;
     pub const deinitProcessRuntimeOpaque = backend.deinitProcessRuntimeOpaque;
     pub const onProcessRuntimeDiskCrashOpaque = backend.onProcessRuntimeDiskCrashOpaque;
+    pub const streamWaitObserver = backend.ProcessRuntime.streamWaitObserver;
 };
 
 test {

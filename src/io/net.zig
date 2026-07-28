@@ -256,7 +256,7 @@ pub fn Ops(comptime Backend: type) type {
             var bound_address = address.*;
             if (bound_address.getPort() == 0) {
                 bound_address.setPort(try backend.allocateEphemeralPort(&bound_address));
-            } else if (backend.findOpenListenerRef(&bound_address) != null) {
+            } else if (backend.findConflictingListenerRef(&bound_address) != null) {
                 return error.AddressInUse;
             }
 

@@ -44,11 +44,17 @@ const ServerTask = struct {
     }
 };
 
-fn runExchange(io: Io, server: *Io.net.Server, client_io: Io, outcome: *Outcome) !void {
+fn runExchange(
+    io: Io,
+    server: *Io.net.Server,
+    client_io: Io,
+    connect_address: Io.net.IpAddress,
+    outcome: *Outcome,
+) !void {
     var server_task = ServerTask{ .io = io, .server = server, .outcome = outcome };
     var future = try Io.concurrent(io, ServerTask.run, .{&server_task});
 
-    const client = try server.socket.address.connect(client_io, .{
+    const client = try connect_address.connect(client_io, .{
         .mode = .stream,
         .protocol = .tcp,
     });
@@ -90,7 +96,7 @@ fn hostOutcome() !Outcome {
     defer server.deinit(io);
 
     var outcome: Outcome = .{};
-    try runExchange(io, &server, io, &outcome);
+    try runExchange(io, &server, io, server.socket.address, &outcome);
     return outcome;
 }
 
@@ -106,7 +112,7 @@ fn simulatedOutcome() !Outcome {
     defer server.deinit(server_io);
 
     var outcome: Outcome = .{};
-    try runExchange(server_io, &server, client_io, &outcome);
+    try runExchange(server_io, &server, client_io, server.socket.address, &outcome);
     return outcome;
 }
 
@@ -115,6 +121,52 @@ test "std.Io.net no-fault stream behavior matches the host backend" {
     const simulated = try simulatedOutcome();
 
     try std.testing.expect(host.accepted_peer_has_nonzero_port);
+    try std.testing.expectEqual(host.accepted_peer_has_nonzero_port, simulated.accepted_peer_has_nonzero_port);
+    try std.testing.expectEqual(host.server_read_len, simulated.server_read_len);
+    try std.testing.expectEqualStrings(host.server_read[0..host.server_read_len], simulated.server_read[0..simulated.server_read_len]);
+    try std.testing.expectEqual(host.client_read_len, simulated.client_read_len);
+    try std.testing.expectEqualStrings(host.client_read[0..host.client_read_len], simulated.client_read[0..simulated.client_read_len]);
+    try std.testing.expectEqual(host.client_saw_eof, simulated.client_saw_eof);
+}
+
+fn hostWildcardOutcome() !Outcome {
+    const io = std.testing.io;
+    const wildcard = Io.net.IpAddress.parseIp4("0.0.0.0", 0) catch unreachable;
+    var server = try wildcard.listen(io, .{});
+    defer server.deinit(io);
+    const loopback = Io.net.IpAddress.parseIp4(
+        "127.0.0.1",
+        server.socket.address.getPort(),
+    ) catch unreachable;
+
+    var outcome: Outcome = .{};
+    try runExchange(io, &server, io, loopback, &outcome);
+    return outcome;
+}
+
+fn simulatedWildcardOutcome() !Outcome {
+    var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xD1FE, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 8 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    const wildcard = Io.net.IpAddress.parseIp4("0.0.0.0", 0) catch unreachable;
+    var server = try wildcard.listen(server_io, .{});
+    defer server.deinit(server_io);
+    const loopback = Io.net.IpAddress.parseIp4(
+        "127.0.0.1",
+        server.socket.address.getPort(),
+    ) catch unreachable;
+
+    var outcome: Outcome = .{};
+    try runExchange(server_io, &server, client_io, loopback, &outcome);
+    return outcome;
+}
+
+test "std.Io.net wildcard listener behavior matches the host backend" {
+    const host = try hostWildcardOutcome();
+    const simulated = try simulatedWildcardOutcome();
+
     try std.testing.expectEqual(host.accepted_peer_has_nonzero_port, simulated.accepted_peer_has_nonzero_port);
     try std.testing.expectEqual(host.server_read_len, simulated.server_read_len);
     try std.testing.expectEqualStrings(host.server_read[0..host.server_read_len], simulated.server_read[0..simulated.server_read_len]);

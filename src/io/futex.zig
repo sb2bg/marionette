@@ -63,6 +63,26 @@ pub fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
     return (id << wait_key_tag_bits) | @intFromEnum(tag);
 }
 
+/// Sleep-tagged task-start and connect-probe waits are both timer-shaped, but
+/// probes can also be explicitly woken when a harness clears a clog early.
+/// Keep them in disjoint even/odd payload subspaces so a probe wake cannot
+/// accidentally start a jittered task before its deadline.
+pub fn taskStartWaitKey(task_id: u64) usize {
+    const doubled = std.math.mul(usize, @intCast(task_id), 2) catch
+        @panic("task id exceeds wait-key range");
+    const payload = std.math.add(usize, doubled, 2) catch
+        @panic("task id exceeds wait-key range");
+    return waitKey(.sleep, payload);
+}
+
+pub fn connectProbeWaitKey(packet_id: u64) usize {
+    const doubled = std.math.mul(usize, @intCast(packet_id), 2) catch
+        @panic("packet id exceeds wait-key range");
+    const payload = std.math.add(usize, doubled, 1) catch
+        @panic("packet id exceeds wait-key range");
+    return waitKey(.sleep, payload);
+}
+
 /// World-global wait key for stream writers parked on backpressure. The
 /// byte pool and path queues are shared resources, so a writer blocked
 /// because another connection filled them must be woken by any drain or

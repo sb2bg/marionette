@@ -53,6 +53,17 @@ pub const SimProbeResult = union(enum) {
     dropped: SimByteDropReason,
 };
 
+/// Scheduler-facing notification used when a harness mutation makes queued
+/// stream traffic ready earlier than its previously computed deadline.
+pub const StreamWaitObserver = struct {
+    ptr: *anyopaque,
+    wake: *const fn (*anyopaque) void,
+
+    fn notify(self: StreamWaitObserver) void {
+        self.wake(self.ptr);
+    }
+};
+
 /// Borrowed view of the next stream event. The runtime retains ownership of
 /// `message` until the matching event id is committed.
 pub const SimByteReadyEvent = union(enum) {
@@ -99,6 +110,7 @@ const SharedRuntime = struct {
     down_nodes: []bool,
     typed_runtimes: std.ArrayList(TypedRuntimeEntry) = .empty,
     byte_runtime: ?*SimByteRuntime = null,
+    stream_wait_observer: ?StreamWaitObserver = null,
     auto_partitioned_node: ?NodeId = null,
     auto_partition_changed_at_ns: clock_module.Timestamp = 0,
     auto_partition_schedule: AutoSchedule = .pending,
@@ -187,6 +199,10 @@ const SharedRuntime = struct {
                 return;
             }
         }
+    }
+
+    fn wakeStreamWaiters(self: *SharedRuntime) void {
+        if (self.stream_wait_observer) |observer| observer.notify();
     }
 
     fn pathIndex(self: *const SharedRuntime, from: NodeId, to: NodeId) NetworkError!usize {
@@ -323,6 +339,7 @@ const SharedRuntime = struct {
         link.clogged_until = 0;
         link.auto_clog_schedule = .pending;
         try self.world.record("network.unclog from={} to={} active={}", .{ from, to, active });
+        if (active) self.wakeStreamWaiters();
     }
 
     fn unclogAll(self: *SharedRuntime) !void {
@@ -332,6 +349,7 @@ const SharedRuntime = struct {
             link.auto_clog_schedule = .pending;
         }
         try self.world.record("network.unclog_all clogged_count={}", .{clogged_count});
+        if (clogged_count > 0) self.wakeStreamWaiters();
     }
 
     fn partition(self: *SharedRuntime, left: []const NodeId, right: []const NodeId) !void {
@@ -364,6 +382,7 @@ const SharedRuntime = struct {
             "network.heal disabled_count={} down_count={} clogged_count={}",
             .{ disabled_count, down_count, clogged_count },
         );
+        if (clogged_count > 0) self.wakeStreamWaiters();
     }
 
     fn healLinks(self: *SharedRuntime) !void {
@@ -404,6 +423,7 @@ const SharedRuntime = struct {
             "network.liveness_restore core_count={} restored_links={} cleared_clogs={} revived_nodes={}",
             .{ core.len, restored_links, cleared_clogs, revived_nodes },
         );
+        if (cleared_clogs > 0) self.wakeStreamWaiters();
     }
 
     fn expireDeterministicFaults(self: *SharedRuntime) !void {
@@ -822,6 +842,14 @@ pub fn endpointFromControl(comptime Payload: type, control: AnyNetworkControl, n
 pub fn processCountFromControl(control: AnyNetworkControl) ?usize {
     const shared = sharedFromControl(control) orelse return null;
     return shared.process_count;
+}
+
+pub fn attachStreamWaitObserverFromControl(
+    control: AnyNetworkControl,
+    observer: StreamWaitObserver,
+) void {
+    const shared = sharedFromControl(control) orelse return;
+    shared.stream_wait_observer = observer;
 }
 
 pub const StreamPathState = enum {

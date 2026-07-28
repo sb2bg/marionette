@@ -12,13 +12,16 @@
   enforced, accepted sockets report deterministic peer addresses, port `0`
   assigns deterministic ephemeral ports, directional shutdown implements
   half-close, and cancellation is delivered at every supported blocking
-  network point. `reuse_address` is an explicit abstraction because the
-  simulator has no kernel `TIME_WAIT` state.
+  network point. Same-family wildcard listeners match literal destinations and
+  preserve active-bind exclusivity. `reuse_address` is an explicit abstraction
+  because the simulator has no kernel `TIME_WAIT` state.
 
 - Preserves reliable-stream semantics under simulated faults. Segmented writes
   return accepted partial progress, loss cannot expose an interior byte hole,
-  teardown reclaims queued path/pool capacity, and every capacity release wakes
-  blocked writers.
+  process reset discards delayed outbound frames before terminally resetting
+  the peer, teardown reclaims queued path/pool capacity, and every capacity
+  release wakes blocked writers. Explicit unclog and healing also wake queued
+  stream/connect waits at their newly eligible simulated time.
 
 - Adds a checked-in `std.Io.net` conformance ledger and no-fault differential
   coverage that runs the same bidirectional exchange, peer-address checks, and

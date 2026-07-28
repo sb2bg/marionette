@@ -982,11 +982,11 @@ pub const Backend = struct {
         return futex_module.waitKey(.connection, @intCast(handle));
     }
 
-    /// Connect probes are timer-driven and never explicitly woken. Keep their
-    /// keys in the sleep namespace so packet ids cannot alias socket handles
-    /// (or the connection-tagged global stream-backpressure key).
+    /// Connect probes normally wake by timer, but clearing a clog early wakes
+    /// them explicitly. Their sleep-tagged odd payloads are disjoint from the
+    /// even payloads used by task-start jitter.
     pub fn connectProbeWaitKey(_: *Backend, id: u64) usize {
-        return futex_module.waitKey(.sleep, @as(usize, @intCast(id)) + 1);
+        return futex_module.connectProbeWaitKey(id);
     }
 
     pub fn sleepWaitKey(_: *Backend) usize {
@@ -1014,6 +1014,13 @@ pub const Backend = struct {
             },
             .listener, .file => {},
         };
+    }
+
+    pub fn wakeConnectProbes(self: *Backend) void {
+        const wait_set = self.futex_wait_set orelse return;
+        for (self.connect_probes.items) |probe| {
+            _ = wait_set.wake(self.connectProbeWaitKey(probe.id), std.math.maxInt(usize));
+        }
     }
 
     /// Wake tasks blocked on a listener handle becoming ready, if a
@@ -1108,8 +1115,22 @@ pub const Backend = struct {
         if (connection_state.peer) |peer| {
             if (reset_peer) {
                 if (peer.backend.connection(peer.handle)) |peer_state| {
-                    if (!peer_state.closed and peer_state.read_error == null) {
-                        peer_state.read_error = error.ConnectionResetByPeer;
+                    if (!peer_state.closed) {
+                        // A reset is terminal once surfaced. Retire frames that
+                        // the dying endpoint accepted but that have not reached
+                        // the peer yet; otherwise a later read could clear the
+                        // reset and then observe those delayed bytes.
+                        if (peer_state.node) |peer_node| {
+                            _ = network_module.internal.discardStreamFramesFromControl(
+                                peer.backend.network_control,
+                                peer_node,
+                                @intCast(peer.handle),
+                            );
+                        }
+                        if (peer_state.read_error == null) {
+                            peer_state.read_error = error.ConnectionResetByPeer;
+                        }
+                        peer_state.read_failed = true;
                     }
                 }
             }
@@ -1217,10 +1238,58 @@ pub const Backend = struct {
         return null;
     }
 
+    fn isUnspecifiedAddress(address: *const Io.net.IpAddress) bool {
+        return switch (address.*) {
+            .ip4 => |ip4| @as(u32, @bitCast(ip4.bytes)) == 0,
+            .ip6 => |ip6| unspecified: {
+                for (ip6.bytes) |byte| {
+                    if (byte != 0) break :unspecified false;
+                }
+                break :unspecified true;
+            },
+        };
+    }
+
+    fn sameAddressFamilyAndPort(
+        a: *const Io.net.IpAddress,
+        b: *const Io.net.IpAddress,
+    ) bool {
+        if (a.getPort() != b.getPort()) return false;
+        return switch (a.*) {
+            .ip4 => switch (b.*) {
+                .ip4 => true,
+                .ip6 => false,
+            },
+            .ip6 => switch (b.*) {
+                .ip4 => false,
+                .ip6 => true,
+            },
+        };
+    }
+
+    fn listenerMatchesConnect(
+        listener_address: *const Io.net.IpAddress,
+        connect_address: *const Io.net.IpAddress,
+    ) bool {
+        if (!sameAddressFamilyAndPort(listener_address, connect_address)) return false;
+        return isUnspecifiedAddress(listener_address) or listener_address.eql(connect_address);
+    }
+
+    fn listenerAddressesConflict(
+        existing: *const Io.net.IpAddress,
+        candidate: *const Io.net.IpAddress,
+    ) bool {
+        if (!sameAddressFamilyAndPort(existing, candidate)) return false;
+        return isUnspecifiedAddress(existing) or
+            isUnspecifiedAddress(candidate) or
+            existing.eql(candidate);
+    }
+
     pub fn findOpenListener(self: *Backend, address: *const Io.net.IpAddress) ?*HandleEntry {
         for (self.handles.items) |*entry| switch (entry.state) {
             .listener => |listener_state| {
-                if (!listener_state.closed and listener_state.address.eql(address)) return entry;
+                if (!listener_state.closed and
+                    listenerMatchesConnect(&listener_state.address, address)) return entry;
             },
             .connection => {},
             .file => {},
@@ -1238,6 +1307,22 @@ pub const Backend = struct {
         };
     }
 
+    pub fn findConflictingListenerRef(self: *Backend, address: *const Io.net.IpAddress) ?ListenerRef {
+        if (self.process_registry) |registry| return registry.findConflictingListener(address);
+        for (self.handles.items) |entry| switch (entry.state) {
+            .listener => |listener_state| {
+                if (!listener_state.closed and
+                    listenerAddressesConflict(&listener_state.address, address)) return .{
+                    .backend = self,
+                    .handle = entry.handle,
+                    .state = listener_state,
+                };
+            },
+            .connection, .file => {},
+        };
+        return null;
+    }
+
     pub const ephemeral_port_min: u16 = 49152;
     pub const ephemeral_port_max: u16 = 65535;
 
@@ -1252,7 +1337,7 @@ pub const Backend = struct {
         while (attempts < range_len) : (attempts += 1) {
             const port = self.takeEphemeralPortCursor();
             candidate.setPort(port);
-            if (self.findOpenListenerRef(&candidate) == null) return port;
+            if (self.findConflictingListenerRef(&candidate) == null) return port;
         }
         return error.AddressInUse;
     }
@@ -1916,7 +2001,21 @@ pub const ProcessRegistry = struct {
 
     fn findOpenListener(self: *ProcessRegistry, address: *const Io.net.IpAddress) ?Backend.ListenerRef {
         for (self.listeners.items) |entry| {
-            if (!entry.address.eql(address)) continue;
+            if (!Backend.listenerMatchesConnect(&entry.address, address)) continue;
+            const listener = entry.backend.listener(entry.handle) orelse continue;
+            if (listener.closed) continue;
+            return .{
+                .backend = entry.backend,
+                .handle = entry.handle,
+                .state = listener,
+            };
+        }
+        return null;
+    }
+
+    fn findConflictingListener(self: *ProcessRegistry, address: *const Io.net.IpAddress) ?Backend.ListenerRef {
+        for (self.listeners.items) |entry| {
+            if (!Backend.listenerAddressesConflict(&entry.address, address)) continue;
             const listener = entry.backend.listener(entry.handle) orelse continue;
             if (listener.closed) continue;
             return .{
@@ -2073,6 +2172,21 @@ pub const ProcessRuntime = struct {
 
     pub fn attachProcessTaskControl(self: *ProcessRuntime, control: ProcessTaskControl) void {
         self.task_control = control;
+    }
+
+    pub fn streamWaitObserver(self: *ProcessRuntime) network_module.internal.StreamWaitObserver {
+        return .{
+            .ptr = self,
+            .wake = wakeNetworkWaitersOpaque,
+        };
+    }
+
+    fn wakeNetworkWaitersOpaque(ptr: *anyopaque) void {
+        const self: *ProcessRuntime = @ptrCast(@alignCast(ptr));
+        for (self.backends, 0..) |*backend, index| {
+            backend.wakeConnectionsForNode(@intCast(index));
+            backend.wakeConnectProbes();
+        }
     }
 
     pub fn onDiskCrash(self: *ProcessRuntime) void {

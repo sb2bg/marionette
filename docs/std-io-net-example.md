@@ -37,9 +37,9 @@ The second mode is planted test code. It is not an external bug report.
 [`validation/std_io_net_kv.zig`](https://github.com/sb2bg/marionette/blob/main/validation/std_io_net_kv.zig)
 creates two simulated nodes and three cooperative tasks:
 
-1. The server accepts one TCP-like stream and processes requests.
-2. The client sends a PUT, observes a timeout, retries the same request ID,
-   then reads the key.
+1. The server accepts TCP-like streams and processes requests.
+2. The client sends a PUT, observes a terminal stream timeout, reconnects,
+   retries the same request ID, then reads the key.
 3. The fault controller partitions the server and client after the first
    response is queued, waits for the timeout, heals the link, and releases the
    retry.
@@ -85,10 +85,12 @@ The correct run records the fault at the stream and application altitudes:
 
 ```text
 network.partition left_count=1 right_count=1
-network.drop id=1 from=0 to=1 reason=link_disabled
+network.drop id=2 from=0 to=1 reason=link_disabled
 io.net.delivery_error from=0 to=1 handle=1001 reason=link_disabled error=Timeout
 std_io_net_kv.client.timeout request_id=7
 network.heal disabled_count=2 down_count=0 clogged_count=0
+network.send id=3 from=1 to=0 deliver_at=120 latency_ns=30
+std_io_net_kv.client.reconnected
 std_io_net_kv.client.retry request_id=7 revision=1 duplicate=true
 std_io_net_kv.check retry_idempotent=ok value=41 revision=1 applied_puts=1
 ```
@@ -137,7 +139,9 @@ The current simulated stream subset supports:
 - stream reads, writes, shutdown, and close;
 - deterministic latency and send-time loss;
 - delivery-time manual partitions surfaced as `error.Timeout`;
-- healing followed by deterministic retry on the same connection;
+- terminal receive failure after stream loss, followed by deterministic
+  reconnect and retry after healing;
+- early `unclog`/`heal` wakeup for queued scheduler-backed stream traffic;
 - in-order bytes within each connection;
 - graceful close after queued delayed bytes have drained.
 

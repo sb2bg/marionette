@@ -4,6 +4,7 @@ const Backend = @import("backend.zig").Backend;
 const clock_module = @import("../clock.zig");
 const disk_module = @import("../disk/root.zig");
 const env_module = @import("../env.zig");
+const futex_module = @import("futex.zig");
 const network_module = @import("../network/root.zig");
 const world_module = @import("../world.zig");
 const World = world_module.World;
@@ -809,6 +810,27 @@ test "io: duplicate listeners are rejected across process backends" {
     try std.testing.expectError(error.AddressInUse, address.listen(client_io, .{}));
 }
 
+test "io: wildcard listeners accept literals and conflict with exact binds" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA73, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const wildcard = Io.net.IpAddress.parseIp4("0.0.0.0", 4594) catch unreachable;
+    const loopback = Io.net.IpAddress.parseIp4("127.0.0.1", 4594) catch unreachable;
+    var server = try wildcard.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    try std.testing.expectError(error.AddressInUse, loopback.listen(client_io, .{}));
+
+    const client = try loopback.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try server.accept(server_io);
+    defer accepted.close(server_io);
+}
+
 test "io: listen accepts abstracted address reuse without weakening active bind exclusivity" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA62, .tick_ns = 10 });
     defer world.deinit();
@@ -1056,6 +1078,61 @@ test "io: canceling an in-flight connect reclaims its probe" {
         try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
     );
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver") != null);
+}
+
+test "io: explicit unclog wakes an in-flight connect at the new ready time" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        sim: World.Simulation,
+        server_io: Io,
+        client_io: Io,
+        address: Io.net.IpAddress,
+        connected_at: ?u64 = null,
+
+        fn connect(self: *@This()) void {
+            const stream = self.address.connect(self.client_io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+            }) catch @panic("unclog connect failed");
+            self.connected_at = self.sim.control.world.now();
+            stream.close(self.client_io);
+        }
+
+        fn unclog(self: *@This()) void {
+            Io.sleep(self.server_io, .fromNanoseconds(20), .awake) catch
+                @panic("unclog controller sleep failed");
+            self.sim.control.network.unclog(1, 0) catch @panic("unclog failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA74, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try sim.control.network.clog(1, 0, 100);
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4595) catch unreachable;
+    var server = try address.listen(server_io, .{});
+    defer server.deinit(server_io);
+
+    var state: State = .{
+        .sim = sim,
+        .server_io = server_io,
+        .client_io = client_io,
+        .address = address,
+    };
+    var connect_future = try Io.concurrent(client_io, State.connect, .{&state});
+    var unclog_future = try Io.concurrent(server_io, State.unclog, .{&state});
+    connect_future.await(client_io);
+    unclog_future.await(server_io);
+
+    const accepted = try server.accept(server_io);
+    accepted.close(server_io);
+    try std.testing.expectEqual(@as(?u64, 20), state.connected_at);
+    try std.testing.expectEqual(@as(u64, 20), world.now());
 }
 
 test "io: process kill reclaims an in-flight connect probe without running task defers" {
@@ -1359,6 +1436,15 @@ test "io: connect probe wait keys cannot alias live connection handles" {
     try std.testing.expect(state.connect_error == null);
     const second = try listener.accept(server_io);
     second.close(server_io);
+}
+
+test "io: connect probe wakes cannot alias task-start jitter waits" {
+    try std.testing.expect(
+        futex_module.taskStartWaitKey(0) != futex_module.connectProbeWaitKey(0),
+    );
+    try std.testing.expect(
+        futex_module.taskStartWaitKey(1) != futex_module.connectProbeWaitKey(1),
+    );
 }
 
 test "io: accept returns the connecting peer address" {
@@ -1828,6 +1914,121 @@ test "io: process kill cancels owned tasks and resets peers" {
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=manual") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=killed") != null);
+}
+
+test "io: process reset discards delayed outbound frames terminally" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Scenario = struct {
+        sim: World.Simulation,
+        server_io: Io,
+        client_io: Io,
+        listener: Io.net.Server,
+        address: Io.net.IpAddress,
+        frame_queued: u32 = 0,
+        read_started: u32 = 0,
+        first_read_error: ?Io.net.Stream.Reader.Error = null,
+        second_read_len: ?usize = null,
+
+        fn signal(io: Io, flag: *u32) void {
+            flag.* = 1;
+            io.futexWake(u32, flag, std.math.maxInt(u32));
+        }
+
+        fn waitFor(io: Io, flag: *u32) void {
+            while (flag.* == 0) {
+                io.futexWait(u32, flag, 0) catch @panic("reset test futex wait failed");
+            }
+        }
+
+        fn serverTask(self: *@This()) void {
+            const stream = self.listener.accept(self.server_io) catch
+                @panic("reset test accept failed");
+            const chunks: [1][]const u8 = .{"late"};
+            const written = self.server_io.vtable.netWrite(
+                self.server_io.userdata,
+                stream.socket.handle,
+                "",
+                &chunks,
+                1,
+            ) catch @panic("reset test write failed");
+            if (written != 4) @panic("reset test short write");
+            // The harness flag's futex identity is scoped to the waiting
+            // client backend even though the server task publishes it.
+            signal(self.client_io, &self.frame_queued);
+
+            // Process kill retires both this task and its stream without
+            // running defers.
+            Io.sleep(self.server_io, .fromNanoseconds(1_000_000), .awake) catch {};
+        }
+
+        fn clientTask(self: *@This()) void {
+            const stream = self.address.connect(self.client_io, .{
+                .mode = .stream,
+                .protocol = .tcp,
+            }) catch @panic("reset test connect failed");
+            defer stream.close(self.client_io);
+            waitFor(self.client_io, &self.frame_queued);
+
+            var byte: [4]u8 = undefined;
+            var buffers: [1][]u8 = .{&byte};
+            signal(self.client_io, &self.read_started);
+            _ = self.client_io.vtable.netRead(
+                self.client_io.userdata,
+                stream.socket.handle,
+                &buffers,
+            ) catch |err| {
+                self.first_read_error = err;
+            };
+            if (self.first_read_error == null) @panic("reset test first read unexpectedly succeeded");
+
+            self.second_read_len = self.client_io.vtable.netRead(
+                self.client_io.userdata,
+                stream.socket.handle,
+                &buffers,
+            ) catch @panic("reset test terminal read failed");
+        }
+
+        fn killerTask(self: *@This()) void {
+            waitFor(self.client_io, &self.read_started);
+            Io.sleep(self.client_io, .fromNanoseconds(10), .awake) catch
+                @panic("reset test killer sleep failed");
+            self.sim.killProcess(0) catch @panic("reset test process kill failed");
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xA75, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    try sim.control.network.setLatency(.{ .min_latency_ns = 1_000 });
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4596) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+    var scenario: Scenario = .{
+        .sim = sim,
+        .server_io = server_io,
+        .client_io = client_io,
+        .listener = listener,
+        .address = address,
+    };
+
+    var server_future = try Io.concurrent(server_io, Scenario.serverTask, .{&scenario});
+    var client_future = try Io.concurrent(client_io, Scenario.clientTask, .{&scenario});
+    var killer_future = try Io.concurrent(client_io, Scenario.killerTask, .{&scenario});
+    client_future.await(client_io);
+    server_future.await(client_io);
+    killer_future.await(client_io);
+
+    try std.testing.expectEqual(error.ConnectionResetByPeer, scenario.first_read_error.?);
+    try std.testing.expectEqual(@as(?usize, 0), scenario.second_read_len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+    );
+    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
 }
 
 test "io: cross-process await releases the spawning backend closure" {
