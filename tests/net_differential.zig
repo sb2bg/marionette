@@ -6,7 +6,9 @@ const mar = @import("marionette");
 const Io = std.Io;
 
 const Outcome = struct {
-    accepted_peer_has_nonzero_port: bool = false,
+    accepted_peer_port_is_nonzero: bool = false,
+    accepted_peer_port_differs_from_listener: bool = false,
+    accepted_peer_family_matches_connect: bool = false,
     server_read: [4]u8 = undefined,
     server_read_len: usize = 0,
     client_read: [4]u8 = undefined,
@@ -17,12 +19,17 @@ const Outcome = struct {
 const ServerTask = struct {
     io: Io,
     server: *Io.net.Server,
+    connect_address: Io.net.IpAddress,
     outcome: *Outcome,
 
     fn run(self: *@This()) void {
         const stream = self.server.accept(self.io) catch @panic("differential accept failed");
         defer stream.close(self.io);
-        self.outcome.accepted_peer_has_nonzero_port = stream.socket.address.getPort() != 0;
+        self.outcome.accepted_peer_port_is_nonzero = stream.socket.address.getPort() != 0;
+        self.outcome.accepted_peer_port_differs_from_listener =
+            stream.socket.address.getPort() != self.server.socket.address.getPort();
+        self.outcome.accepted_peer_family_matches_connect =
+            std.meta.activeTag(stream.socket.address) == std.meta.activeTag(self.connect_address);
 
         var read_buffers: [1][]u8 = .{&self.outcome.server_read};
         self.outcome.server_read_len = self.io.vtable.netRead(
@@ -51,7 +58,12 @@ fn runExchange(
     connect_address: Io.net.IpAddress,
     outcome: *Outcome,
 ) !void {
-    var server_task = ServerTask{ .io = io, .server = server, .outcome = outcome };
+    var server_task = ServerTask{
+        .io = io,
+        .server = server,
+        .connect_address = connect_address,
+        .outcome = outcome,
+    };
     var future = try Io.concurrent(io, ServerTask.run, .{&server_task});
 
     const client = try connect_address.connect(client_io, .{
@@ -116,12 +128,16 @@ fn simulatedOutcome() !Outcome {
     return outcome;
 }
 
-test "std.Io.net no-fault stream behavior matches the host backend" {
+test "std.Io.net no-fault stream data and accepted peer port/family scope match the host backend" {
     const host = try hostOutcome();
     const simulated = try simulatedOutcome();
 
-    try std.testing.expect(host.accepted_peer_has_nonzero_port);
-    try std.testing.expectEqual(host.accepted_peer_has_nonzero_port, simulated.accepted_peer_has_nonzero_port);
+    try std.testing.expect(host.accepted_peer_port_is_nonzero);
+    try std.testing.expect(host.accepted_peer_port_differs_from_listener);
+    try std.testing.expect(host.accepted_peer_family_matches_connect);
+    try std.testing.expectEqual(host.accepted_peer_port_is_nonzero, simulated.accepted_peer_port_is_nonzero);
+    try std.testing.expectEqual(host.accepted_peer_port_differs_from_listener, simulated.accepted_peer_port_differs_from_listener);
+    try std.testing.expectEqual(host.accepted_peer_family_matches_connect, simulated.accepted_peer_family_matches_connect);
     try std.testing.expectEqual(host.server_read_len, simulated.server_read_len);
     try std.testing.expectEqualStrings(host.server_read[0..host.server_read_len], simulated.server_read[0..simulated.server_read_len]);
     try std.testing.expectEqual(host.client_read_len, simulated.client_read_len);
@@ -163,11 +179,13 @@ fn simulatedWildcardOutcome() !Outcome {
     return outcome;
 }
 
-test "std.Io.net wildcard listener behavior matches the host backend" {
+test "std.Io.net wildcard stream and accepted peer port/family scope match the host backend" {
     const host = try hostWildcardOutcome();
     const simulated = try simulatedWildcardOutcome();
 
-    try std.testing.expectEqual(host.accepted_peer_has_nonzero_port, simulated.accepted_peer_has_nonzero_port);
+    try std.testing.expectEqual(host.accepted_peer_port_is_nonzero, simulated.accepted_peer_port_is_nonzero);
+    try std.testing.expectEqual(host.accepted_peer_port_differs_from_listener, simulated.accepted_peer_port_differs_from_listener);
+    try std.testing.expectEqual(host.accepted_peer_family_matches_connect, simulated.accepted_peer_family_matches_connect);
     try std.testing.expectEqual(host.server_read_len, simulated.server_read_len);
     try std.testing.expectEqualStrings(host.server_read[0..host.server_read_len], simulated.server_read[0..simulated.server_read_len]);
     try std.testing.expectEqual(host.client_read_len, simulated.client_read_len);

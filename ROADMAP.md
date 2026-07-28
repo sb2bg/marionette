@@ -124,7 +124,9 @@ exposes an interior byte hole.
 - Model connect as a deterministic network event that participates in node and
   link state, latency, timeout, and cancellation.
 - Enforce listener backlog, assign deterministic ephemeral ports for port `0`,
-  and return the remote peer address from accept.
+  and return documented abstracted peer metadata from accept. Peer ports and
+  address family are modeled; peer IP remains destination-derived until nodes
+  model source interfaces.
 - Preserve contiguous ordered bytes across loss/partition behavior; retry,
   stall, or reset rather than delivering a prefix and suffix with a hole.
 - Return partial progress after a segmented write has already queued a prefix.

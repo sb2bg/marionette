@@ -126,9 +126,9 @@ Blocking queue waits, directory deletion/rename, chmod/chown, symlinks, memory
 maps, process operations, datagrams, DNS, and real external network access
 fail closed until they are routed through simulator-owned state.
 
-The eventual target is for simulation envs to return a fuller deterministic
-`std.Io` that routes time, files, network, queues, and concurrency through
-`World`.
+The implementation target is for simulation envs to return an increasingly
+complete deterministic `std.Io` that routes supported time, file, network,
+queue, and concurrency operations through `World`.
 
 ## Mapping
 
@@ -141,8 +141,9 @@ Marionette simulator state.
   (Done.)
 - `future.await(io)` parks until the target task completes. (Done; awaiting
   from the non-task scenario context drives the scheduler instead.)
-- `future.cancel(io)` requests cancellation at the next yield point. (Today
-  it awaits completion; cooperative cancellation points are future work.)
+- `future.cancel(io)` requests cancellation and awaits completion. (Done for
+  the current supported futex, sleep, and network cancellation points;
+  additional I/O surfaces must define their own cancellation behavior.)
 - `Io.Queue(T)` becomes a deterministic queue with documented wake order.
 - file I/O routes through the disk simulator and `DiskControl` fault state.
 - network I/O routes through the network simulator and `NetworkControl` fault
@@ -156,10 +157,10 @@ trace-visible enough to replay failures.
 Zig 0.16's `std.Io.net` vtable already gives Marionette the seam it needs for
 a narrow deterministic stream backend:
 
-- immediate operations: `netListenIp`, `netConnectIp`, `netClose`,
-  `netShutdown`;
-- suspending operations: `netAccept` when no connection is queued, and
-  `netRead` when the peer is open but no bytes are buffered;
+- immediate operations: `netListenIp`, `netClose`, `netShutdown`;
+- suspending operations: `netConnectIp` while its probe is queued, `netAccept`
+  when no connection is queued, `netRead` when the peer is open but no bytes
+  are buffered, and `netWrite` under simulated backpressure;
 - currently unsupported or out of scope: DNS lookup, Unix sockets, datagrams,
   socket pairs, `sendmsg`/`recvmsg`, `writeFile`, and interface-name queries.
 
@@ -235,10 +236,11 @@ This means Phase 1 was not blocked on inventing coroutines from scratch. The
 bare context-switch spike is green for the pinned compiler, and the first
 scheduler layers now cover ready ordering, futex wait sets, and timed futex
 waits. `Io.async`/`Io.concurrent`/`await` now run through each simulation's
-world-owned scheduler, and the validation harnesses use them exclusively. Remaining
-scheduler risk is cooperative cancellation, `Io.Group` support, broader I/O
-suspension, and same-seed trace stability as more real SUTs move onto the
-backend.
+world-owned scheduler, and the validation harnesses use them exclusively.
+`Io.Group` and cooperative cancellation at the supported futex, sleep, and
+network points are implemented. Remaining scheduler risk is broader I/O
+suspension, explicit cancellation contracts for each new surface, and
+same-seed trace stability as more real SUTs move onto the backend.
 
 Do not build a separate libucontext or assembly coroutine runtime. Marionette's
 fiber experiments should continue through the local seam over `std.Io.fiber`
@@ -266,8 +268,10 @@ claim is cooperative task scheduling inside Marionette's scheduler, not
 preemptive OS threads or memory-model interleavings. Atomics, lock-free
 algorithms, torn non-atomic reads, missed wakeups in host condition variables,
 and CPU reorderings remain outside this model and need different tools. The
-single-future `std.Io` `async` / `concurrent` / await path is implemented;
-cooperative cancellation points and `Io.Group` are not complete yet.
+single-future and `Io.Group` `async` / `concurrent` / await/cancel paths are
+implemented. Cooperative cancellation is intentionally scoped to the
+supported futex, sleep, and network points; every future suspending I/O
+surface must add and validate its own cancellation contract.
 
 The scheduler work exposed two concrete determinism leaks that future backend
 work should keep in view:
@@ -365,8 +369,8 @@ The experimental deterministic `std.Io` foundation is implemented:
 - TCP byte order is preserved within each stream; message reordering remains
   an `Endpoint(Message)`-altitude fault.
 
-Remaining deterministic `std.Io` work includes queue suspension, cooperative
-cancellation points, richer stream reset/node-down behavior, and
+Remaining deterministic `std.Io` work includes queue suspension, cancellation
+contracts for future I/O surfaces, richer stream reset/node-down behavior, and
 continued validation against real `std.Io`-native libraries.
 
 The next maturity phase is production readiness and ecosystem leverage:

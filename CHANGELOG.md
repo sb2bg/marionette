@@ -6,15 +6,18 @@
   network event. Connect now observes source/destination liveness, link state,
   latency, duration/deadline timeouts, and task cancellation before publishing
   either endpoint; failed, timed-out, and canceled attempts roll back their
-  probe and socket state.
+  probe and socket state. Competing probes on a directed path publish in
+  `(deliver_at, packet_id)` order independently of reader-owned stream frames.
 
 - Completes the supported TCP-stream lifecycle contract: listener backlogs are
-  enforced, accepted sockets report deterministic peer addresses, port `0`
-  assigns deterministic ephemeral ports, directional shutdown implements
-  half-close, and cancellation is delivered at every supported blocking
-  network point. Same-family wildcard listeners match literal destinations and
-  preserve active-bind exclusivity. `reuse_address` is an explicit abstraction
-  because the simulator has no kernel `TIME_WAIT` state.
+  enforced, accepted sockets report deterministic abstracted peer metadata,
+  port `0` assigns deterministic ephemeral ports, directional shutdown
+  implements half-close, and cancellation is delivered at every supported
+  blocking network point. Accepted peer IPs remain destination-derived because
+  simulated nodes do not model source interfaces. Same-family wildcard
+  listeners match literal destinations and preserve active-bind exclusivity.
+  `reuse_address` is an explicit abstraction because the simulator has no
+  kernel `TIME_WAIT` state.
 
 - Preserves reliable-stream semantics under simulated faults. Segmented writes
   return accepted partial progress, loss cannot expose an interior byte hole,
@@ -24,14 +27,16 @@
   stream/connect waits at their newly eligible simulated time.
 
 - Adds a checked-in `std.Io.net` conformance ledger and no-fault differential
-  coverage that runs the same bidirectional exchange, peer-address checks, and
-  send-half-close/EOF scenario against host `std.Io.net` and Marionette.
-  Targeted allocation, timeout, cancellation, partition, backlog, and capacity
-  regressions accompany the contract tests.
+  coverage that runs the same bidirectional exchange, accepted-peer port/family
+  checks, and send-half-close/EOF scenario against host `std.Io.net` and
+  Marionette. Targeted allocation, timeout, cancellation, partition, backlog,
+  and capacity regressions accompany the contract tests.
 
 - Keeps connection probes separate from readable stream payloads. This avoids
   a ready probe owned by one connecting task making an unrelated reader
-  busy-loop, a regression caught by the pinned Dusty HTTP validation.
+  busy-loop, while probe publication retains its own deterministic ordering
+  domain. The ownership regression was caught by the pinned Dusty HTTP
+  validation.
 
 ## v0.6.0 - 2026-07-17
 

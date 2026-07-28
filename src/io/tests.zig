@@ -1597,7 +1597,7 @@ test "io: connect probe wakes cannot alias task-start jitter waits" {
     );
 }
 
-test "io: accept returns the connecting peer address" {
+test "io: accept reports a deterministic abstracted peer port" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA64, .tick_ns = 10 });
     defer world.deinit();
 
