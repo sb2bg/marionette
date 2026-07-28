@@ -5,6 +5,8 @@ const Io = std.Io;
 
 const wait_key_tag_bits = 3;
 
+pub const WaitKeyError = error{WaitKeyPayloadOutOfRange};
+
 pub const WaitKeyTag = enum(usize) {
     futex = 0,
     listener = 1,
@@ -59,28 +61,56 @@ pub const FutexWaitSet = struct {
     }
 };
 
-pub fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
+pub const max_wait_key_payload = std.math.maxInt(usize) >> wait_key_tag_bits;
+
+pub fn waitKeyChecked(comptime tag: WaitKeyTag, id: usize) WaitKeyError!usize {
+    if (id > max_wait_key_payload) return error.WaitKeyPayloadOutOfRange;
     return (id << wait_key_tag_bits) | @intFromEnum(tag);
+}
+
+pub fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
+    return waitKeyChecked(tag, id) catch std.debug.panic(
+        "wait-key payload {} for tag {s} exceeds maximum {}",
+        .{ id, @tagName(tag), max_wait_key_payload },
+    );
 }
 
 /// Sleep-tagged task-start and connect-probe waits are both timer-shaped, but
 /// probes can also be explicitly woken when a harness clears a clog early.
 /// Keep them in disjoint even/odd payload subspaces so a probe wake cannot
 /// accidentally start a jittered task before its deadline.
-pub fn taskStartWaitKey(task_id: u64) usize {
-    const doubled = std.math.mul(usize, @intCast(task_id), 2) catch
-        @panic("task id exceeds wait-key range");
+pub fn taskStartWaitKeyChecked(task_id: u64) WaitKeyError!usize {
+    const narrowed = std.math.cast(usize, task_id) orelse
+        return error.WaitKeyPayloadOutOfRange;
+    const doubled = std.math.mul(usize, narrowed, 2) catch
+        return error.WaitKeyPayloadOutOfRange;
     const payload = std.math.add(usize, doubled, 2) catch
-        @panic("task id exceeds wait-key range");
-    return waitKey(.sleep, payload);
+        return error.WaitKeyPayloadOutOfRange;
+    return waitKeyChecked(.sleep, payload);
+}
+
+pub fn taskStartWaitKey(task_id: u64) usize {
+    return taskStartWaitKeyChecked(task_id) catch std.debug.panic(
+        "task id {} exceeds tagged wait-key capacity",
+        .{task_id},
+    );
+}
+
+pub fn connectProbeWaitKeyChecked(packet_id: u64) WaitKeyError!usize {
+    const narrowed = std.math.cast(usize, packet_id) orelse
+        return error.WaitKeyPayloadOutOfRange;
+    const doubled = std.math.mul(usize, narrowed, 2) catch
+        return error.WaitKeyPayloadOutOfRange;
+    const payload = std.math.add(usize, doubled, 1) catch
+        return error.WaitKeyPayloadOutOfRange;
+    return waitKeyChecked(.sleep, payload);
 }
 
 pub fn connectProbeWaitKey(packet_id: u64) usize {
-    const doubled = std.math.mul(usize, @intCast(packet_id), 2) catch
-        @panic("packet id exceeds wait-key range");
-    const payload = std.math.add(usize, doubled, 1) catch
-        @panic("packet id exceeds wait-key range");
-    return waitKey(.sleep, payload);
+    return connectProbeWaitKeyChecked(packet_id) catch std.debug.panic(
+        "packet id {} exceeds tagged wait-key capacity",
+        .{packet_id},
+    );
 }
 
 /// World-global wait key for stream writers parked on backpressure. The
@@ -91,6 +121,35 @@ pub fn connectProbeWaitKey(packet_id: u64) usize {
 /// so the connection-tagged key for handle 0 can never collide with a
 /// real connection.
 pub const stream_backpressure_wait_key = waitKey(.connection, 0);
+
+test "tagged wait keys preserve the maximum payload and reject the first invalid payload" {
+    try std.testing.expectEqual(
+        std.math.maxInt(usize),
+        try waitKeyChecked(.file_lock, max_wait_key_payload),
+    );
+    try std.testing.expectError(
+        error.WaitKeyPayloadOutOfRange,
+        waitKeyChecked(.file_lock, max_wait_key_payload + 1),
+    );
+}
+
+test "task-start and connect-probe wait keys are bounded and disjoint" {
+    const max_task_id: u64 = @intCast((max_wait_key_payload - 2) / 2);
+    const max_probe_id: u64 = @intCast((max_wait_key_payload - 1) / 2);
+
+    const max_task_key = try taskStartWaitKeyChecked(max_task_id);
+    const max_probe_key = try connectProbeWaitKeyChecked(max_probe_id);
+    try std.testing.expect(max_task_key != max_probe_key);
+    try std.testing.expect(taskStartWaitKey(0) != connectProbeWaitKey(0));
+    try std.testing.expectError(
+        error.WaitKeyPayloadOutOfRange,
+        taskStartWaitKeyChecked(max_task_id + 1),
+    );
+    try std.testing.expectError(
+        error.WaitKeyPayloadOutOfRange,
+        connectProbeWaitKeyChecked(max_probe_id + 1),
+    );
+}
 
 pub fn Ops(comptime Backend: type) type {
     return struct {
