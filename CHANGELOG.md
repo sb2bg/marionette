@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.1 - Unreleased
+## v0.6.1 - 2026-07-27
 
 - Makes simulated stream connection establishment a queued deterministic
   network event. Connect now observes source/destination liveness, link state,
