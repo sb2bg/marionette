@@ -5,9 +5,9 @@ Marionette itself. The roadmap groups this work into releases; this file
 preserves each finding until it is fixed, deferred with an explicit reason, or
 rejected after a reproduction shows the report was wrong.
 
-This is not a count of 60 confirmed bugs. It currently contains 55 code-defect
-candidates from source audit, one unresolved model decision, one documentation
-task, and three capability gaps. A candidate is treated as reproduced only
+This is not a count of 61 confirmed bugs. It currently contains 55 code-defect
+candidates from source audit, one unresolved model decision, two documentation
+tasks, and three capability gaps. A candidate is treated as reproduced only
 after targeted reproduction or regression coverage exists.
 
 Findings in external systems under test belong in
@@ -101,6 +101,7 @@ the failure and prevents recurrence.
 | Medium | Fixed (`2c9b1aa`; API surface review) | Trace/RNG rollback helpers were public `World` methods despite restoring only a deliberately narrow subset of world state. | `internal.transactionCheckpoint` and `internal.rollbackTransaction` in `src/world.zig` |
 | Medium | Fixed (`c530133`; `io: multi-sector setLength extension is one atomic metadata operation`) | Failed multi-sector `setLength` extension can leave disk-visible zero writes beyond the still-cached old length. | `simFileSetLength` and `zeroDiskBytes` in `src/io/file.zig` |
 | Medium | Fixed (`8af66f8`; `disk: scripted sector corruption rejects a missing file`) | `corruptSector` uses get-or-create lookup and can materialize a missing logical file instead of rejecting a nonexistent target. | `SimDisk.corruptSector` in `src/disk/sim.zig` |
+| Low | Fixed (`cc97b6f`; ledger table recount) | Documentation task: the headline inventory remained at 44 entries after later audits expanded the five tables to 60 rows. | headline inventory in `SIMULATOR_FINDINGS.md` |
 
 ## 0.6.3 - Expected-Failure Containment
 
