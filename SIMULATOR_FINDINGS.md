@@ -5,7 +5,7 @@ Marionette itself. The roadmap groups this work into releases; this file
 preserves each finding until it is fixed, deferred with an explicit reason, or
 rejected after a reproduction shows the report was wrong.
 
-This is not a count of 44 confirmed bugs. It currently contains 39 code-defect
+This is not a count of 60 confirmed bugs. It currently contains 55 code-defect
 candidates from source audit, one unresolved model decision, one documentation
 task, and three capability gaps. A candidate is treated as reproduced only
 after targeted reproduction or regression coverage exists.
@@ -94,6 +94,7 @@ the failure and prevents recurrence.
 | High | Fixed (`9e4efd4`; `io: disk crash trace failure leaves disk and process state coherent`) | Disk crash sets durable/crashed state before the final trace and only notifies process observers afterward; trace OOM can leave a crashed disk with live pre-crash process state. | `SimDisk.crash` in `src/disk/sim.zig` |
 | High | Fixed (`e46e1de`; `disk: torn writes land a prefix of whole sectors`) | Torn writes land half the pending bytes even though the public contract says a prefix of whole sectors lands. | `applyTornWrite` in `src/disk/sim.zig`; `DiskFaultOptions` in `src/disk/model.zig` |
 | High | Fixed (`d21691d`; `disk: crash-global reorder classifies every reversed write`) | One successful per-write reorder roll reverses the entire surviving landing list while only selected entries are traced as reordered; option, trace, and implementation semantics disagree. | crash landing loop in `src/disk/sim.zig` |
+| High | Fixed (`e228cec`; `disk: later kept create wins over an earlier lost delete`; `disk: later kept source create wins over an earlier lost rename`; mixed replacement/path-kind regressions) | Mixed metadata outcomes can restore an older deleted or replaced file alongside a later surviving entry at the same path, making namespace lookup and lifecycle behavior list-order-dependent. | `CrashStage.rollbackPendingMetadata` and `CrashStage.restoreFile` in `src/disk/sim.zig` |
 | Medium | Fixed (`2c9b1aa`; `world: trace records deterministic actions`) | The mandatory `disk.model` event changed the trace vocabulary and event positions without advancing the global trace-format version. | trace header in `World.init`; `docs/trace-format.md` |
 | Medium | Fixed (`2c9b1aa`; `world: failed simulation construction leaves the world retryable`) | A failed `World.simulate` after disk initialization retained the partial composition's `disk.model` event, event index, and seeded-choice state in a later retry. | `World.simulate` in `src/world.zig` |
 | Medium | Fixed (`ec8b426`; `disk: crash staging does not clone unrelated durable media`; `disk: setLength staging does not clone unrelated durable media`) | Transactional crash and `setLength` staging deep-cloned every unrelated durable file, sector, directory, and metadata undo snapshot. | `CrashStage` and `SimDisk.setLength` in `src/disk/sim.zig` |
