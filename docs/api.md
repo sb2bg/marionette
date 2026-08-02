@@ -179,7 +179,7 @@ const trace = world.traceBytes();
 
 The returned trace slice is invalidated by later trace writes.
 
-Phase 0 traces start with `marionette.trace format=text version=1`. Every
+Phase 0 traces start with `marionette.trace format=text version=2`. Every
 later `World.record` line is prefixed with a global `event=<u64>` index.
 
 ## Random Choices In A World

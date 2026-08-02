@@ -5,8 +5,9 @@ const std = @import("std");
 const clock_module = @import("../clock.zig");
 const env_module = @import("../env.zig");
 const model = @import("model.zig");
-const World = @import("../world.zig").World;
-const traceField = @import("../world.zig").traceField;
+const world_module = @import("../world.zig");
+const World = world_module.World;
+const traceField = world_module.traceField;
 
 const Disk = model.Disk;
 const DiskControl = @import("control.zig").DiskControl;
@@ -726,8 +727,8 @@ pub const SimDisk = struct {
         // and classification under one world checkpoint. Only after the
         // final summary and observer trace succeed do we swap the staged
         // state in and notify process-local owners.
-        const checkpoint = self.world.transactionCheckpoint();
-        errdefer self.world.rollbackTransaction(checkpoint);
+        const checkpoint = world_module.internal.transactionCheckpoint(self.world);
+        errdefer world_module.internal.rollbackTransaction(self.world, checkpoint);
         var staged = try self.cloneMediaState();
         defer staged.deinit();
 

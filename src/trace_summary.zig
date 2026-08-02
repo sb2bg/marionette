@@ -332,7 +332,7 @@ fn recordNetwork(summary: *Summary, event: ParsedEvent) !void {
 
 test "trace summary: summarizes run context and network events" {
     const trace =
-        "marionette.trace format=text version=1\n" ++
+        "marionette.trace format=text version=2\n" ++
         "event=0 world.init seed=1 start_ns=0 tick_ns=10\n" ++
         "event=1 run.name value=smoke\n" ++
         "event=2 run.tag value=example:replicated_register\n" ++

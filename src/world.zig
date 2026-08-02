@@ -62,10 +62,24 @@ pub const ProcessLifecycle = struct {
     restart: *const fn (*anyopaque, env_module.Env) anyerror!void,
 };
 
+const TransactionCheckpoint = struct {
+    trace_len: usize,
+    event_index: u64,
+    rng: random_module.Random,
+};
+
 /// Internal hooks for white-box simulator tests.
 pub const internal = struct {
     pub fn ioRuntime(sim: World.Simulation) *io_module.internal.ProcessRuntime {
         return sim.ioRuntime();
+    }
+
+    pub fn transactionCheckpoint(world: *const World) TransactionCheckpoint {
+        return world.transactionCheckpoint();
+    }
+
+    pub fn rollbackTransaction(world: *World, checkpoint: TransactionCheckpoint) void {
+        world.rollbackTransaction(checkpoint);
     }
 };
 
@@ -558,7 +572,7 @@ pub const World = struct {
         };
         errdefer world.deinit();
 
-        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=1\n");
+        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=2\n");
         world.record(
             "world.init seed={} start_ns={} tick_ns={}",
             .{ options.seed, options.start_ns, options.tick_ns },
@@ -776,6 +790,9 @@ pub const World = struct {
         if (self.simulation_created) return error.SimulationAlreadyCreated;
         try options.allocation.validate();
 
+        const transaction_checkpoint = self.transactionCheckpoint();
+        errdefer self.rollbackTransaction(transaction_checkpoint);
+
         self.simulation_created = true;
         errdefer self.simulation_created = false;
 
@@ -968,7 +985,7 @@ pub const World = struct {
     /// transaction. Callers that perform several traced choices before one
     /// externally visible commit use this to make the entire sequence
     /// retryable after trace or allocator failure.
-    pub fn transactionCheckpoint(self: *const World) TransactionCheckpoint {
+    fn transactionCheckpoint(self: *const World) TransactionCheckpoint {
         return .{
             .trace_len = self.trace_log.items.len,
             .event_index = self.event_index,
@@ -977,18 +994,12 @@ pub const World = struct {
     }
 
     /// Roll back a checkpoint created by `transactionCheckpoint`.
-    pub fn rollbackTransaction(self: *World, checkpoint: TransactionCheckpoint) void {
+    fn rollbackTransaction(self: *World, checkpoint: TransactionCheckpoint) void {
         std.debug.assert(checkpoint.trace_len <= self.trace_log.items.len);
         self.trace_log.shrinkRetainingCapacity(checkpoint.trace_len);
         self.event_index = checkpoint.event_index;
         self.rng = checkpoint.rng;
     }
-
-    pub const TransactionCheckpoint = struct {
-        trace_len: usize,
-        event_index: u64,
-        rng: random_module.Random,
-    };
 
     /// Advance the world by one simulation tick.
     pub fn tick(self: *World) !void {
@@ -1244,14 +1255,23 @@ test "world: failed simulation construction leaves the world retryable" {
     defer world.deinit();
 
     const teardown_checkpoint = world.teardowns.items.len;
+    const trace_checkpoint = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(trace_checkpoint);
+    const event_checkpoint = world.nextEventIndex();
     try std.testing.expectError(
         error.InvalidNode,
         world.simulate(.{ .network = .{ .nodes = 0 } }),
     );
     try std.testing.expectEqual(teardown_checkpoint, world.teardowns.items.len);
     try std.testing.expect(!world.simulation_created);
+    try std.testing.expectEqualStrings(trace_checkpoint, world.traceBytes());
+    try std.testing.expectEqual(event_checkpoint, world.nextEventIndex());
 
     _ = try world.simulate(.{});
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, world.traceBytes(), " disk.model "),
+    );
     const before_teardown_count = world.teardowns.items.len;
     const before_now = world.now();
     var expected_rng = world.rng;
@@ -1306,7 +1326,7 @@ test "world: trace records deterministic actions" {
     try world.record("service.allowed request_id={}", .{7});
 
     try std.testing.expectEqualStrings(
-        \\marionette.trace format=text version=1
+        \\marionette.trace format=text version=2
         \\event=0 world.init seed=12648430 start_ns=5 tick_ns=2
         \\event=1 world.tick now_ns=7
         \\event=2 world.run_for start_ns=7 duration_ns=4 end_ns=11

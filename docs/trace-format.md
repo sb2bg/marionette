@@ -10,13 +10,17 @@ Phase 0 uses newline-delimited UTF-8 text.
 The first line is a header:
 
 ```text
-marionette.trace format=text version=1
+marionette.trace format=text version=2
 ```
 
 Version 1 (2026-06-11) added `io.random` events: every `Io.random` /
 `Io.randomSecure` draw in simulation records its length and a fixed-seed
 Wyhash digest of the produced bytes, so replay divergence is visible at the
 draw site without inflating traces by buffer size.
+
+Version 2 (2026-08-02) adds the mandatory `disk.model` event emitted when a
+simulated disk is composed. This makes the portable disk semantic contract
+and sector size explicit before any disk operation is traced.
 
 Every later line is one event:
 
@@ -27,7 +31,7 @@ event=<u64> <component>.<action> <key>=<value> ...
 Example:
 
 ```text
-marionette.trace format=text version=1
+marionette.trace format=text version=2
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1
 event=1 run.name value=smoke
 event=2 run.tag value=scenario:smoke
