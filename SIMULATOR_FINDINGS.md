@@ -91,10 +91,14 @@ the failure and prevents recurrence.
 
 | Severity | Status | Finding | Primary location |
 | --- | --- | --- | --- |
-| High | Fixed (0.6.2; `io: disk crash trace failure leaves disk and process state coherent`) | Disk crash sets durable/crashed state before the final trace and only notifies process observers afterward; trace OOM can leave a crashed disk with live pre-crash process state. | `SimDisk.crash` in `src/disk/sim.zig` |
+| High | Fixed (`9e4efd4`; `io: disk crash trace failure leaves disk and process state coherent`) | Disk crash sets durable/crashed state before the final trace and only notifies process observers afterward; trace OOM can leave a crashed disk with live pre-crash process state. | `SimDisk.crash` in `src/disk/sim.zig` |
 | High | Fixed (`e46e1de`; `disk: torn writes land a prefix of whole sectors`) | Torn writes land half the pending bytes even though the public contract says a prefix of whole sectors lands. | `applyTornWrite` in `src/disk/sim.zig`; `DiskFaultOptions` in `src/disk/model.zig` |
 | High | Fixed (`d21691d`; `disk: crash-global reorder classifies every reversed write`) | One successful per-write reorder roll reverses the entire surviving landing list while only selected entries are traced as reordered; option, trace, and implementation semantics disagree. | crash landing loop in `src/disk/sim.zig` |
-| Medium | Fixed (0.6.2; `io: multi-sector setLength extension is one atomic metadata operation`) | Failed multi-sector `setLength` extension can leave disk-visible zero writes beyond the still-cached old length. | `simFileSetLength` and `zeroDiskBytes` in `src/io/file.zig` |
+| Medium | Fixed (`2c9b1aa`; `world: trace records deterministic actions`) | The mandatory `disk.model` event changed the trace vocabulary and event positions without advancing the global trace-format version. | trace header in `World.init`; `docs/trace-format.md` |
+| Medium | Fixed (`2c9b1aa`; `world: failed simulation construction leaves the world retryable`) | A failed `World.simulate` after disk initialization retained the partial composition's `disk.model` event, event index, and seeded-choice state in a later retry. | `World.simulate` in `src/world.zig` |
+| Medium | Fixed (`ec8b426`; `disk: crash staging does not clone unrelated durable media`; `disk: setLength staging does not clone unrelated durable media`) | Transactional crash and `setLength` staging deep-cloned every unrelated durable file, sector, directory, and metadata undo snapshot. | `CrashStage` and `SimDisk.setLength` in `src/disk/sim.zig` |
+| Medium | Fixed (`2c9b1aa`; API surface review) | Trace/RNG rollback helpers were public `World` methods despite restoring only a deliberately narrow subset of world state. | `internal.transactionCheckpoint` and `internal.rollbackTransaction` in `src/world.zig` |
+| Medium | Fixed (`c530133`; `io: multi-sector setLength extension is one atomic metadata operation`) | Failed multi-sector `setLength` extension can leave disk-visible zero writes beyond the still-cached old length. | `simFileSetLength` and `zeroDiskBytes` in `src/io/file.zig` |
 | Medium | Fixed (`8af66f8`; `disk: scripted sector corruption rejects a missing file`) | `corruptSector` uses get-or-create lookup and can materialize a missing logical file instead of rejecting a nonexistent target. | `SimDisk.corruptSector` in `src/disk/sim.zig` |
 
 ## 0.6.3 - Expected-Failure Containment
@@ -122,9 +126,9 @@ evidence:
 - The world-global stream backpressure wake key intentionally wakes unrelated
   writers because the byte pool itself is world-global. Extra wakeups are a
   performance tradeoff, not a correctness defect.
-- `setLength`, delete, and rename committing pending writes is the current
-  documented Phase 1 disk contract. 0.6.2 may replace or name that contract,
-  but its present existence is not an undocumented implementation bug.
+- `setLength`, delete, and rename committing pending writes is the named
+  `portable_v1` disk contract. Its present existence is not an undocumented
+  implementation bug.
 - The harness main context is intentionally a scheduler driver rather than a
   normal application task. A scheduled root task is a possible exploration
   design, not a current contract violation.

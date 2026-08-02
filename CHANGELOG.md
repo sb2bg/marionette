@@ -7,20 +7,23 @@
   sector-prefix tear model, crash-global reversal model, and lifecycle
   commit policy in a `disk.model` event. The public contract constants and
   disk fault-model documentation distinguish this portable adversarial model
-  from any OS- or filesystem-specific promise.
+  from any OS- or filesystem-specific promise. The trace header advances to
+  format version `2` for the mandatory event-vocabulary change.
 
 - Makes disk crash application transactional across allocation, tracing, and
-  process notification. Recovered files, directories, and metadata are staged
-  off to the side; seeded fault choices, per-operation classifications, the
-  crash summary, and process-kill records roll back together on failure. Only
-  after all fallible work succeeds does the disk atomically publish recovered
-  media, enter the crashed state, invalidate process-local I/O, and run
-  lifecycle kill callbacks.
+  process notification. Only affected files, directories, and pending metadata
+  are staged off to the side, avoiding a deep copy of unrelated durable media;
+  seeded fault choices, per-operation classifications, the crash summary, and
+  process-kill records roll back together on failure. Only after all fallible
+  work succeeds does the disk atomically publish recovered media, enter the
+  crashed state, invalidate process-local I/O, and run lifecycle kill callbacks.
 
 - Makes `std.Io.File.setLength` extension one disk lifecycle operation instead
   of a sequence of fallible zero-sector writes. A failed extension can no
   longer leave disk-visible zero writes beyond the still-cached old length;
-  successful extension remains zero-filled by the disk authority.
+  successful extension remains zero-filled by the disk authority. Resizes with
+  no pending writes allocate no media, while pending-write commits stage only
+  the affected file.
 
 - Adds contract, trace-failure, staged-allocation, tiny crash-boundary,
   metamorphic-sync, and all-profile durable-truth regressions. These make the

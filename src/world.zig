@@ -68,7 +68,7 @@ const TransactionCheckpoint = struct {
     rng: random_module.Random,
 };
 
-/// Internal hooks for white-box simulator tests.
+/// Internal hooks shared by simulator components and white-box tests.
 pub const internal = struct {
     pub fn ioRuntime(sim: World.Simulation) *io_module.internal.ProcessRuntime {
         return sim.ioRuntime();
