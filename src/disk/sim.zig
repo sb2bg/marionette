@@ -226,6 +226,19 @@ pub const SimDisk = struct {
             return null;
         }
 
+        fn findDirectoryId(self: *CrashStage, path: []const u8) ?DirId {
+            for (self.directory_changes.items) |*change| {
+                if (change.directory) |*directory| {
+                    if (std.mem.eql(u8, directory.path, path)) return directory.id;
+                }
+            }
+            for (self.disk.directories.items) |*directory| {
+                if (self.findDirectoryChange(directory.id) != null) continue;
+                if (std.mem.eql(u8, directory.path, path)) return directory.id;
+            }
+            return null;
+        }
+
         fn findDirectoryById(self: *CrashStage, id: DirId) ?*Directory {
             if (self.findDirectoryChange(id)) |change| {
                 if (change.directory) |*directory| return directory;
@@ -375,17 +388,34 @@ pub const SimDisk = struct {
             });
         }
 
-        fn restoreFile(self: *CrashStage, file: File) DiskError!void {
+        fn pathOccupiedByDifferentEntry(
+            self: *CrashStage,
+            path: []const u8,
+            file_id: FileId,
+        ) bool {
+            if (self.findFileId(path)) |occupant_id| {
+                if (occupant_id != file_id) return true;
+            }
+            return self.findDirectoryId(path) != null;
+        }
+
+        /// Metadata is resolved newest-to-oldest. If rolling back an older
+        /// delete or replacement would collide with a later surviving entry,
+        /// the later entry wins and the owned snapshot stays with its pending
+        /// record for normal teardown.
+        fn restoreFile(self: *CrashStage, file: File) DiskError!bool {
+            if (self.pathOccupiedByDifferentEntry(file.path, file.id)) return false;
             if (self.findFileChange(file.id)) |change| {
                 std.debug.assert(change.file == null);
                 change.file = file;
-                return;
+                return true;
             }
             try self.file_changes.append(self.disk.world.allocator, .{
                 .id = file.id,
                 .existed = self.disk.findFileById(file.id) != null,
                 .file = file,
             });
+            return true;
         }
 
         fn removeDirectoryTree(self: *CrashStage, path: []const u8) DiskError!void {
@@ -423,23 +453,72 @@ pub const SimDisk = struct {
                 },
                 .delete => |*deleted| {
                     if (deleted.*) |file| {
-                        try self.restoreFile(file);
-                        deleted.* = null;
+                        if (try self.restoreFile(file)) deleted.* = null;
                     }
                 },
                 .rename => |*rename_undo| {
-                    if (try self.mutableFileById(rename_undo.file_id)) |file| {
-                        if (rename_undo.old_path) |old_path| {
+                    if (rename_undo.old_path) |old_path| {
+                        if (self.pathOccupiedByDifferentEntry(old_path, rename_undo.file_id)) {
+                            // A later surviving create owns the old source
+                            // name, so the older renamed incarnation cannot
+                            // also move back into that namespace slot.
+                            try self.deleteFileById(rename_undo.file_id);
+                        } else if (try self.mutableFileById(rename_undo.file_id)) |file| {
                             self.disk.world.allocator.free(file.path);
                             file.path = old_path;
                             rename_undo.old_path = null;
                         }
                     }
                     if (rename_undo.replaced) |file| {
-                        try self.restoreFile(file);
-                        rename_undo.replaced = null;
+                        if (try self.restoreFile(file)) rename_undo.replaced = null;
                     }
                 },
+            }
+        }
+
+        fn assertUniquePaths(self: *CrashStage) void {
+            for (self.disk.files.items) |source| {
+                const file = self.findFileById(source.id) orelse continue;
+                self.assertFilePathUnique(file);
+            }
+            for (self.file_changes.items) |*change| {
+                if (change.existed) continue;
+                if (change.file) |*file| self.assertFilePathUnique(file);
+            }
+            for (self.disk.directories.items) |source| {
+                const directory = self.findDirectoryById(source.id) orelse continue;
+                self.assertDirectoryPathUnique(directory);
+            }
+            for (self.directory_changes.items) |*change| {
+                if (change.existed) continue;
+                if (change.directory) |*directory| self.assertDirectoryPathUnique(directory);
+            }
+        }
+
+        fn assertFilePathUnique(self: *CrashStage, file: *const File) void {
+            for (self.disk.files.items) |source| {
+                const other = self.findFileById(source.id) orelse continue;
+                if (other.id != file.id) std.debug.assert(!std.mem.eql(u8, other.path, file.path));
+            }
+            for (self.file_changes.items) |*change| {
+                if (change.existed) continue;
+                if (change.file) |*other| {
+                    if (other.id != file.id) std.debug.assert(!std.mem.eql(u8, other.path, file.path));
+                }
+            }
+            std.debug.assert(self.findDirectoryId(file.path) == null);
+        }
+
+        fn assertDirectoryPathUnique(self: *CrashStage, directory: *const Directory) void {
+            for (self.disk.directories.items) |source| {
+                const other = self.findDirectoryById(source.id) orelse continue;
+                if (other.id != directory.id) std.debug.assert(!std.mem.eql(u8, other.path, directory.path));
+            }
+            for (self.directory_changes.items) |*change| {
+                if (change.existed) continue;
+                if (change.directory) |*other| {
+                    if (other.id != directory.id) std.debug.assert(!std.mem.eql(u8, other.path, directory.path));
+                }
             }
         }
 
@@ -1225,6 +1304,7 @@ pub const SimDisk = struct {
             }
         }
         staged.clearPendingMetadata();
+        staged.assertUniquePaths();
         try staged.prepareCommit();
 
         try self.world.recordFields("disk.crash", &.{

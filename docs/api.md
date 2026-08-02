@@ -441,6 +441,11 @@ matching the classic parent-directory-fsync storage bug class. Cross-directory
 renames require syncing both parent directories before the rename is fully
 durable.
 
+Pending metadata is resolved newest-to-oldest during a crash. When rolling
+back an older delete or rename would collide with a later surviving create,
+the later entry owns that path. Recovery therefore preserves a unique logical
+namespace even when individual metadata records receive mixed outcomes.
+
 Under `portable_v1`, `setLength`, `delete`, and `rename` commit pending writes
 for the affected source path before applying the lifecycle mutation. This is a
 named adversarial ordering rule, not an extra durability boundary. In

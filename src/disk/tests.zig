@@ -493,6 +493,142 @@ test "disk: crash can roll back unsynced delete and rename metadata" {
     try std.testing.expectEqual(@as(u64, 4), (try disk.disk().stat(.{ .path = "archive/wal.log" })).size);
 }
 
+test "disk: later kept create wins over an earlier lost delete" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "victim", .offset = 0, .bytes = "OLD!" });
+    try disk.disk().sync(.{ .path = "victim" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().delete(.{ .path = "victim" });
+    try disk.disk().write(.{ .path = "victim", .offset = 0, .bytes = "NEW!" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    var entries = try disk.disk().readDir(.{
+        .allocator = std.testing.allocator,
+        .path = ".",
+    });
+    defer entries.deinit();
+    var victim_count: usize = 0;
+    for (entries.entries) |entry| {
+        if (entry.kind == .file and std.mem.eql(u8, entry.name, "victim")) victim_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), victim_count);
+
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "victim", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("NEW!", &recovered);
+}
+
+test "disk: later kept source create wins over an earlier lost rename" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "source", .offset = 0, .bytes = "SRC!" });
+    try disk.disk().sync(.{ .path = "source" });
+    try disk.disk().write(.{ .path = "target", .offset = 0, .bytes = "DST!" });
+    try disk.disk().sync(.{ .path = "target" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().rename(.{ .old_path = "source", .new_path = "target" });
+    try disk.disk().write(.{ .path = "source", .offset = 0, .bytes = "NEW!" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    var entries = try disk.disk().readDir(.{
+        .allocator = std.testing.allocator,
+        .path = ".",
+    });
+    defer entries.deinit();
+    var source_count: usize = 0;
+    var target_count: usize = 0;
+    for (entries.entries) |entry| {
+        if (entry.kind != .file) continue;
+        if (std.mem.eql(u8, entry.name, "source")) source_count += 1;
+        if (std.mem.eql(u8, entry.name, "target")) target_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), source_count);
+    try std.testing.expectEqual(@as(usize, 1), target_count);
+
+    var source: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "source", .offset = 0, .buffer = &source });
+    try std.testing.expectEqualStrings("NEW!", &source);
+    var target: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "target", .offset = 0, .buffer = &target });
+    try std.testing.expectEqualStrings("DST!", &target);
+}
+
+test "disk: later kept directory wins over an earlier lost file delete" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "victim", .offset = 0, .bytes = "FILE" });
+    try disk.disk().sync(.{ .path = "victim" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().delete(.{ .path = "victim" });
+    try disk.disk().createDir(.{ .path = "victim" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectError(error.FileNotFound, disk.disk().stat(.{ .path = "victim" }));
+    _ = try disk.disk().statDir(.{ .path = "victim" });
+    var entries = try disk.disk().readDir(.{
+        .allocator = std.testing.allocator,
+        .path = ".",
+    });
+    defer entries.deinit();
+    var victim_count: usize = 0;
+    for (entries.entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "victim")) victim_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), victim_count);
+    try std.testing.expectEqual(disk_model.DiskDirEntryKind.directory, entries.entries[0].kind);
+}
+
+test "disk: mixed rename replacement outcomes preserve unique paths" {
+    for (0..16) |seed| {
+        var world = try World.init(std.testing.allocator, .{ .seed = seed, .tick_ns = 1 });
+        defer world.deinit();
+        var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+        defer disk.deinit();
+
+        try disk.disk().write(.{ .path = "source", .offset = 0, .bytes = "SRC!" });
+        try disk.disk().sync(.{ .path = "source" });
+        try disk.disk().write(.{ .path = "target", .offset = 0, .bytes = "OLD!" });
+        try disk.disk().sync(.{ .path = "target" });
+        try disk.disk().syncDir(.{ .path = "." });
+        try disk.disk().rename(.{ .old_path = "source", .new_path = "target" });
+        try disk.disk().delete(.{ .path = "target" });
+        try disk.disk().write(.{ .path = "target", .offset = 0, .bytes = "NEW!" });
+        try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+        try disk.control().crash();
+        try disk.control().restart();
+
+        var entries = try disk.disk().readDir(.{
+            .allocator = std.testing.allocator,
+            .path = ".",
+        });
+        defer entries.deinit();
+        var source_count: usize = 0;
+        var target_count: usize = 0;
+        for (entries.entries) |entry| {
+            if (std.mem.eql(u8, entry.name, "source")) source_count += 1;
+            if (std.mem.eql(u8, entry.name, "target")) target_count += 1;
+        }
+        try std.testing.expect(source_count <= 1);
+        try std.testing.expect(target_count <= 1);
+    }
+}
+
 test "disk: crash can lose unflushed pending writes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();

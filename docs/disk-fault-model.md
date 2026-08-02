@@ -34,7 +34,10 @@ not an emulation of Linux, macOS, Windows, or a particular filesystem.
 - `corruptSector` is explicitly destructive and requires existing logical
   media, while corrupt-read faults change returned bytes but not stored bytes;
 - `setLength`, `delete`, and `rename` first commit pending writes for the
-  affected source path, then perform the lifecycle mutation; and
+  affected source path, then perform the lifecycle mutation;
+- crash metadata is resolved newest-to-oldest. If rolling back an older delete
+  or rename would collide with a later surviving create, the later entry wins,
+  so recovery never publishes duplicate file paths or file/directory names; and
 - a crash is atomic with its trace and process notification. Allocation or
   trace failure leaves media, pending work, disk liveness, process liveness,
   the seeded-choice stream, and the visible trace at the pre-crash state so
