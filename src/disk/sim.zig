@@ -156,8 +156,7 @@ pub const SimDisk = struct {
         file_changes: std.ArrayList(FileChange) = .empty,
         directory_changes: std.ArrayList(DirectoryChange) = .empty,
         pending_metadata: std.ArrayList(PendingMetadata) = .empty,
-        kept_file_paths: std.AutoHashMapUnmanaged(FileId, []const u8) = .empty,
-        kept_directory_paths: std.AutoHashMapUnmanaged(DirId, []const u8) = .empty,
+        kept_file_ids: std.AutoHashMapUnmanaged(FileId, void) = .empty,
         next_file_id: FileId,
         next_file_inode: u64,
         next_dir_id: DirId,
@@ -190,8 +189,7 @@ pub const SimDisk = struct {
             self.directory_changes.deinit(self.disk.world.allocator);
             self.clearPendingMetadata();
             self.pending_metadata.deinit(self.disk.world.allocator);
-            self.kept_file_paths.deinit(self.disk.world.allocator);
-            self.kept_directory_paths.deinit(self.disk.world.allocator);
+            self.kept_file_ids.deinit(self.disk.world.allocator);
             self.* = undefined;
         }
 
@@ -353,24 +351,19 @@ pub const SimDisk = struct {
             switch (pending.kind) {
                 .create => |id| {
                     if (try self.mutableFileById(id)) |file| {
-                        try self.kept_file_paths.put(self.disk.world.allocator, id, file.path);
+                        try self.kept_file_ids.put(self.disk.world.allocator, id, {});
                         file.metadata_durable = true;
                     }
                 },
                 .create_dir => |id| {
                     if (try self.mutableDirectoryById(id)) |directory| {
-                        try self.kept_directory_paths.put(self.disk.world.allocator, id, directory.path);
                         directory.metadata_durable = true;
                     }
                 },
                 .delete => {},
                 .rename => |rename_undo| {
                     if (try self.mutableFileById(rename_undo.file_id)) |file| {
-                        try self.kept_file_paths.put(
-                            self.disk.world.allocator,
-                            rename_undo.file_id,
-                            file.path,
-                        );
+                        try self.kept_file_ids.put(self.disk.world.allocator, rename_undo.file_id, {});
                         file.metadata_durable = true;
                     }
                 },
@@ -469,45 +462,30 @@ pub const SimDisk = struct {
             return true;
         }
 
-        fn removeDirectoryTree(self: *CrashStage, path: []const u8) DiskError!void {
-            for (self.disk.files.items) |file| {
-                const visible = self.findFileById(file.id) orelse continue;
-                if (isDescendantOrSelf(path, visible.path)) try self.deleteFileById(file.id);
-            }
-            for (self.file_changes.items) |*change| {
-                if (change.existed) continue;
-                if (change.file) |*file| {
-                    if (isDescendantOrSelf(path, file.path)) try self.deleteFileById(file.id);
-                }
-            }
-            for (self.disk.directories.items) |directory| {
-                const visible = self.findDirectoryById(directory.id) orelse continue;
-                if (isDescendantOrSelf(path, visible.path)) try self.deleteDirectoryById(directory.id);
-            }
-            for (self.directory_changes.items) |*change| {
-                if (change.existed) continue;
-                if (change.directory) |*directory| {
-                    if (isDescendantOrSelf(path, directory.path)) try self.deleteDirectoryById(directory.id);
-                }
-            }
-        }
-
-        /// A newer kept entry below a directory causally depends on that
-        /// directory's existence. Metadata is resolved newest-to-oldest, so
-        /// these sets contain only later outcomes when an older create is
-        /// considered for rollback.
-        fn directoryRequiredByKeptEntry(
+        /// A durable descendant or newer kept outcome causally requires this
+        /// directory. Changed entries are checked first; unchanged durable
+        /// media is then read directly without a whole-namespace clone.
+        fn directoryHasDurableDescendant(
             self: *CrashStage,
             path: []const u8,
         ) bool {
-            var file_paths = self.kept_file_paths.valueIterator();
-            while (file_paths.next()) |kept_path| {
-                if (isDescendantOrSelf(path, kept_path.*)) return true;
+            for (self.file_changes.items) |*change| {
+                if (change.file) |*file| {
+                    if (file.metadata_durable and isDescendant(path, file.path)) return true;
+                }
             }
-
-            var directory_paths = self.kept_directory_paths.valueIterator();
-            while (directory_paths.next()) |kept_path| {
-                if (isDescendantOrSelf(path, kept_path.*)) return true;
+            for (self.disk.files.items) |*file| {
+                if (!file.metadata_durable or !isDescendant(path, file.path)) continue;
+                if (self.findFileChange(file.id) == null) return true;
+            }
+            for (self.directory_changes.items) |*change| {
+                if (change.directory) |*directory| {
+                    if (directory.metadata_durable and isDescendant(path, directory.path)) return true;
+                }
+            }
+            for (self.disk.directories.items) |*directory| {
+                if (!directory.metadata_durable or !isDescendant(path, directory.path)) continue;
+                if (self.findDirectoryChange(directory.id) == null) return true;
             }
             return false;
         }
@@ -518,18 +496,22 @@ pub const SimDisk = struct {
                     // A surviving rename of this same identity causally
                     // depends on its creation, so an older lost create cannot
                     // erase the newer kept destination.
-                    if (!self.kept_file_paths.contains(id)) try self.deleteFileById(id);
+                    if (!self.kept_file_ids.contains(id)) try self.deleteFileById(id);
                 },
                 .create_dir => |id| {
                     if (self.findDirectoryById(id)) |directory| {
-                        if (self.directoryRequiredByKeptEntry(directory.path)) {
+                        if (self.directoryHasDurableDescendant(directory.path)) {
                             const kept_directory = (try self.mutableDirectoryById(id)) orelse unreachable;
                             kept_directory.metadata_durable = true;
                             return;
                         }
-                        const path = try self.disk.world.allocator.dupe(u8, directory.path);
-                        defer self.disk.world.allocator.free(path);
-                        try self.removeDirectoryTree(path);
+                        // Descendant metadata is newer than its parent create
+                        // and has already been resolved. With no surviving
+                        // durable descendant, only this directory remains to
+                        // be removed; rescanning and deleting its full subtree
+                        // would both erase durable truth and make a batch of
+                        // lost creates cubic.
+                        try self.deleteDirectoryById(id);
                     }
                 },
                 .delete => |*deleted| {
@@ -538,7 +520,7 @@ pub const SimDisk = struct {
                     }
                 },
                 .rename => |*rename_undo| {
-                    if (!self.kept_file_paths.contains(rename_undo.file_id)) {
+                    if (!self.kept_file_ids.contains(rename_undo.file_id)) {
                         if (rename_undo.old_path) |old_path| {
                             if (self.pathOccupiedByDifferentEntry(old_path, rename_undo.file_id)) {
                                 // A later surviving create owns the old source
@@ -1756,9 +1738,10 @@ pub const SimDisk = struct {
         return relative;
     }
 
-    fn isDescendantOrSelf(parent: []const u8, path: []const u8) bool {
-        return std.mem.eql(u8, parent, path) or
-            (std.mem.startsWith(u8, path, parent) and path.len > parent.len and path[parent.len] == '/');
+    fn isDescendant(parent: []const u8, path: []const u8) bool {
+        return std.mem.startsWith(u8, path, parent) and
+            path.len > parent.len and
+            path[parent.len] == '/';
     }
 
     fn cloneFile(self: *Self, source: *const File) DiskError!File {

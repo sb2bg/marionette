@@ -747,6 +747,141 @@ test "disk: kept child directory preserves its older-created parent" {
     _ = try disk.disk().statDir(.{ .path = "parent/child" });
 }
 
+test "disk: durable file preserves its unsynced parent directory" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "d" });
+    try disk.disk().write(.{ .path = "d/a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "d/a" });
+    try disk.disk().syncDir(.{ .path = "d" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "d" });
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "d/a", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+}
+
+test "disk: durable child directory preserves its unsynced parent" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "parent" });
+    try disk.disk().createDir(.{ .path = "parent/child" });
+    try disk.disk().syncDir(.{ .path = "parent" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "parent" });
+    _ = try disk.disk().statDir(.{ .path = "parent/child" });
+}
+
+test "disk: durable rename destination preserves its unsynced parent" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "source" });
+    try disk.disk().createDir(.{ .path = "destination" });
+    try disk.disk().write(.{ .path = "source/a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "source/a" });
+    try disk.disk().syncDir(.{ .path = "source" });
+    try disk.disk().rename(.{ .old_path = "source/a", .new_path = "destination/a" });
+    try disk.disk().syncDir(.{ .path = "source" });
+    try disk.disk().syncDir(.{ .path = "destination" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "destination" });
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "destination/a", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+}
+
+test "disk: restored durable child preserves its unsynced parent" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "d" });
+    try disk.disk().write(.{ .path = "d/a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "d/a" });
+    try disk.disk().syncDir(.{ .path = "d" });
+    try disk.disk().delete(.{ .path = "d/a" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "d" });
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "d/a", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+}
+
+test "disk: durable deep subtree preserves every unsynced ancestor" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "parent" });
+    try disk.disk().createDir(.{ .path = "parent/child" });
+    try disk.disk().createDir(.{ .path = "parent/child/grandchild" });
+    try disk.disk().write(.{ .path = "parent/child/grandchild/a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "parent/child/grandchild/a" });
+    try disk.disk().syncDir(.{ .path = "parent/child/grandchild" });
+    try disk.disk().syncDir(.{ .path = "parent/child" });
+    try disk.disk().syncDir(.{ .path = "parent" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "parent" });
+    _ = try disk.disk().statDir(.{ .path = "parent/child" });
+    _ = try disk.disk().statDir(.{ .path = "parent/child/grandchild" });
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{
+        .path = "parent/child/grandchild/a",
+        .offset = 0,
+        .buffer = &recovered,
+    });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+}
+
+test "disk: all-lost flat directory recovery handles a large batch" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    for (0..1024) |index| {
+        var path_buffer: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "directory-{d}", .{index});
+        try disk.disk().createDir(.{ .path = path });
+    }
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    var entries = try disk.disk().readDir(.{
+        .allocator = std.testing.allocator,
+        .path = ".",
+    });
+    defer entries.deinit();
+    try std.testing.expectEqual(@as(usize, 0), entries.entries.len);
+}
+
 test "disk: later kept directory wins over an earlier lost file delete" {
     var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
     defer world.deinit();
