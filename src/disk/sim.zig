@@ -138,13 +138,16 @@ pub const SimDisk = struct {
         }
     };
 
-    /// Hook invoked after a crash lands. A disk crash models a machine
-    /// crash, which also kills the process; layers caching disk-derived
-    /// state (such as the `std.Io` file backend) register here so a crash
-    /// invalidates their caches and open handles.
+    /// Two-phase hook coordinated with a crash landing. A disk crash models
+    /// a machine crash, which also kills the process; layers caching
+    /// disk-derived state (such as the `std.Io` file backend) register here.
+    /// `prepare` publishes any fallible observer trace before the disk
+    /// transition; `commit` then invalidates caches and open handles without
+    /// failure.
     pub const CrashObserver = struct {
         ptr: *anyopaque,
-        on_crash: *const fn (*anyopaque) void,
+        prepare: *const fn (*anyopaque) DiskError!void,
+        commit: *const fn (*anyopaque) void,
     };
 
     world: *World,
@@ -696,7 +699,16 @@ pub const SimDisk = struct {
         // A control action, not a data operation: it must neither consume
         // armed-crash budget nor recursively trigger itself.
         try self.ensureRunning();
-        self.armed_crash_budget = null;
+
+        // Crash is one externally visible transaction. Build the recovered
+        // durable state off to the side while recording every seeded choice
+        // and classification under one world checkpoint. Only after the
+        // final summary and observer trace succeed do we swap the staged
+        // state in and notify process-local owners.
+        const checkpoint = self.world.transactionCheckpoint();
+        errdefer self.world.rollbackTransaction(checkpoint);
+        var staged = try self.cloneMediaState();
+        defer staged.deinit();
 
         const pending_count = self.pending_writes.items.len;
         var landed: u64 = 0;
@@ -726,7 +738,7 @@ pub const SimDisk = struct {
                 "crash_torn_write",
                 self.faults.crash_torn_write_rate,
             )) {
-                try self.applyTornWrite(pending);
+                try staged.applyTornWrite(pending);
                 torn += 1;
                 try self.recordCrashWrite(pending, "torn");
                 continue;
@@ -752,43 +764,40 @@ pub const SimDisk = struct {
                 index -= 1;
                 const item = landing.items[index];
                 const pending = &self.pending_writes.items[item.index];
-                try self.applyFullWrite(pending);
+                try staged.applyFullWrite(pending);
                 try self.recordCrashWrite(pending, "reordered");
             }
         } else {
             landed = @intCast(landing.items.len);
             for (landing.items) |item| {
                 const pending = &self.pending_writes.items[item.index];
-                try self.applyFullWrite(pending);
+                try staged.applyFullWrite(pending);
                 try self.recordCrashWrite(pending, "landed");
             }
         }
-        self.clearPendingWrites();
-
-        const pending_metadata_count = self.pending_metadata.items.len;
+        const pending_metadata_count = staged.pending_metadata.items.len;
         var metadata_kept: u64 = 0;
         var metadata_lost: u64 = 0;
-        var index = self.pending_metadata.items.len;
+        var index = staged.pending_metadata.items.len;
         while (index > 0) {
             index -= 1;
-            const pending = &self.pending_metadata.items[index];
+            const pending = &staged.pending_metadata.items[index];
             if (try self.rollFault(
                 pending.op_id,
                 pending.dir,
                 "crash_lost_metadata",
                 self.faults.crash_lost_metadata_rate,
             )) {
-                try self.rollbackPendingMetadata(pending);
+                try staged.rollbackPendingMetadata(pending);
                 metadata_lost += 1;
                 try self.recordCrashMetadata(pending, "lost");
             } else {
-                self.markMetadataDurable(pending);
+                staged.markMetadataDurable(pending);
                 metadata_kept += 1;
                 try self.recordCrashMetadata(pending, "kept");
             }
         }
-        self.clearPendingMetadata();
-        self.crashed = true;
+        staged.clearPendingMetadata();
 
         try self.world.recordFields("disk.crash", &.{
             traceField("pending_writes", .{ .uint = @intCast(pending_count) }),
@@ -801,7 +810,19 @@ pub const SimDisk = struct {
             traceField("metadata_lost", .{ .uint = metadata_lost }),
         });
 
-        if (self.crash_observer) |observer| observer.on_crash(observer.ptr);
+        if (self.crash_observer) |observer| try observer.prepare(observer.ptr);
+
+        std.mem.swap(std.ArrayList(File), &self.files, &staged.files);
+        std.mem.swap(std.ArrayList(Directory), &self.directories, &staged.directories);
+        self.next_file_id = staged.next_file_id;
+        self.next_file_inode = staged.next_file_inode;
+        self.next_dir_id = staged.next_dir_id;
+        self.clearPendingWrites();
+        self.clearPendingMetadata();
+        self.armed_crash_budget = null;
+        self.crashed = true;
+
+        if (self.crash_observer) |observer| observer.commit(observer.ptr);
     }
 
     fn restart(self: *Self, _: Restart) DiskError!void {
@@ -1222,6 +1243,109 @@ pub const SimDisk = struct {
     fn isDescendantOrSelf(parent: []const u8, path: []const u8) bool {
         return std.mem.eql(u8, parent, path) or
             (std.mem.startsWith(u8, path, parent) and path.len > parent.len and path[parent.len] == '/');
+    }
+
+    fn cloneMediaState(self: *Self) DiskError!Self {
+        var staged: Self = .{
+            .world = self.world,
+            .options = self.options,
+            .faults = self.faults,
+            .next_op_id = self.next_op_id,
+            .next_file_id = self.next_file_id,
+            .next_file_inode = self.next_file_inode,
+            .next_dir_id = self.next_dir_id,
+        };
+        errdefer staged.deinit();
+
+        for (self.files.items) |*file| {
+            var cloned = try self.cloneFile(file);
+            errdefer cloned.deinit(self.world.allocator);
+            try staged.files.append(self.world.allocator, cloned);
+        }
+        for (self.directories.items) |*directory| {
+            const cloned_path = try self.world.allocator.dupe(u8, directory.path);
+            errdefer self.world.allocator.free(cloned_path);
+            try staged.directories.append(self.world.allocator, .{
+                .id = directory.id,
+                .path = cloned_path,
+                .mtime_ns = directory.mtime_ns,
+                .metadata_durable = directory.metadata_durable,
+            });
+        }
+        for (self.pending_metadata.items) |*pending| {
+            var cloned = try self.clonePendingMetadata(pending);
+            errdefer cloned.deinit(self.world.allocator);
+            try staged.pending_metadata.append(self.world.allocator, cloned);
+        }
+        return staged;
+    }
+
+    fn cloneFile(self: *Self, source: *const File) DiskError!File {
+        const path = try self.world.allocator.dupe(u8, source.path);
+        var cloned: File = .{
+            .id = source.id,
+            .inode = source.inode,
+            .path = path,
+            .len = source.len,
+            .metadata_durable = source.metadata_durable,
+        };
+        errdefer cloned.deinit(self.world.allocator);
+
+        for (source.sectors.items) |source_sector| {
+            const bytes = try self.world.allocator.dupe(u8, source_sector.bytes);
+            errdefer self.world.allocator.free(bytes);
+            try cloned.sectors.append(self.world.allocator, .{
+                .index = source_sector.index,
+                .bytes = bytes,
+                .corrupt = source_sector.corrupt,
+            });
+        }
+        return cloned;
+    }
+
+    fn clonePendingMetadata(self: *Self, source: *const PendingMetadata) DiskError!PendingMetadata {
+        const dir = try self.world.allocator.dupe(u8, source.dir);
+        errdefer self.world.allocator.free(dir);
+        const other_dir = if (source.other_dir) |path|
+            try self.world.allocator.dupe(u8, path)
+        else
+            null;
+        errdefer if (other_dir) |path| self.world.allocator.free(path);
+
+        const kind: PendingMetadata.Kind = switch (source.kind) {
+            .create => |id| .{ .create = id },
+            .create_dir => |id| .{ .create_dir = id },
+            .delete => |deleted| .{ .delete = if (deleted) |*file|
+                try self.cloneFile(file)
+            else
+                null },
+            .rename => |*rename_undo| .{ .rename = try self.cloneRenameUndo(rename_undo) },
+        };
+        return .{
+            .op_id = source.op_id,
+            .dir = dir,
+            .other_dir = other_dir,
+            .dir_synced = source.dir_synced,
+            .other_dir_synced = source.other_dir_synced,
+            .kind = kind,
+        };
+    }
+
+    fn cloneRenameUndo(self: *Self, source: *const PendingMetadata.RenameUndo) DiskError!PendingMetadata.RenameUndo {
+        const old_path = if (source.old_path) |path|
+            try self.world.allocator.dupe(u8, path)
+        else
+            null;
+        errdefer if (old_path) |path| self.world.allocator.free(path);
+        const replaced = if (source.replaced) |*file|
+            try self.cloneFile(file)
+        else
+            null;
+        return .{
+            .file_id = source.file_id,
+            .old_path = old_path,
+            .replaced = replaced,
+        };
     }
 
     fn directoryInode(id: DirId) u64 {

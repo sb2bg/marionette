@@ -695,6 +695,139 @@ test "disk: crash traces are deterministic for the same seed" {
     try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
 }
 
+test "disk: crash allocation failure leaves pending and durable state retryable" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xA110C, .tick_ns = 10 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4, .min_latency_ns = 10 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
+    const trace_before = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(trace_before);
+    const event_before = world.nextEventIndex();
+
+    // The landing-list allocation succeeds; staging the first new durable
+    // file then fails. The live disk must still contain the pending write.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    world.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, disk.control().crash());
+    world.allocator = std.testing.allocator;
+
+    try std.testing.expectEqualStrings(trace_before, world.traceBytes());
+    try std.testing.expectEqual(event_before, world.nextEventIndex());
+    var visible: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "wal.log", .offset = 0, .buffer = &visible });
+    try std.testing.expectEqualStrings("abcd", &visible);
+
+    try disk.control().crash();
+    try disk.control().restart();
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "wal.log", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("abcd", &recovered);
+}
+
+test "disk: exhaustive tiny crash boundaries preserve unrelated durable truth" {
+    for (0..4) |crash_after| {
+        var world = try World.init(std.testing.allocator, .{
+            .seed = 0xD15C + crash_after,
+            .tick_ns = 1,
+        });
+        defer world.deinit();
+        var disk = try SimDisk.init(&world, .{ .sector_size = 2 });
+        defer disk.deinit();
+
+        try disk.disk().write(.{ .path = "durable", .offset = 0, .bytes = "SAFE" });
+        try disk.disk().sync(.{ .path = "durable" });
+        try disk.disk().syncDir(.{ .path = "." });
+        try disk.control().setFaults(.{
+            .crash_lost_write_rate = .oneIn(2),
+            .crash_torn_write_rate = .oneIn(2),
+            .crash_reordered_write_rate = .oneIn(2),
+            .crash_lost_metadata_rate = .oneIn(2),
+        });
+        try disk.control().crashAfterOps(crash_after);
+
+        var crashed = false;
+        for (0..4) |index| {
+            const offset: u64 = @intCast(index * 2);
+            disk.disk().write(.{
+                .path = "pending",
+                .offset = offset,
+                .bytes = "xx",
+            }) catch |err| switch (err) {
+                error.DiskCrashed => {
+                    crashed = true;
+                    break;
+                },
+                else => return err,
+            };
+        }
+        try std.testing.expect(crashed);
+        try disk.control().restart();
+
+        var durable: [4]u8 = undefined;
+        try disk.disk().read(.{ .path = "durable", .offset = 0, .buffer = &durable });
+        try std.testing.expectEqualStrings("SAFE", &durable);
+    }
+}
+
+test "disk: every ordinary crash profile preserves unrelated durable truth" {
+    for (0..16) |mask| {
+        var world = try World.init(std.testing.allocator, .{
+            .seed = 0xC0DE + mask,
+            .tick_ns = 1,
+        });
+        defer world.deinit();
+        var disk = try SimDisk.init(&world, .{ .sector_size = 2 });
+        defer disk.deinit();
+
+        try disk.disk().write(.{ .path = "truth", .offset = 0, .bytes = "SAFE" });
+        try disk.disk().sync(.{ .path = "truth" });
+        try disk.disk().syncDir(.{ .path = "." });
+        try disk.disk().write(.{ .path = "pending", .offset = 0, .bytes = "11112222" });
+        try disk.disk().write(.{ .path = "pending", .offset = 0, .bytes = "33334444" });
+        try disk.control().setFaults(.{
+            .crash_lost_write_rate = if (mask & 1 != 0) .always() else .never(),
+            .crash_torn_write_rate = if (mask & 2 != 0) .always() else .never(),
+            .crash_reordered_write_rate = if (mask & 4 != 0) .always() else .never(),
+            .crash_lost_metadata_rate = if (mask & 8 != 0) .always() else .never(),
+        });
+        try disk.control().crash();
+        try disk.control().restart();
+
+        var durable: [4]u8 = undefined;
+        try disk.disk().read(.{ .path = "truth", .offset = 0, .buffer = &durable });
+        try std.testing.expectEqualStrings("SAFE", &durable);
+    }
+}
+
+test "disk: sync metamorphically promotes a lost pending write to durable truth" {
+    var unsynced_world = try World.init(std.testing.allocator, .{ .seed = 7 });
+    defer unsynced_world.deinit();
+    var unsynced = try SimDisk.init(&unsynced_world, .{ .sector_size = 4 });
+    defer unsynced.deinit();
+    try unsynced.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "data" });
+    try unsynced.control().setFaults(.{ .crash_lost_write_rate = .always() });
+    try unsynced.control().crash();
+    try unsynced.control().restart();
+    var absent: [4]u8 = undefined;
+    try unsynced.disk().read(.{ .path = "wal.log", .offset = 0, .buffer = &absent });
+    try std.testing.expectEqualStrings("\x00" ** 4, &absent);
+
+    var synced_world = try World.init(std.testing.allocator, .{ .seed = 7 });
+    defer synced_world.deinit();
+    var synced = try SimDisk.init(&synced_world, .{ .sector_size = 4 });
+    defer synced.deinit();
+    try synced.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "data" });
+    try synced.disk().sync(.{ .path = "wal.log" });
+    try synced.control().setFaults(.{ .crash_lost_write_rate = .always() });
+    try synced.control().crash();
+    try synced.control().restart();
+    var present: [4]u8 = undefined;
+    try synced.disk().read(.{ .path = "wal.log", .offset = 0, .buffer = &present });
+    try std.testing.expectEqualStrings("data", &present);
+}
+
 test "disk: armed crash fires at the operation boundary and disarms" {
     var world = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
     defer world.deinit();

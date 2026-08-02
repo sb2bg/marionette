@@ -1968,6 +1968,76 @@ test "io: process kill retires futex keys for killed waiters" {
     try std.testing.expectEqual(@as(usize, 0), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 }
 
+test "io: disk crash trace failure leaves disk and process state coherent" {
+    // Measure the exact disk-crash summary size so the real case can leave
+    // room for that record while forcing the following process notification
+    // to grow the trace buffer.
+    var sizing_world = try World.init(std.testing.allocator, .{ .seed = 0xC0DE });
+    defer sizing_world.deinit();
+    const sizing_sim = try sizing_world.simulate(.{});
+    const sizing_start = sizing_world.traceBytes().len;
+    try sizing_sim.control.disk.crash();
+    const process_record_at = std.mem.indexOfPos(
+        u8,
+        sizing_world.traceBytes(),
+        sizing_start,
+        "process.kill node=0 reason=disk_crash",
+    ).?;
+    const disk_record_len = process_record_at - sizing_start;
+
+    const Lifecycle = struct {
+        kills: usize = 0,
+
+        fn onKill(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.kills += 1;
+        }
+
+        fn restart(_: *anyopaque, _: env_module.Env) anyerror!void {}
+    };
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xC0DE });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    var lifecycle: Lifecycle = .{};
+    try sim.registerProcess(0, .{
+        .ptr = &lifecycle,
+        .on_kill = Lifecycle.onKill,
+        .restart = Lifecycle.restart,
+    });
+
+    try world.trace_log.ensureUnusedCapacity(world.allocator, disk_record_len + 128);
+    const spare = world.trace_log.capacity - world.trace_log.items.len;
+    try std.testing.expect(spare >= disk_record_len);
+    try world.trace_log.appendNTimes(
+        world.allocator,
+        0,
+        spare - disk_record_len,
+    );
+    const trace_before = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(trace_before);
+    const event_before = world.nextEventIndex();
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    world.allocator = failing.allocator();
+    const crash_result = sim.control.disk.crash();
+    world.allocator = std.testing.allocator;
+    try std.testing.expectError(error.OutOfMemory, crash_result);
+
+    try std.testing.expectEqualStrings(trace_before, world.traceBytes());
+    try std.testing.expectEqual(event_before, world.nextEventIndex());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.kills);
+
+    // A retry succeeds from the unchanged pre-crash state and notifies the
+    // process exactly once.
+    try sim.control.disk.crash();
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.kills);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, world.traceBytes(), "process.kill node=0 reason=disk_crash"),
+    );
+}
+
 test "io: disk crash closes process-local std.Io.net listeners" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5B, .tick_ns = 10 });
     defer world.deinit();

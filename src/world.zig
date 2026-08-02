@@ -228,14 +228,30 @@ pub const ProcessSupervisor = struct {
         self.transition_schedules[index] = .pending;
     }
 
-    /// Disk-crash observer: kills every alive process, since a machine
-    /// whose disk vanished cannot keep running.
-    pub fn onDiskCrash(self: *ProcessSupervisor) void {
+    /// Publish the fallible half of a disk-crash notification before either
+    /// disk or process state changes. The enclosing disk transaction rolls
+    /// all of these records back if any one fails.
+    pub fn prepareDiskCrash(self: *ProcessSupervisor) disk_module.DiskError!void {
+        for (self.states, 0..) |state, index| {
+            if (state != .alive) continue;
+            try self.world.recordFields("process.kill", &.{
+                traceField("node", .{ .uint = @intCast(index) }),
+                traceField("reason", .{ .literal = "disk_crash" }),
+            });
+        }
+    }
+
+    /// Commit the infallible half of a prepared disk-crash notification.
+    pub fn commitDiskCrash(self: *ProcessSupervisor) void {
         self.io_runtime.onDiskCrash();
         for (self.states, 0..) |state, index| {
             if (state != .alive) continue;
-            const node: network_module.NodeId = @intCast(index);
-            self.noteKilled(node, "disk_crash") catch @panic("failed to record process disk-crash kill");
+            if (self.lifecycles[index]) |lifecycle| {
+                if (lifecycle.on_kill) |on_kill| on_kill(lifecycle.ptr);
+            }
+            self.states[index] = .killed;
+            self.state_changed_at_ns[index] = self.world.now();
+            self.transition_schedules[index] = .pending;
         }
     }
 
@@ -852,7 +868,8 @@ pub const World = struct {
 
         sim_disk.setCrashObserver(.{
             .ptr = process_supervisor,
-            .on_crash = onProcessSupervisorDiskCrashOpaque,
+            .prepare = prepareProcessSupervisorDiskCrashOpaque,
+            .commit = commitProcessSupervisorDiskCrashOpaque,
         });
 
         const control: env_module.SimControl = .{
@@ -888,9 +905,14 @@ pub const World = struct {
         allocator.destroy(process_supervisor);
     }
 
-    fn onProcessSupervisorDiskCrashOpaque(ptr: *anyopaque) void {
+    fn prepareProcessSupervisorDiskCrashOpaque(ptr: *anyopaque) disk_module.DiskError!void {
         const process_supervisor: *ProcessSupervisor = @ptrCast(@alignCast(ptr));
-        process_supervisor.onDiskCrash();
+        try process_supervisor.prepareDiskCrash();
+    }
+
+    fn commitProcessSupervisorDiskCrashOpaque(ptr: *anyopaque) void {
+        const process_supervisor: *ProcessSupervisor = @ptrCast(@alignCast(ptr));
+        process_supervisor.commitDiskCrash();
     }
 
     /// Return the world's simulated clock.
@@ -941,6 +963,32 @@ pub const World = struct {
         );
         return value;
     }
+
+    /// Snapshot the trace and seeded-choice state for a larger simulator
+    /// transaction. Callers that perform several traced choices before one
+    /// externally visible commit use this to make the entire sequence
+    /// retryable after trace or allocator failure.
+    pub fn transactionCheckpoint(self: *const World) TransactionCheckpoint {
+        return .{
+            .trace_len = self.trace_log.items.len,
+            .event_index = self.event_index,
+            .rng = self.rng,
+        };
+    }
+
+    /// Roll back a checkpoint created by `transactionCheckpoint`.
+    pub fn rollbackTransaction(self: *World, checkpoint: TransactionCheckpoint) void {
+        std.debug.assert(checkpoint.trace_len <= self.trace_log.items.len);
+        self.trace_log.shrinkRetainingCapacity(checkpoint.trace_len);
+        self.event_index = checkpoint.event_index;
+        self.rng = checkpoint.rng;
+    }
+
+    pub const TransactionCheckpoint = struct {
+        trace_len: usize,
+        event_index: u64,
+        rng: random_module.Random,
+    };
 
     /// Advance the world by one simulation tick.
     pub fn tick(self: *World) !void {
