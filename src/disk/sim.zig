@@ -156,7 +156,8 @@ pub const SimDisk = struct {
         file_changes: std.ArrayList(FileChange) = .empty,
         directory_changes: std.ArrayList(DirectoryChange) = .empty,
         pending_metadata: std.ArrayList(PendingMetadata) = .empty,
-        kept_rename_file_ids: std.AutoHashMapUnmanaged(FileId, void) = .empty,
+        kept_file_paths: std.AutoHashMapUnmanaged(FileId, []const u8) = .empty,
+        kept_directory_paths: std.AutoHashMapUnmanaged(DirId, []const u8) = .empty,
         next_file_id: FileId,
         next_file_inode: u64,
         next_dir_id: DirId,
@@ -189,7 +190,8 @@ pub const SimDisk = struct {
             self.directory_changes.deinit(self.disk.world.allocator);
             self.clearPendingMetadata();
             self.pending_metadata.deinit(self.disk.world.allocator);
-            self.kept_rename_file_ids.deinit(self.disk.world.allocator);
+            self.kept_file_paths.deinit(self.disk.world.allocator);
+            self.kept_directory_paths.deinit(self.disk.world.allocator);
             self.* = undefined;
         }
 
@@ -350,19 +352,27 @@ pub const SimDisk = struct {
         fn markMetadataDurable(self: *CrashStage, pending: *const PendingMetadata) DiskError!void {
             switch (pending.kind) {
                 .create => |id| {
-                    if (try self.mutableFileById(id)) |file| file.metadata_durable = true;
+                    if (try self.mutableFileById(id)) |file| {
+                        try self.kept_file_paths.put(self.disk.world.allocator, id, file.path);
+                        file.metadata_durable = true;
+                    }
                 },
                 .create_dir => |id| {
-                    if (try self.mutableDirectoryById(id)) |directory| directory.metadata_durable = true;
+                    if (try self.mutableDirectoryById(id)) |directory| {
+                        try self.kept_directory_paths.put(self.disk.world.allocator, id, directory.path);
+                        directory.metadata_durable = true;
+                    }
                 },
                 .delete => {},
                 .rename => |rename_undo| {
-                    try self.kept_rename_file_ids.put(
-                        self.disk.world.allocator,
-                        rename_undo.file_id,
-                        {},
-                    );
-                    if (try self.mutableFileById(rename_undo.file_id)) |file| file.metadata_durable = true;
+                    if (try self.mutableFileById(rename_undo.file_id)) |file| {
+                        try self.kept_file_paths.put(
+                            self.disk.world.allocator,
+                            rename_undo.file_id,
+                            file.path,
+                        );
+                        file.metadata_durable = true;
+                    }
                 },
             }
         }
@@ -482,16 +492,41 @@ pub const SimDisk = struct {
             }
         }
 
+        /// A newer kept entry below a directory causally depends on that
+        /// directory's existence. Metadata is resolved newest-to-oldest, so
+        /// these sets contain only later outcomes when an older create is
+        /// considered for rollback.
+        fn directoryRequiredByKeptEntry(
+            self: *CrashStage,
+            path: []const u8,
+        ) bool {
+            var file_paths = self.kept_file_paths.valueIterator();
+            while (file_paths.next()) |kept_path| {
+                if (isDescendantOrSelf(path, kept_path.*)) return true;
+            }
+
+            var directory_paths = self.kept_directory_paths.valueIterator();
+            while (directory_paths.next()) |kept_path| {
+                if (isDescendantOrSelf(path, kept_path.*)) return true;
+            }
+            return false;
+        }
+
         fn rollbackPendingMetadata(self: *CrashStage, pending: *PendingMetadata) DiskError!void {
             switch (pending.kind) {
                 .create => |id| {
                     // A surviving rename of this same identity causally
                     // depends on its creation, so an older lost create cannot
                     // erase the newer kept destination.
-                    if (!self.kept_rename_file_ids.contains(id)) try self.deleteFileById(id);
+                    if (!self.kept_file_paths.contains(id)) try self.deleteFileById(id);
                 },
                 .create_dir => |id| {
                     if (self.findDirectoryById(id)) |directory| {
+                        if (self.directoryRequiredByKeptEntry(directory.path)) {
+                            const kept_directory = (try self.mutableDirectoryById(id)) orelse unreachable;
+                            kept_directory.metadata_durable = true;
+                            return;
+                        }
                         const path = try self.disk.world.allocator.dupe(u8, directory.path);
                         defer self.disk.world.allocator.free(path);
                         try self.removeDirectoryTree(path);
@@ -503,7 +538,7 @@ pub const SimDisk = struct {
                     }
                 },
                 .rename => |*rename_undo| {
-                    if (!self.kept_rename_file_ids.contains(rename_undo.file_id)) {
+                    if (!self.kept_file_paths.contains(rename_undo.file_id)) {
                         if (rename_undo.old_path) |old_path| {
                             if (self.pathOccupiedByDifferentEntry(old_path, rename_undo.file_id)) {
                                 // A later surviving create owns the old source

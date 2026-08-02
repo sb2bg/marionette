@@ -681,6 +681,72 @@ test "disk: kept rename preserves the identity of an older lost create" {
     try std.testing.expectEqualStrings("DATA", &recovered);
 }
 
+test "disk: kept rename preserves an older-created destination directory" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "a" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().createDir(.{ .path = "d" });
+    try disk.disk().rename(.{ .old_path = "a", .new_path = "d/a" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "d" });
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "d/a", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.crash_metadata op=4 dir=. kind=rename result=kept",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.crash_metadata op=3 dir=. kind=create_dir result=lost",
+    ) != null);
+}
+
+test "disk: kept file create preserves its older-created parent directory" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "d" });
+    try disk.disk().write(.{ .path = "d/a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "d/a" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "d" });
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "d/a", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+}
+
+test "disk: kept child directory preserves its older-created parent" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "parent" });
+    try disk.disk().createDir(.{ .path = "parent/child" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try disk.disk().statDir(.{ .path = "parent" });
+    _ = try disk.disk().statDir(.{ .path = "parent/child" });
+}
+
 test "disk: later kept directory wins over an earlier lost file delete" {
     var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
     defer world.deinit();
@@ -1016,6 +1082,55 @@ test "disk: crash staging is leak-free across metadata allocation failures" {
             .fail_index = fail_index,
         });
         crashMetadataAllocationFailureSweep(failing.allocator()) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        reached_success = true;
+        break;
+    }
+    try std.testing.expect(reached_success);
+}
+
+fn keptEntryDependencyAllocationFailureSweep(allocator: std.mem.Allocator) !void {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "a" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().createDir(.{ .path = "d" });
+    try disk.disk().rename(.{ .old_path = "a", .new_path = "d/a" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+
+    const trace_before = try std.testing.allocator.dupe(u8, world.traceBytes());
+    defer std.testing.allocator.free(trace_before);
+    const event_before = world.nextEventIndex();
+    world.allocator = allocator;
+    const crash_result = disk.control().crash();
+    world.allocator = std.testing.allocator;
+    crash_result catch |err| {
+        try std.testing.expectEqualStrings(trace_before, world.traceBytes());
+        try std.testing.expectEqual(event_before, world.nextEventIndex());
+        try disk.control().crash();
+        try disk.control().restart();
+        _ = try disk.disk().statDir(.{ .path = "d" });
+        _ = try disk.disk().stat(.{ .path = "d/a" });
+        return err;
+    };
+    try disk.control().restart();
+    _ = try disk.disk().statDir(.{ .path = "d" });
+    _ = try disk.disk().stat(.{ .path = "d/a" });
+}
+
+test "disk: kept-entry directory dependencies retry across allocation failures" {
+    var reached_success = false;
+    for (0..128) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        keptEntryDependencyAllocationFailureSweep(failing.allocator()) catch |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             continue;
         };
