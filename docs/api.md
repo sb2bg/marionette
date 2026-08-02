@@ -444,7 +444,14 @@ durable.
 Pending metadata is resolved newest-to-oldest during a crash. When rolling
 back an older delete or rename would collide with a later surviving create,
 the later entry owns that path. Recovery therefore preserves a unique logical
-namespace even when individual metadata records receive mixed outcomes.
+namespace even when individual metadata records receive mixed outcomes. A
+later surviving rename also owns its file identity: losing an older rename or
+the identity's original create cannot erase or move the newer kept destination.
+
+The simulated disk rejects file operations whose exact path names a directory.
+In particular, `write` and a file `rename` destination return `error.IsDir`
+before publishing file data or committing pending source writes. This namespace
+rule is enforced in every optimization mode, including ReleaseFast.
 
 Under `portable_v1`, `setLength`, `delete`, and `rename` commit pending writes
 for the affected source path before applying the lifecycle mutation. This is a
