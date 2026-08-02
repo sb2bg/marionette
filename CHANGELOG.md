@@ -17,9 +17,11 @@
   process-kill records roll back together on failure. Only after all fallible
   work succeeds does the disk atomically publish recovered media, enter the
   crashed state, invalidate process-local I/O, and run lifecycle kill callbacks.
-  Newest-to-oldest metadata reconciliation gives later surviving creates
-  precedence over older delete/rename rollbacks, preserving unique paths under
-  mixed metadata outcomes.
+  Newest-to-oldest metadata reconciliation gives later surviving creates and
+  renames precedence over older rollbacks, rejects cross-kind path collisions,
+  and causally preserves ancestor directories required by surviving or already
+  durable descendants. Recovery therefore retains a unique, reachable namespace
+  under mixed metadata outcomes.
 
 - Makes `std.Io.File.setLength` extension one disk lifecycle operation instead
   of a sequence of fallible zero-sector writes. A failed extension can no
