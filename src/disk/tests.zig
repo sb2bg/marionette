@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const clock_module = @import("../clock.zig");
+const disk_model = @import("model.zig");
 const DiskFaultOptions = @import("model.zig").DiskFaultOptions;
 const SimDisk = @import("sim.zig").SimDisk;
 const World = @import("../world.zig").World;
@@ -32,6 +33,25 @@ test "disk: writes and reads sector-aligned logical files" {
     try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.write op=0 path=wal.log offset=4 len=4 status=ok latency_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=8 status=ok latency_ns=10") != null);
+}
+
+test "disk: trace names the portable v1 semantic contract" {
+    try std.testing.expectEqual(
+        disk_model.DiskSemanticContract.portable_v1,
+        disk_model.disk_semantic_contract,
+    );
+    try std.testing.expectEqual(@as(u32, 1), disk_model.disk_semantic_version);
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.model contract=portable_v1 version=1 sector_size=4 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=commit_pending",
+    ) != null);
 }
 
 test "disk: lifecycle operations are deterministic and trace-visible" {

@@ -57,6 +57,13 @@ pub const RealDisk = disk_module.RealDisk;
 /// Configuration for one deterministic disk simulator.
 pub const DiskOptions = disk_module.DiskOptions;
 
+/// Named, versioned semantics implemented by the disk simulator.
+pub const DiskSemanticContract = disk_module.DiskSemanticContract;
+
+/// Current disk semantic contract and numeric version.
+pub const disk_semantic_contract = disk_module.disk_semantic_contract;
+pub const disk_semantic_version = disk_module.disk_semantic_version;
+
 /// Fault rates and corruption controls for one deterministic disk simulator.
 pub const DiskFaultOptions = disk_module.DiskFaultOptions;
 

@@ -171,6 +171,14 @@ pub const SimDisk = struct {
     /// stream, and trace. Latency values must be tick-aligned.
     pub fn init(world: *World, options: DiskOptions) DiskError!Self {
         const resolved_options = try resolveOptions(world, options);
+        try world.recordFields("disk.model", &.{
+            traceField("contract", .{ .literal = @tagName(model.disk_semantic_contract) }),
+            traceField("version", .{ .uint = model.disk_semantic_version }),
+            traceField("sector_size", .{ .uint = resolved_options.sector_size }),
+            traceField("torn_write", .{ .literal = "sector_prefix" }),
+            traceField("reorder", .{ .literal = "crash_global_reverse" }),
+            traceField("lifecycle", .{ .literal = "commit_pending" }),
+        });
         return .{
             .world = world,
             .options = resolved_options,

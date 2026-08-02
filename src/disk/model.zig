@@ -5,6 +5,19 @@ const std = @import("std");
 const clock_module = @import("../clock.zig");
 const env_module = @import("../env.zig");
 
+/// Versioned simulator semantics applications may rely on.
+///
+/// `portable_v1` is deliberately a Marionette contract rather than a claim
+/// about any one host filesystem. It uses sector-prefix tears, one
+/// crash-global reversal for surviving writes, and commits a path's pending
+/// writes before `setLength`, `delete`, or `rename` changes its lifecycle.
+pub const DiskSemanticContract = enum {
+    portable_v1,
+};
+
+pub const disk_semantic_contract: DiskSemanticContract = .portable_v1;
+pub const disk_semantic_version: u32 = 1;
+
 /// Errors shared by every disk implementation and control operation.
 pub const DiskError = error{
     DiskUnavailable,
@@ -101,6 +114,9 @@ pub const Disk = struct {
     pub const DirEntry = DiskDirEntry;
     pub const DirEntryKind = DiskDirEntryKind;
     pub const DirList = DiskDirList;
+    pub const SemanticContract = DiskSemanticContract;
+    pub const semantic_contract = disk_semantic_contract;
+    pub const semantic_version = disk_semantic_version;
 
     pub const VTable = struct {
         read: *const fn (*anyopaque, Read) DiskError!void,
