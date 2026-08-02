@@ -393,10 +393,44 @@ pub const SimDisk = struct {
             path: []const u8,
             file_id: FileId,
         ) bool {
-            if (self.findFileId(path)) |occupant_id| {
-                if (occupant_id != file_id) return true;
+            for (self.file_changes.items) |*change| {
+                if (change.file) |*file| {
+                    if (file.id != file_id and std.mem.eql(u8, file.path, path)) return true;
+                }
             }
-            return self.findDirectoryId(path) != null;
+            if (self.disk.findFile(path)) |file| {
+                if (file.id != file_id and self.findFileChange(file.id) == null) return true;
+            }
+            return self.pathOccupiedByDirectory(path);
+        }
+
+        fn pathOccupiedByDirectory(self: *CrashStage, path: []const u8) bool {
+            for (self.directory_changes.items) |*change| {
+                if (change.directory) |*directory| {
+                    if (std.mem.eql(u8, directory.path, path)) return true;
+                }
+            }
+            if (self.disk.findDirectory(path)) |directory| {
+                return self.findDirectoryChange(directory.id) == null;
+            }
+            return false;
+        }
+
+        fn directoryPathOccupiedByDifferentEntry(
+            self: *CrashStage,
+            path: []const u8,
+            directory_id: DirId,
+        ) bool {
+            if (self.findFileId(path) != null) return true;
+            for (self.directory_changes.items) |*change| {
+                if (change.directory) |*directory| {
+                    if (directory.id != directory_id and std.mem.eql(u8, directory.path, path)) return true;
+                }
+            }
+            if (self.disk.findDirectory(path)) |directory| {
+                if (directory.id != directory_id and self.findDirectoryChange(directory.id) == null) return true;
+            }
+            return false;
         }
 
         /// Metadata is resolved newest-to-oldest. If rolling back an older
@@ -476,48 +510,23 @@ pub const SimDisk = struct {
             }
         }
 
-        fn assertUniquePaths(self: *CrashStage) void {
-            for (self.disk.files.items) |source| {
-                const file = self.findFileById(source.id) orelse continue;
-                self.assertFilePathUnique(file);
-            }
+        /// The live disk starts unique, and every staged path mutation checks
+        /// its destination before publication. Revalidate only changed
+        /// entries here so a clean crash is O(1), while invariant violations
+        /// remain runtime errors even when checked-build assertions are off.
+        fn validateChangedPaths(self: *CrashStage) DiskError!void {
             for (self.file_changes.items) |*change| {
-                if (change.existed) continue;
-                if (change.file) |*file| self.assertFilePathUnique(file);
-            }
-            for (self.disk.directories.items) |source| {
-                const directory = self.findDirectoryById(source.id) orelse continue;
-                self.assertDirectoryPathUnique(directory);
-            }
-            for (self.directory_changes.items) |*change| {
-                if (change.existed) continue;
-                if (change.directory) |*directory| self.assertDirectoryPathUnique(directory);
-            }
-        }
-
-        fn assertFilePathUnique(self: *CrashStage, file: *const File) void {
-            for (self.disk.files.items) |source| {
-                const other = self.findFileById(source.id) orelse continue;
-                if (other.id != file.id) std.debug.assert(!std.mem.eql(u8, other.path, file.path));
-            }
-            for (self.file_changes.items) |*change| {
-                if (change.existed) continue;
-                if (change.file) |*other| {
-                    if (other.id != file.id) std.debug.assert(!std.mem.eql(u8, other.path, file.path));
+                if (change.file) |*file| {
+                    if (self.pathOccupiedByDifferentEntry(file.path, file.id)) {
+                        return error.PathAlreadyExists;
+                    }
                 }
             }
-            std.debug.assert(self.findDirectoryId(file.path) == null);
-        }
-
-        fn assertDirectoryPathUnique(self: *CrashStage, directory: *const Directory) void {
-            for (self.disk.directories.items) |source| {
-                const other = self.findDirectoryById(source.id) orelse continue;
-                if (other.id != directory.id) std.debug.assert(!std.mem.eql(u8, other.path, directory.path));
-            }
             for (self.directory_changes.items) |*change| {
-                if (change.existed) continue;
-                if (change.directory) |*other| {
-                    if (other.id != directory.id) std.debug.assert(!std.mem.eql(u8, other.path, directory.path));
+                if (change.directory) |*directory| {
+                    if (self.directoryPathOccupiedByDifferentEntry(directory.path, directory.id)) {
+                        return error.PathAlreadyExists;
+                    }
                 }
             }
         }
@@ -750,6 +759,18 @@ pub const SimDisk = struct {
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
+        if (self.findDirectory(options.path) != null) {
+            try self.recordRangeOp(
+                "disk.write",
+                op_id,
+                options.path,
+                options.offset,
+                options.bytes.len,
+                "is_dir",
+                latency_ns,
+            );
+            return error.IsDir;
+        }
         if (try self.rollFault(op_id, options.path, "write_error", self.faults.write_error_rate)) {
             try self.recordRangeOp(
                 "disk.write",
@@ -1137,6 +1158,10 @@ pub const SimDisk = struct {
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
+        if (self.findDirectory(options.new_path) != null) {
+            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, 0, "is_dir", latency_ns);
+            return error.IsDir;
+        }
         const committed = try self.commitPendingWrites(options.old_path);
         const old_index = self.findFileIndex(options.old_path) orelse {
             try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "not_found", latency_ns);
@@ -1304,7 +1329,7 @@ pub const SimDisk = struct {
             }
         }
         staged.clearPendingMetadata();
-        staged.assertUniquePaths();
+        try staged.validateChangedPaths();
         try staged.prepareCommit();
 
         try self.world.recordFields("disk.crash", &.{

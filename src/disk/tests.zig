@@ -152,6 +152,72 @@ test "disk: rejects invalid paths, ranges, and latency options" {
     }));
 }
 
+test "disk: write rejects an existing directory in every build mode" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "victim" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.control().setFaults(.{ .write_error_rate = .always() });
+    try std.testing.expectError(error.IsDir, disk.disk().write(.{
+        .path = "victim",
+        .offset = 0,
+        .bytes = "FILE",
+    }));
+    try disk.control().setFaults(.{});
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectError(error.FileNotFound, disk.disk().stat(.{ .path = "victim" }));
+    _ = try disk.disk().statDir(.{ .path = "victim" });
+    var entries = try disk.disk().readDir(.{
+        .allocator = std.testing.allocator,
+        .path = ".",
+    });
+    defer entries.deinit();
+    try std.testing.expectEqual(@as(usize, 1), entries.entries.len);
+    try std.testing.expectEqual(disk_model.DiskDirEntryKind.directory, entries.entries[0].kind);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.write op=2 path=victim offset=0 len=4 status=is_dir latency_ns=1",
+    ) != null);
+}
+
+test "disk: rename onto a directory fails before committing source writes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "victim" });
+    try disk.disk().write(.{ .path = "source", .offset = 0, .bytes = "OLD!" });
+    try disk.disk().sync(.{ .path = "source" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().write(.{ .path = "source", .offset = 0, .bytes = "NEW!" });
+
+    try std.testing.expectError(error.IsDir, disk.disk().rename(.{
+        .old_path = "source",
+        .new_path = "victim",
+    }));
+    try disk.control().setFaults(.{ .crash_lost_write_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    var source: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "source", .offset = 0, .buffer = &source });
+    try std.testing.expectEqualStrings("OLD!", &source);
+    _ = try disk.disk().statDir(.{ .path = "victim" });
+    try std.testing.expectError(error.FileNotFound, disk.disk().stat(.{ .path = "victim" }));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.rename op=5 path=source new_path=victim status=is_dir committed_writes=0 latency_ns=1",
+    ) != null);
+}
+
 test "disk: latency jitter is deterministic and traced" {
     var a = try World.init(std.testing.allocator, .{ .seed = 99, .tick_ns = 10 });
     defer a.deinit();

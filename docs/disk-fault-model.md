@@ -324,7 +324,7 @@ dynamics.
 - `disk.crash pending_writes=<u64> landed=<u64> lost=<u64> torn=<u64> reordered=<u64> pending_metadata=<u64> metadata_kept=<u64> metadata_lost=<u64>`
 - `disk.restart status=ok`
 
-Use status values such as `ok`, `not_found`, `io_error`, and `corrupt`. Use
+Use status values such as `ok`, `not_found`, `is_dir`, `io_error`, and `corrupt`. Use
 fault kinds such as `read_error`, `write_error`, `corrupt_read`,
 `crash_lost_write`, `crash_torn_write`, `crash_reordered_write`, and
 `crash_lost_metadata`.
