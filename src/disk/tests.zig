@@ -630,6 +630,57 @@ test "disk: later kept source create wins over an earlier lost rename" {
     try std.testing.expectEqualStrings("DST!", &target);
 }
 
+test "disk: later kept rename wins over an older lost rename of the same file" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "a" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().rename(.{ .old_path = "a", .new_path = "b" });
+    try disk.disk().rename(.{ .old_path = "b", .new_path = "c" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectError(error.FileNotFound, disk.disk().stat(.{ .path = "a" }));
+    try std.testing.expectError(error.FileNotFound, disk.disk().stat(.{ .path = "b" }));
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "c", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.crash_metadata op=4 dir=. kind=rename result=kept",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        world.traceBytes(),
+        "disk.crash_metadata op=3 dir=. kind=rename result=lost",
+    ) != null);
+}
+
+test "disk: kept rename preserves the identity of an older lost create" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "a", .offset = 0, .bytes = "DATA" });
+    try disk.disk().sync(.{ .path = "a" });
+    try disk.disk().rename(.{ .old_path = "a", .new_path = "b" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectError(error.FileNotFound, disk.disk().stat(.{ .path = "a" }));
+    var recovered: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "b", .offset = 0, .buffer = &recovered });
+    try std.testing.expectEqualStrings("DATA", &recovered);
+}
+
 test "disk: later kept directory wins over an earlier lost file delete" {
     var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
     defer world.deinit();

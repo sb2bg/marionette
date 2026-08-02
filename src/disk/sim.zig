@@ -156,6 +156,7 @@ pub const SimDisk = struct {
         file_changes: std.ArrayList(FileChange) = .empty,
         directory_changes: std.ArrayList(DirectoryChange) = .empty,
         pending_metadata: std.ArrayList(PendingMetadata) = .empty,
+        kept_rename_file_ids: std.AutoHashMapUnmanaged(FileId, void) = .empty,
         next_file_id: FileId,
         next_file_inode: u64,
         next_dir_id: DirId,
@@ -188,6 +189,7 @@ pub const SimDisk = struct {
             self.directory_changes.deinit(self.disk.world.allocator);
             self.clearPendingMetadata();
             self.pending_metadata.deinit(self.disk.world.allocator);
+            self.kept_rename_file_ids.deinit(self.disk.world.allocator);
             self.* = undefined;
         }
 
@@ -355,6 +357,11 @@ pub const SimDisk = struct {
                 },
                 .delete => {},
                 .rename => |rename_undo| {
+                    try self.kept_rename_file_ids.put(
+                        self.disk.world.allocator,
+                        rename_undo.file_id,
+                        {},
+                    );
                     if (try self.mutableFileById(rename_undo.file_id)) |file| file.metadata_durable = true;
                 },
             }
@@ -477,7 +484,12 @@ pub const SimDisk = struct {
 
         fn rollbackPendingMetadata(self: *CrashStage, pending: *PendingMetadata) DiskError!void {
             switch (pending.kind) {
-                .create => |id| try self.deleteFileById(id),
+                .create => |id| {
+                    // A surviving rename of this same identity causally
+                    // depends on its creation, so an older lost create cannot
+                    // erase the newer kept destination.
+                    if (!self.kept_rename_file_ids.contains(id)) try self.deleteFileById(id);
+                },
                 .create_dir => |id| {
                     if (self.findDirectoryById(id)) |directory| {
                         const path = try self.disk.world.allocator.dupe(u8, directory.path);
@@ -491,16 +503,18 @@ pub const SimDisk = struct {
                     }
                 },
                 .rename => |*rename_undo| {
-                    if (rename_undo.old_path) |old_path| {
-                        if (self.pathOccupiedByDifferentEntry(old_path, rename_undo.file_id)) {
-                            // A later surviving create owns the old source
-                            // name, so the older renamed incarnation cannot
-                            // also move back into that namespace slot.
-                            try self.deleteFileById(rename_undo.file_id);
-                        } else if (try self.mutableFileById(rename_undo.file_id)) |file| {
-                            self.disk.world.allocator.free(file.path);
-                            file.path = old_path;
-                            rename_undo.old_path = null;
+                    if (!self.kept_rename_file_ids.contains(rename_undo.file_id)) {
+                        if (rename_undo.old_path) |old_path| {
+                            if (self.pathOccupiedByDifferentEntry(old_path, rename_undo.file_id)) {
+                                // A later surviving create owns the old source
+                                // name, so the older renamed incarnation cannot
+                                // also move back into that namespace slot.
+                                try self.deleteFileById(rename_undo.file_id);
+                            } else if (try self.mutableFileById(rename_undo.file_id)) |file| {
+                                self.disk.world.allocator.free(file.path);
+                                file.path = old_path;
+                                rename_undo.old_path = null;
+                            }
                         }
                     }
                     if (rename_undo.replaced) |file| {
