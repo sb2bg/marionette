@@ -447,8 +447,10 @@ the later entry owns that path. Recovery therefore preserves a unique logical
 namespace even when individual metadata records receive mixed outcomes. A
 later surviving rename also owns its file identity: losing an older rename or
 the identity's original create cannot erase or move the newer kept destination.
-A kept file or directory entry also preserves any older-created ancestor
-directories required by its path.
+A kept or already durable file or directory entry also preserves any
+older-created ancestor directories required by its path. This causal promotion
+prevents recovery from making durable descendants unreachable when an ancestor
+directory's own create record was still pending in its parent.
 
 The simulated disk rejects namespace-mutating file operations that would create
 an exact-path collision with a directory. In particular, `write` and a file
