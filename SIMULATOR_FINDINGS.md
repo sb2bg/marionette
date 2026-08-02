@@ -107,7 +107,7 @@ the failure and prevents recurrence.
 | Medium | Fixed (`8af66f8`; `disk: scripted sector corruption rejects a missing file`) | `corruptSector` uses get-or-create lookup and can materialize a missing logical file instead of rejecting a nonexistent target. | `SimDisk.corruptSector` in `src/disk/sim.zig` |
 | Low | Fixed (`cc97b6f`; ledger table recount) | Documentation task: the headline inventory remained at 44 entries after later audits expanded the five tables to 60 rows. | headline inventory in `SIMULATOR_FINDINGS.md` |
 | Low | Fixed (`212d436`; API documentation review) | Documentation task: the disk namespace prose says every file operation rejects an exact directory path even though only namespace-mutating `write` and rename behavior changed. | `docs/api.md` |
-| Low | Fixed (ledger recount in this update) | Documentation task: the headline inventory remained at 61 entries and 55 code-defect candidates after three more code findings expanded the tables to 64 rows. | headline inventory in `SIMULATOR_FINDINGS.md` |
+| Low | Fixed (`09a98a7`; ledger recount) | Documentation task: the headline inventory remained at 61 entries and 55 code-defect candidates after three more code findings expanded the tables to 64 rows. | headline inventory in `SIMULATOR_FINDINGS.md` |
 
 ## 0.6.3 - Expected-Failure Containment
 
