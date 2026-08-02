@@ -402,12 +402,18 @@ coverage. `RealDisk.syncDir` returns `error.DirectorySyncUnsupported` because
 Zig 0.16 does not expose a portable directory-sync operation; it never reports
 durability that it did not perform.
 
+Simulated storage follows the named `portable_v1` disk semantic contract
+(`mar.disk_semantic_version == 1`). Traces record that contract explicitly;
+sector-prefix tears, crash-global reversal, lifecycle commit ordering, and
+transactional crash/process notification are specified in the
+[disk fault model](docs/disk-fault-model.md).
+
 If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
 
 ## Install
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.1.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.2.tar.gz
 ```
 
 Then wire the module into your test build in `build.zig` and import it:

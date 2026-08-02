@@ -279,7 +279,7 @@ directory is the best place to start.
 ## Install
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.1.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.2.tar.gz
 ```
 
 Then wire the module into your test build in `build.zig` and import it:

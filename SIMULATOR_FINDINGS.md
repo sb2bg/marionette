@@ -91,10 +91,10 @@ the failure and prevents recurrence.
 
 | Severity | Status | Finding | Primary location |
 | --- | --- | --- | --- |
-| High | Open | Disk crash sets durable/crashed state before the final trace and only notifies process observers afterward; trace OOM can leave a crashed disk with live pre-crash process state. | `SimDisk.crash` in `src/disk/sim.zig` |
+| High | Fixed (0.6.2; `io: disk crash trace failure leaves disk and process state coherent`) | Disk crash sets durable/crashed state before the final trace and only notifies process observers afterward; trace OOM can leave a crashed disk with live pre-crash process state. | `SimDisk.crash` in `src/disk/sim.zig` |
 | High | Fixed (`e46e1de`; `disk: torn writes land a prefix of whole sectors`) | Torn writes land half the pending bytes even though the public contract says a prefix of whole sectors lands. | `applyTornWrite` in `src/disk/sim.zig`; `DiskFaultOptions` in `src/disk/model.zig` |
 | High | Fixed (`d21691d`; `disk: crash-global reorder classifies every reversed write`) | One successful per-write reorder roll reverses the entire surviving landing list while only selected entries are traced as reordered; option, trace, and implementation semantics disagree. | crash landing loop in `src/disk/sim.zig` |
-| Medium | Open | Failed multi-sector `setLength` extension can leave disk-visible zero writes beyond the still-cached old length. | `simFileSetLength` and `zeroDiskBytes` in `src/io/file.zig` |
+| Medium | Fixed (0.6.2; `io: multi-sector setLength extension is one atomic metadata operation`) | Failed multi-sector `setLength` extension can leave disk-visible zero writes beyond the still-cached old length. | `simFileSetLength` and `zeroDiskBytes` in `src/io/file.zig` |
 | Medium | Fixed (`8af66f8`; `disk: scripted sector corruption rejects a missing file`) | `corruptSector` uses get-or-create lookup and can materialize a missing logical file instead of rejecting a nonexistent target. | `SimDisk.corruptSector` in `src/disk/sim.zig` |
 
 ## 0.6.3 - Expected-Failure Containment

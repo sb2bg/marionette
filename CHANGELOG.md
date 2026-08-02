@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.6.2 - Unreleased
+
+- Names and versions Marionette's simulated disk semantics as `portable_v1`
+  (version `1`). Every simulated disk trace now records the sector size,
+  sector-prefix tear model, crash-global reversal model, and lifecycle
+  commit policy in a `disk.model` event. The public contract constants and
+  disk fault-model documentation distinguish this portable adversarial model
+  from any OS- or filesystem-specific promise.
+
+- Makes disk crash application transactional across allocation, tracing, and
+  process notification. Recovered files, directories, and metadata are staged
+  off to the side; seeded fault choices, per-operation classifications, the
+  crash summary, and process-kill records roll back together on failure. Only
+  after all fallible work succeeds does the disk atomically publish recovered
+  media, enter the crashed state, invalidate process-local I/O, and run
+  lifecycle kill callbacks.
+
+- Makes `std.Io.File.setLength` extension one disk lifecycle operation instead
+  of a sequence of fallible zero-sector writes. A failed extension can no
+  longer leave disk-visible zero writes beyond the still-cached old length;
+  successful extension remains zero-filled by the disk authority.
+
+- Adds contract, trace-failure, staged-allocation, tiny crash-boundary,
+  metamorphic-sync, and all-profile durable-truth regressions. These make the
+  existing whole-sector tear, globally classified reversal, and
+  existing-media-only scripted corruption rules release-blocking rather than
+  scenario-only expectations.
+
 ## v0.6.1 - 2026-07-27
 
 - Makes simulated stream connection establishment a queued deterministic

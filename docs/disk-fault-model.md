@@ -13,6 +13,39 @@ real storage code without pretending to model every filesystem or device
 quirk. Marionette should make disk failures replayable from a seed, visible in
 the trace, and constrained enough that failures teach users something useful.
 
+## Portable v1 Semantic Contract
+
+Marionette names its current disk semantics `portable_v1`, with numeric
+version `1`. Code can refer to `mar.disk_semantic_contract` and
+`mar.disk_semantic_version`; every simulated disk also begins its trace with a
+`disk.model` event that records the contract, version, sector size, tear model,
+reorder model, and lifecycle policy. This is a portable adversarial contract,
+not an emulation of Linux, macOS, Windows, or a particular filesystem.
+
+`portable_v1` promises:
+
+- successful writes are immediately visible but remain pending until file
+  `sync`;
+- torn pending writes land a prefix of whole sectors, never a byte prefix;
+- one successful reorder roll requests a crash-global reversal of every
+  surviving write, and every reversed write is classified `reordered`;
+- lost, torn, reordered, and lost-metadata crash faults operate only on
+  pending state; unrelated durable files and directory entries remain exact;
+- `corruptSector` is explicitly destructive and requires existing logical
+  media, while corrupt-read faults change returned bytes but not stored bytes;
+- `setLength`, `delete`, and `rename` first commit pending writes for the
+  affected source path, then perform the lifecycle mutation; and
+- a crash is atomic with its trace and process notification. Allocation or
+  trace failure leaves media, pending work, disk liveness, process liveness,
+  the seeded-choice stream, and the visible trace at the pre-crash state so
+  the same crash can be retried exactly.
+
+Lifecycle commit is intentionally adversarial: it prevents callers from
+assuming those operations discard an earlier acknowledged write, but it does
+not claim that a host filesystem provides the same ordering. `sync` and
+`syncDir` remain the only portable durability boundaries an application may
+use when claiming crash survival.
+
 ## Goals
 
 - Route every disk decision through the owning `World`.
@@ -271,6 +304,7 @@ operation id (or to an explicit crash) and do not participate in the
 time-evolved `fault_evolution.boundary` contract used by network and process
 dynamics.
 
+- `disk.model contract=portable_v1 version=1 sector_size=<u64> torn_write=sector_prefix reorder=crash_global_reverse lifecycle=commit_pending`
 - `disk.read op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
 - `disk.write op=<u64> path=<escaped-text> offset=<u64> len=<u64> status=<literal> latency_ns=<u64>`
 - `disk.sync op=<u64> path=<escaped-text> status=<literal> committed_writes=<u64> latency_ns=<u64>`
@@ -291,7 +325,6 @@ Use status values such as `ok`, `not_found`, `io_error`, and `corrupt`. Use
 fault kinds such as `read_error`, `write_error`, `corrupt_read`,
 `crash_lost_write`, `crash_torn_write`, `crash_reordered_write`, and
 `crash_lost_metadata`.
-`crash_lost_write`, `crash_torn_write`, and `crash_reordered_write`.
 
 Trace fields must be scalar, deterministic, and independent of pointer
 identity. User bytes should not be dumped into the default trace unless a
@@ -312,7 +345,7 @@ hashes, the hash algorithm must be named and stable.
   may corrupt, tear, lose, or error operations, but it should not infer storage
   format semantics.
 
-## Phase 1 Decisions
+## Portable v1 Decisions
 
 - Low-level disk type: `Disk`.
 - Simulator implementation type: `SimDisk`.
@@ -342,6 +375,9 @@ hashes, the hash algorithm must be named and stable.
   crashed and commit pending writes for the affected path before mutating
   metadata. `syncDir` is the explicit durability boundary for creates, deletes,
   and renames; cross-directory renames require syncing both parent directories.
+- `std.Io.File.setLength` delegates to that single disk lifecycle operation;
+  extension is zero-filled by the disk authority and is never decomposed into
+  independently fallible sector writes.
 
 ## Open Questions
 

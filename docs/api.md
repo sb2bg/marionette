@@ -298,6 +298,12 @@ If `DiskOptions.min_latency_ns` is omitted, it defaults to the world's tick
 duration. Passing a concrete value keeps that exact value and validates it
 against the tick size.
 
+The simulator implements the named `portable_v1` disk contract. Its public
+identity is available as `mar.disk_semantic_contract` and
+`mar.disk_semantic_version` (`1`), and every simulated trace records it as
+`disk.model`. The contract is Marionette's portable adversarial model, not a
+promise that any particular host filesystem orders writes the same way.
+
 Write and read logical paths:
 
 ```zig
@@ -416,6 +422,7 @@ past EOF. Logical paths are not host paths and are escaped through
 `World.recordFields` in trace events:
 
 ```text
+disk.model contract=portable_v1 version=1 sector_size=4096 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=commit_pending
 disk.write op=0 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.read op=1 path=wal.log offset=0 len=4096 status=ok latency_ns=1000000
 disk.sync op=2 path=wal.log status=ok committed_writes=1 latency_ns=1000000
@@ -433,6 +440,13 @@ metadata for creates, deletes, and renames in that logical directory. Without
 matching the classic parent-directory-fsync storage bug class. Cross-directory
 renames require syncing both parent directories before the rename is fully
 durable.
+
+Under `portable_v1`, `setLength`, `delete`, and `rename` commit pending writes
+for the affected source path before applying the lifecycle mutation. This is a
+named adversarial ordering rule, not an extra durability boundary. In
+particular, `std.Io.File.setLength` extension is one disk operation whose new
+range reads as zero; it is not implemented as a series of independently
+fallible zero writes.
 
 `RealDisk.syncDir` currently returns `error.DirectorySyncUnsupported`. Zig
 0.16 does not expose a portable directory-sync operation through `std.Io`, so

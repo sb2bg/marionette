@@ -87,6 +87,11 @@ Rules:
   is translated into a stream error.
 - Logical process lifecycle records use `process.kill node=<u64> reason=<literal>`
   and `process.restart node=<u64>`.
+- Simulated disks begin with
+  `disk.model contract=portable_v1 version=1 sector_size=<u64> torn_write=sector_prefix reorder=crash_global_reverse lifecycle=commit_pending`.
+  A disk crash publishes all fault choices, per-write and per-metadata
+  classifications, its summary, and process-kill records transactionally. If
+  any trace allocation fails, none of that crash sequence remains visible.
 - The one-shot liveness transition records `liveness.transition core_count=<u64>`
   followed by the zeroed-rate events and, when a network is configured,
   `network.liveness_restore` with `core_count`, `restored_links`,

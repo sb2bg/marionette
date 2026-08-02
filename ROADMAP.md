@@ -18,7 +18,7 @@ Item-level status for Marionette's own defects lives in
 External SUT findings remain separately characterized in
 [`FOUND_BUGS.md`](https://github.com/sb2bg/marionette/blob/main/FOUND_BUGS.md).
 
-Last updated for completed `v0.6.1` `std.Io.net` contract work.
+Last updated for completed `v0.6.2` disk semantics work.
 
 ---
 
@@ -144,7 +144,7 @@ contract we then maintain.
 
 ---
 
-## Current Target: 0.6.2 - Disk Semantics v1
+## Completed: 0.6.2 - Disk Semantics v1
 
 **Theme:** name and test the atomicity and durability promises applications
 may rely on.
@@ -174,7 +174,7 @@ Do not add OS-named storage profiles without differential evidence.
 
 ---
 
-## 0.6.3 - Expected-Failure Containment
+## Current Target: 0.6.3 - Expected-Failure Containment
 
 **Theme:** deadlock, cancellation, timeout, livelock, and non-yielding hot loops
 remain observable simulation outcomes rather than terminating or freezing the
