@@ -5,8 +5,8 @@ Marionette itself. The roadmap groups this work into releases; this file
 preserves each finding until it is fixed, deferred with an explicit reason, or
 rejected after a reproduction shows the report was wrong.
 
-This is not a count of 61 confirmed bugs. It currently contains 55 code-defect
-candidates from source audit, one unresolved model decision, two documentation
+This is not a count of 67 confirmed bugs. It currently contains 59 code-defect
+candidates from source audit, one unresolved model decision, four documentation
 tasks, and three capability gaps. A candidate is treated as reproduced only
 after targeted reproduction or regression coverage exists.
 
@@ -97,6 +97,7 @@ the failure and prevents recurrence.
 | High | Fixed (`e228cec`; `disk: later kept create wins over an earlier lost delete`; `disk: later kept source create wins over an earlier lost rename`; mixed replacement/path-kind regressions) | Mixed metadata outcomes can restore an older deleted or replaced file alongside a later surviving entry at the same path, making namespace lookup and lifecycle behavior list-order-dependent. | `CrashStage.rollbackPendingMetadata` and `CrashStage.restoreFile` in `src/disk/sim.zig` |
 | High | Fixed (`d2915e5`; `disk: write rejects an existing directory in every build mode`; `disk: rename onto a directory fails before committing source writes`) | File writes and file renames can publish an exact-path collision with an existing directory; checked builds catch it only during crash recovery while ReleaseFast preserves both entries. | `SimDisk.write`, `SimDisk.rename`, and crash namespace validation in `src/disk/sim.zig` |
 | High | Fixed (`b9bf81b`; `disk: later kept rename wins over an older lost rename of the same file`; `disk: kept rename preserves the identity of an older lost create`) | Rolling back an older rename or create can erase or move a newer rename of the same file identity even though that newer operation is classified as kept. | metadata recovery in `CrashStage` in `src/disk/sim.zig` |
+| High | Fixed (`09f1dd5`; kept rename/file-create/child-directory parent dependency regressions) | Rolling back an older directory creation can remove a newer kept rename, file creation, or child-directory creation that causally depends on that parent path. | `CrashStage.rollbackPendingMetadata` in `src/disk/sim.zig` |
 | Medium | Fixed (`2c9b1aa`; `world: trace records deterministic actions`) | The mandatory `disk.model` event changed the trace vocabulary and event positions without advancing the global trace-format version. | trace header in `World.init`; `docs/trace-format.md` |
 | Medium | Fixed (`2c9b1aa`; `world: failed simulation construction leaves the world retryable`) | A failed `World.simulate` after disk initialization retained the partial composition's `disk.model` event, event index, and seeded-choice state in a later retry. | `World.simulate` in `src/world.zig` |
 | Medium | Fixed (`ec8b426`; `disk: crash staging does not clone unrelated durable media`; `disk: setLength staging does not clone unrelated durable media`) | Transactional crash and `setLength` staging deep-cloned every unrelated durable file, sector, directory, and metadata undo snapshot. | `CrashStage` and `SimDisk.setLength` in `src/disk/sim.zig` |
@@ -105,6 +106,8 @@ the failure and prevents recurrence.
 | Medium | Fixed (`c530133`; `io: multi-sector setLength extension is one atomic metadata operation`) | Failed multi-sector `setLength` extension can leave disk-visible zero writes beyond the still-cached old length. | `simFileSetLength` and `zeroDiskBytes` in `src/io/file.zig` |
 | Medium | Fixed (`8af66f8`; `disk: scripted sector corruption rejects a missing file`) | `corruptSector` uses get-or-create lookup and can materialize a missing logical file instead of rejecting a nonexistent target. | `SimDisk.corruptSector` in `src/disk/sim.zig` |
 | Low | Fixed (`cc97b6f`; ledger table recount) | Documentation task: the headline inventory remained at 44 entries after later audits expanded the five tables to 60 rows. | headline inventory in `SIMULATOR_FINDINGS.md` |
+| Low | Fixed (`212d436`; API documentation review) | Documentation task: the disk namespace prose says every file operation rejects an exact directory path even though only namespace-mutating `write` and rename behavior changed. | `docs/api.md` |
+| Low | Fixed (ledger recount in this update) | Documentation task: the headline inventory remained at 61 entries and 55 code-defect candidates after three more code findings expanded the tables to 64 rows. | headline inventory in `SIMULATOR_FINDINGS.md` |
 
 ## 0.6.3 - Expected-Failure Containment
 
