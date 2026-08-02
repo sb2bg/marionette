@@ -4212,6 +4212,44 @@ test "io: simulation files zero sparse and extended ranges" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 'x', 0, 0, 0 }, &extended);
 }
 
+test "io: multi-sector setLength extension is one atomic metadata operation" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4, .min_latency_ns = 0 } });
+    const io = sim.env.io();
+    var file = try Io.Dir.cwd().createFile(io, "extend.bin", .{ .read = true });
+    defer file.close(io);
+
+    try file.writePositionalAll(io, "data", 0);
+    try file.sync(io);
+    try sim.control.disk.setFaults(.{ .write_error_rate = .always() });
+    const trace_start = world.traceBytes().len;
+
+    // setLength is not synthesized from fallible sector writes. Extending
+    // therefore cannot publish a prefix of zero writes while cached length
+    // remains old.
+    try file.setLength(io, 12);
+    try std.testing.expectEqual(@as(u64, 12), try file.length(io));
+    try std.testing.expectEqual(@as(u64, 12), (try sim.env.disk.stat(.{ .path = "extend.bin" })).size);
+    var bytes: [12]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 12), try file.readPositionalAll(io, &bytes, 0));
+    try std.testing.expectEqualStrings("data" ++ "\x00" ** 8, &bytes);
+
+    const operation_trace = world.traceBytes()[trace_start..];
+    try std.testing.expect(std.mem.indexOf(u8, operation_trace, "disk.set_length") != null);
+    try std.testing.expect(std.mem.indexOf(u8, operation_trace, "disk.write") == null);
+
+    try file.setLength(io, 4);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    world.allocator = failing.allocator();
+    const failed_extension = file.setLength(io, 12);
+    world.allocator = std.testing.allocator;
+    try std.testing.expectError(error.InputOutput, failed_extension);
+    try std.testing.expectEqual(@as(u64, 4), try file.length(io));
+    try std.testing.expectEqual(@as(u64, 4), (try sim.env.disk.stat(.{ .path = "extend.bin" })).size);
+}
+
 test "io: simulation files delete and rename through disk authority" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();

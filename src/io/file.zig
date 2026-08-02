@@ -688,9 +688,6 @@ pub fn Ops(comptime Backend: type) type {
             };
             defer lease.deinit();
             const old_len = meta.len;
-            if (new_length > old_len) {
-                zeroDiskBytes(backend, lease.path, old_len, new_length - old_len) catch return error.InputOutput;
-            }
             backend.disk.setLength(.{ .path = lease.path, .len = new_length }) catch |err| switch (err) {
                 error.FileNotFound => {
                     if (new_length != 0) return error.InputOutput;

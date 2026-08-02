@@ -585,15 +585,36 @@ pub const SimDisk = struct {
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
-        const committed = try self.commitPendingWrites(options.path);
-        const file = self.findFile(options.path) orelse {
-            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, committed, "not_found", latency_ns);
+        if (self.visibleLength(options.path) == null) {
+            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, 0, "not_found", latency_ns);
             return error.FileNotFound;
-        };
+        }
 
-        try self.truncateFile(file, options.len);
+        // Commit pending writes, zero/truncate storage, and publish the trace
+        // before replacing live media. A failed setLength therefore cannot
+        // leave disk-visible length or bytes ahead of the std.Io metadata
+        // cache that still reports the old length.
+        var staged = try self.cloneMediaState();
+        defer staged.deinit();
+        var committed: u64 = 0;
+        for (self.pending_writes.items) |*pending| {
+            if (!std.mem.eql(u8, pending.path, options.path)) continue;
+            try staged.applyFullWrite(pending);
+            committed += 1;
+        }
+        const file = staged.findFile(options.path).?;
+
+        try staged.truncateFile(file, options.len);
         file.len = options.len;
         try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, committed, "ok", latency_ns);
+
+        std.mem.swap(std.ArrayList(File), &self.files, &staged.files);
+        std.mem.swap(std.ArrayList(Directory), &self.directories, &staged.directories);
+        std.mem.swap(std.ArrayList(PendingMetadata), &self.pending_metadata, &staged.pending_metadata);
+        self.next_file_id = staged.next_file_id;
+        self.next_file_inode = staged.next_file_inode;
+        self.next_dir_id = staged.next_dir_id;
+        self.clearPendingWritesFor(options.path);
     }
 
     fn delete(self: *Self, options: Disk.Delete) DiskError!void {
