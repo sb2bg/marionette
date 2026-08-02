@@ -4243,6 +4243,19 @@ test "io: multi-sector setLength extension is one atomic metadata operation" {
     try file.setLength(io, 4);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     world.allocator = failing.allocator();
+    const allocation_free_extension = file.setLength(io, 12);
+    world.allocator = std.testing.allocator;
+    try allocation_free_extension;
+    try std.testing.expectEqual(@as(u64, 12), try file.length(io));
+
+    // With a pending write, setLength stages only this file. Failure while
+    // preparing that affected-file copy leaves both cached and disk state at
+    // their pre-call length.
+    try file.setLength(io, 4);
+    try sim.control.disk.setFaults(.{});
+    try file.writePositionalAll(io, "DATA", 0);
+    failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    world.allocator = failing.allocator();
     const failed_extension = file.setLength(io, 12);
     world.allocator = std.testing.allocator;
     try std.testing.expectError(error.InputOutput, failed_extension);

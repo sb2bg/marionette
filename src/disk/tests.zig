@@ -726,6 +726,120 @@ test "disk: crash allocation failure leaves pending and durable state retryable"
     try std.testing.expectEqualStrings("abcd", &recovered);
 }
 
+fn crashMetadataAllocationFailureSweep(allocator: std.mem.Allocator) !void {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xA11CE, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 2 });
+    defer disk.deinit();
+
+    try disk.disk().write(.{ .path = "deleted", .offset = 0, .bytes = "DELETE" });
+    try disk.disk().sync(.{ .path = "deleted" });
+    try disk.disk().write(.{ .path = "source", .offset = 0, .bytes = "SOURCE" });
+    try disk.disk().sync(.{ .path = "source" });
+    try disk.disk().write(.{ .path = "target", .offset = 0, .bytes = "TARGET" });
+    try disk.disk().sync(.{ .path = "target" });
+    try disk.disk().syncDir(.{ .path = "." });
+
+    try disk.disk().createDir(.{ .path = "volatile" });
+    try disk.disk().delete(.{ .path = "deleted" });
+    try disk.disk().rename(.{ .old_path = "source", .new_path = "target" });
+    try disk.disk().write(.{ .path = "volatile/new", .offset = 0, .bytes = "PENDING!" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    world.allocator = allocator;
+    const crash_result = disk.control().crash();
+    world.allocator = std.testing.allocator;
+    crash_result catch |err| {
+        // Every failed staging point must leave the original pending state
+        // coherent enough for the same crash to succeed on retry.
+        try disk.control().crash();
+        return err;
+    };
+}
+
+test "disk: crash staging is leak-free across metadata allocation failures" {
+    var reached_success = false;
+    for (0..128) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        crashMetadataAllocationFailureSweep(failing.allocator()) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        reached_success = true;
+        break;
+    }
+    try std.testing.expect(reached_success);
+}
+
+test "disk: crash staging does not clone unrelated durable media" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xC0F, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    const durable = "D" ** 256;
+    try disk.disk().write(.{ .path = "large.durable", .offset = 0, .bytes = durable });
+    try disk.disk().sync(.{ .path = "large.durable" });
+    try disk.disk().syncDir(.{ .path = "." });
+
+    // A fully synced crash has no media to stage. Even the first allocator
+    // failure must remain unobserved when the existing trace has capacity.
+    var fail_first = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    world.allocator = fail_first.allocator();
+    const clean_crash = disk.control().crash();
+    world.allocator = std.testing.allocator;
+    try clean_crash;
+    try disk.control().restart();
+
+    try disk.disk().write(.{ .path = "small.pending", .offset = 0, .bytes = "data" });
+
+    // The old whole-media clone exhausted this budget while duplicating the
+    // unrelated 64-sector file. Affected-media staging stays below it.
+    var fail_clone = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 20 });
+    world.allocator = fail_clone.allocator();
+    const targeted_crash = disk.control().crash();
+    world.allocator = std.testing.allocator;
+    try targeted_crash;
+    try disk.control().restart();
+
+    var durable_after: [durable.len]u8 = undefined;
+    try disk.disk().read(.{ .path = "large.durable", .offset = 0, .buffer = &durable_after });
+    try std.testing.expectEqualStrings(durable, &durable_after);
+    var small_after: [4]u8 = undefined;
+    try disk.disk().read(.{ .path = "small.pending", .offset = 0, .buffer = &small_after });
+    try std.testing.expectEqualStrings("data", &small_after);
+}
+
+test "disk: setLength staging does not clone unrelated durable media" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x5E7, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+
+    const durable = "D" ** 256;
+    try disk.disk().write(.{ .path = "large.durable", .offset = 0, .bytes = durable });
+    try disk.disk().sync(.{ .path = "large.durable" });
+    try disk.disk().syncDir(.{ .path = "." });
+    try disk.disk().write(.{ .path = "small.pending", .offset = 0, .bytes = "data" });
+
+    // Whole-media staging exhausted this budget while cloning the unrelated
+    // 64-sector file. Target-file staging needs only a handful of allocations.
+    var fail_clone = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 16 });
+    world.allocator = fail_clone.allocator();
+    const resize = disk.disk().setLength(.{ .path = "small.pending", .len = 8 });
+    world.allocator = std.testing.allocator;
+    try resize;
+
+    var durable_after: [durable.len]u8 = undefined;
+    try disk.disk().read(.{ .path = "large.durable", .offset = 0, .buffer = &durable_after });
+    try std.testing.expectEqualStrings(durable, &durable_after);
+    try std.testing.expectEqual(@as(u64, 8), (try disk.disk().stat(.{ .path = "small.pending" })).size);
+    var small_after: [8]u8 = undefined;
+    try disk.disk().read(.{ .path = "small.pending", .offset = 0, .buffer = &small_after });
+    try std.testing.expectEqualStrings("data" ++ "\x00" ** 4, &small_after);
+}
+
 test "disk: exhaustive tiny crash boundaries preserve unrelated durable truth" {
     for (0..4) |crash_after| {
         var world = try World.init(std.testing.allocator, .{
