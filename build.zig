@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/release_symbol_probe.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+        .strip = true,
     });
     release_probe_mod.addImport("marionette", release_mod);
 
