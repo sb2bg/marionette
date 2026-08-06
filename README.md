@@ -162,15 +162,11 @@ not only simulator-native examples:
 | HTTP over `std.Io.net`             | `lalinsky/dusty`      |
 | Queue protocol and process restart | `g41797/beanstalkz`   |
 
-These campaigns have produced both positive robustness results and
-characterized external bugs. The [findings ledger](FOUND_BUGS.md) distinguishes
-confirmed system-under-test bugs from simulator boundaries and harness/model
-mistakes.
+These campaigns have validated robust behavior and uncovered confirmed bugs in real third-party code. The [findings ledger](FOUND_BUGS.md) distinguishes confirmed system-under-test bugs from simulator boundaries and harness/model mistakes.
 
 ## Status
 
-Marionette is alpha software. It is a `0.x` release with no API stability
-guarantee before 1.0.
+Marionette is alpha software. It is a `0.x` release with no API stability guarantee before 1.0.
 
 The simulator covers deliberate subsets of `std.Io`, it is not syscall
 interception and cannot make arbitrary nondeterministic code deterministic. It
