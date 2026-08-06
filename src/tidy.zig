@@ -177,6 +177,7 @@ fn scanPath(
     path: []const u8,
     options: Options,
 ) !void {
+    if (isGeneratedPath(path)) return;
     if (std.mem.endsWith(u8, path, ".zig")) {
         return scanFile(allocator, result, path, options);
     }
@@ -189,6 +190,7 @@ fn scanPath(
     defer walker.deinit();
 
     while (try walker.next(io)) |entry| {
+        if (isGeneratedPath(entry.path)) continue;
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
 
@@ -214,6 +216,20 @@ fn scanFile(
     defer allocator.free(source);
 
     try scanSourceForPath(allocator, result, path, source, options);
+}
+
+fn isGeneratedPath(path: []const u8) bool {
+    var components = std.mem.tokenizeAny(u8, path, "/\\");
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".zig-cache") or
+            std.mem.eql(u8, component, "zig-cache") or
+            std.mem.eql(u8, component, "zig-out") or
+            std.mem.eql(u8, component, "zig-pkg"))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 const Location = struct {
@@ -407,6 +423,13 @@ test "tidy flags banned patterns" {
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
     try std.testing.expectEqual(@as(usize, 1), result.violations.items[0].line);
     try std.testing.expectEqualStrings("std.os", result.violations.items[0].pattern.needle);
+}
+
+test "tidy ignores generated Zig artifact paths" {
+    try std.testing.expect(isGeneratedPath("tidy_consumer/zig-pkg/dependency/src/root.zig"));
+    try std.testing.expect(isGeneratedPath("nested/.zig-cache/o/generated.zig"));
+    try std.testing.expect(isGeneratedPath("nested\\zig-out\\generated.zig"));
+    try std.testing.expect(!isGeneratedPath("tests/zig-pkg-regression.zig"));
 }
 
 test "tidy flags prefix patterns" {
