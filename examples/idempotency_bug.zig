@@ -8,7 +8,6 @@
 const std = @import("std");
 const mar = @import("marionette");
 
-pub const passing_seed: u64 = 0xC0FFEE;
 pub const failing_seed: u64 = 13;
 
 const deposit_cents = 100;
@@ -103,9 +102,23 @@ pub fn runReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
     return mar.runSimCase(.{
         .allocator = allocator,
         .seed = seed,
-        .simulate = .{},
+        .simulate = mar.World.SimulateOptions{},
         .init = init,
         .scenario = scenario,
         .checks = &checks,
     });
+}
+
+test "idempotency bug: account-local IDs collide in the global cache" {
+    var report = try runReport(std.testing.allocator, failing_seed);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
+            try std.testing.expectEqualStrings("AccountDepositLost", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "reason=global_duplicate") != null);
+        },
+    }
 }

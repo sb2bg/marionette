@@ -11,7 +11,6 @@ const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
 const io_module = @import("io/root.zig");
 const network_module = @import("network/root.zig");
-const random_module = @import("random.zig");
 const scheduler_module = @import("scheduler.zig");
 
 /// Errors returned while writing deterministic trace records.
@@ -65,7 +64,7 @@ pub const ProcessLifecycle = struct {
 const TransactionCheckpoint = struct {
     trace_len: usize,
     event_index: u64,
-    rng: random_module.Random,
+    rng: std.Random.DefaultPrng,
 };
 
 /// Internal hooks shared by simulator components and white-box tests.
@@ -525,7 +524,7 @@ pub const World = struct {
     /// Fake clock advanced explicitly by the world.
     sim_clock: clock_module.SimClock,
     /// Seeded pseudorandom number generator for reproducible choices.
-    rng: random_module.Random,
+    rng: std.Random.DefaultPrng,
     /// Byte trace compared by determinism tests.
     trace_log: std.ArrayList(u8),
     /// Next event index to write into the trace.
@@ -869,7 +868,7 @@ pub const World = struct {
             .io_backend = try sim_io.io(0),
             .memory = sim_allocation.allocator(),
             .disk = sim_disk.disk(),
-            .tracer = env_module.Tracer.fromWorld(self),
+            .trace = env_module.Recorder.fromWorld(self),
             .buggify_enabled = true,
         };
 

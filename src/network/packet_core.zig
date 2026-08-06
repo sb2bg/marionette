@@ -124,16 +124,6 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             return .{ .network = self };
         }
 
-        /// Count configured service/replica nodes.
-        pub fn nodeCount(_: *const Self) usize {
-            return network_options.node_count;
-        }
-
-        /// Count configured client processes.
-        pub fn clientCount(_: *const Self) usize {
-            return network_options.client_count;
-        }
-
         /// Count all configured processes.
         pub fn processCount(_: *const Self) usize {
             return process_count;
@@ -363,9 +353,7 @@ pub fn UnstableNetwork(comptime Payload: type, comptime network_options: Network
             }
         }
 
-        // Scanning per-link heads is deliberate for Phase 0 capacities. A
-        // later scheduler can add an index/heap over active paths without
-        // changing the per-link queue model needed for clogging.
+        // Fixed capacities keep a scan of per-link heads bounded.
         fn nextReadyLinkIndex(self: *const Self) ?usize {
             var best_index: ?usize = null;
             var best_packet: Packet = undefined;

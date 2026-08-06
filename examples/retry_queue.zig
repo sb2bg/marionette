@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const mar = @import("marionette");
+const support = @import("support.zig");
 
 const ns_per_ms: mar.Duration = 1_000_000;
 
@@ -34,13 +35,7 @@ pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     var report = try runScenarioReport(allocator, seed);
     defer report.deinit();
 
-    switch (report) {
-        .passed => |*passed| return passed.takeTrace(),
-        .failed => |failure| {
-            failure.print();
-            return error.RetryQueueScenarioFailed;
-        },
-    }
+    return support.takePassedTrace(&report);
 }
 
 pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
@@ -49,7 +44,7 @@ pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport
         .seed = seed,
         .tick_ns = ns_per_ms,
         .name = "retry-queue-late-ack",
-        .simulate = .{},
+        .simulate = mar.World.SimulateOptions{},
         .init = RetryQueue.init,
         .scenario = scenario,
         .checks = &checks,
@@ -63,7 +58,7 @@ pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunR
         .seed = seed,
         .tick_ns = ns_per_ms,
         .name = "retry-queue-late-ack-bug",
-        .simulate = .{},
+        .simulate = mar.World.SimulateOptions{},
         .init = RetryQueue.init,
         .scenario = buggyScenario,
         .checks = &checks,
@@ -239,4 +234,25 @@ fn now(io: std.Io) mar.Timestamp {
 fn randomIntLessThan(io: std.Io, comptime T: type, less_than: T) T {
     var source: std.Random.IoSource = .{ .io = io };
     return @intCast(source.interface().intRangeLessThan(u64, 0, less_than));
+}
+
+test "retry queue: accepts the current lease only" {
+    const trace = try runScenario(std.testing.allocator, 0xC0FFEE);
+    defer std.testing.allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "reason=stale_ack") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "completed_at_most_once=ok") != null);
+}
+
+test "retry queue: checker catches duplicate completion" {
+    var report = try runBuggyScenarioReport(std.testing.allocator, 0xC0FFEE);
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
+            try std.testing.expectEqualStrings("JobCompletedTwice", failure.error_name.?);
+        },
+    }
 }

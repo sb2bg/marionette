@@ -2,6 +2,15 @@
 
 ## v0.6.2 - Unreleased
 
+- Removes the unused world-only `mar.run` path, `RunOptions`, world checks,
+  the `Random` wrapper, and redundant `SimCase` forwarding helpers. Simulation
+  cases now pass `World.SimulateOptions` directly instead of relying on a
+  reflective field copier.
+
+- Collapses `Tracer` and its wrapper into one `Recorder` capability. A recorder
+  is either world-backed or disabled; production options now accept an optional
+  recorder directly.
+
 - Names and versions Marionette's simulated disk semantics as `portable_v1`
   (version `1`). Every simulated disk trace now records the sector size,
   sector-prefix tear model, crash-global reversal model, and lifecycle

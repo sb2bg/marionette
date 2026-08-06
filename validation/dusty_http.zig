@@ -850,8 +850,7 @@ const FaultScenario = struct {
 
         var attempt: u32 = 1;
         while (attempt <= max_retry_attempts) : (attempt += 1) {
-            // Fresh client per attempt: dusty's pool may retain dead keep-alive
-            // connections, and pool recovery belongs to the later 16d slice.
+            // A fresh client avoids retaining dead keep-alive connections.
             var client = http.Client.init(self.allocator, self.client_io, .{
                 .max_idle_connections = 0,
                 .max_response_size = total_chunks * chunk_len + 1024,

@@ -99,7 +99,9 @@ test "WAL recovery is deterministic" {
     try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
-        .simulate = .{ .disk = .{ .sector_size = 16 } },
+        .simulate = mar.World.SimulateOptions{
+            .disk = .{ .sector_size = 16 },
+        },
         .init = init,
         .scenario = scenario,
         .checks = &checks,
@@ -176,12 +178,13 @@ fiber path is currently disabled. Typed `Endpoint(Message)` networking remains
 experimental.
 
 For exact contracts and unsupported behavior, see the
-[`std.Io.net` conformance matrix](docs/std-io-net-conformance.md), [disk fault model](docs/disk-fault-model.md), and [`std.Io` direction](docs/std-io-direction.md).
+[`std.Io.net` conformance matrix](docs/std-io-net-conformance.md),
+[disk fault model](docs/disk-fault-model.md), and [architecture](docs/architecture.md).
 
 ## Documentation
 
 - **Start -** [examples](docs/examples.md) and the [simulation runner](docs/run.md)
-- **Understand the design -** [overview](docs/overview.md) and [architecture](docs/architecture.md)
+- **Understand the design -** [architecture](docs/architecture.md) and [determinism contract](docs/determinism.md)
 - **Use the library -** [API reference](docs/api.md), [determinism contract](docs/determinism.md), and [trace format](docs/trace-format.md)
 - **Follow the project -** [roadmap](ROADMAP.md), [findings](FOUND_BUGS.md), and the [technical blog](docs/blog/index.md)
 

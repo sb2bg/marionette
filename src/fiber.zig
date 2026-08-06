@@ -225,35 +225,11 @@ pub inline fn contextSwitch(message: *const Switch) *const Switch {
     return correctedContextSwitch(message);
 }
 
-/// Local copy of `std.Io.fiber.contextSwitch` with three corrections, all
-/// load-bearing for ReleaseSafe:
-///
-/// 1. Corrected asm constraints. The std version lists the message
-///    register (aarch64 `x1`, x86_64 `rsi`, riscv64 `a1`) as an input, an
-///    output, AND a clobber. Declaring an input/output register as a
-///    clobber is ill-formed asm; under register pressure LLVM silently
-///    drops the copy of the input into that register and the switch
-///    dereferences caller garbage. The clobber lists below are std's
-///    minus the message register, plus the condition-flags register on
-///    aarch64 (std's x86_64 variant clobbers rflags; its aarch64 variant
-///    omits nzcv).
-///
-/// 2. `noinline`. The asm resumes at a local label that other executions
-///    re-enter (setjmp-like returns-twice control flow the optimizer does
-///    not model). Inlined into a caller loop, LLVM has been observed to
-///    fold the loop's exit condition into a constant, spinning forever.
-///    Keeping the label inside this dedicated function makes every switch
-///    a plain call from the caller's point of view.
-///
-/// 3. Complete LLVM clobber coverage. On x86_64, LLVM does not always treat
-///    `zmmN` as clobbering its `ymmN` and `xmmN` aliases when the target CPU
-///    lacks the wider register classes, so all three widths are explicit.
-///    On aarch64, `x18` is allocatable on targets such as Linux and must be
-///    invalidated across a switch, but it must stay out of the clobber list
-///    on Android, Darwin, Fuchsia, Windows, and OpenHarmony, where LLVM
-///    reserves it as a platform register by default.
-///
-/// Remove this copy once fixes land upstream in `std.Io.fiber`.
+/// Corrected `std.Io.fiber.contextSwitch`: the message register is not also a
+/// clobber, the switch remains `noinline` because control resumes at a local
+/// label, and architecture-specific clobbers cover LLVM register aliases and
+/// platform-reserved registers. All three constraints are load-bearing; see
+/// `docs/blog/our-tests-only-passed-because-of-register-allocation-luck.md`.
 noinline fn correctedContextSwitch(s: *const Switch) *const Switch {
     return switch (builtin.cpu.arch) {
         .aarch64 => asm volatile (

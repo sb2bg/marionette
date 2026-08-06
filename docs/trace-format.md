@@ -3,9 +3,9 @@
 The trace is Marionette's replay artifact. Same seed means byte-identical
 trace, so the bytes need a small spec.
 
-## Phase 0 Format
+## Text Format
 
-Phase 0 uses newline-delimited UTF-8 text.
+Traces use newline-delimited UTF-8 text.
 
 The first line is a header:
 
@@ -109,8 +109,8 @@ behavior:
 - Seed and simulation options.
 - Time movement.
 - Random choices that affect behavior.
-- Future scheduler decisions.
-- Future disk and network faults.
+- Scheduler decisions.
+- Disk and network fault decisions.
 - User service events that help explain a failure.
 - Invariant failures and liveness failures.
 
@@ -137,8 +137,3 @@ If Marionette changes the trace layout, it must bump the trace format version.
 If Zig's formatter changes output for a value, that is outside the cross-version
 trace guarantee, but Marionette should avoid relying on ambiguous formatting in
 core simulator events.
-
-## Future Binary Format
-
-A binary trace may be added later for speed, compactness, and tooling. If that
-happens, text traces should remain available for debugging and examples.

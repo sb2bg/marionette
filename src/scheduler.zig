@@ -57,11 +57,7 @@ pub const WaitResult = enum {
     canceled,
 };
 
-/// Experimental seeded cooperative scheduler.
-///
-/// This is intentionally isolated from the `std.Io` backend for now. It exists
-/// to prove deterministic scheduling policy over Marionette fibers before
-/// futexes, timers, or real SUTs sit on top of it.
+/// Seeded cooperative scheduler backing Marionette's deterministic `std.Io`.
 pub const TaskScheduler = struct {
     const Self = @This();
 
@@ -257,19 +253,6 @@ pub const TaskScheduler = struct {
         for (self.opaque_entries.items) |adapter| self.allocator.destroy(adapter);
         self.opaque_entries.deinit(self.allocator);
         self.* = undefined;
-    }
-
-    /// Spawn a task from a bare function pointer and context pointer.
-    ///
-    /// This is the type-erased entry used by the `std.Io` backend; the
-    /// scheduler parameter of `Entry` is dropped because opaque callers
-    /// hold capabilities through their own context instead.
-    pub fn spawnOpaque(
-        self: *Self,
-        entry: *const fn (*anyopaque) void,
-        arg: *anyopaque,
-    ) TaskSchedulerError!TaskId {
-        return try self.spawnOpaqueForProcess(null, entry, arg);
     }
 
     /// Spawn a type-erased task owned by `process_id`.
@@ -1292,10 +1275,7 @@ const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
 
 /// Fixed-capacity deterministic event queue.
 ///
-/// This is not the final Marionette scheduler. It is a small shared primitive
-/// for examples and early designs that need stable event ordering.
-/// TODO(roadmap "Scheduler Scale"): `pop` does a linear scan, which is fine for Phase 0.
-/// Replace this with a heap once the scheduler becomes hot or user-facing.
+/// `pop` uses a linear scan; capacities are fixed and deliberately small.
 pub fn EventQueue(
     comptime Event: type,
     comptime capacity: usize,

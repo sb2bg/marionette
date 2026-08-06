@@ -15,7 +15,7 @@ const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
-pub const TracerError = std.mem.Allocator.Error || world_module.TraceError;
+const RecorderError = std.mem.Allocator.Error || world_module.TraceError;
 
 pub const BuggifyError = fault_module.BuggifyError;
 pub const BuggifyRate = fault_module.BuggifyRate;
@@ -39,95 +39,26 @@ pub const ProcessDynamicsOptions = struct {
     restart_stability_min_ns: clock_module.Duration = 0,
 };
 
-/// App-facing trace authority. Simulation tracers append to the world's
-/// deterministic byte trace; production tracers drop everything.
-pub const Tracer = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        should_record: *const fn (*anyopaque) bool,
-        allocator: ?*const fn (*anyopaque) std.mem.Allocator,
-        record_payload: *const fn (*anyopaque, []const u8) TracerError!void,
-    };
-
-    /// A tracer that records nothing and formats nothing.
-    pub fn none() Tracer {
-        return .{ .ptr = &noop_tracer_ctx, .vtable = &noop_tracer_vtable };
-    }
-
-    /// Build the simulation tracer over a world's byte trace.
-    pub fn fromWorld(world: *World) Tracer {
-        return .{ .ptr = world, .vtable = &world_tracer_vtable };
-    }
-
-    /// Format and append one trace event. Payloads must follow the trace
-    /// format contract (`docs/trace-format.md`); a disabled tracer skips
-    /// formatting entirely.
-    pub fn record(self: Tracer, comptime fmt: []const u8, args: anytype) TracerError!void {
-        if (!self.vtable.should_record(self.ptr)) return;
-        const allocator = self.vtable.allocator.?(self.ptr);
-        const payload = try std.fmt.allocPrint(allocator, fmt, args);
-        defer allocator.free(payload);
-        try self.vtable.record_payload(self.ptr, payload);
-    }
-
-    const world_tracer_vtable: VTable = .{
-        .should_record = worldTracerShouldRecord,
-        .allocator = worldTracerAllocator,
-        .record_payload = worldTracerRecordPayload,
-    };
-
-    const noop_tracer_vtable: VTable = .{
-        .should_record = noopTracerShouldRecord,
-        .allocator = null,
-        .record_payload = noopTracerRecordPayload,
-    };
-
-    fn worldTracer(ptr: *anyopaque) *World {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn worldTracerShouldRecord(_: *anyopaque) bool {
-        return true;
-    }
-
-    fn worldTracerAllocator(ptr: *anyopaque) std.mem.Allocator {
-        return worldTracer(ptr).allocator;
-    }
-
-    fn worldTracerRecordPayload(ptr: *anyopaque, payload: []const u8) TracerError!void {
-        try worldTracer(ptr).recordPayload(payload);
-    }
-
-    fn noopTracerShouldRecord(_: *anyopaque) bool {
-        return false;
-    }
-
-    fn noopTracerRecordPayload(_: *anyopaque, _: []const u8) TracerError!void {}
-};
-
-/// Thin app-facing wrapper over `Tracer` for user service events.
+/// Narrow app-facing trace capability. Simulation recorders append to the
+/// world's deterministic trace; production recorders may be disabled.
 pub const Recorder = struct {
-    tracer: Tracer,
+    world: ?*World,
 
     /// A recorder that drops everything.
     pub fn none() Recorder {
-        return .{ .tracer = .none() };
+        return .{ .world = null };
     }
 
-    /// Wrap an existing tracer.
-    pub fn fromTracer(tracer: Tracer) Recorder {
-        return .{ .tracer = tracer };
+    /// Build a recorder over a world's byte trace.
+    pub fn fromWorld(world: *World) Recorder {
+        return .{ .world = world };
     }
 
     /// Format and append one user trace event.
-    pub fn record(self: Recorder, comptime fmt: []const u8, args: anytype) TracerError!void {
-        try self.tracer.record(fmt, args);
+    pub fn record(self: Recorder, comptime fmt: []const u8, args: anytype) RecorderError!void {
+        if (self.world) |world| try world.record(fmt, args);
     }
 };
-
-var noop_tracer_ctx: u8 = 0;
 
 /// The capability bundle handed to application code. `io_backend` is the
 /// authority for I/O, clocks, sleeps, and randomness; allocation, modeled
@@ -136,7 +67,7 @@ pub const Env = struct {
     io_backend: std.Io = .failing,
     memory: std.mem.Allocator,
     disk: disk_module.Disk,
-    tracer: Tracer,
+    trace: Recorder,
     buggify_enabled: bool = false,
 
     /// Return the std.Io backing this environment.
@@ -157,7 +88,7 @@ pub const Env = struct {
     }
 
     pub fn recorder(self: Env) Recorder {
-        return .fromTracer(self.tracer);
+        return self.trace;
     }
 
     pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void {
@@ -203,7 +134,7 @@ pub const Production = struct {
     allocator: std.mem.Allocator,
     io_backend: std.Io,
     disk: disk_module.RealDisk,
-    tracer: Tracer,
+    recorder: Recorder,
 
     pub const Options = struct {
         allocator: std.mem.Allocator,
@@ -213,7 +144,7 @@ pub const Production = struct {
         /// Host I/O backend used by production capabilities.
         io: std.Io,
         disk: disk_module.RealDisk.Options = .{},
-        tracer: ?Tracer = null,
+        recorder: ?Recorder = null,
     };
 
     /// Construct production capabilities over host resources. The caller
@@ -223,7 +154,7 @@ pub const Production = struct {
             .allocator = options.allocator,
             .io_backend = options.io,
             .disk = try disk_module.RealDisk.init(options.root_dir, options.io, options.disk),
-            .tracer = options.tracer orelse .none(),
+            .recorder = options.recorder orelse .none(),
         };
     }
 
@@ -234,7 +165,7 @@ pub const Production = struct {
             .io_backend = self.io_backend,
             .memory = self.allocator,
             .disk = self.disk.disk(),
-            .tracer = self.tracer,
+            .trace = self.recorder,
         };
     }
 

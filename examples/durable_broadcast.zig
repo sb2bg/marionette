@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const mar = @import("marionette");
+const support = @import("support.zig");
 const wal_record = @import("wal_record.zig");
 
 pub const tick_ns: mar.Duration = 1_000_000;
@@ -61,22 +62,12 @@ pub fn simulateOptions() mar.World.SimulateOptions {
     return profile.simulateOptions();
 }
 
-fn probabilisticBugSearchProfile() mar.SimProfile.Expanded {
-    return replayProfile(.{
-        .disk_faults = .{ .crash_lost_write_rate = .percent(25) },
-    });
-}
-
 pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "quorum acknowledgements are durable", .check = quorumAcknowledgementsAreDurable },
 };
 
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return runTrace(allocator, seed, "durable-broadcast-network-faults", scenario);
-}
-
-pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return runReport(allocator, seed, "durable-broadcast-network-faults", scenario);
 }
 
 pub fn runCrashRecoveryScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
@@ -91,11 +82,6 @@ pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunR
     return runReport(allocator, seed, "durable-broadcast-bug", buggyScenario);
 }
 
-pub fn runProbabilisticBugScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    const profile = probabilisticBugSearchProfile();
-    return runReportWithProfile(allocator, seed, "durable-broadcast-bug-search", &profile, probabilisticBugScenario);
-}
-
 fn runTrace(
     allocator: std.mem.Allocator,
     seed: u64,
@@ -105,13 +91,7 @@ fn runTrace(
     var report = try runReport(allocator, seed, name, scenario_fn);
     defer report.deinit();
 
-    switch (report) {
-        .passed => |*passed| return passed.takeTrace(),
-        .failed => |failure| {
-            failure.print();
-            return error.DurableBroadcastScenarioFailed;
-        },
-    }
+    return support.takePassedTrace(&report);
 }
 
 fn runReport(
@@ -126,27 +106,6 @@ fn runReport(
         .tick_ns = tick_ns,
         .name = name,
         .simulate = simulateOptions(),
-        .init = init,
-        .scenario = scenario_fn,
-        .checks = &checks,
-    });
-}
-
-fn runReportWithProfile(
-    allocator: std.mem.Allocator,
-    seed: u64,
-    name: []const u8,
-    profile: *const mar.SimProfile.Expanded,
-    comptime scenario_fn: fn (*Case) anyerror!void,
-) !mar.RunReport {
-    return mar.runSimCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .tick_ns = tick_ns,
-        .name = name,
-        .tags = profile.runTags(),
-        .attributes = profile.runAttributes(),
-        .simulate = profile.simulateOptions(),
         .init = init,
         .scenario = scenario_fn,
         .checks = &checks,
@@ -236,20 +195,6 @@ fn configureNetworkFaults(case: *Case) !void {
 
 pub fn buggyScenario(case: *Case) !void {
     try case.control().disk.setFaults(.{ .crash_lost_write_rate = .always() });
-    try case.app.submit(.{
-        .op = .{ .id = 1, .value = 99 },
-        .retry_limit = 1,
-        .sync_before_broadcast = false,
-    });
-
-    try case.control().disk.crash();
-    try restartAfterDiskCrash(case);
-    try case.app.recover();
-}
-
-pub fn probabilisticBugScenario(case: *Case) !void {
-    const profile = probabilisticBugSearchProfile();
-    try profile.apply(case.control());
     try case.app.submit(.{
         .op = .{ .id = 1, .value = 99 },
         .retry_limit = 1,
@@ -534,21 +479,6 @@ fn countTrue(values: *const [replica_count]bool) u8 {
     return count;
 }
 
-fn writeBroadcastRecover(
-    env: mar.Env,
-    client: Endpoint,
-    replica_endpoints: [replica_count]Endpoint,
-) !DurableBroadcast {
-    var service = DurableBroadcast.init(env, client, replica_endpoints);
-    try service.submit(.{
-        .op = .{ .id = 1, .value = 41 },
-        .retry_limit = 2,
-        .sync_before_broadcast = true,
-    });
-    try service.recover();
-    return service;
-}
-
 test "durable broadcast: smoke" {
     try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
@@ -584,4 +514,11 @@ test "durable broadcast: bug detected" {
         .scenario = buggyScenario,
         .checks = &checks,
     });
+}
+
+test "durable broadcast: recovery variants" {
+    inline for (.{ runCrashRecoveryScenario, runMultiRecordScenario }) |run| {
+        const trace = try run(std.testing.allocator, 0xC0FFEE);
+        std.testing.allocator.free(trace);
+    }
 }

@@ -12,6 +12,34 @@ const Mode = enum {
     trace,
 };
 
+const TraceRunner = *const fn (std.mem.Allocator, u64) anyerror![]u8;
+const ReportRunner = *const fn (std.mem.Allocator, u64) anyerror!mar.RunReport;
+
+const Scenario = struct {
+    name: []const u8,
+    runner: union(enum) {
+        trace: TraceRunner,
+        report: ReportRunner,
+        std_io_net: std_io_net_kv_validation.ScenarioMode,
+    },
+};
+
+const scenarios = [_]Scenario{
+    .{ .name = "retry-queue", .runner = .{ .trace = examples.retry_queue.runScenario } },
+    .{ .name = "retry-queue-bug", .runner = .{ .report = examples.retry_queue.runBuggyScenarioReport } },
+    .{ .name = "replicated-register", .runner = .{ .trace = examples.replicated_register.runScenario } },
+    .{ .name = "replicated-register-bug", .runner = .{ .report = examples.replicated_register.runBuggyScenarioReport } },
+    .{ .name = "replicated-register-partition", .runner = .{ .trace = examples.replicated_register.runPartitionScenario } },
+    .{ .name = "replicated-register-conflict", .runner = .{ .trace = examples.replicated_register.runConflictScenario } },
+    .{ .name = "durable-broadcast", .runner = .{ .trace = examples.durable_broadcast.runScenario } },
+    .{ .name = "durable-broadcast-bug", .runner = .{ .report = examples.durable_broadcast.runBuggyScenarioReport } },
+    .{ .name = "kv-store", .runner = .{ .report = runKvStore } },
+    .{ .name = "kv-store-bug", .runner = .{ .report = runKvStoreBug } },
+    .{ .name = "idempotency-bug", .runner = .{ .report = examples.idempotency_bug.runReport } },
+    .{ .name = "std-io-net-kv", .runner = .{ .std_io_net = .retry_safe } },
+    .{ .name = "std-io-net-kv-bug", .runner = .{ .std_io_net = .retry_buggy } },
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -55,54 +83,35 @@ fn runScenario(
     mode: Mode,
     expect_failure: bool,
 ) !void {
-    if (std.mem.eql(u8, scenario, "retry-queue")) {
-        const trace = try examples.retry_queue.runScenario(allocator, seed);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "retry-queue-bug")) {
-        try printReport(try examples.retry_queue.runBuggyScenarioReport(allocator, seed), expect_failure);
-    } else if (std.mem.eql(u8, scenario, "replicated-register")) {
-        const trace = try examples.replicated_register.runScenario(allocator, seed);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "replicated-register-bug")) {
-        try printReport(try examples.replicated_register.runBuggyScenarioReport(allocator, seed), expect_failure);
-    } else if (std.mem.eql(u8, scenario, "replicated-register-partition")) {
-        const trace = try examples.replicated_register.runPartitionScenario(allocator, seed);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "replicated-register-conflict")) {
-        const trace = try examples.replicated_register.runConflictScenario(allocator, seed);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "durable-broadcast")) {
-        const trace = try examples.durable_broadcast.runScenario(allocator, seed);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "durable-broadcast-bug")) {
-        try printReport(try examples.durable_broadcast.runBuggyScenarioReport(allocator, seed), expect_failure);
-    } else if (std.mem.eql(u8, scenario, "kv-store")) {
-        const trace = try runKvStoreTrace(allocator, seed, "kv-store", examples.kv_store.scenario);
-        defer allocator.free(trace);
-        if (expect_failure) return expectedFailureDidNotHappen();
-        try printTraceOrSummary(allocator, trace, mode);
-    } else if (std.mem.eql(u8, scenario, "kv-store-bug")) {
-        try printReport(try runKvStoreReport(allocator, seed, "kv-store-bug", examples.kv_store.buggyScenario), expect_failure);
-    } else if (std.mem.eql(u8, scenario, "idempotency-bug")) {
-        try printSeedSensitiveReport(allocator, try runIdempotencyBugReport(allocator, seed), mode, expect_failure);
-    } else if (std.mem.eql(u8, scenario, "std-io-net-kv")) {
-        try runStdIoNetKv(allocator, seed, mode, expect_failure, .retry_safe);
-    } else if (std.mem.eql(u8, scenario, "std-io-net-kv-bug")) {
-        try runStdIoNetKv(allocator, seed, mode, expect_failure, .retry_buggy);
-    } else {
-        std.debug.print("unknown scenario: {s}\n", .{scenario});
-        std.process.exit(2);
+    for (scenarios) |entry| {
+        if (!std.mem.eql(u8, scenario, entry.name)) continue;
+
+        switch (entry.runner) {
+            .trace => |run_trace| {
+                const trace = try run_trace(allocator, seed);
+                defer allocator.free(trace);
+                if (expect_failure) return expectedFailureDidNotHappen();
+                try printTraceOrSummary(allocator, trace, mode);
+            },
+            .report => |run_report| try printReport(
+                allocator,
+                try run_report(allocator, seed),
+                mode,
+                expect_failure,
+            ),
+            .std_io_net => |scenario_mode| try runStdIoNetKv(
+                allocator,
+                seed,
+                mode,
+                expect_failure,
+                scenario_mode,
+            ),
+        }
+        return;
     }
+
+    std.debug.print("unknown scenario: {s}\n", .{scenario});
+    std.process.exit(2);
 }
 
 fn runStdIoNetKv(
@@ -127,74 +136,24 @@ fn runStdIoNetKv(
     }
 }
 
-fn runKvStoreTrace(
-    allocator: std.mem.Allocator,
-    seed: u64,
-    name: []const u8,
-    comptime scenario_fn: fn (*examples.kv_store.Case) anyerror!void,
-) ![]u8 {
-    var report = try runKvStoreReport(allocator, seed, name, scenario_fn);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |*passed| return passed.takeTrace(),
-        .failed => |failure| {
-            failure.print();
-            return error.UnexpectedRunFailure;
-        },
-    }
-}
-
-fn runKvStoreReport(
-    allocator: std.mem.Allocator,
-    seed: u64,
-    name: []const u8,
-    comptime scenario_fn: fn (*examples.kv_store.Case) anyerror!void,
-) !mar.RunReport {
+fn runKvStore(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
     return examples.kv_store.runReport(
         allocator,
         seed,
-        name,
-        scenario_fn,
+        "kv-store",
+        examples.kv_store.scenario,
         &examples.kv_store.checks,
     );
 }
 
-fn runIdempotencyBugReport(
-    allocator: std.mem.Allocator,
-    seed: u64,
-) !mar.RunReport {
-    return examples.idempotency_bug.runReport(allocator, seed);
-}
-
-fn printSeedSensitiveReport(
-    allocator: std.mem.Allocator,
-    report: mar.RunReport,
-    mode: Mode,
-    expect_failure: bool,
-) !void {
-    var owned_report = report;
-    defer owned_report.deinit();
-
-    switch (owned_report) {
-        .passed => |*passed| {
-            if (expect_failure) return expectedFailureDidNotHappen();
-            const trace = passed.takeTrace();
-            defer allocator.free(trace);
-            try printTraceOrSummary(allocator, trace, mode);
-        },
-        .failed => |failure| {
-            if (expect_failure and mode == .trace) {
-                std.debug.print("{s}", .{failure.first_trace});
-            } else {
-                var buffer: [4096]u8 = undefined;
-                var writer: std.Io.Writer = .fixed(&buffer);
-                try failure.writeSummary(&writer);
-                std.debug.print("{s}", .{writer.buffered()});
-            }
-            if (!expect_failure) std.process.exit(1);
-        },
-    }
+fn runKvStoreBug(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    return examples.kv_store.runReport(
+        allocator,
+        seed,
+        "kv-store-bug",
+        examples.kv_store.buggyScenario,
+        &examples.kv_store.checks,
+    );
 }
 
 fn printTraceOrSummary(
@@ -216,23 +175,29 @@ fn printTraceOrSummary(
     }
 }
 
-fn printReport(report: mar.RunReport, expect_failure: bool) !void {
+fn printReport(
+    allocator: std.mem.Allocator,
+    report: mar.RunReport,
+    mode: Mode,
+    expect_failure: bool,
+) !void {
     var owned_report = report;
     defer owned_report.deinit();
 
     switch (owned_report) {
         .passed => |passed| {
-            std.debug.print(
-                "marionette passed unexpectedly: seed={} events={}\n",
-                .{ passed.options.seed, passed.event_count },
-            );
-            if (expect_failure) std.process.exit(1);
+            if (expect_failure) return expectedFailureDidNotHappen();
+            try printTraceOrSummary(allocator, passed.trace, mode);
         },
         .failed => |failure| {
-            var buffer: [4096]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try failure.writeSummary(&writer);
-            std.debug.print("{s}", .{writer.buffered()});
+            if (mode == .trace) {
+                std.debug.print("{s}", .{failure.first_trace});
+            } else {
+                var buffer: [4096]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(&buffer);
+                try failure.writeSummary(&writer);
+                std.debug.print("{s}", .{writer.buffered()});
+            }
             if (!expect_failure) std.process.exit(1);
         },
     }
@@ -248,22 +213,10 @@ fn usage(exe_name: []const u8) noreturn {
         \\usage: {s} <scenario> [--seed <seed>] [--summary|--trace] [--expect-failure]
         \\
         \\scenarios:
-        \\  retry-queue
-        \\  retry-queue-bug
-        \\  replicated-register
-        \\  replicated-register-bug
-        \\  replicated-register-partition
-        \\  replicated-register-conflict
-        \\  durable-broadcast
-        \\  durable-broadcast-bug
-        \\  kv-store
-        \\  kv-store-bug
-        \\  idempotency-bug
-        \\  std-io-net-kv
-        \\  std-io-net-kv-bug
         \\
     ,
         .{exe_name},
     );
+    for (scenarios) |scenario| std.debug.print("  {s}\n", .{scenario.name});
     std.process.exit(2);
 }

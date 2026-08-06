@@ -32,18 +32,9 @@
     },
     .paths = .{
         "README.md",
-        "ROADMAP.md",
-        "CHANGELOG.md",
-        "FOUND_BUGS.md",
         "LICENSE",
         "build.zig",
         "build.zig.zon",
-        "mkdocs.yml",
-        "assets",
-        "docs",
-        "examples",
         "src",
-        "tests",
-        "validation",
     },
 }

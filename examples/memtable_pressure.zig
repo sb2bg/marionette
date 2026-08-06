@@ -17,57 +17,6 @@ pub const checks = [_]mar.StateCheck(Case){
     .{ .name = "committed puts match stored entries", .check = commitIntegrity },
 };
 
-/// Run the correct allocation-pressure scenario and return an owned trace.
-pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
-    var report = try runScenarioReport(allocator, seed);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |*passed| return passed.takeTrace(),
-        .failed => |failure| {
-            failure.print();
-            return error.MemtableScenarioFailed;
-        },
-    }
-}
-
-pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runSimCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .name = "memtable-allocation-pressure",
-        .simulate = .{},
-        .init = Memtable.init,
-        .scenario = scenario,
-        .checks = &checks,
-    });
-}
-
-/// Run the planted commit-before-allocate bug under the same fault choreography.
-pub fn runBuggyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runSimCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .name = "memtable-phantom-commit",
-        .simulate = .{},
-        .init = Memtable.init,
-        .scenario = buggyScenario,
-        .checks = &checks,
-    });
-}
-
-pub fn runBuggifyScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return mar.runSimCase(.{
-        .allocator = allocator,
-        .seed = seed,
-        .name = "memtable-allocation-buggify",
-        .simulate = .{},
-        .init = Memtable.init,
-        .scenario = buggifyScenario,
-        .checks = &checks,
-    });
-}
-
 fn scenario(case: *Case) !void {
     try runPressureScenario(case, .strict);
 }
@@ -215,7 +164,7 @@ test "memtable: allocation rejection passes through expectation helper" {
     try mar.expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
-        .simulate = .{},
+        .simulate = mar.World.SimulateOptions{},
         .init = Memtable.init,
         .scenario = scenario,
         .checks = &checks,
@@ -226,7 +175,7 @@ test "memtable: phantom commit fails through expectation helper" {
     try mar.expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
-        .simulate = .{},
+        .simulate = mar.World.SimulateOptions{},
         .init = Memtable.init,
         .scenario = buggyScenario,
         .checks = &checks,
@@ -238,7 +187,7 @@ test "memtable: probabilistic allocation faults fuzz clean" {
         .allocator = std.testing.allocator,
         .seed = 0xC0FFEE,
         .seeds = 16,
-        .simulate = .{},
+        .simulate = mar.World.SimulateOptions{},
         .init = Memtable.init,
         .scenario = buggifyScenario,
         .checks = &checks,

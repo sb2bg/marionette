@@ -2,14 +2,11 @@
 
 const std = @import("std");
 
-const allocation_module = @import("allocation.zig");
 const env_module = @import("env.zig");
-const network_module = @import("network/root.zig");
 const run_types = @import("run_types.zig");
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
 
-pub const Check = run_types.Check;
 pub const RunAttribute = run_types.RunAttribute;
 pub const RunAttributeValue = run_types.RunAttributeValue;
 pub const RunFailure = run_types.RunFailure;
@@ -69,37 +66,6 @@ pub fn SimCase(comptime App: type) type {
             return self.sim.control;
         }
 
-        /// An environment whose `std.Io` is bound to one node's process.
-        pub fn envForNode(self: *const Self, node: network_module.NodeId) !env_module.Env {
-            return try self.sim.envForNode(node);
-        }
-
-        /// The node-0 deterministic `std.Io`.
-        pub fn io(self: *const Self) std.Io {
-            return self.env().io();
-        }
-
-        /// The deterministic `std.Io` bound to one node's process.
-        pub fn ioForNode(self: *const Self, node: network_module.NodeId) !std.Io {
-            return (try self.envForNode(node)).io();
-        }
-
-        /// Open one typed simulated endpoint on `node`.
-        pub fn endpoint(self: *const Self, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
-            return try self.sim.endpoint(Payload, node);
-        }
-
-        /// Open typed endpoints on `count` consecutive nodes starting at
-        /// `first_node`.
-        pub fn endpoints(
-            self: *const Self,
-            comptime Payload: type,
-            comptime count: usize,
-            first_node: network_module.NodeId,
-        ) ![count]network_module.Endpoint(Payload) {
-            return try self.sim.endpoints(Payload, count, first_node);
-        }
-
         /// Deinitialize the app state if it defines `deinit`; the
         /// runner tears down world-owned simulator state itself.
         pub fn deinit(self: *Self) void {
@@ -111,28 +77,6 @@ pub fn SimCase(comptime App: type) type {
     };
 }
 
-/// Run `scenario` twice with the same seed and compare byte-identical traces.
-///
-/// Scenario errors are returned as `RunReport.failed` with the partial trace
-/// preserved. Allocation failures while setting up or copying runner-owned
-/// traces are returned as normal Zig errors.
-pub fn run(
-    allocator: std.mem.Allocator,
-    options: RunOptions,
-    comptime scenario: fn (*World) anyerror!void,
-) RunError!RunReport {
-    const no_state_checks = [_]StateCheck(NoState){};
-    return runTwiceWithStateLifecycle(
-        allocator,
-        options,
-        NoState,
-        infallibleStateInit(NoState, initNoState),
-        noopStateDeinit(NoState),
-        scenarioWithoutState(scenario),
-        &no_state_checks,
-    );
-}
-
 /// Run one simulation case.
 ///
 /// Required fields:
@@ -141,8 +85,8 @@ pub fn run(
 /// - `init: fn (mar.Sim) App` or `fn (mar.Sim) !App`
 /// - `scenario: fn (*mar.SimCase(App)) !void`
 ///
-/// Optional fields mirror `RunOptions`: `seed`, `start_ns`, `tick_ns`,
-/// `name`, `tags`, `attributes`, `world_checks`, and `checks`.
+/// Optional fields are `seed`, `start_ns`, `tick_ns`, `name`, `tags`,
+/// `attributes`, and `checks`.
 pub fn runSimCase(config: anytype) RunError!RunReport {
     return runSimCaseWithSeed(config, null);
 }
@@ -211,41 +155,6 @@ pub fn expectTraceContains(trace: []const u8, needle: []const u8) error{TraceNee
     return error.TraceNeedleMissing;
 }
 
-const NoState = struct {
-    world: *World,
-};
-
-fn initNoState(world: *World) NoState {
-    return .{ .world = world };
-}
-
-fn scenarioWithoutState(
-    comptime scenario: fn (*World) anyerror!void,
-) fn (*NoState) anyerror!void {
-    return struct {
-        fn runScenario(state: *NoState) anyerror!void {
-            try scenario(state.world);
-        }
-    }.runScenario;
-}
-
-fn infallibleStateInit(
-    comptime State: type,
-    comptime init_state: fn (*World) State,
-) fn (*World) anyerror!State {
-    return struct {
-        fn init(world: *World) anyerror!State {
-            return init_state(world);
-        }
-    }.init;
-}
-
-fn noopStateDeinit(comptime State: type) fn (*State) void {
-    return struct {
-        fn deinit(_: *State) void {}
-    }.deinit;
-}
-
 fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
     if (!@hasField(@TypeOf(config), "simulate")) {
         @compileError("runSimCase config requires a `simulate` field");
@@ -261,7 +170,7 @@ fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
     return runTwiceWithSimCase(
         config.allocator,
         runOptionsFromConfig(config, seed_override),
-        simulateOptionsFromConfig(config.simulate),
+        config.simulate,
         App,
         fallibleSimInit(App, config.init),
         fallibleSimScenario(Case, config.scenario),
@@ -277,7 +186,6 @@ fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
         .name = configRunName(config),
         .tags = fieldOrDefault(config, "tags", @as([]const []const u8, &.{})),
         .attributes = fieldOrDefault(config, "attributes", @as([]const RunAttribute, &.{})),
-        .checks = fieldOrDefault(config, "world_checks", @as([]const Check, &.{})),
     };
 }
 
@@ -291,58 +199,6 @@ fn configRunName(config: anytype) ?[]const u8 {
 
 fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
     return if (@hasField(@TypeOf(config), name)) @field(config, name) else default;
-}
-
-fn simulateOptionsFromConfig(simulate: anytype) World.SimulateOptions {
-    const Simulate = @TypeOf(simulate);
-    return .{
-        .allocation = if (@hasField(Simulate, "allocation")) allocationOptionsFromConfig(simulate.allocation) else .{},
-        .disk = if (@hasField(Simulate, "disk")) diskOptionsFromConfig(simulate.disk) else .{},
-        .network = if (@hasField(Simulate, "network")) networkOptionsFromConfig(simulate.network) else null,
-        .task_stack_size = fieldOrDefault(
-            simulate,
-            "task_stack_size",
-            @as(usize, @import("scheduler.zig").default_task_stack_size),
-        ),
-        .task_start_jitter_ns = fieldOrDefault(simulate, "task_start_jitter_ns", @as(u64, 0)),
-        .fiber_overflow_diagnostics = fieldOrDefault(simulate, "fiber_overflow_diagnostics", true),
-    };
-}
-
-fn allocationOptionsFromConfig(allocation: anytype) allocation_module.FaultOptions {
-    const Allocation = @TypeOf(allocation);
-    return .{
-        .fail_after = fieldOrDefault(allocation, "fail_after", @as(?usize, null)),
-        .quota_bytes = fieldOrDefault(allocation, "quota_bytes", @as(?usize, null)),
-        .buggify_rate = if (@hasField(Allocation, "buggify_rate")) .{
-            .numerator = allocation.buggify_rate.numerator,
-            .denominator = allocation.buggify_rate.denominator,
-        } else .never(),
-    };
-}
-
-fn diskOptionsFromConfig(disk: anytype) @import("disk/root.zig").DiskOptions {
-    return .{
-        .sector_size = fieldOrDefault(disk, "sector_size", @as(u64, 4096)),
-        .min_latency_ns = fieldOrDefault(disk, "min_latency_ns", @as(?@import("clock.zig").Duration, null)),
-        .latency_jitter_ns = fieldOrDefault(disk, "latency_jitter_ns", @as(@import("clock.zig").Duration, 0)),
-    };
-}
-
-fn networkOptionsFromConfig(network: anytype) ?network_module.SimNetworkOptions {
-    const Network = @TypeOf(network);
-    return switch (@typeInfo(Network)) {
-        .null => null,
-        .optional => if (network) |options| networkOptionsFromConfig(options) else null,
-        else => .{
-            .nodes = if (@hasField(Network, "nodes"))
-                network.nodes
-            else
-                @compileError("runSimCase config.simulate.network requires a `nodes` field"),
-            .service_nodes = fieldOrDefault(network, "service_nodes", @as(usize, 0)),
-            .path_capacity = fieldOrDefault(network, "path_capacity", @as(usize, 64)),
-        },
-    };
 }
 
 /// Derive the seed for one fuzz iteration.
@@ -440,26 +296,6 @@ fn appHasDeinit(comptime App: type) bool {
         .pointer => |pointer| pointer.size == .one and appHasDeinit(pointer.child),
         else => false,
     };
-}
-
-fn runTwiceWithStateLifecycle(
-    allocator: std.mem.Allocator,
-    options: RunOptions,
-    comptime State: type,
-    comptime init_state: fn (*World) anyerror!State,
-    comptime deinit_state: fn (*State) void,
-    comptime scenario: fn (*State) anyerror!void,
-    comptime state_checks: []const StateCheck(State),
-) RunError!RunReport {
-    // Always execute both runs, even when the first fails: a failure that
-    // does not reproduce with the same seed is itself a determinism leak,
-    // and a failure that does reproduce is verified replayable.
-    var first = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
-    errdefer first.deinit();
-
-    const second = try runOnceWithStateLifecycle(allocator, options, State, init_state, deinit_state, scenario, state_checks);
-
-    return compareRunOnceResults(allocator, first, second);
 }
 
 fn runTwiceWithSimCase(
@@ -662,106 +498,7 @@ fn runOnceWithSimCase(
         };
     }
 
-    for (options.checks) |check| {
-        check.check(&world) catch |err| {
-            state.deinit();
-            state_live = false;
-            return .{ .failed = try failureFromWorld(
-                allocator,
-                options,
-                .check_failed,
-                &world,
-                err,
-                check.name,
-            ) };
-        };
-    }
-
     state.deinit();
-    state_live = false;
-    const trace = try allocator.dupe(u8, world.traceBytes());
-    errdefer allocator.free(trace);
-    const owned_options = try cloneRunOptions(allocator, options);
-
-    return .{ .passed = .{
-        .allocator = allocator,
-        .options = owned_options,
-        .owns_options = true,
-        .trace = trace,
-        .event_count = world.nextEventIndex(),
-    } };
-}
-
-fn runOnceWithStateLifecycle(
-    allocator: std.mem.Allocator,
-    options: RunOptions,
-    comptime State: type,
-    comptime init_state: fn (*World) anyerror!State,
-    comptime deinit_state: fn (*State) void,
-    comptime scenario: fn (*State) anyerror!void,
-    comptime state_checks: []const StateCheck(State),
-) RunError!RunOnceResult {
-    var world = try World.init(allocator, options.worldOptions());
-    defer world.deinit();
-    try recordRunContext(&world, options);
-
-    var state = init_state(&world) catch |err| {
-        return .{ .failed = try failureFromWorld(
-            allocator,
-            options,
-            .scenario_error,
-            &world,
-            err,
-            null,
-        ) };
-    };
-    var state_live = true;
-    defer if (state_live) deinit_state(&state);
-
-    scenario(&state) catch |err| {
-        deinit_state(&state);
-        state_live = false;
-        return .{ .failed = try failureFromWorld(
-            allocator,
-            options,
-            .scenario_error,
-            &world,
-            err,
-            null,
-        ) };
-    };
-
-    for (state_checks) |check| {
-        check.check(&state) catch |err| {
-            deinit_state(&state);
-            state_live = false;
-            return .{ .failed = try failureFromWorld(
-                allocator,
-                options,
-                .check_failed,
-                &world,
-                err,
-                check.name,
-            ) };
-        };
-    }
-
-    for (options.checks) |check| {
-        check.check(&world) catch |err| {
-            deinit_state(&state);
-            state_live = false;
-            return .{ .failed = try failureFromWorld(
-                allocator,
-                options,
-                .check_failed,
-                &world,
-                err,
-                check.name,
-            ) };
-        };
-    }
-
-    deinit_state(&state);
     state_live = false;
     const trace = try allocator.dupe(u8, world.traceBytes());
     errdefer allocator.free(trace);
@@ -859,374 +596,6 @@ fn failureFromWorld(
     };
 }
 
-fn deterministicScenario(world: *World) !void {
-    try world.tick();
-    _ = try world.randomIntLessThan(u64, 100);
-    try world.record("scenario.done", .{});
-}
-
-test "run: deterministic scenario passes with one owned trace" {
-    var report = try run(std.testing.allocator, .{ .seed = 1234 }, deterministicScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expectEqual(@as(u64, 4), passed.event_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "scenario.done") != null);
-        },
-        .failed => return error.UnexpectedRunFailure,
-    }
-}
-
-var leak_counter: u64 = 0;
-
-fn nondeterministicScenario(world: *World) !void {
-    leak_counter += 1;
-    try world.record("scenario.leak value={}", .{leak_counter});
-}
-
-test "run: same-seed trace mismatch is reported" {
-    leak_counter = 0;
-    var report = try run(std.testing.allocator, .{ .seed = 1234 }, nondeterministicScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.determinism_mismatch, failure.kind);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "value=1") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "value=2") != null);
-        },
-    }
-}
-
-var flaky_counter: u64 = 0;
-
-fn passThenFailScenario(world: *World) !void {
-    try world.record("scenario.flaky", .{});
-    flaky_counter += 1;
-    if (flaky_counter >= 2) return error.SecondRunBoom;
-}
-
-fn failThenPassScenario(world: *World) !void {
-    try world.record("scenario.flaky", .{});
-    flaky_counter += 1;
-    if (flaky_counter == 1) return error.FirstRunBoom;
-}
-
-test "run: fail-then-pass is reported as a determinism leak" {
-    flaky_counter = 0;
-    var report = try run(std.testing.allocator, .{ .seed = 1234 }, failThenPassScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.first_run_failed, failure.kind);
-            try std.testing.expectEqualStrings("FirstRunBoom", failure.error_name.?);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.flaky") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "scenario.flaky") != null);
-        },
-    }
-}
-
-fn divergingFailureScenario(world: *World) !void {
-    flaky_counter += 1;
-    try world.record("scenario.attempt value={}", .{flaky_counter});
-    return if (flaky_counter == 1) error.FirstBoom else error.SecondBoom;
-}
-
-test "run: failures that do not replay byte-identically are a determinism mismatch" {
-    flaky_counter = 0;
-    var report = try run(std.testing.allocator, .{ .seed = 1234 }, divergingFailureScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.determinism_mismatch, failure.kind);
-            try std.testing.expectEqualStrings("FirstBoom", failure.error_name.?);
-            try std.testing.expectEqualStrings("SecondBoom", failure.second_error_name.?);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "value=1") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "value=2") != null);
-
-            var buffer: [512]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try failure.writeSummary(&writer);
-            const summary = writer.buffered();
-            try std.testing.expect(std.mem.indexOf(u8, summary, "error=FirstBoom") != null);
-            try std.testing.expect(std.mem.indexOf(u8, summary, "second_error=SecondBoom") != null);
-        },
-    }
-}
-
-test "run: pass-then-fail is reported as a determinism leak" {
-    flaky_counter = 0;
-    var report = try run(std.testing.allocator, .{ .seed = 1234 }, passThenFailScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.second_run_failed, failure.kind);
-            try std.testing.expectEqualStrings("SecondRunBoom", failure.error_name.?);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.flaky") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.second_trace, "scenario.flaky") != null);
-        },
-    }
-}
-
-const ScenarioError = error{Boom};
-
-fn failingScenario(world: *World) !void {
-    try world.record("scenario.before_error", .{});
-    return ScenarioError.Boom;
-}
-
-test "run: scenario errors preserve partial trace" {
-    var report = try run(std.testing.allocator, .{ .seed = 1234 }, failingScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.scenario_error, failure.kind);
-            try std.testing.expectEqualStrings("Boom", failure.error_name.?);
-            try std.testing.expectEqual(@as(u64, 2), failure.first_event_count);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.before_error") != null);
-        },
-    }
-}
-
-test "run: attributes and tags are traced before scenario code" {
-    const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
-    const attributes = [_]RunAttribute{
-        .{ .key = "replicas", .value = .{ .uint = 3 } },
-        .{ .key = "proposal_drop_percent", .value = .{ .uint = 20 } },
-        .{ .key = "faults_enabled", .value = .{ .boolean = true } },
-    };
-
-    var report = try run(std.testing.allocator, .{
-        .seed = 1234,
-        .name = "smoke",
-        .tags = &tags,
-        .attributes = &attributes,
-    }, deterministicScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expectEqual(@as(u64, 10), passed.event_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.name value=smoke") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.tag value=example:replicated_register") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=replicas value=uint:3") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=proposal_drop_percent value=uint:20") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.attribute key=faults_enabled value=bool:true") != null);
-        },
-        .failed => return error.UnexpectedRunFailure,
-    }
-}
-
-test "run: replay metadata text is escaped before scenario code" {
-    const tags = [_][]const u8{"invalid tag"};
-
-    var report = try run(std.testing.allocator, .{
-        .seed = 1234,
-        .tags = &tags,
-    }, deterministicScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "run.tag value=invalid%20tag") != null);
-        },
-        .failed => return error.UnexpectedRunFailure,
-    }
-}
-
-fn invalidTraceScenario(world: *World) !void {
-    try world.record("scenario.message value={s}", .{"hello world"});
-}
-
-test "run: invalid scenario trace is reported as scenario failure" {
-    var report = try run(std.testing.allocator, .{ .seed = 1234 }, invalidTraceScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.scenario_error, failure.kind);
-            try std.testing.expectEqualStrings("InvalidTracePayload", failure.error_name.?);
-            try std.testing.expectEqual(@as(u64, 1), failure.first_event_count);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "hello world") == null);
-        },
-    }
-}
-
-test "RunFailure: writeSummary includes replay attributes and tags" {
-    const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
-    const attributes = [_]RunAttribute{
-        .{ .key = "replicas", .value = .{ .uint = 3 } },
-        .{ .key = "proposal_drop_percent", .value = .{ .uint = 20 } },
-    };
-
-    var report = try run(std.testing.allocator, .{
-        .seed = 1234,
-        .name = "smoke",
-        .tags = &tags,
-        .attributes = &attributes,
-    }, failingScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            var buffer: [512]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try failure.writeSummary(&writer);
-            const summary = writer.buffered();
-
-            try std.testing.expectEqualStrings(
-                "marionette failure: kind=scenario_error seed=1234 name=smoke start_ns=0 tick_ns=1 first_events=7 second_events=0 tag=example:replicated_register tag=scenario:smoke replicas=uint:3 proposal_drop_percent=uint:20 error=Boom\n",
-                summary,
-            );
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "run.name value=smoke") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.before_error") != null);
-        },
-    }
-}
-
-test "RunFailure: owns replay metadata used by summaries" {
-    var name_buf = [_]u8{ 's', 'm', 'o', 'k', 'e' };
-    var tag_buf = [_]u8{ 't', 'a', 'g', '_', 'a' };
-    var key_buf = [_]u8{ 'm', 'o', 'd', 'e' };
-    var value_buf = [_]u8{ 'f', 'a', 's', 't' };
-    var check_name_buf = [_]u8{ 'f', 'a', 'i', 'l', 's' };
-
-    const attributes = [_]RunAttribute{
-        .{
-            .key = key_buf[0..],
-            .value = .{ .string = value_buf[0..] },
-        },
-    };
-    const tags = [_][]const u8{tag_buf[0..]};
-    const checks = [_]Check{.{ .name = check_name_buf[0..], .check = failingCheck }};
-
-    var report = try run(std.testing.allocator, .{
-        .seed = 1234,
-        .name = name_buf[0..],
-        .tags = &tags,
-        .attributes = &attributes,
-        .checks = &checks,
-    }, deterministicScenario);
-    defer report.deinit();
-
-    @memcpy(name_buf[0..], "other");
-    @memcpy(tag_buf[0..], "tag_b");
-    @memcpy(key_buf[0..], "xxxx");
-    @memcpy(value_buf[0..], "slow");
-    @memcpy(check_name_buf[0..], "nope!");
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            var buffer: [512]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try failure.writeSummary(&writer);
-            const summary = writer.buffered();
-
-            try std.testing.expect(std.mem.indexOf(u8, summary, "name=smoke") != null);
-            try std.testing.expect(std.mem.indexOf(u8, summary, "tag=tag_a") != null);
-            try std.testing.expect(std.mem.indexOf(u8, summary, "mode=string:fast") != null);
-            try std.testing.expect(std.mem.indexOf(u8, summary, "check=fails") != null);
-        },
-    }
-}
-
-test "RunFailure: summary escapes replay metadata text" {
-    const tags = [_][]const u8{"tag with space"};
-    const attributes = [_]RunAttribute{
-        .{ .key = "mode name", .value = .{ .string = "fast mode" } },
-    };
-    const checks = [_]Check{.{ .name = "check name", .check = failingCheck }};
-
-    var report = try run(std.testing.allocator, .{
-        .seed = 1234,
-        .name = "smoke test",
-        .tags = &tags,
-        .attributes = &attributes,
-        .checks = &checks,
-    }, deterministicScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            var buffer: [512]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try failure.writeSummary(&writer);
-            const summary = writer.buffered();
-
-            try std.testing.expect(std.mem.indexOf(u8, summary, "name=smoke%20test") != null);
-            try std.testing.expect(std.mem.indexOf(u8, summary, "tag=tag%20with%20space") != null);
-            try std.testing.expect(std.mem.indexOf(u8, summary, "mode%20name=string:fast%20mode") != null);
-            try std.testing.expect(std.mem.indexOf(u8, summary, "check=check%20name") != null);
-        },
-    }
-}
-
-fn passingCheck(world: *World) !void {
-    try world.record("check.pass", .{});
-}
-
-test "run: checks run after the scenario" {
-    const checks = [_]Check{.{ .name = "passes", .check = passingCheck }};
-
-    var report = try run(std.testing.allocator, .{
-        .seed = 1234,
-        .checks = &checks,
-    }, deterministicScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expectEqual(@as(u64, 5), passed.event_count);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "scenario.done") != null);
-            try std.testing.expect(std.mem.indexOf(u8, passed.trace, "check.pass") != null);
-        },
-        .failed => return error.UnexpectedRunFailure,
-    }
-}
-
-const CheckError = error{InvariantBroken};
-
-fn failingCheck(world: *World) !void {
-    try world.record("check.fail", .{});
-    return CheckError.InvariantBroken;
-}
-
-test "run: check failures preserve partial trace and check name" {
-    const checks = [_]Check{.{ .name = "always_fails", .check = failingCheck }};
-
-    var report = try run(std.testing.allocator, .{
-        .seed = 1234,
-        .checks = &checks,
-    }, deterministicScenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => return error.ExpectedRunFailure,
-        .failed => |failure| {
-            try std.testing.expectEqual(RunFailureKind.check_failed, failure.kind);
-            try std.testing.expectEqualStrings("InvariantBroken", failure.error_name.?);
-            try std.testing.expectEqualStrings("always_fails", failure.check_name.?);
-            try std.testing.expectEqual(@as(u64, 5), failure.first_event_count);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scenario.done") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "check.fail") != null);
-        },
-    }
-}
-
 test "fuzzSeed: distinct within a run and across related bases" {
     const seed_count = 8;
 
@@ -1249,43 +618,6 @@ test "fuzzSeed: distinct within a run and across related bases" {
             try std.testing.expect(seed != other);
         }
     }
-}
-
-test "runSimCase: forwards every simulate option" {
-    const options = simulateOptionsFromConfig(.{
-        .allocation = .{
-            .fail_after = 3,
-            .quota_bytes = 4096,
-            .buggify_rate = .{ .numerator = 1, .denominator = 7 },
-        },
-        .disk = .{
-            .sector_size = 8192,
-            .min_latency_ns = 20,
-            .latency_jitter_ns = 10,
-        },
-        .network = .{
-            .nodes = 3,
-            .service_nodes = 2,
-            .path_capacity = 32,
-        },
-        .task_stack_size = 1024 * 1024,
-        .task_start_jitter_ns = 50,
-        .fiber_overflow_diagnostics = false,
-    });
-
-    try std.testing.expectEqual(@as(?usize, 3), options.allocation.fail_after);
-    try std.testing.expectEqual(@as(?usize, 4096), options.allocation.quota_bytes);
-    try std.testing.expectEqual(@as(u32, 1), options.allocation.buggify_rate.numerator);
-    try std.testing.expectEqual(@as(u32, 7), options.allocation.buggify_rate.denominator);
-    try std.testing.expectEqual(@as(u64, 8192), options.disk.sector_size);
-    try std.testing.expectEqual(@as(?u64, 20), options.disk.min_latency_ns);
-    try std.testing.expectEqual(@as(u64, 10), options.disk.latency_jitter_ns);
-    try std.testing.expectEqual(@as(usize, 3), options.network.?.nodes);
-    try std.testing.expectEqual(@as(usize, 2), options.network.?.service_nodes);
-    try std.testing.expectEqual(@as(usize, 32), options.network.?.path_capacity);
-    try std.testing.expectEqual(@as(usize, 1024 * 1024), options.task_stack_size);
-    try std.testing.expectEqual(@as(u64, 50), options.task_start_jitter_ns);
-    try std.testing.expect(!options.fiber_overflow_diagnostics);
 }
 
 const FailSimDiskAllocation = struct {
@@ -1342,7 +674,7 @@ test "runSimCase: simulation setup allocation errors remain runner errors" {
     try std.testing.expectError(error.OutOfMemory, runSimCase(.{
         .allocator = failing.allocator(),
         .seed = 1234,
-        .simulate = .{},
+        .simulate = World.SimulateOptions{},
         .init = Functions.init,
         .scenario = Functions.scenario,
     }));
@@ -1368,9 +700,9 @@ const SimCaseApp = struct {
 fn simCaseScenario(case: *SimCase(SimCaseApp)) !void {
     case.app.value += 1;
     try case.control().network.setLossiness(.{});
-    _ = case.io();
-    _ = try case.ioForNode(0);
-    _ = try case.endpoint(u8, 0);
+    _ = case.env().io();
+    _ = (try case.sim.envForNode(0)).io();
+    _ = try case.sim.endpoint(u8, 0);
     try case.control().tick();
     try case.env().record("simcase.value value={}", .{case.app.value});
 }
@@ -1389,7 +721,7 @@ test "runSimCase: initializes app from simulation and deinitializes each replay"
     var report = try runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = .{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1421,7 +753,7 @@ test "runSimCase: accepts an infallible scenario" {
     var report = try runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = .{},
+        .simulate = World.SimulateOptions{},
         .init = Functions.init,
         .scenario = Functions.scenario,
     });
@@ -1458,7 +790,7 @@ test "runSimCase: deinitializes pointer-valued apps after each replay" {
     var report = try runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = .{},
+        .simulate = World.SimulateOptions{},
         .init = PointerSimApp.init,
         .scenario = pointerSimAppScenario,
     });
@@ -1493,7 +825,7 @@ test "runSimCase: includes app teardown in replay comparison" {
     var report = try runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = .{},
+        .simulate = World.SimulateOptions{},
         .init = TeardownTraceApp.init,
         .scenario = teardownTraceScenario,
     });
@@ -1517,7 +849,7 @@ test "expectSimPass and expectSimFuzz accept passing cases" {
     try expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = .{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1527,7 +859,7 @@ test "expectSimPass and expectSimFuzz accept passing cases" {
         .allocator = std.testing.allocator,
         .seed = 1234,
         .seeds = 4,
-        .simulate = .{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1549,7 +881,7 @@ test "expectSimFuzz rejects zero-run campaigns" {
         .allocator = std.testing.allocator,
         .seed = 1234,
         .seeds = seed_count,
-        .simulate = .{},
+        .simulate = World.SimulateOptions{},
         .init = Functions.init,
         .scenario = Functions.scenario,
     }));
@@ -1568,7 +900,7 @@ test "expectSimFailure accepts failing simulation cases" {
     try expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = .{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1591,7 +923,7 @@ test "runSimCase: init errors become scenario failures" {
     var report = try runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = .{},
+        .simulate = World.SimulateOptions{},
         .init = FallibleSimApp.init,
         .scenario = unreachableSimCaseScenario,
         .checks = &case_checks,

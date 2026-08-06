@@ -114,10 +114,6 @@ pub const Disk = struct {
     pub const DirEntry = DiskDirEntry;
     pub const DirEntryKind = DiskDirEntryKind;
     pub const DirList = DiskDirList;
-    pub const SemanticContract = DiskSemanticContract;
-    pub const semantic_contract = disk_semantic_contract;
-    pub const semantic_version = disk_semantic_version;
-
     pub const VTable = struct {
         read: *const fn (*anyopaque, Read) DiskError!void,
         write: *const fn (*anyopaque, Write) DiskError!void,

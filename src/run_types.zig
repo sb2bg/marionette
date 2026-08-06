@@ -6,17 +6,6 @@ const clock_module = @import("clock.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
-/// Named scenario check run by `mar.run`.
-///
-/// Checks are the post-scenario invariant hook. They should return an error when a
-/// property is violated so the runner can preserve the partial trace.
-pub const Check = struct {
-    /// Stable name included in failure reports.
-    name: []const u8,
-    /// Check function. It may inspect and record through the world.
-    check: *const fn (*World) anyerror!void,
-};
-
 /// Replay-visible scalar attribute value.
 pub const RunAttributeValue = union(enum) {
     string: []const u8,
@@ -123,9 +112,6 @@ pub const RunOptions = struct {
     tags: []const []const u8 = &.{},
     /// Expanded typed run facts needed to reproduce the scenario.
     attributes: []const RunAttribute = &.{},
-    /// Checks run after a successful scenario body.
-    checks: []const Check = &.{},
-
     pub fn worldOptions(self: RunOptions) World.Options {
         return .{
             .seed = self.seed,
@@ -168,20 +154,6 @@ pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.me
         }
     }
 
-    if (options.checks.len > 0) {
-        const checks = try allocator.alloc(Check, options.checks.len);
-        cloned.checks = checks;
-        for (checks) |*check| {
-            check.* = .{ .name = &.{}, .check = undefined };
-        }
-        for (options.checks, 0..) |check, index| {
-            checks[index] = .{
-                .name = try allocator.dupe(u8, check.name),
-                .check = check.check,
-            };
-        }
-    }
-
     return cloned;
 }
 
@@ -194,8 +166,6 @@ pub fn deinitRunOptions(allocator: std.mem.Allocator, options: *RunOptions) void
         deinitRunAttributeValue(allocator, attribute.value);
     }
     allocator.free(options.attributes);
-    for (options.checks) |check| allocator.free(check.name);
-    allocator.free(options.checks);
     options.* = undefined;
 }
 

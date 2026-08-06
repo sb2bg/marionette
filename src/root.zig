@@ -76,14 +76,8 @@ pub const Env = env_module.Env;
 /// Production capability composition root.
 pub const Production = env_module.Production;
 
-/// App-facing trace capability.
-pub const Tracer = env_module.Tracer;
-
 /// Narrow structured recording capability for `std.Io`-shaped code.
 pub const Recorder = env_module.Recorder;
-
-/// Errors returned by trace capabilities.
-pub const TracerError = env_module.TracerError;
 
 /// Simulator-control capability bundle.
 pub const Control = env_module.SimControl;
@@ -115,9 +109,6 @@ pub const AllocationStats = env_module.AllocationStats;
 /// Simulator-control allocation capability.
 pub const AllocationControl = env_module.AllocationControl;
 
-/// Seeded deterministic random number generator.
-pub const Random = @import("random.zig").Random;
-
 /// Deterministic simulation engine state.
 pub const World = @import("world.zig").World;
 
@@ -142,17 +133,8 @@ pub const SimNetworkOptions = network_module.SimNetworkOptions;
 /// Typed app-facing process endpoint.
 pub const Endpoint = network_module.Endpoint;
 
-/// Simulator-control network capability.
-pub const NetworkControl = network_module.AnyNetworkControl;
-
 /// Named simulation profile expansion helpers.
 pub const SimProfile = profile_module.SimProfile;
-
-/// Namespace for profile helpers.
-pub const profile = profile_module;
-
-/// Configuration for `run`.
-pub const RunOptions = run_module.RunOptions;
 
 /// Replay-visible typed attribute attached to a run.
 pub const RunAttribute = run_module.RunAttribute;
@@ -163,14 +145,8 @@ pub const RunAttributeValue = run_module.RunAttributeValue;
 /// Build one replay-visible typed attribute from a scalar value.
 pub const runAttribute = run_module.runAttribute;
 
-/// Named scenario check run by `run`.
-pub const Check = run_module.Check;
-
 /// Named scenario check over user-owned scenario state.
 pub const StateCheck = run_module.StateCheck;
-
-/// Successful deterministic scenario result.
-pub const RunResult = run_module.RunResult;
 
 /// Data-bearing scenario failure.
 pub const RunFailure = run_module.RunFailure;
@@ -178,7 +154,7 @@ pub const RunFailure = run_module.RunFailure;
 /// Failure kind captured by the runner.
 pub const RunFailureKind = run_module.RunFailureKind;
 
-/// Result of `run`: either a verified replay or a failure report.
+/// Result of `runSimCase`: either a verified replay or a failure report.
 pub const RunReport = run_module.RunReport;
 
 /// Errors returned by the deterministic scenario runner itself.
@@ -195,9 +171,6 @@ pub const TraceValue = @import("world.zig").TraceValue;
 
 /// Build one structured trace field.
 pub const traceField = @import("world.zig").traceField;
-
-/// Run a scenario twice with the same seed and compare traces.
-pub const run = run_module.run;
 
 /// Standard simulation scenario state wrapper.
 pub const SimCase = run_module.SimCase;

@@ -1,458 +1,71 @@
 # Network Model
 
-This is a design note for Marionette's current unstable network simulation
-work. It is not the final public network API yet.
+Marionette has two network altitudes:
 
-For the intended production/simulation API split, see
-[Network API Direction](network-api.md).
+- deterministic `std.Io.net` for socket-facing code, codecs, framing, partial
+  I/O, deadlines, and connection lifecycle;
+- experimental `Endpoint(Message)` for protocol and state-machine exploration
+  above the wire.
 
-The goal is a deterministic network authority that can make distributed
-failures replayable from a seed. The first slice is intentionally small:
-messages can be delayed, dropped, queued, filtered by directed link state,
-clogged by directed path, partitioned, healed, stopped, restarted, and
-delivered in a stable order. Replay recording, node spawning, and the final
-scheduler API come later.
-
-## VOPR Comparison
-
-TigerBeetle's VOPR network is built around `PacketSimulator`, a deterministic
-packet core with one link for every directed source-target path. Each link owns
-a queue, a command filter, an optional packet drop predicate, an optional
-recording filter, and path clog state. Global packet simulator options include
-node/client counts, seed, latency distribution, packet loss, packet replay,
-automatic partition settings, partition stability, unpartition stability,
-per-path capacity, and path clog probability/duration.
-
-The portable lessons for Marionette are:
-
-- Treat the network as simulator-owned machinery, not real sockets.
-- Keep packet send/delivery separate from simulator-control faults.
-- Queue packets per directed path, not in one global network bucket.
-- Give every packet a replay-visible identity.
-- Make latency, loss, replay, clogs, and partitions seeded simulator decisions.
-- Evolve random network faults only from the simulator tick.
-- Trace sends, drops, deliveries, and state changes separately.
-- Layer advanced faults on top of a small packet core.
-
-The internal packet core already follows this shape: fixed topology,
-per-directed-path queues, path-local capacity, stable packet ids, seeded
-latency/drop decisions, explicit link filters, explicit partitions, path clogs,
-node up/down state, and delivery order by `(deliver_at, packet_id)`.
-
-The main differences are deliberate:
-
-- VOPR has broader tick-evolved automatic fault scheduling; Marionette now has
-  a narrow version for per-path clogs and node-isolating partitions.
-- VOPR can replay packets and record selected command classes for later
-  replay; Marionette has whole-run seed replay but no packet-sequence replay.
-- VOPR has command-aware link filters and optional per-link drop predicates;
-  Marionette is payload-generic and does not know user protocol commands yet.
-- VOPR uses an exponential latency model with a minimum; Marionette currently
-  uses uniform tick-aligned jitter.
-- VOPR can randomly drop an already queued packet when a path is over
-  capacity; Marionette returns queue-capacity errors from the packet core.
-- VOPR's automatic partitions are replica/node-focused; Marionette's manual
-  `partition` helper can target any configured process, including clients.
-
-Marionette should not copy TigerBeetle's full harness. TigerBeetle has a
-production protocol, message pools, client/replica process identities, command
-classes, replay recording, and liveness-specific modes. Marionette needs the
-same discipline in a generic API, not the same product-specific surface.
-
-## Current API
-
-The experimental app-facing type is `mar.Endpoint(Message)`. It is a
-protocol-level simulation surface, not a wire transport. Simulation setup
-creates the backing topology and returns node-scoped typed endpoints from the
-composition root:
-
-```zig
-const sim = try world.simulate(.{ .network = .{
-    .nodes = 4,
-    .service_nodes = 3,
-    .path_capacity = 64,
-} });
-const sender = try sim.endpoint(Message, 0);
-const receiver = try sim.endpoint(Message, 1);
-```
-
-`nodes` declares the total simulated process ids. With the example above,
-valid process ids are `0`, `1`, `2`, and `3`. `path_capacity` is per directed
-link, not global. `service_nodes` declares the prefix of process ids eligible
-for automatic node-isolating partitions; when omitted or zero, all processes
-are eligible. This is explicit because `.nodes` alone does not tell Marionette
-which ids are replicas/services and which ids are clients. Clients still
-participate in the topology and can be partitioned from services, but automatic
-node isolation chooses from the service prefix.
-
-`Message` is user-owned data. Marionette copies it with ordinary Zig value
-semantics and only schedules and traces the packet metadata. Inline values are
-copied, but pointers, slices, and handles still refer to their original
-storage. Marionette does not serialize messages, deep-copy pointees, retain
-referenced storage, or clean it up. Prefer value-only messages. If references
-are unavoidable, their storage must remain valid and immutable for the entire
-simulation:
-
-```zig
-const Message = struct {
-    value: u64,
-};
-
-try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
-try sim.control.network.setLatency(.{
-    .min_latency_ns = 1_000_000,
-    .latency_jitter_ns = 2_000_000,
-});
-try sender.send(1, .{ .value = 42 });
-```
-
-Deliverable messages are consumed explicitly:
-
-```zig
-while (try receiver.receive()) |envelope| {
-    try apply(envelope.from, envelope.message);
-}
-```
-
-`send` is synchronous and does not wait for delivery. Success does not prove
-that a message was queued: configured loss and a down source are successful,
-trace-visible drops. A queued message can still be dropped when received if
-its destination is down or its directed link is disabled.
-
-`receive` may advance simulated time to the earliest delivery anywhere on the
-same typed bus. `null` means that this endpoint has no message available at
-that bus scheduling boundary. It does not mean that the endpoint has no later
-packet, is closed, or reached EOF. A ready message for another endpoint can
-therefore cause `null` even while this endpoint has a later queued message.
-
-Endpoint handles are borrowed from their simulation and must not outlive it.
-The current API has no close, EOF, deadline, cancellation, acknowledgement, or
-backpressure contract. Use simulated `std.Io.net` when tests must cover the
-wire format, framing, partial I/O, stream ordering, or connection lifecycle.
-
-Application-shaped code sends and drains through typed endpoints, while fault
-orchestration goes through `sim.control.network`. The packet core underneath
-is module-internal; focused simulator work imports it directly rather than
-through the public API.
+`std.Io.net` is the canonical same-code production seam. Marionette does not
+provide a production endpoint bus.
 
 ## Topology
 
-The topology is fixed when simulation is created:
+`World.SimulateOptions.network` configures:
 
-```zig
-.nodes = 4,
-```
+- `nodes`: total logical processes;
+- `service_nodes`: the prefix restored by liveness transition;
+- `path_capacity`: queued capacity per directed path.
 
-All node-shaped APIs reject ids outside `0..nodes`.
-That gives the simulator a known universe for partitions, per-link queues,
-node state, and future liveness checks. It also makes invalid topology use
-return `InvalidNode` instead of silently creating new processes by accident.
+Node IDs are stable `u16` values. Links are directed, so disabling `A -> B`
+does not disable `B -> A`.
 
-Each directed path owns its own queue and enabled/disabled state. The packet
-core scans path queue heads and picks the ready packet with the lowest
-`(deliver_at, packet_id)` for the receiving endpoint. The scan is acceptable
-for current topology sizes; a future optimization can add an index over active
-paths without changing the per-link model needed for clogging and path-local
-capacity.
+## Harness Control
 
-## Node State
+`case.control().network` can configure loss, latency, automatic partitions,
+node state, link state, clogs, explicit partitions, and healing. Changes are
+trace-visible.
 
-Nodes are up by default. Mark a simulated process down or up with:
+Application code does not receive this capability. It receives node-scoped
+`std.Io` from `sim.envForNode(node)` or a typed endpoint created through
+`sim.endpoint`.
 
-```zig
-try sim.control.network.setNode(1, false);
-try sim.control.network.setNode(1, true);
-```
+## Delivery
 
-A down source cannot submit new packets. `send` still consumes a stable packet
-id and records:
+Each send receives a monotonically increasing packet ID and a deterministic
+delivery timestamp. Ready packets are selected by delivery time and packet ID.
+This permits latency-driven reordering without unstable container iteration.
 
-```text
-network.drop id=<id> from=1 to=2 reason=source_down
-```
+Loss may occur at send time. Destination failure, link disablement, or
+partition may also discard a packet when delivery becomes due. Clogged links
+delay otherwise ready packets until the clog expires. Every outcome records a
+reason.
 
-A down destination drops ready packets when `receive` consumes them:
+For reliable `std.Io.net` streams, a lost interior segment terminally fails the
+receive stream; later bytes are not exposed across a hole. Connection teardown
+reclaims queued frames and wakes writers waiting on shared byte capacity.
 
-```text
-network.drop id=<id> from=0 to=1 reason=destination_down
-```
+## Time And Backpressure
 
-Queued packets are not removed when a node goes down. Destination state is
-checked when a ready packet is consumed, not merely when its scheduled
-timestamp passes. An overdue packet can therefore be delivered if the node is
-marked up again before `receive` consumes it.
+Network delivery advances only when the harness moves virtual time or drives
+scheduled tasks. Queues and the shared stream byte pool are bounded. Capacity
+exhaustion blocks stream writers through deterministic scheduler wait keys;
+typed endpoint queues return `error.EventQueueFull`.
 
-Queued connect probes are the deliberate exception to ordinary packet source
-semantics: connect publication is a transaction boundary, so it rechecks the
-source node as well as the destination and directed link when the ready probe is
-consumed. A source that is down at that point produces `error.NetworkDown`
-without publishing either socket endpoint or consuming listener backlog.
-Transient source loss that is restored before probe consumption is not latched,
-matching the consume-time destination and link model above.
+## Process State
 
-Connect probes on one directed path commit in `(deliver_at, packet_id)` order.
-That ordering domain contains probes only. Reader-owned stream frames remain
-separately consumable so a probe cannot deadlock behind a frame that only its
-eventual connection reader owns.
+Node failure affects both network delivery and process-scoped I/O. Saved
+capabilities reject use while their process is killed. Restart creates a fresh
+incarnation; stale handles remain invalid.
 
-Typed endpoint node state is controlled by `control.network.setNode` and is
-separate from the process supervisor. `killProcess(node)` alone kills that
-process's tasks and I/O handles; it does not mark its typed endpoint node down.
+## Limits
 
-## Link Filters
+The current model does not provide UDP, Unix sockets, real DNS, arbitrary
+multi-peer production transports, or preemptive shared-memory scheduling.
+Typed endpoints do not serialize arbitrary Zig values and do not yet promise a
+stable production ownership, readiness, cancellation, or backpressure
+contract.
 
-Links are directed. A disabled link drops ready packets when `receive`
-consumes them:
-
-```zig
-try sim.control.network.setLink(0, 1, false);
-```
-
-If a packet from node `0` to node `1` is already queued when the link is
-disabled, it remains queued. When it becomes ready, endpoint receive drops it and
-records:
-
-```text
-network.drop id=<id> from=0 to=1 reason=link_disabled
-```
-
-This mirrors the VOPR-style idea that the network's link state at delivery can
-decide whether an in-flight packet makes it through.
-
-Re-enable a directed link with:
-
-```zig
-try sim.control.network.setLink(0, 1, true);
-```
-
-## Path Clogging
-
-Clogs are directed path faults. A clogged path keeps its packets queued until
-simulated time reaches the clog deadline, while other paths keep delivering:
-
-```zig
-try sim.control.network.clog(0, 1, 100 * ns_per_ms);
-```
-
-If a packet for `0 -> 1` is ready at `t=10ms` but the path is clogged until
-`t=100ms`, endpoint receive skips that path and may deliver packets from other
-paths addressed to that endpoint first. The packet core's internal
-next-delivery calculation accounts for active clogs.
-
-Clear one path clog explicitly with:
-
-```zig
-try sim.control.network.unclog(0, 1);
-```
-
-Clear all active clogs with:
-
-```zig
-try sim.control.network.unclogAll();
-```
-
-Clogs also expire when simulated time reaches `until_ns`. Endpoint receive
-evolves that deterministic expiry state before selecting a packet as a
-backstop. Scenario and scheduler code should move simulated time through
-`sim.control.tick()` or `sim.control.runFor(...)`. A single `tick()` evolves
-faults at that tick boundary. A longer `runFor(...)` jumps between scheduled
-fault boundaries and deterministic clog expiries instead of replaying every
-intermediate tick.
-
-## Partitions
-
-Partitions are expressed as batches of directed link filters. The current
-helper disables both directions between two groups:
-
-```zig
-const left = [_]mar.NodeId{0};
-const right = [_]mar.NodeId{ 1, 2 };
-try sim.control.network.partition(&left, &right);
-```
-
-This disables `0 -> 1`, `1 -> 0`, `0 -> 2`, and `2 -> 0`, while leaving
-traffic inside the right side alone.
-
-Heal all disabled links with:
-
-```zig
-try sim.control.network.heal();
-```
-
-`heal` restores default network state by re-enabling links and marking nodes
-up, and it clears active clogs. Clearing clogs through `unclog`, `unclogAll`,
-`heal`, or core-liveness restoration wakes scheduler-backed stream reads and
-connects so they recompute readiness immediately rather than sleeping until
-the old clog deadline. Use `healLinks` when a scenario needs to clear
-link filters without changing node state or path clogs.
-
-This is deliberately simple. Later network work can add asymmetric partitions,
-automatic partition schedules, and liveness modes.
-
-## Ordering
-
-Packets are ordered by:
-
-1. `deliver_at`
-2. `packet_id`
-
-That is the same basic tie-breaker discipline Marionette uses elsewhere:
-simulated time first, stable id second. Pointers, host thread scheduling, hash
-map iteration order, and wall-clock time must never decide delivery order.
-
-Each directed `(from, to)` path has its own bounded queue. A full path
-currently returns `error.EventQueueFull`; it does not consume capacity on
-another path. Latency is sampled independently per send, so jitter can reorder
-messages even on one directed path. There is no separate reorder operation and
-no duplication or corruption fault in the current model.
-
-## Time
-
-Network latency is measured in nanoseconds, but it must align with the
-world's tick size. Fault-evolution and delivery boundaries are tick-aligned, so
-the packet core rejects `min_latency_ns` and `latency_jitter_ns` values that
-are not whole multiples of the world's tick. Long `sim.control.runFor(...)`
-calls may still jump between deterministic boundaries instead of iterating
-every tick in the interval.
-
-Typed endpoints default to one world tick of latency. `setLatency` may set the
-minimum to zero explicitly when immediate delivery is the intended model.
-
-When using composition-root simulation, prefer:
-
-```zig
-try sim.control.tick();
-try sim.control.runFor(10 * ns_per_ms);
-```
-
-over calling `world.tick()` or `world.runFor(...)` directly. Simulation control
-advances the world and evolves network fault state at deterministic boundaries.
-Single ticks keep the explicit tick boundary; longer positive `runFor(...)`
-calls use `world.run_for` jumps between scheduled fault events so large
-simulated sleeps do not scale with `duration / tick_ns`. `runFor(0)` is a
-no-op. This mirrors VOPR's outer simulator tick and keeps future
-disk/network/crash subsystems from each needing separate caller-managed ticks.
-
-The current latency model is uniform integer jitter over whole ticks:
-
-```text
-latency = min_latency_ns + random(0..latency_jitter_ns)
-```
-
-where the random jitter is tick-aligned.
-
-Later versions may add distributions such as exponential latency. The first
-priority is deterministic replay and clear traces, not realism.
-
-## Drops
-
-Every `send` consumes a packet id. If the drop decision fires, Marionette
-records `network.drop` and does not enqueue the payload.
-
-The current drop model uses `BuggifyRate`:
-
-```zig
-try sim.control.network.setLossiness(.{ .drop_rate = .percent(20) });
-```
-
-This keeps the API consistent with BUGGIFY without making packet drops into
-opaque user behavior. Marionette owns the random decision; user code owns the
-payload and protocol semantics.
-
-## Trace Events
-
-Current network trace events:
-
-- `network.send id={} from={} to={} deliver_at={} latency_ns={}`
-- `network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop`
-- `network.drop id={} from={} to={} reason=source_down`
-- `network.drop id={} from={} to={} reason=destination_down`
-- `network.drop id={} from={} to={} reason=link_disabled`
-- `network.deliver id={} from={} to={} now_ns={}`
-- `network.node node={} up={}`
-- `network.link from={} to={} enabled={}`
-- `network.clog from={} to={} duration_ns={} until_ns={}`
-- `network.clog from={} to={} duration_ns={} until_ns={} automatic=true`
-- `network.unclog from={} to={} active={}`
-- `network.unclog_all clogged_count={}`
-- `network.partition left_count={} right_count={}`
-- `network.auto_partition node={} isolated_count=1 connected_count={}`
-- `network.auto_heal node={}`
-- `network.heal disabled_count={} down_count={} clogged_count={}`
-- `network.heal_links disabled_count={}`
-- `network.lossiness drop_rate={}/{}`
-- `network.latency min_latency_ns={} latency_jitter_ns={}`
-- `network.clog_faults path_clog_rate={}/{} path_clog_duration_ns={}`
-- `network.partition_dynamics partition_rate={}/{} unpartition_rate={}/{} partition_stability_min_ns={} unpartition_stability_min_ns={}`
-
-The payload is not dumped into the core network trace. User code should record
-domain-specific payload facts separately when useful, as the replicated
-register example does with `register.message`.
-
-## Fault Evolution
-
-Packet loss is still a send-time decision. Probabilistic path clogs and
-automatic partitions are control-evolved decisions: random rolls happen only
-when simulation control advances to a fault-evolution boundary with
-`sim.control.tick()` or a positive `sim.control.runFor(...)`. Observation
-methods do not fire random partition or clog probabilities. `tick()` preserves
-the explicit one-tick boundary. `runFor(...)` samples seeded next-occurrence
-times for probabilistic faults and advances directly to those timestamps, while
-still stopping at deterministic clog-expiry boundaries. Lazy `popReady`
-expiration remains only for deterministic clog deadlines.
-
-The runtime fault profile is separate from static topology. Prefer focused
-control calls for scenario readability:
-
-```zig
-try sim.control.network.setLossiness(.{ .drop_rate = .percent(1) });
-try sim.control.network.setLatency(.{
-    .min_latency_ns = 1 * ns_per_ms,
-    .latency_jitter_ns = 2 * ns_per_ms,
-});
-try sim.control.network.setClogs(.{
-    .path_clog_rate = .percent(10),
-    .path_clog_duration_ns = 2 * ns_per_ms,
-});
-try sim.control.network.setPartitionDynamics(.{
-    .partition_rate = .percent(1),
-    .unpartition_rate = .percent(5),
-    .partition_stability_min_ns = 20 * ns_per_ms,
-    .unpartition_stability_min_ns = 20 * ns_per_ms,
-});
-```
-
-`SimNetworkOptions` describes what exists; runtime fault controls describe how
-the simulator may perturb it during a run. The focused setters replace their
-own fault family and leave the other fault families unchanged. Automatic
-partitioning currently isolates one random service node from every other
-configured process and heals only after the unpartition stability floor has
-elapsed and the unpartition roll fires. Explicit `partition`, `heal`,
-`setLink`, and `clog` calls remain immediate scenario actions.
-
-## Current Limits
-
-The packet core does not yet support:
-
-- Replay recording.
-- Packet duplication.
-- Broadcast.
-- Node spawning.
-- Multiple named buses or bus registry.
-- Command-aware or user-classified link filters.
-- Per-link drop predicates.
-- Exponential or profile-selected latency distributions.
-- Capacity-overflow policies other than returning `EventQueueFull`.
-- Event-by-event scheduler callbacks.
-- Human summary rendering.
-
-These are deliberate omissions. The current primitive should prove the
-smallest useful packet core before growing.
-
-## Next Step
-
-The app-facing/control split in `network-api.md` still matters. The remaining
-network work is liveness-oriented: replay recording, duplicate/broadcast
-semantics, richer latency distributions, and named bus composition.
-The packet core remains a module-internal simulator primitive; examples
-should not teach it as the final production network surface.
+See [`std.Io.net` Conformance](std-io-net-conformance.md) for the exact socket
+subset and [the client/server example](std-io-net-example.md) for usage.

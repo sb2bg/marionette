@@ -1,339 +1,86 @@
-# Run
+# Running Scenarios
 
-`mar.runSimCase` is the primary stateful simulation wrapper. It initializes a
-fresh `SimCase(App)` value for each replay attempt, executes the scenario twice
-with the same seed, runs named checks, and compares the resulting traces
-byte-for-byte.
+`runSimCase` is the single scenario runner. It executes the same case twice and
+compares byte-identical traces. Scenario and check errors are returned as data;
+allocation or trace-infrastructure errors remain Zig errors.
 
-`mar.run` is the lower-level world-only wrapper for scenarios that do not
-need structured state.
-
-## World-Only Shape
+## Define A Case
 
 ```zig
-const std = @import("std");
-const mar = @import("marionette");
+const Case = mar.SimCase(Service);
 
-fn scenario(world: *mar.World) !void {
-    try world.tick();
-    _ = try world.randomIntLessThan(u64, 100);
-    try world.record("scenario.done", .{});
-}
-
-test "scenario is deterministic" {
-    const tags = [_][]const u8{ "scenario:smoke" };
-    const attributes = [_]mar.RunAttribute{
-        mar.runAttribute("requests", @as(u64, 1)),
-    };
-
-    var report = try mar.run(std.testing.allocator, .{
-        .seed = 0x1234,
-        .name = "smoke",
-        .tags = &tags,
-        .attributes = &attributes,
-        .checks = &.{.{ .name = "trace exists", .check = traceExists }},
-    }, scenario);
-    defer report.deinit();
-
-    switch (report) {
-        .passed => |passed| {
-            try std.testing.expect(passed.trace.len > 0);
-        },
-        .failed => |failure| {
-            failure.print();
-            return error.ScenarioFailed;
-        },
-    }
-}
-
-fn traceExists(world: *mar.World) !void {
-    if (world.traceBytes().len == 0) return error.EmptyTrace;
-}
-```
-
-`mar.run` returns `mar.RunReport`:
-
-- `.passed` contains one owned trace from the first successful run.
-- `.failed` contains a data-bearing failure report.
-
-Call `report.deinit()` when done.
-
-## Example Runner
-
-The repository includes a small runner for replaying built-in examples from a
-seed:
-
-```sh
-zig build run-example -- replicated-register --seed 12648430 --summary
-zig build run-example -- replicated-register --seed 12648430 --trace
-zig build run-example -- retry-queue-bug --seed 12648430 --expect-failure
-```
-
-`--summary` renders `mar.summarize` output for passing traces. `--trace` prints
-the raw trace. Known-bug scenarios return nonzero when they fail unless
-`--expect-failure` is supplied.
-
-## Failure Reports
-
-Failures are not returned as bare scenario errors because that would lose the
-trace. Instead, the runner captures:
-
-- Seed and run options.
-- Run name, tags, and typed attributes.
-- Failure kind.
-- First trace.
-- Second trace when a second run happened.
-- First and second event counts.
-- Error name when user code or a check returned an error.
-- Check name when a named check failed.
-
-Failure kinds:
-
-- `scenario_error`: user scenario returned an error in both runs with an
-  identical trace. The first trace is the partial trace through the last
-  completed event; the failure is verified replayable.
-- `check_failed`: a named check returned an error after the scenario body,
-  identically in both runs. The first trace is the partial trace through the
-  check failure.
-- `determinism_mismatch`: the runs diverged. Either both passed with
-  different traces, or both failed but not byte-identically. When both runs
-  failed, `error`/`check` describe the first run and
-  `second_error`/`second_check` describe the second.
-- `second_run_failed`: the first run passed but the second failed with the
-  same seed. A determinism leak surfaced through an error; `error` (and
-  `check`, if set) describe the second run's failure.
-- `first_run_failed`: the first run failed but the second passed with the
-  same seed. A determinism leak: the failure did not reproduce. `error` (and
-  `check`, if set) describe the first run's failure, and the second trace is
-  the passing run's trace.
-
-The runner always executes both runs, even when the first fails, so every
-reported `scenario_error` or `check_failed` has already been replayed once.
-
-Panics are different from error returns. Zig's default panic path may abort
-before Marionette can report a partial trace, so simulated failures should
-prefer error-returning invariant checks.
-
-`RunFailure.print()` writes one compact line to stderr. Tests should use
-`RunFailure.writeSummary(writer)`, which writes the same line to a caller-owned
-writer.
-
-## Metadata
-
-The seed is necessary but not sufficient once scenarios generate options from
-that seed. Use a run name, tags, and attributes to make the expanded run shape
-visible. `mar.runSimCase` and the lower-level `mar.run` options use
-`.name`:
-
-```zig
-const tags = [_][]const u8{ "example:replicated_register", "scenario:smoke" };
-const attributes = [_]mar.RunAttribute{
-    mar.runAttribute("replicas", @as(u64, 3)),
-    mar.runAttribute("packet_loss_percent", @as(u8, 20)),
-};
-
-var report = try mar.run(std.testing.allocator, .{
-    .seed = 0x1234,
-    .name = "replicated-register-smoke",
-    .tags = &tags,
-    .attributes = &attributes,
-}, scenario);
-```
-
-The runner records these entries before scenario code:
-
-```text
-event=1 run.name value=replicated-register-smoke
-event=2 run.tag value=example:replicated_register
-event=3 run.tag value=scenario:smoke
-event=4 run.attribute key=replicas value=uint:3
-event=5 run.attribute key=packet_loss_percent value=uint:20
-```
-
-Tags should be stable scalar labels. Attribute keys should be stable scalar
-text, and values should use the narrow typed union Marionette exposes.
-Use `mar.runAttribute` to build attributes; keys are written explicitly so
-exported trace keys never silently track internal field renames. Runtime
-behavior should read from the config, not from derived attributes. Do not put pointers,
-addresses, unordered dumps, or machine-local paths in run metadata.
-
-## Profiles
-
-Use `mar.SimProfile` when a scenario should run under a named configuration
-such as `baseline`, `swarm`, `replay`, or `performance`. Profiles expand into
-three explicit pieces:
-
-- `simulateOptions()` for `runSimCase(.simulate = ...)`;
-- `runTags()` and `runAttributes()` for replay-visible metadata;
-- `apply(control)` for runtime fault controls inside the scenario.
-
-This keeps profiles reproducible without hiding the final values from traces
-or failure summaries.
-
-```zig
-fn swarmProfile() mar.SimProfile.Expanded {
-    return mar.SimProfile.swarm(.{
-        .tick_ns = tick_ns,
-        .network = .{
-            .nodes = replica_count + 1,
-            .service_nodes = replica_count,
-            .path_capacity = max_messages,
-        },
-    }).expand();
+fn init(sim: mar.Sim) !Service {
+    return Service.init(sim.env.io(), sim.env.recorder());
 }
 
 fn scenario(case: *Case) !void {
-    const profile = swarmProfile();
-    try profile.apply(case.control());
-    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 6 });
-}
-
-const profile = swarmProfile();
-try mar.expectSimFuzz(.{
-    .allocator = std.testing.allocator,
-    .seed = 0xC0FFEE,
-    .seeds = 100,
-    .tick_ns = tick_ns,
-    .name = "replicated-register-swarm",
-    .tags = profile.runTags(),
-    .attributes = profile.runAttributes(),
-    .simulate = profile.simulateOptions(),
-    .init = initReplicas,
-    .scenario = scenario,
-    .checks = &checks,
-});
-```
-
-The `replay` profile has no hidden generator. It is for rehydrating the exact
-expanded values from a failure report with the same seed. Network runtime
-controls are effective, and reported as nonzero metadata, only when the profile
-also includes a network topology. The `performance` profile is a low-noise
-starting point with zero default disk latency and no default runtime faults.
-
-## Checks
-
-Checks are the post-scenario invariant hook. A world check is a named function that
-runs after the scenario body and returns an error when a property is violated:
-
-```zig
-fn noBadState(world: *mar.World) !void {
-    if (std.mem.indexOf(u8, world.traceBytes(), "bad_state") != null) {
-        return error.BadState;
-    }
-}
-
-const checks = [_]mar.Check{
-    .{ .name = "no bad state", .check = noBadState },
-};
-
-var report = try mar.run(std.testing.allocator, .{
-    .seed = 0x1234,
-    .checks = &checks,
-}, scenario);
-```
-
-Simulation scenarios should usually use `mar.runSimCase` and
-`mar.SimCase(App)`. The app initializer receives `mar.Sim` directly, so it can
-construct endpoints and other simulation-bound authorities without a custom
-harness whose only job is to store `control`:
-
-```zig
-const Case = mar.SimCase(Model);
-
-const Model = struct {
-    env: mar.Env,
-    committed: bool = false,
-};
-
-fn initModel(sim: mar.Sim) Model {
-    return .{ .env = sim.env };
-}
-
-fn scenario(case: *Case) !void {
+    try case.app.request();
+    try case.control().network.partition(&.{0}, &.{1});
     try case.control().tick();
-    case.app.committed = true;
-    try case.env().record("model.commit", .{});
 }
 
-fn committed(case: *const Case) !void {
-    if (!case.app.committed) return error.NotCommitted;
-    try case.env().record("model.check committed=true", .{});
+fn safe(case: *const Case) !void {
+    if (!case.app.safe()) return error.InvariantBroken;
 }
+```
 
-const state_checks = [_]mar.StateCheck(Case){
-    .{ .name = "committed", .check = committed },
+Run it with typed simulation options:
+
+```zig
+const checks = [_]mar.StateCheck(Case){
+    .{ .name = "service remains safe", .check = safe },
 };
 
 var report = try mar.runSimCase(.{
-    .allocator = std.testing.allocator,
-    .seed = 0x1234,
-    .name = "model-smoke",
-    .simulate = .{},
-    .init = initModel,
-    .scenario = scenario,
-    .checks = &state_checks,
-});
-```
-
-`runSimCase` initializes a fresh `World`, records run metadata, calls
-`world.simulate(config.simulate)`, passes the resulting `mar.Sim` to `init`,
-then runs the scenario and checks over `*mar.SimCase(App)`. Scenario code uses
-`case.app` for application state and `case.control()` for simulator authority.
-`case.env()`, `case.envForNode(...)`, `case.endpoint(...)`, and related helpers
-forward to the underlying `mar.Sim`. `case.io()` and `case.ioForNode(node)`
-are the std.Io-facing equivalents for single-node and node-scoped simulated
-I/O.
-
-Use `mar.expectSimPass` when a simulation test only needs to fail loudly on a
-bad run:
-
-```zig
-try mar.expectSimPass(.{
-    .allocator = std.testing.allocator,
-    .seed = 0x1234,
-    .simulate = .{},
-    .init = initModel,
-    .scenario = scenario,
-    .checks = &state_checks,
-});
-```
-
-Use `mar.expectSimFuzz` to run many deterministic seeds and report the failing
-seed if one fails:
-
-```zig
-try mar.expectSimFuzz(.{
-    .allocator = std.testing.allocator,
-    .seed = 0x1234,
-    .seeds = 1000,
-    .simulate = .{},
-    .init = initModel,
-    .scenario = scenario,
-    .checks = &state_checks,
-});
-```
-
-Use `mar.expectSimFailure` when proving a simulation checker catches a
-known-buggy scenario.
-
-This is intentionally small. Future scheduler work can check invariants after
-every event or on quiescence, but the current API already gives failures a
-stable name, preserved trace, and direct access to structured scenario state.
-
-## Ownership
-
-Successful traces are owned by `RunReport`. To return a trace from a helper,
-use `takeTrace()`:
-
-```zig
-var report = try mar.run(allocator, .{ .seed = seed }, scenario);
-defer report.deinit();
-
-switch (report) {
-    .passed => |*passed| return passed.takeTrace(),
-    .failed => |failure| {
-        failure.print();
-        return error.ScenarioFailed;
+    .allocator = allocator,
+    .seed = seed,
+    .name = "partition",
+    .simulate = mar.World.SimulateOptions{
+        .network = .{ .nodes = 2 },
     },
-}
+    .init = init,
+    .scenario = scenario,
+    .checks = &checks,
+});
+defer report.deinit();
 ```
+
+The runner owns world and application cleanup. If the app type defines
+`deinit`, it runs before each world is destroyed and remains part of replay
+comparison.
+
+## Outcomes
+
+`RunReport` is either `passed` or `failed`.
+
+Failure kinds are:
+
+- `scenario_error`;
+- `check_failed`;
+- `determinism_mismatch`;
+- `first_run_failed`;
+- `second_run_failed`.
+
+`RunFailure.writeSummary` writes a compact replay line. The failure owns its
+metadata and traces until `RunReport.deinit`.
+
+## Test Helpers
+
+Use `expectSimPass` for normal cases and `expectSimFailure` for planted bugs.
+Use `runSimCase` directly when a test must assert the exact failure kind, error,
+check name, or trace.
+
+`expectSimFuzz` requires a nonzero `seeds` field. Each derived seed is replayed
+twice. Long campaigns belong in the nightly seed sweep; focused unit tests
+should use small counts.
+
+## CLI
+
+Run an included scenario with:
+
+```sh
+zig build run-example -- kv-store --seed 12648430 --summary
+```
+
+Use `--trace` for the full trace and `--expect-failure` for planted bugs. Run
+without a valid scenario to print the current scenario list.

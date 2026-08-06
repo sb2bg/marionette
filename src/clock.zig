@@ -14,7 +14,7 @@ pub const default_tick_ns: Duration = 1;
 /// Deterministic clock for simulation tests.
 ///
 /// Time starts at `Options.start_ns` and only advances when the caller
-/// invokes `tick()`, `runFor()`, or `sleep()`. This low-level clock does not
+/// invokes `tick()` or `runFor()`. This low-level clock does not
 /// suspend tasks; scheduler-backed `std.Io` waits park through the scheduler.
 pub const SimClock = struct {
     /// Current simulated timestamp in nanoseconds.
@@ -47,15 +47,6 @@ pub const SimClock = struct {
     /// Advance simulated time by exactly one configured tick.
     pub fn tick(self: *SimClock) void {
         self.advanceBy(self.tick_ns);
-    }
-
-    /// Advance simulated time by `duration_ns`.
-    ///
-    /// Sleeping directly on `SimClock` moves simulated time forward.
-    /// Requiring whole ticks keeps all time movement observable through the
-    /// same tick semantics.
-    pub fn sleep(self: *SimClock, duration_ns: Duration) void {
-        self.runFor(duration_ns);
     }
 
     /// Advance simulated time by `duration_ns`.
@@ -104,8 +95,8 @@ test "clock: sim clock advances by ticks" {
     try std.testing.expectEqual(@as(Timestamp, 30), clock.now());
 }
 
-test "clock: sim sleep advances by whole ticks" {
+test "clock: sim clock advances by a duration" {
     var clock: SimClock = .init(.{ .tick_ns = 4 });
-    clock.sleep(12);
+    clock.runFor(12);
     try std.testing.expectEqual(@as(Timestamp, 12), clock.now());
 }

@@ -113,10 +113,6 @@ pub fn probabilisticScenario(case: *Case) !void {
     try runProbabilisticCrash(case, .strict);
 }
 
-pub fn probabilisticBuggyScenario(case: *Case) !void {
-    try runProbabilisticCrash(case, .buggy_accept_magic_only);
-}
-
 pub fn runReport(
     allocator: std.mem.Allocator,
     seed: u64,
@@ -134,14 +130,6 @@ pub fn runReport(
         .scenario = scenario_fn,
         .checks = state_checks,
     });
-}
-
-pub fn runRecoveryWindowReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return runReport(allocator, seed, "kv-recovery-window", probabilisticScenario, &window_checks);
-}
-
-pub fn runRecoveryWindowBugReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return runReport(allocator, seed, "kv-recovery-window-bug", probabilisticBuggyScenario, &window_checks);
 }
 
 fn recoveredStateIsSafe(case: *const Case) !void {

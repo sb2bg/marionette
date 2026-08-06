@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const mar = @import("marionette");
+const support = @import("support.zig");
 
 const tick_ns: mar.Duration = 1_000_000;
 const replica_count = 3;
@@ -25,7 +26,7 @@ const RegisterValue = struct {
 const Endpoint = mar.Endpoint(MessagePayload);
 const Case = mar.SimCase(Replicas);
 
-const simulate_options = .{ .network = .{
+const simulate_options: mar.World.SimulateOptions = .{ .network = .{
     .nodes = replica_count + 1,
     .service_nodes = replica_count,
     .path_capacity = max_messages,
@@ -49,10 +50,6 @@ pub const checks = [_]mar.StateCheck(Case){
 /// Run the correct replicated-register scenario and return an owned trace.
 pub fn runScenario(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     return runTrace(allocator, seed, "replicated-register-smoke", scenario);
-}
-
-pub fn runScenarioReport(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
-    return runReport(allocator, seed, "replicated-register-smoke", scenario);
 }
 
 /// Run a deliberately buggy scenario. Tests use this to prove the checker
@@ -80,13 +77,7 @@ fn runTrace(
     var report = try runReport(allocator, seed, name, scenario_fn);
     defer report.deinit();
 
-    switch (report) {
-        .passed => |*passed| return passed.takeTrace(),
-        .failed => |failure| {
-            failure.print();
-            return error.ReplicatedRegisterScenarioFailed;
-        },
-    }
+    return support.takePassedTrace(&report);
 }
 
 fn runReport(

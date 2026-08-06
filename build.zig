@@ -32,6 +32,17 @@ pub fn addTidyStep(
     );
 }
 
+fn addValidation(
+    b: *std.Build,
+    module: *std.Build.Module,
+    name: []const u8,
+    description: []const u8,
+) *std.Build.Step.Run {
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = module }));
+    b.step(name, description).dependOn(&run.step);
+    return run;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -123,11 +134,7 @@ pub fn build(b: *std.Build) void {
         validate_xitdb_mod.addImport("marionette", mod);
         validate_xitdb_mod.addImport("xitdb", xitdb_dep.module("xitdb"));
 
-        const validate_xitdb_tests = b.addTest(.{ .root_module = validate_xitdb_mod });
-        const run_validate_xitdb = b.addRunArtifact(validate_xitdb_tests);
-
-        const validate_xitdb_step = b.step("validate-xitdb", "Run xitdb under Marionette");
-        validate_xitdb_step.dependOn(&run_validate_xitdb.step);
+        _ = addValidation(b, validate_xitdb_mod, "validate-xitdb", "Run xitdb under Marionette");
     }
 
     if (b.lazyDependency("mailbox", .{
@@ -142,11 +149,7 @@ pub fn build(b: *std.Build) void {
         validate_mailbox_mod.addImport("marionette", mod);
         validate_mailbox_mod.addImport("mailbox", mailbox_dep.module("mailbox"));
 
-        const validate_mailbox_tests = b.addTest(.{ .root_module = validate_mailbox_mod });
-        const run_validate_mailbox = b.addRunArtifact(validate_mailbox_tests);
-
-        const validate_mailbox_step = b.step("validate-mailbox", "Run Mailbox under Marionette");
-        validate_mailbox_step.dependOn(&run_validate_mailbox.step);
+        _ = addValidation(b, validate_mailbox_mod, "validate-mailbox", "Run Mailbox under Marionette");
     }
 
     if (b.lazyDependency("ochi", .{
@@ -182,14 +185,12 @@ pub fn build(b: *std.Build) void {
         validate_ochi_mod.addImport("ochi_store", ochi_store_mod);
         validate_ochi_mod.addImport("ochi_logging", ochi_root_mod.import_table.get("logging").?);
 
-        const validate_ochi_tests = b.addTest(.{ .root_module = validate_ochi_mod });
-        const run_validate_ochi = b.addRunArtifact(validate_ochi_tests);
-
-        const validate_ochi_step = b.step(
+        _ = addValidation(
+            b,
+            validate_ochi_mod,
             "validate-ochi",
             "Run Ochi's unmodified storage path under Marionette",
         );
-        validate_ochi_step.dependOn(&run_validate_ochi.step);
     }
 
     if (b.lazyDependency("dusty", .{
@@ -205,14 +206,12 @@ pub fn build(b: *std.Build) void {
         validate_dusty_mod.addImport("marionette", mod);
         validate_dusty_mod.addImport("dusty", dusty_dep.module("dusty"));
 
-        const validate_dusty_tests = b.addTest(.{ .root_module = validate_dusty_mod });
-        const run_validate_dusty = b.addRunArtifact(validate_dusty_tests);
-
-        const validate_dusty_step = b.step(
+        _ = addValidation(
+            b,
+            validate_dusty_mod,
             "validate-dusty",
             "Run the unmodified dusty HTTP client/server under Marionette",
         );
-        validate_dusty_step.dependOn(&run_validate_dusty.step);
     }
 
     if (b.lazyDependency("beanstalkz", .{
@@ -227,14 +226,12 @@ pub fn build(b: *std.Build) void {
         validate_beanstalkz_mod.addImport("marionette", mod);
         validate_beanstalkz_mod.addImport("beanstalkz", beanstalkz_dep.module("beanstalkz"));
 
-        const validate_beanstalkz_tests = b.addTest(.{ .root_module = validate_beanstalkz_mod });
-        const run_validate_beanstalkz = b.addRunArtifact(validate_beanstalkz_tests);
-
-        const validate_beanstalkz_step = b.step(
+        _ = addValidation(
+            b,
+            validate_beanstalkz_mod,
             "validate-beanstalkz",
             "Run the unmodified beanstalkz queue client under Marionette",
         );
-        validate_beanstalkz_step.dependOn(&run_validate_beanstalkz.step);
     }
 
     const validate_bounded_queue_mod = b.createModule(.{
@@ -244,14 +241,12 @@ pub fn build(b: *std.Build) void {
     });
     validate_bounded_queue_mod.addImport("marionette", mod);
 
-    const validate_bounded_queue_tests = b.addTest(.{ .root_module = validate_bounded_queue_mod });
-    const run_validate_bounded_queue = b.addRunArtifact(validate_bounded_queue_tests);
-
-    const validate_bounded_queue_step = b.step(
+    const run_validate_bounded_queue = addValidation(
+        b,
+        validate_bounded_queue_mod,
         "validate-bounded-queue",
         "Run the cooperative bounded-queue capability validation",
     );
-    validate_bounded_queue_step.dependOn(&run_validate_bounded_queue.step);
 
     const validate_std_io_net_kv_mod = b.createModule(.{
         .root_source_file = b.path("validation/std_io_net_kv.zig"),
@@ -262,16 +257,12 @@ pub fn build(b: *std.Build) void {
     validate_std_io_net_kv_mod.addImport("examples", examples_mod);
     run_examples_mod.addImport("std_io_net_kv_validation", validate_std_io_net_kv_mod);
 
-    const validate_std_io_net_kv_tests = b.addTest(.{
-        .root_module = validate_std_io_net_kv_mod,
-    });
-    const run_validate_std_io_net_kv = b.addRunArtifact(validate_std_io_net_kv_tests);
-
-    const validate_std_io_net_kv_step = b.step(
+    const run_validate_std_io_net_kv = addValidation(
+        b,
+        validate_std_io_net_kv_mod,
         "validate-std-io-net-kv",
         "Run the std.Io.net KV capability validation",
     );
-    validate_std_io_net_kv_step.dependOn(&run_validate_std_io_net_kv.step);
 
     const validate_kv_compat_mod = b.createModule(.{
         .root_source_file = b.path("validation/kv_compat.zig"),
@@ -281,14 +272,12 @@ pub fn build(b: *std.Build) void {
     validate_kv_compat_mod.addImport("marionette", mod);
     validate_kv_compat_mod.addImport("examples", examples_mod);
 
-    const validate_kv_compat_tests = b.addTest(.{ .root_module = validate_kv_compat_mod });
-    const run_validate_kv_compat = b.addRunArtifact(validate_kv_compat_tests);
-
-    const validate_kv_compat_step = b.step(
+    const run_validate_kv_compat = addValidation(
+        b,
+        validate_kv_compat_mod,
         "validate-kv-compat",
         "Run the KV compatibility lifecycle (WAL, compaction rename, recovery) under Marionette",
     );
-    validate_kv_compat_step.dependOn(&run_validate_kv_compat.step);
 
     const seed_sweep_count = b.option(
         usize,
@@ -307,14 +296,12 @@ pub fn build(b: *std.Build) void {
     seed_sweep_mod.addImport("examples", examples_mod);
     seed_sweep_mod.addOptions("seed_sweep_options", seed_sweep_options);
 
-    const seed_sweep_tests = b.addTest(.{ .root_module = seed_sweep_mod });
-    const run_seed_sweep = b.addRunArtifact(seed_sweep_tests);
-
-    const seed_sweep_step = b.step(
+    _ = addValidation(
+        b,
+        seed_sweep_mod,
         "seed-sweep",
         "Run the bounded long-running deterministic seed sweep",
     );
-    seed_sweep_step.dependOn(&run_seed_sweep.step);
 
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/root.zig"),

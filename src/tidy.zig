@@ -39,10 +39,6 @@ pub const Allow = struct {
     needle: ?[]const u8 = null,
 };
 
-// Keep this growing toward a small rules engine, not a pile of one-off string
-// checks. Tidy should encode Marionette's determinism contract as project law:
-// named bans, clear replacements, narrow allowlist entries, and tests for each
-// rule shape. Marionette should stay focused on deterministic-simulation hazards first.
 pub const default_patterns = [_]Pattern{
     .{ .needle = "std.Thread", .reason = "use Marionette cooperative tasks; do not use host threads in simulated code", .match = .prefix },
     .{ .needle = "std.posix", .reason = "route host access through Marionette authorities or caller-provided std.Io", .match = .prefix },
@@ -87,10 +83,7 @@ pub const default_allowed = [_]Allow{
     .{ .path = "src/main_tidy.zig", .needle = "std.process.exit" },
     .{ .path = "src/main_tidy.zig", .needle = "std.debug.print" },
     .{ .path = "src/run.zig", .needle = "std.debug.print" },
-    .{ .path = "tests/determinism.zig", .needle = "std.debug.print" },
     .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.debug.print" },
-    .{ .path = "tests/fuzz.zig", .needle = "std.debug.print" },
-    .{ .path = "tests/switch_inline_bench.zig", .needle = "std.debug.print" },
     .{ .path = "validation/dusty_http.zig", .needle = "std.debug.print" },
     .{ .path = "validation/nightly_seed_sweep.zig", .needle = "std.debug.print" },
     .{ .path = "validation/xitdb_durability.zig", .needle = "std.debug.print" },
@@ -131,16 +124,12 @@ pub fn scanSourceForPath(
 
     if (tree.errors.len > 0) return error.ParseError;
 
-    var aliases: std.ArrayList(Alias) = .empty;
-    defer aliases.deinit(allocator);
-    try collectAliases(allocator, tree, options, &aliases);
-
     for (0..tree.nodes.len) |node_index| {
         const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
         if (tree.nodeTag(node) != .field_access) continue;
 
         for (options.patterns) |pattern| {
-            if (!fieldAccessMatches(tree, node, pattern, aliases.items)) continue;
+            if (!fieldAccessMatches(tree, node, pattern)) continue;
             if (isAllowed(path, pattern, options.allowed)) continue;
 
             const token = tree.firstToken(node);
@@ -254,11 +243,6 @@ const PathParts = struct {
     }
 };
 
-const Alias = struct {
-    name: []const u8,
-    parts: PathParts,
-};
-
 fn lineColumn(source: []const u8, index: usize) Location {
     var location: Location = .{ .line = 1, .column = 1 };
     for (source[0..index]) |byte| {
@@ -272,40 +256,14 @@ fn lineColumn(source: []const u8, index: usize) Location {
     return location;
 }
 
-fn collectAliases(
-    allocator: std.mem.Allocator,
-    tree: std.zig.Ast,
-    options: Options,
-    aliases: *std.ArrayList(Alias),
-) !void {
-    for (0..tree.nodes.len) |node_index| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
-        const var_decl = tree.fullVarDecl(node) orelse continue;
-
-        const init_node = var_decl.ast.init_node.unwrap() orelse continue;
-        var init_parts: PathParts = .{};
-        collectPathParts(tree, init_node, &init_parts) catch continue;
-
-        for (options.patterns) |pattern| {
-            if (!pathPartsAreNeedlePrefix(init_parts.slice(), pattern.needle)) continue;
-
-            const name_token = var_decl.ast.mut_token + 1;
-            const name = tree.tokenSlice(name_token);
-            try aliases.append(allocator, .{ .name = name, .parts = init_parts });
-            break;
-        }
-    }
-}
-
 fn fieldAccessMatches(
     tree: std.zig.Ast,
     node: std.zig.Ast.Node.Index,
     pattern: Pattern,
-    aliases: []const Alias,
 ) bool {
     var parts: PathParts = .{};
     collectPathParts(tree, node, &parts) catch return false;
-    return pathPartsMatchPattern(parts.slice(), pattern) or pathPartsMatchAlias(parts, pattern, aliases);
+    return pathPartsMatchPattern(parts.slice(), pattern);
 }
 
 fn collectPathParts(
@@ -322,17 +280,6 @@ fn collectPathParts(
         .identifier => try parts.append(tree.tokenSlice(tree.nodeMainToken(node))),
         else => return error.UnsupportedPath,
     }
-}
-
-fn pathPartsAreNeedlePrefix(parts: []const []const u8, needle: []const u8) bool {
-    if (parts.len == 0) return false;
-    var index: usize = 0;
-    var split = std.mem.splitScalar(u8, needle, '.');
-    while (index < parts.len) : (index += 1) {
-        const expected = split.next() orelse return false;
-        if (!std.mem.eql(u8, expected, parts[index])) return false;
-    }
-    return true;
 }
 
 fn pathPartsMatchNeedle(parts: []const []const u8, needle: []const u8) bool {
@@ -360,22 +307,6 @@ fn pathPartsHaveNeedlePrefix(parts: []const []const u8, needle: []const u8) bool
         if (!std.mem.eql(u8, expected, parts[index])) return false;
     }
     return true;
-}
-
-fn pathPartsMatchAlias(parts: PathParts, pattern: Pattern, aliases: []const Alias) bool {
-    const actual = parts.slice();
-    if (actual.len == 0) return false;
-
-    for (aliases) |alias| {
-        if (!std.mem.eql(u8, alias.name, actual[0])) continue;
-
-        var expanded = alias.parts;
-        for (actual[1..]) |part| {
-            expanded.append(part) catch return false;
-        }
-        return pathPartsMatchPattern(expanded.slice(), pattern);
-    }
-    return false;
 }
 
 fn isAllowed(path: []const u8, pattern: Pattern, allowed: []const Allow) bool {
@@ -408,21 +339,69 @@ fn hasViolation(result: ScanResult, path: []const u8, location: Location, patter
     return false;
 }
 
-test "tidy flags banned patterns" {
+fn expectViolations(
+    source: []const u8,
+    options: Options,
+    expected: []const []const u8,
+) !void {
     var result: ScanResult = .{};
     defer result.deinit(std.testing.allocator);
 
     try scanSourceForPath(
         std.testing.allocator,
         &result,
-        "src/bad.zig",
-        "const host = std.os;\n",
-        .{},
+        "src/test.zig",
+        source,
+        options,
     );
 
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items[0].line);
-    try std.testing.expectEqualStrings("std.os", result.violations.items[0].pattern.needle);
+    try std.testing.expectEqual(expected.len, result.violations.items.len);
+    for (expected, result.violations.items) |needle, violation| {
+        try std.testing.expectEqualStrings(needle, violation.pattern.needle);
+    }
+}
+
+test "tidy scans determinism hazards" {
+    inline for (.{
+        .{ "const host = std.os;\n", &[_][]const u8{"std.os"} },
+        .{ "fn bad() void { std.posix.getpid(); }\n", &[_][]const u8{"std.posix"} },
+        .{
+            "fn worker() void {}\nfn bad() !void { _ = try std.Thread.spawn(.{}, worker, .{}); }\n",
+            &[_][]const u8{"std.Thread"},
+        },
+        .{ "const host = std.Io.Threaded.global_single_threaded;\n", &[_][]const u8{"std.Io.Threaded"} },
+        .{
+            "// std.os.linux.getpid()\nconst text = \"std.debug.print\";\n",
+            &[_][]const u8{},
+        },
+        .{
+            "fn work(io: std.Io, buffer: []u8) !void { _ = try std.process.currentPath(io, buffer); _ = try std.process.totalSystemMemory(); }\n",
+            &[_][]const u8{"std.process.totalSystemMemory"},
+        },
+        .{
+            "fn bad() void { std.debug.print(\"bad\", .{}); std.log.info(\"bad\", .{}); }\n",
+            &[_][]const u8{ "std.debug.print", "std.log" },
+        },
+        .{
+            "const a = std.heap.page_allocator; const b = std.heap.smp_allocator; const c = std.heap.c_allocator; const d = std.heap.wasm_allocator; const e = std.heap.brk_allocator;\n",
+            &[_][]const u8{ "std.heap.page_allocator", "std.heap.smp_allocator", "std.heap.c_allocator", "std.heap.wasm_allocator", "std.heap.brk_allocator" },
+        },
+        .{
+            \\const second = std.time.ns_per_s;
+            \\fn work(io: std.Io) void {
+            \\    _ = std.Io.Dir.cwd();
+            \\    _ = std.Io.File.stdout();
+            \\    _ = std.Io.Clock.awake.now(io);
+            \\    var source: std.Random.IoSource = .{ .io = io };
+            \\    _ = source.interface().int(u64);
+            \\}
+            \\
+            ,
+            &[_][]const u8{},
+        },
+    }) |case| {
+        try expectViolations(case[0], .{}, case[1]);
+    }
 }
 
 test "tidy ignores generated Zig artifact paths" {
@@ -432,260 +411,26 @@ test "tidy ignores generated Zig artifact paths" {
     try std.testing.expect(!isGeneratedPath("tests/zig-pkg-regression.zig"));
 }
 
-test "tidy flags prefix patterns" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/bad.zig",
-        "fn bad() void { std.posix.getpid(); }\n",
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.posix", result.violations.items[0].pattern.needle);
-}
-
-test "tidy flags host threads" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/bad_thread.zig",
-        \\fn worker() void {}
-        \\fn bad() !void {
-        \\    _ = try std.Thread.spawn(.{}, worker, .{});
-        \\}
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.Thread", result.violations.items[0].pattern.needle);
-}
-
-test "tidy flags construction of another host io backend" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/bad_io.zig",
-        "const host = std.Io.Threaded.global_single_threaded;\n",
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.Io.Threaded", result.violations.items[0].pattern.needle);
-}
-
-test "tidy ignores comments and string literals" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/comment.zig",
-        \\// std.os.linux.getpid()
-        \\const text = "std.debug.print";
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
-}
-
-test "tidy allows wrapper files to mention banned patterns" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "./src/host_clock.zig",
+test "tidy applies narrow allowlists" {
+    try expectViolations(
         "const pid = std.os.linux.getpid();\n",
-        .{ .allowed = &.{.{ .path = "src/host_clock.zig" }} },
+        .{ .allowed = &.{.{ .path = "src/test.zig" }} },
+        &.{},
     );
-
-    try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
-}
-
-test "tidy allows specific patterns without exempting the whole file" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/custom_host.zig",
-        \\const pid = std.os.linux.getpid();
-        \\const debug_io = std.Options.debug_io;
-        \\
-    ,
-        .{ .allowed = &.{.{ .path = "src/custom_host.zig", .needle = "std.os" }} },
+    try expectViolations(
+        "const pid = std.os.linux.getpid();\nconst debug_io = std.Options.debug_io;\n",
+        .{ .allowed = &.{.{ .path = "src/test.zig", .needle = "std.os" }} },
+        &.{"std.Options.debug_io"},
     );
-
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.Options.debug_io", result.violations.items[0].pattern.needle);
-}
-
-test "tidy identifies aliases when matching patterns" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/alias.zig",
-        \\const os = std.os;
-        \\const pid = os.linux.getpid();
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items[0].line);
-    try std.testing.expectEqual(@as(usize, 12), result.violations.items[0].column);
-    try std.testing.expectEqual(@as(usize, 2), result.violations.items[1].line);
-    try std.testing.expectEqual(@as(usize, 13), result.violations.items[1].column);
-}
-
-test "tidy identifies aliases to host threads" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/thread_alias.zig",
-        \\const Thread = std.Thread;
-        \\fn worker() void {}
-        \\fn bad() !void {
-        \\    _ = try Thread.spawn(.{}, worker, .{});
-        \\}
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.Thread", result.violations.items[0].pattern.needle);
-    try std.testing.expectEqualStrings("std.Thread", result.violations.items[1].pattern.needle);
-}
-
-test "tidy allows time constants and caller-provided io clocks and randomness" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/capabilities.zig",
-        \\const second = std.time.ns_per_s;
-        \\fn work(io: std.Io) void {
-        \\    _ = std.Io.Dir.cwd();
-        \\    _ = std.Io.File.stdout();
-        \\    _ = std.Io.Clock.awake.now(io);
-        \\    var source: std.Random.IoSource = .{ .io = io };
-        \\    _ = source.interface().int(u64);
-        \\}
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 0), result.violations.items.len);
-}
-
-test "tidy allows io-backed process operations but flags ambient host queries" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/process.zig",
-        \\fn work(io: std.Io, buffer: []u8) !void {
-        \\    _ = try std.process.currentPath(io, buffer);
-        \\    _ = try std.process.totalSystemMemory();
-        \\}
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.process.totalSystemMemory", result.violations.items[0].pattern.needle);
-}
-
-test "tidy flags global debug and log sinks" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/output.zig",
-        \\fn bad() void {
-        \\    std.debug.print("bad", .{});
-        \\    std.log.info("bad", .{});
-        \\}
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 2), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.debug.print", result.violations.items[0].pattern.needle);
-    try std.testing.expectEqualStrings("std.log", result.violations.items[1].pattern.needle);
-}
-
-test "tidy flags ambient allocator singletons" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/allocation.zig",
-        \\const a = std.heap.page_allocator;
-        \\const b = std.heap.smp_allocator;
-        \\const c = std.heap.c_allocator;
-        \\const d = std.heap.wasm_allocator;
-        \\const e = std.heap.brk_allocator;
-        \\
-    ,
-        .{},
-    );
-
-    try std.testing.expectEqual(@as(usize, 5), result.violations.items.len);
 }
 
 test "tidy accepts caller-provided patterns" {
-    var result: ScanResult = .{};
-    defer result.deinit(std.testing.allocator);
-
     const patterns = [_]Pattern{
         .{ .needle = "std.heap.page_allocator", .reason = "pass an allocator explicitly" },
     };
-
-    try scanSourceForPath(
-        std.testing.allocator,
-        &result,
-        "src/custom.zig",
+    try expectViolations(
         "const allocator = std.heap.page_allocator;\n",
         .{ .patterns = &patterns },
+        &.{"std.heap.page_allocator"},
     );
-
-    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
-    try std.testing.expectEqualStrings("std.heap.page_allocator", result.violations.items[0].pattern.needle);
 }
