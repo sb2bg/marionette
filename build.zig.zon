@@ -40,7 +40,6 @@
         "build.zig.zon",
         "mkdocs.yml",
         "assets",
-        "build_tests",
         "docs",
         "examples",
         "src",

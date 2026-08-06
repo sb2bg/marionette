@@ -347,7 +347,7 @@ pub fn build(b: *std.Build) void {
         "build",
         "test",
         "--build-file",
-        b.pathFromRoot("build_tests/tidy_consumer/build.zig"),
+        b.pathFromRoot("tests/tidy_consumer/build.zig"),
         "--cache-dir",
         b.pathFromRoot(".zig-cache/tidy-consumer"),
     });
