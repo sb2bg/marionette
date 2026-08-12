@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.2 - Unreleased
+## v0.6.2 - 2026-08-11
 
 - Removes the unused world-only `mar.run` path, `RunOptions`, world checks,
   the `Random` wrapper, and redundant `SimCase` forwarding helpers. Simulation
