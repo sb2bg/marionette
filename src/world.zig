@@ -67,6 +67,32 @@ const TransactionCheckpoint = struct {
     rng: std.Random.DefaultPrng,
 };
 
+/// Infallible observation seam used by the runner's out-of-process watchdog.
+/// It mirrors committed trace prefixes and scheduler task boundaries into
+/// shared memory without granting simulated code any host authority.
+pub const ExecutionObserver = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        trace: *const fn (*anyopaque, []const u8, u64, usize) void,
+        task_start: *const fn (*anyopaque, u64) void,
+        task_stop: *const fn (*anyopaque, u64) void,
+    };
+
+    fn publishTrace(self: ExecutionObserver, trace: []const u8, event_count: u64, replace_from: usize) void {
+        self.vtable.trace(self.ptr, trace, event_count, replace_from);
+    }
+
+    fn taskStart(self: ExecutionObserver, task_id: u64) void {
+        self.vtable.task_start(self.ptr, task_id);
+    }
+
+    fn taskStop(self: ExecutionObserver, task_id: u64) void {
+        self.vtable.task_stop(self.ptr, task_id);
+    }
+};
+
 /// Internal hooks shared by simulator components and white-box tests.
 pub const internal = struct {
     pub fn ioRuntime(sim: World.Simulation) *io_module.internal.ProcessRuntime {
@@ -535,6 +561,7 @@ pub const World = struct {
     liveness_transitioned: bool,
     /// Simulator resources owned by the world and torn down in reverse order.
     teardowns: std.ArrayList(Teardown),
+    execution_observer: ?ExecutionObserver = null,
 
     /// Destructor signature for world-owned simulator resources.
     pub const TeardownFn = *const fn (*anyopaque, std.mem.Allocator) void;
@@ -609,6 +636,21 @@ pub const World = struct {
             .ptr = ptr,
             .deinit = teardown_fn,
         });
+    }
+
+    /// Attach the runner-owned watchdog observer and publish the trace prefix
+    /// already produced by `World.init`.
+    pub fn attachExecutionObserver(self: *World, observer: ExecutionObserver) void {
+        self.execution_observer = observer;
+        observer.publishTrace(self.traceBytes(), self.event_index, 0);
+    }
+
+    pub fn executionTaskStart(self: *World, task_id: u64) void {
+        if (self.execution_observer) |observer| observer.taskStart(task_id);
+    }
+
+    pub fn executionTaskStop(self: *World, task_id: u64) void {
+        if (self.execution_observer) |observer| observer.taskStop(task_id);
     }
 
     /// Tear down and unregister every resource added after `checkpoint`.
@@ -998,6 +1040,7 @@ pub const World = struct {
         self.trace_log.shrinkRetainingCapacity(checkpoint.trace_len);
         self.event_index = checkpoint.event_index;
         self.rng = checkpoint.rng;
+        self.publishExecutionTrace(checkpoint.trace_len);
     }
 
     /// Advance the world by one simulation tick.
@@ -1032,7 +1075,10 @@ pub const World = struct {
     /// adds one so trace records stay line-oriented and comparable.
     pub fn record(self: *World, comptime fmt: []const u8, args: anytype) (std.mem.Allocator.Error || TraceError)!void {
         const start_len = self.trace_log.items.len;
-        errdefer self.trace_log.shrinkRetainingCapacity(start_len);
+        errdefer {
+            self.trace_log.shrinkRetainingCapacity(start_len);
+            self.publishExecutionTrace(start_len);
+        }
 
         try self.trace_log.print(self.allocator, "event={} ", .{self.event_index});
         const payload_start = self.trace_log.items.len;
@@ -1042,6 +1088,7 @@ pub const World = struct {
         }
         try self.trace_log.append(self.allocator, '\n');
         self.event_index += 1;
+        self.publishExecutionTrace(start_len);
     }
 
     /// Append two trace records as one transaction. If either record fails,
@@ -1058,6 +1105,7 @@ pub const World = struct {
         errdefer {
             self.trace_log.shrinkRetainingCapacity(start_len);
             self.event_index = start_event_index;
+            self.publishExecutionTrace(start_len);
         }
 
         try self.record(first_fmt, first_args);
@@ -1070,13 +1118,17 @@ pub const World = struct {
     /// string. The payload still uses the same trace validation as `record`.
     pub fn recordPayload(self: *World, payload: []const u8) (std.mem.Allocator.Error || TraceError)!void {
         const start_len = self.trace_log.items.len;
-        errdefer self.trace_log.shrinkRetainingCapacity(start_len);
+        errdefer {
+            self.trace_log.shrinkRetainingCapacity(start_len);
+            self.publishExecutionTrace(start_len);
+        }
 
         if (!isValidTracePayload(payload)) return error.InvalidTracePayload;
         try self.trace_log.print(self.allocator, "event={} ", .{self.event_index});
         try self.trace_log.appendSlice(self.allocator, payload);
         try self.trace_log.append(self.allocator, '\n');
         self.event_index += 1;
+        self.publishExecutionTrace(start_len);
     }
 
     /// Append one event with structured fields.
@@ -1089,7 +1141,10 @@ pub const World = struct {
         fields: []const TraceField,
     ) (std.mem.Allocator.Error || TraceError)!void {
         const start_len = self.trace_log.items.len;
-        errdefer self.trace_log.shrinkRetainingCapacity(start_len);
+        errdefer {
+            self.trace_log.shrinkRetainingCapacity(start_len);
+            self.publishExecutionTrace(start_len);
+        }
 
         if (!isValidTraceName(name)) return error.InvalidTracePayload;
 
@@ -1102,6 +1157,7 @@ pub const World = struct {
         }
         try self.trace_log.append(self.allocator, '\n');
         self.event_index += 1;
+        self.publishExecutionTrace(start_len);
     }
 
     /// Return the trace bytes recorded so far.
@@ -1114,6 +1170,12 @@ pub const World = struct {
     /// Return the index that will be assigned to the next trace event.
     pub fn nextEventIndex(self: *const World) u64 {
         return self.event_index;
+    }
+
+    fn publishExecutionTrace(self: *World, replace_from: usize) void {
+        if (self.execution_observer) |observer| {
+            observer.publishTrace(self.traceBytes(), self.event_index, replace_from);
+        }
     }
 
     fn writeTraceValue(self: *World, value: TraceValue) (std.mem.Allocator.Error || TraceError)!void {

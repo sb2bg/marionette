@@ -444,6 +444,11 @@ test "register: bug detected" {
         .init = initReplicas,
         .scenario = buggyScenario,
         .checks = &checks,
+        .failure = mar.FailureExpectation{
+            .kind = .check_failed,
+            .error_name = "CommittedDivergence",
+            .check_name = "committed register is safe",
+        },
     });
 }
 

@@ -1466,7 +1466,7 @@ pub const SimDisk = struct {
         const deadline_ns = self.world.now() + latency_ns;
         if (self.latency_runtime) |runtime| {
             if (runtime.inTask()) {
-                runtime.waitUntil(deadline_ns);
+                try runtime.waitUntil(deadline_ns);
                 std.debug.assert(self.world.now() >= deadline_ns);
                 return latency_ns;
             }

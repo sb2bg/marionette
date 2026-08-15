@@ -112,6 +112,9 @@ pub const RunOptions = struct {
     tags: []const []const u8 = &.{},
     /// Expanded typed run facts needed to reproduce the scenario.
     attributes: []const RunAttribute = &.{},
+    /// Optional out-of-process liveness watchdog. Disabled unless supplied so
+    /// ordinary runs keep their existing execution/allocator behavior.
+    watchdog: ?WatchdogOptions = null,
     pub fn worldOptions(self: RunOptions) World.Options {
         return .{
             .seed = self.seed,
@@ -121,11 +124,34 @@ pub const RunOptions = struct {
     }
 };
 
+/// Real-time bounds for isolating cooperative tasks that stop making progress.
+/// These durations observe the worker process only; they never enter simulated
+/// time or the deterministic choice stream.
+pub const WatchdogOptions = struct {
+    /// No trace event or scheduler boundary for this long while a task is
+    /// running classifies the task as `non_yielding`.
+    stall_timeout_ns: u64 = 5 * std.time.ns_per_s,
+    /// Total worker duration before continuing activity is classified as
+    /// `livelock`.
+    run_timeout_ns: u64 = 30 * std.time.ns_per_s,
+    /// Maximum partial trace retained in shared memory.
+    trace_capacity: usize = 4 * 1024 * 1024,
+
+    pub fn validate(self: WatchdogOptions) error{InvalidWatchdogOptions}!void {
+        if (self.stall_timeout_ns == 0 or self.run_timeout_ns == 0 or self.trace_capacity == 0) {
+            return error.InvalidWatchdogOptions;
+        }
+        if (self.stall_timeout_ns > self.run_timeout_ns) return error.InvalidWatchdogOptions;
+        if (self.trace_capacity > std.math.maxInt(u64)) return error.InvalidWatchdogOptions;
+    }
+};
+
 pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.mem.Allocator.Error!RunOptions {
     var cloned: RunOptions = .{
         .seed = options.seed,
         .start_ns = options.start_ns,
         .tick_ns = options.tick_ns,
+        .watchdog = options.watchdog,
     };
     errdefer deinitRunOptions(allocator, &cloned);
 
@@ -214,11 +240,20 @@ pub const RunResult = struct {
 };
 
 /// Failure kind captured by the runner.
-pub const RunFailureKind = enum {
+pub const RunFailureKind = enum(u8) {
     /// The scenario returned an error. The first trace is the partial trace.
     scenario_error,
     /// A named check returned an error. The first trace is the partial trace.
     check_failed,
+    /// The scheduler proved that blocked work cannot make progress.
+    scheduler_deadlock,
+    /// The scheduler itself failed while an ABI bridge was driving work.
+    scheduler_error,
+    /// A watchdog observed worker code running without reaching a trace or
+    /// scheduler suspension boundary.
+    non_yielding,
+    /// A watchdog observed continuing scheduler activity without completion.
+    livelock,
     /// Two executions with the same seed produced different traces.
     determinism_mismatch,
     /// The first run passed but the second failed with the same seed. This
@@ -233,6 +268,32 @@ pub const RunFailureKind = enum {
     first_run_failed,
 };
 
+/// Optional identity constraints for `expectSimFailure`.
+///
+/// Omitted fields accept any value. Supplying one or more fields prevents an
+/// unrelated replayable setup, scenario, or check failure from satisfying a
+/// planted-bug test.
+pub const FailureExpectation = struct {
+    kind: ?RunFailureKind = null,
+    error_name: ?[]const u8 = null,
+    check_name: ?[]const u8 = null,
+
+    pub fn matches(self: FailureExpectation, failure: RunFailure) bool {
+        if (self.kind) |kind| {
+            if (failure.kind != kind) return false;
+        }
+        if (self.error_name) |error_name| {
+            const actual = failure.error_name orelse return false;
+            if (!std.mem.eql(u8, error_name, actual)) return false;
+        }
+        if (self.check_name) |check_name| {
+            const actual = failure.check_name orelse return false;
+            if (!std.mem.eql(u8, check_name, actual)) return false;
+        }
+        return true;
+    }
+};
+
 /// Data-bearing failure report.
 pub const RunFailure = struct {
     allocator: std.mem.Allocator,
@@ -244,10 +305,12 @@ pub const RunFailure = struct {
     first_event_count: u64,
     second_event_count: u64 = 0,
     error_name: ?[]const u8 = null,
+    owns_error_name: bool = false,
     check_name: ?[]const u8 = null,
     owns_check_name: bool = false,
     /// Second run's failure details when both runs failed differently.
     second_error_name: ?[]const u8 = null,
+    owns_second_error_name: bool = false,
     second_check_name: ?[]const u8 = null,
     owns_second_check_name: bool = false,
 
@@ -259,8 +322,14 @@ pub const RunFailure = struct {
         if (self.owns_check_name) {
             if (self.check_name) |name| self.allocator.free(name);
         }
+        if (self.owns_error_name) {
+            if (self.error_name) |name| self.allocator.free(name);
+        }
         if (self.owns_second_check_name) {
             if (self.second_check_name) |name| self.allocator.free(name);
+        }
+        if (self.owns_second_error_name) {
+            if (self.second_error_name) |name| self.allocator.free(name);
         }
         self.* = undefined;
     }
@@ -284,6 +353,12 @@ pub const RunFailure = struct {
                 self.second_event_count,
             },
         );
+        if (self.options.watchdog) |watchdog| {
+            try writer.print(
+                " watchdog_stall_ns={} watchdog_run_ns={} watchdog_trace_capacity={}",
+                .{ watchdog.stall_timeout_ns, watchdog.run_timeout_ns, watchdog.trace_capacity },
+            );
+        }
         for (self.options.tags) |tag| {
             try writer.print(" tag=", .{});
             try world_module.writeEscapedTraceText(writer, tag, false);

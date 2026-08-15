@@ -18,6 +18,14 @@ pub const TaskRuntime = struct {
     vtable: *const VTable,
 
     pub const SpawnError = error{ConcurrencyUnavailable};
+    pub const DriveError = error{
+        Deadlock,
+        SchedulerFailed,
+    };
+    pub const BlockError = error{
+        Canceled,
+        SchedulerFailed,
+    };
 
     pub const VTable = struct {
         /// Spawn a cooperative task running `entry(arg)`. Returns a stable
@@ -31,11 +39,15 @@ pub const TaskRuntime = struct {
         current_task_id: *const fn (ptr: *anyopaque) ?u64,
         /// Park the current task on `key`. Must only be called in-task.
         block: *const fn (ptr: *anyopaque, key: usize) void,
+        /// Park on `key` as a cancellation point. Main-context scheduler
+        /// failures use `SchedulerFailed`; task cancellation uses `Canceled`.
+        block_cancelable: *const fn (ptr: *anyopaque, key: usize) BlockError!void,
         /// Wake up to `max_count` tasks parked on `key`.
         wake: *const fn (ptr: *anyopaque, key: usize, max_count: usize) usize,
         /// Drive the scheduler from the main context until `done.*` is true.
-        /// Panics on deterministic deadlock (no runnable work, flag unset).
-        run_until_done: *const fn (ptr: *anyopaque, done: *const bool) void,
+        /// Deterministic deadlock and scheduler failures are latched for the
+        /// runner and returned here so ABI bridges can stop cleanly.
+        run_until_done: *const fn (ptr: *anyopaque, done: *const bool) DriveError!void,
         /// Arm a cancellation request against `task_id`. Idempotent;
         /// unknown/completed ids are no-ops.
         request_cancel: *const fn (ptr: *anyopaque, task_id: u64) void,
@@ -64,12 +76,16 @@ pub const TaskRuntime = struct {
         self.vtable.block(self.ptr, key);
     }
 
+    pub fn blockCancelable(self: TaskRuntime, key: usize) BlockError!void {
+        try self.vtable.block_cancelable(self.ptr, key);
+    }
+
     pub fn wake(self: TaskRuntime, key: usize, max_count: usize) usize {
         return self.vtable.wake(self.ptr, key, max_count);
     }
 
-    pub fn runUntilDone(self: TaskRuntime, done: *const bool) void {
-        self.vtable.run_until_done(self.ptr, done);
+    pub fn runUntilDone(self: TaskRuntime, done: *const bool) DriveError!void {
+        try self.vtable.run_until_done(self.ptr, done);
     }
 
     pub fn requestCancel(self: TaskRuntime, task_id: u64) void {
@@ -121,9 +137,15 @@ pub const TaskControl = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
+    pub const Failure = union(enum) {
+        deadlock,
+        scheduler_error: []const u8,
+    };
+
     pub const VTable = struct {
         run_until_idle: *const fn (ptr: *anyopaque) anyerror!void,
         blocked_count: *const fn (ptr: *const anyopaque) usize,
+        failure: *const fn (ptr: *const anyopaque) ?Failure,
     };
 
     pub fn runUntilIdle(self: TaskControl) !void {
@@ -132,5 +154,11 @@ pub const TaskControl = struct {
 
     pub fn blockedCount(self: TaskControl) usize {
         return self.vtable.blocked_count(self.ptr);
+    }
+
+    /// Terminal scheduler failure, if a task-driving bridge had to suppress
+    /// it because the corresponding `std.Io` ABI has no error channel.
+    pub fn failure(self: TaskControl) ?Failure {
+        return self.vtable.failure(self.ptr);
     }
 };

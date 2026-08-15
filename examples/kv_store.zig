@@ -367,6 +367,11 @@ test "kv store: buggy recovery fails through expectation helper" {
         .init = init,
         .scenario = buggyScenario,
         .checks = &checks,
+        .failure = mar.FailureExpectation{
+            .kind = .check_failed,
+            .error_name = "UnsyncedRecordRecovered",
+            .check_name = "synced records recover and unsynced records are rejected",
+        },
     });
 }
 

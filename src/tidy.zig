@@ -83,6 +83,11 @@ pub const default_allowed = [_]Allow{
     .{ .path = "src/main_tidy.zig", .needle = "std.process.exit" },
     .{ .path = "src/main_tidy.zig", .needle = "std.debug.print" },
     .{ .path = "src/run.zig", .needle = "std.debug.print" },
+    // The runner's optional watchdog is a composition boundary: it isolates
+    // simulation in a host worker process and observes real time externally.
+    .{ .path = "src/run.zig", .needle = "std.posix" },
+    .{ .path = "src/run.zig", .needle = "std.os" },
+    .{ .path = "src/run.zig", .needle = "std.Options.debug_io" },
     .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.debug.print" },
     .{ .path = "validation/dusty_http.zig", .needle = "std.debug.print" },
     .{ .path = "validation/nightly_seed_sweep.zig", .needle = "std.debug.print" },

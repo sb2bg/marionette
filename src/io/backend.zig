@@ -88,7 +88,7 @@ const FileLockRegistry = struct {
         path: []const u8,
         lock_mode: Io.File.Lock,
         nonblocking: bool,
-    ) (std.mem.Allocator.Error || error{WouldBlock})!void {
+    ) (std.mem.Allocator.Error || error{ WouldBlock, Canceled })!void {
         if (lock_mode == .none) return;
 
         while (true) {
@@ -119,9 +119,17 @@ const FileLockRegistry = struct {
             try lock.waiters.append(self.allocator, waiter);
             const key = lock.key;
             if (in_task) {
-                task_runtime.block(futex_module.waitKey(.file_lock, key));
+                task_runtime.blockCancelable(futex_module.waitKey(.file_lock, key)) catch |err| switch (err) {
+                    error.Canceled, error.SchedulerFailed => {
+                        self.removeWaiter(waiter);
+                        return error.Canceled;
+                    },
+                };
             } else {
-                task_runtime.runUntilDone(&waiter.ready);
+                task_runtime.runUntilDone(&waiter.ready) catch {
+                    self.removeWaiter(waiter);
+                    return error.Canceled;
+                };
             }
             self.removeWaiter(waiter);
         }
@@ -315,7 +323,7 @@ const PathGate = struct {
         aborted: bool = false,
     };
 
-    const Error = std.mem.Allocator.Error || error{ProcessKilled};
+    const Error = std.mem.Allocator.Error || error{ ProcessKilled, Canceled };
 
     const State = struct {
         path: []u8,
@@ -384,9 +392,17 @@ const PathGate = struct {
         try state.waiters.append(gate.allocator, waiter);
         waiter_owned = false;
         if (waiter.task_owned) {
-            task_runtime.block(futex_module.waitKey(.file_lock, state.key));
+            task_runtime.blockCancelable(futex_module.waitKey(.file_lock, state.key)) catch |err| switch (err) {
+                error.Canceled, error.SchedulerFailed => {
+                    gate.removeWaiter(waiter);
+                    return error.Canceled;
+                },
+            };
         } else {
-            task_runtime.runUntilDone(&waiter.ready);
+            task_runtime.runUntilDone(&waiter.ready) catch {
+                gate.removeWaiter(waiter);
+                return error.Canceled;
+            };
         }
         const aborted = waiter.aborted;
         gate.removeWaiter(waiter);
@@ -1688,7 +1704,7 @@ pub const Backend = struct {
         write: bool,
         lock: Io.File.Lock,
         lock_nonblocking: bool,
-    ) (std.mem.Allocator.Error || error{WouldBlock})!Io.File {
+    ) (std.mem.Allocator.Error || error{ WouldBlock, Canceled })!Io.File {
         var lock_acquire_path = self.files.items[file_index].path;
         while (true) {
             try self.fileLockRegistry().acquire(
@@ -1745,7 +1761,7 @@ pub const Backend = struct {
         return &self.path_gate;
     }
 
-    pub fn acquireFilePathLease(self: *Backend, path: []const u8) (std.mem.Allocator.Error || error{ProcessKilled})!void {
+    pub fn acquireFilePathLease(self: *Backend, path: []const u8) (std.mem.Allocator.Error || error{ ProcessKilled, Canceled })!void {
         if (!self.process_alive) return error.ProcessKilled;
         try self.pathGate().acquire(self, self.task_runtime, path);
     }
@@ -1754,7 +1770,7 @@ pub const Backend = struct {
         self.pathGate().release(self, self.task_runtime, path);
     }
 
-    pub fn reserveFileMutationPaths(self: *Backend, first_path: []const u8, second_path: ?[]const u8) (std.mem.Allocator.Error || error{ProcessKilled})!void {
+    pub fn reserveFileMutationPaths(self: *Backend, first_path: []const u8, second_path: ?[]const u8) (std.mem.Allocator.Error || error{ ProcessKilled, Canceled })!void {
         if (!self.process_alive) return error.ProcessKilled;
         try self.pathGate().reserve(self, self.task_runtime, first_path, second_path);
     }
@@ -2750,6 +2766,10 @@ fn simGroupAwait(
                 switch (wait_set.blockUntilCancelable(state.completionKey(), null)) {
                     .woken => {},
                     .timed_out => unreachable,
+                    .failed => {
+                        canceled = true;
+                        requestGroupCancel(backend, state);
+                    },
                     .canceled => {
                         canceled = true;
                         requestGroupCancel(backend, state);
@@ -2757,7 +2777,9 @@ fn simGroupAwait(
                 }
             }
         } else {
-            runtime.runUntilDone(&state.done);
+            runtime.runUntilDone(&state.done) catch {
+                return error.Canceled;
+            };
         }
     }
     releaseGroupState(state);
@@ -2851,7 +2873,10 @@ fn simAwait(
         if (runtime.inTask()) {
             while (!future.done) runtime.block(future.completionKey());
         } else {
-            runtime.runUntilDone(&future.done);
+            runtime.runUntilDone(&future.done) catch {
+                @memset(result, 0);
+                return;
+            };
         }
     }
 
@@ -3048,7 +3073,7 @@ fn simSleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
             switch (wait_set.blockUntilCancelable(backend.sleepWaitKey(), deadline_ns)) {
                 .woken => {},
                 .timed_out => {},
-                .canceled => return error.Canceled,
+                .canceled, .failed => return error.Canceled,
             }
         }
         return;

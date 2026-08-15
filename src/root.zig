@@ -150,12 +150,16 @@ pub const StateCheck = run_module.StateCheck;
 
 /// Data-bearing scenario failure.
 pub const RunFailure = run_module.RunFailure;
+/// Optional exact identity constraints for `expectSimFailure`.
+pub const FailureExpectation = run_module.FailureExpectation;
 
 /// Failure kind captured by the runner.
 pub const RunFailureKind = run_module.RunFailureKind;
 
 /// Result of `runSimCase`: either a verified replay or a failure report.
 pub const RunReport = run_module.RunReport;
+/// Optional out-of-process liveness watchdog configuration.
+pub const WatchdogOptions = run_module.WatchdogOptions;
 
 /// Errors returned by the deterministic scenario runner itself.
 pub const RunError = run_module.RunError;

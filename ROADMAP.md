@@ -10,21 +10,7 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Current: 0.6.3 — Expected-Failure Containment
-
-Deadlock, cancellation, timeout, livelock, and non-yielding loops should become
-structured outcomes instead of panics or frozen test processes.
-
-Done means:
-
-- cancelable disk-latency and file-lock waits consistently use cancelable
-  scheduler paths;
-- deadlock and cancellation preserve partial traces and compact wait state;
-- a worker watchdog classifies non-yielding loops and preserves completed
-  events;
-- expectation helpers can require a failure kind, error, or check identity.
-
-## 0.7 — Replay, Reduce, Explain
+## Current: 0.7 — Replay, Reduce, Explain
 
 Turn a failure into a durable, minimal, executable artifact.
 

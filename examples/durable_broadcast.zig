@@ -513,6 +513,11 @@ test "durable broadcast: bug detected" {
         .init = init,
         .scenario = buggyScenario,
         .checks = &checks,
+        .failure = mar.FailureExpectation{
+            .kind = .check_failed,
+            .error_name = "QuorumWithoutDurableRecord",
+            .check_name = "quorum acknowledgements are durable",
+        },
     });
 }
 

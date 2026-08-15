@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.6.3 - Unreleased
+
+- Makes scheduler failure a structured, replayable runner outcome. Main-context
+  waits now preserve deterministic deadlocks and internal scheduler errors
+  instead of panicking; deadlock traces include a compact, task-sorted wait
+  state before the scheduler census.
+
+- Routes disk-latency and pathname/file-lock suspension through cancelable
+  scheduler waits. Cancellation now reaches blocked file operations through
+  the `std.Io` bridge as `error.Canceled`, while partial cancellation and wait
+  traces remain available to the failure report.
+
+- Adds an opt-in out-of-process watchdog on supported POSIX hosts. A worker
+  that stops reaching scheduler or trace boundaries is classified as
+  `non_yielding`; continuing activity that exhausts the total-time or partial-
+  trace bound is classified as `livelock`. Shared-memory observation preserves
+  completed trace bytes, and ordinary passing or failing runs retain exact
+  replay comparison and failure identity across the worker boundary. Real-time
+  watchdog cutoffs must reproduce the same identity with nested deterministic
+  trace prefixes, so timing may change prefix length but cannot hide a
+  divergence within the completed history.
+
+- Lets `expectSimFailure` require any combination of failure kind, error name,
+  and check name through `FailureExpectation`. An unrelated replayable setup,
+  scenario, scheduler, or invariant failure can no longer satisfy a planted-
+  bug test accidentally.
+
 ## v0.6.2 - 2026-08-11
 
 - Removes the unused world-only `mar.run` path, `RunOptions`, world checks,

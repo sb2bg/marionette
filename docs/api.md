@@ -49,17 +49,33 @@ test "scenario" {
 
 Required runner fields are `allocator`, `simulate`, `init`, and `scenario`.
 `simulate` must be a `mar.World.SimulateOptions` value. Optional fields are
-`seed`, `start_ns`, `tick_ns`, `name`, `tags`, `attributes`, and `checks`.
+`seed`, `start_ns`, `tick_ns`, `name`, `tags`, `attributes`, `checks`, and
+`watchdog`.
 
 - `runSimCase` returns an owned `RunReport`.
 - `expectSimPass` accepts only a passing replay.
-- `expectSimFailure` accepts a replayable failure.
+- `expectSimFailure` accepts a replayable failure; an optional `failure =
+  FailureExpectation{ ... }` constrains its kind, error name, and/or check
+  name.
 - `expectSimFuzz` repeats a case across a derived seed sequence; add `seeds`.
 - `expectTraceContains` prints the trace tail when an expected event is absent.
 
 Call `RunReport.deinit`. A passed report contains the first trace and event
 count. A failed report contains its failure kind, error/check names, partial
 first trace, and a second trace when replay diverged.
+
+`RunFailureKind` includes scenario and check errors, structured scheduler
+deadlocks/errors, watchdog-classified `non_yielding`/`livelock` failures, and
+the three replay-mismatch outcomes.
+
+`WatchdogOptions` enables optional worker-process containment with
+`stall_timeout_ns`, `run_timeout_ns`, and `trace_capacity` bounds. It is
+available on Linux, macOS, the supported BSD hosts, and illumos. The watchdog
+uses host monotonic time outside simulation and should be enabled only from a
+single-threaded harness process. Unsupported hosts return
+`error.WatchdogUnavailable`; invalid or unrepresentable bounds return
+`error.InvalidWatchdogOptions`. `error.WatchdogTraceTooLarge` indicates that
+failure identity metadata could not fit the worker result channel.
 
 ## Scenario State
 

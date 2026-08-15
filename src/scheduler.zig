@@ -55,6 +55,9 @@ pub const WaitResult = enum {
     /// The wait was interrupted by a consumed cancellation request. Only
     /// cancelable waits resume with this result.
     canceled,
+    /// A terminal scheduler failure was latched while the main context drove
+    /// a wait through an ABI without an error return.
+    failed,
 };
 
 /// Seeded cooperative scheduler backing Marionette's deterministic `std.Io`.
@@ -95,6 +98,10 @@ pub const TaskScheduler = struct {
     /// Current timestamp when the scheduler last evolved the installed fault
     /// participants, avoiding duplicate boundary events across partial jumps.
     fault_evolution_boundary_ns: ?u64 = null,
+    /// Terminal failure observed while the main context drove a wait through
+    /// an ABI that cannot return scheduler errors directly. The scenario
+    /// runner reads this latch before accepting the scenario or its checks.
+    failure: ?io_internal.TaskControl.Failure = null,
 
     const MainWait = struct {
         key: WaitKey,
@@ -392,7 +399,10 @@ pub const TaskScheduler = struct {
 
     // Same optimizer boundary rule as `yieldCurrent`.
     noinline fn blockCurrentImpl(self: *Self, key: WaitKey, deadline_ns: ?u64, cancelable: bool) WaitResult {
-        const task = self.current orelse return self.driveMainUntil(key, deadline_ns);
+        const task = self.current orelse {
+            if (self.failure != null) return .failed;
+            return self.driveMainUntil(key, deadline_ns);
+        };
         if (task.state != .running) @panic("block from a non-running task");
         const effective_deadline_ns = if (deadline_ns) |deadline| b: {
             const now = self.world.now();
@@ -499,7 +509,10 @@ pub const TaskScheduler = struct {
         while (true) {
             if (self.main_wait.?.woken) return .woken;
 
-            switch (self.stepOnce() catch @panic("scheduler failed during main-context wait")) {
+            switch (self.stepOnce() catch |err| {
+                self.latchSchedulerError(err);
+                return .failed;
+            }) {
                 .ran => continue,
                 .idle => {},
             }
@@ -511,14 +524,23 @@ pub const TaskScheduler = struct {
             const target = if (task_deadline) |task_ns|
                 if (effective_deadline_ns) |main_ns| @min(task_ns, main_ns) else task_ns
             else
-                effective_deadline_ns orelse
-                    @panic("deterministic deadlock: main-context wait can never be satisfied");
+                effective_deadline_ns orelse {
+                    self.recordDeadlock() catch |err| self.latchSchedulerError(err);
+                    if (self.failure == null) self.failure = .deadlock;
+                    return .failed;
+                };
 
             const now = self.world.now();
             if (target > now) {
-                _ = self.advanceClockToward(target) catch @panic("failed to advance to main wait deadline");
+                _ = self.advanceClockToward(target) catch |err| {
+                    self.latchSchedulerError(err);
+                    return .failed;
+                };
             }
-            self.wakeDueTasks() catch @panic("failed to wake due tasks during main-context wait");
+            self.wakeDueTasks() catch |err| {
+                self.latchSchedulerError(err);
+                return .failed;
+            };
 
             if (effective_deadline_ns) |main_ns| {
                 if (self.world.now() >= main_ns) return .timed_out;
@@ -645,6 +667,7 @@ pub const TaskScheduler = struct {
         if (task.state != .ready) return error.TaskNotReady;
         task.state = .running;
         scheduler.current = task;
+        scheduler.world.executionTaskStart(task.id);
         var message: SwitchMessage = .{
             .contexts = .{
                 .old = &scheduler.main_context,
@@ -659,6 +682,7 @@ pub const TaskScheduler = struct {
 
         scheduler = returned_message.scheduler;
         const returned_task = returned_message.task;
+        scheduler.world.executionTaskStop(returned_task.id);
         scheduler.current = null;
         if (!returned_task.fiber_instance.?.canaryIntact()) {
             @panic("fiber stack overflow: task smashed its stack canary");
@@ -782,7 +806,7 @@ pub const TaskScheduler = struct {
         }
 
         if (self.blockedCount() > 0) {
-            try self.recordCensus("scheduler.deadlock");
+            try self.recordDeadlock();
             return error.Deadlock;
         }
 
@@ -797,11 +821,18 @@ pub const TaskScheduler = struct {
     /// the awaited work can never complete.
     pub fn runUntilDone(self: *Self, done: *const bool) !void {
         while (!done.*) {
-            switch (try self.stepOnce()) {
+            switch (self.stepOnce() catch |err| {
+                self.latchSchedulerError(err);
+                return err;
+            }) {
                 .ran => {},
                 .idle => {
-                    if (try self.advanceToNextTimer()) continue;
-                    try self.recordCensus("scheduler.deadlock");
+                    if (self.advanceToNextTimer() catch |err| {
+                        self.latchSchedulerError(err);
+                        return err;
+                    }) continue;
+                    try self.recordDeadlock();
+                    self.failure = .deadlock;
                     return error.Deadlock;
                 },
             }
@@ -1057,6 +1088,37 @@ pub const TaskScheduler = struct {
             traceField("blocked", .{ .uint = @intCast(self.blockedCount()) }),
         });
     }
+
+    fn recordDeadlock(self: *Self) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        var waits: std.ArrayList(u8) = .empty;
+        defer waits.deinit(self.allocator);
+
+        var blocked: std.ArrayList(TaskId) = .empty;
+        defer blocked.deinit(self.allocator);
+        for (self.tasks.items) |task| {
+            if (task.state == .blocked) try blocked.append(self.allocator, task.id);
+        }
+        sortTaskIds(blocked.items);
+        for (blocked.items, 0..) |task_id, index| {
+            const task = self.findTask(task_id).?;
+            if (index != 0) try waits.append(self.allocator, ',');
+            try waits.print(self.allocator, "{}:{}", .{ task.id, task.blocked_key.? });
+            if (task.blocked_deadline_ns) |deadline_ns| {
+                try waits.print(self.allocator, "@{}", .{deadline_ns});
+            }
+        }
+        if (waits.items.len != 0) {
+            try self.world.recordFields("scheduler.wait_state", &.{
+                traceField("waits", .{ .text = waits.items }),
+            });
+        }
+        try self.recordCensus("scheduler.deadlock");
+    }
+
+    fn latchSchedulerError(self: *Self, err: anyerror) void {
+        if (self.failure != null) return;
+        self.failure = .{ .scheduler_error = @errorName(err) };
+    }
 };
 
 /// Yield bound for harness polling loops. See `yieldUntilBlockedCount`.
@@ -1085,6 +1147,7 @@ fn waitSetBlockUntil(ptr: *anyopaque, key: usize, deadline_ns: ?u64) io_internal
         .timed_out => .timed_out,
         // Only cancelable parks resume with `.canceled`.
         .canceled => unreachable,
+        .failed => .failed,
     };
 }
 
@@ -1094,6 +1157,7 @@ fn waitSetBlockUntilCancelable(ptr: *anyopaque, key: usize, deadline_ns: ?u64) i
         .woken => .woken,
         .timed_out => .timed_out,
         .canceled => .canceled,
+        .failed => .failed,
     };
 }
 
@@ -1139,14 +1203,13 @@ fn diskLatencyInTask(ptr: *anyopaque) bool {
     return scheduler.current != null;
 }
 
-fn diskLatencyWaitUntil(ptr: *anyopaque, deadline_ns: u64) void {
+fn diskLatencyWaitUntil(ptr: *anyopaque, deadline_ns: u64) error{Canceled}!void {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     while (scheduler.world.now() < deadline_ns) {
-        switch (scheduler.blockCurrentUntil(disk_latency_wait_key, deadline_ns)) {
+        switch (scheduler.blockCurrentCancelableUntil(disk_latency_wait_key, deadline_ns)) {
             .timed_out => {},
             .woken => continue,
-            // Only cancelable parks resume with `.canceled`.
-            .canceled => unreachable,
+            .canceled, .failed => return error.Canceled,
         }
     }
 }
@@ -1182,9 +1245,15 @@ fn taskControlBlockedCount(ptr: *const anyopaque) usize {
     return scheduler.blockedCount();
 }
 
+fn taskControlFailure(ptr: *const anyopaque) ?io_internal.TaskControl.Failure {
+    const scheduler: *const TaskScheduler = @ptrCast(@alignCast(ptr));
+    return scheduler.failure;
+}
+
 const task_control_vtable: io_internal.TaskControl.VTable = .{
     .run_until_idle = taskControlRunUntilIdle,
     .blocked_count = taskControlBlockedCount,
+    .failure = taskControlFailure,
 };
 
 fn processTaskControlKillProcess(ptr: *anyopaque, process_id: io_internal.ProcessId) void {
@@ -1227,16 +1296,29 @@ fn taskRuntimeBlock(ptr: *anyopaque, key: usize) void {
     scheduler.blockCurrent(key);
 }
 
+fn taskRuntimeBlockCancelable(ptr: *anyopaque, key: usize) io_internal.TaskRuntime.BlockError!void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return switch (scheduler.blockCurrentCancelableUntil(key, null)) {
+        .woken => {},
+        .canceled => error.Canceled,
+        .failed => error.SchedulerFailed,
+        .timed_out => unreachable,
+    };
+}
+
 fn taskRuntimeWake(ptr: *anyopaque, key: usize, max_count: usize) usize {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     return scheduler.wake(key, max_count) catch @panic("scheduler wake failed");
 }
 
-fn taskRuntimeRunUntilDone(ptr: *anyopaque, done: *const bool) void {
+fn taskRuntimeRunUntilDone(ptr: *anyopaque, done: *const bool) io_internal.TaskRuntime.DriveError!void {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     scheduler.runUntilDone(done) catch |err| switch (err) {
-        error.Deadlock => @panic("await deadlock: awaited async task can never complete"),
-        else => @panic("scheduler failed while driving awaited task"),
+        error.Deadlock => return error.Deadlock,
+        else => {
+            scheduler.latchSchedulerError(err);
+            return error.SchedulerFailed;
+        },
     };
 }
 
@@ -1265,6 +1347,7 @@ const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .in_task = taskRuntimeInTask,
     .current_task_id = taskRuntimeCurrentTaskId,
     .block = taskRuntimeBlock,
+    .block_cancelable = taskRuntimeBlockCancelable,
     .wake = taskRuntimeWake,
     .run_until_done = taskRuntimeRunUntilDone,
     .request_cancel = taskRuntimeRequestCancel,
@@ -1731,6 +1814,7 @@ const TimeoutScenario = struct {
             .woken => self.woken += 1,
             .timed_out => self.timed_out += 1,
             .canceled => unreachable,
+            .failed => unreachable,
         }
     }
 

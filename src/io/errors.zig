@@ -43,6 +43,7 @@ pub fn mapNetworkConnectError(err: anyerror) Io.net.IpAddress.ConnectError {
 pub fn mapDiskReadError(err: disk_module.DiskError) Io.File.ReadPositionalError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,
+        error.Canceled => error.Canceled,
         else => error.InputOutput,
     };
 }
@@ -50,12 +51,14 @@ pub fn mapDiskReadError(err: disk_module.DiskError) Io.File.ReadPositionalError 
 pub fn mapDiskWriteError(err: disk_module.DiskError) Io.File.WritePositionalError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,
+        error.Canceled => error.Canceled,
         else => error.InputOutput,
     };
 }
 
 pub fn mapDiskSyncError(err: disk_module.DiskError) Io.File.SyncError {
     return switch (err) {
+        error.Canceled => error.Canceled,
         else => error.InputOutput,
     };
 }
@@ -63,6 +66,7 @@ pub fn mapDiskSyncError(err: disk_module.DiskError) Io.File.SyncError {
 pub fn mapDiskOpenError(err: disk_module.DiskError) Io.File.OpenError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,
+        error.Canceled => error.Canceled,
         error.FileNotFound => error.FileNotFound,
         error.InvalidPath,
         error.InvalidAlignment,
@@ -75,6 +79,7 @@ pub fn mapDiskOpenError(err: disk_module.DiskError) Io.File.OpenError {
 pub fn mapDiskSetLengthError(err: disk_module.DiskError) Io.File.SetLengthError {
     return switch (err) {
         error.OutOfMemory => error.InputOutput,
+        error.Canceled => error.Canceled,
         error.FileNotFound => error.AccessDenied,
         error.InvalidPath,
         error.InvalidAlignment,
@@ -87,6 +92,7 @@ pub fn mapDiskSetLengthError(err: disk_module.DiskError) Io.File.SetLengthError 
 pub fn mapDiskDeleteError(err: disk_module.DiskError) Io.Dir.DeleteFileError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,
+        error.Canceled => error.Canceled,
         error.FileNotFound => error.FileNotFound,
         error.InvalidPath,
         error.InvalidAlignment,
@@ -99,6 +105,7 @@ pub fn mapDiskDeleteError(err: disk_module.DiskError) Io.Dir.DeleteFileError {
 pub fn mapDiskRenameError(err: disk_module.DiskError) Io.Dir.RenameError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,
+        error.Canceled => error.Canceled,
         error.FileNotFound => error.FileNotFound,
         error.InvalidPath,
         error.InvalidAlignment,

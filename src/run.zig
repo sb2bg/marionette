@@ -1,6 +1,7 @@
 //! Scenario runner with built-in deterministic replay verification.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const env_module = @import("env.zig");
 const run_types = @import("run_types.zig");
@@ -9,23 +10,30 @@ const World = @import("world.zig").World;
 
 pub const RunAttribute = run_types.RunAttribute;
 pub const RunAttributeValue = run_types.RunAttributeValue;
+pub const FailureExpectation = run_types.FailureExpectation;
 pub const RunFailure = run_types.RunFailure;
 pub const RunFailureKind = run_types.RunFailureKind;
 pub const RunOptions = run_types.RunOptions;
 pub const RunReport = run_types.RunReport;
 pub const RunResult = run_types.RunResult;
+pub const WatchdogOptions = run_types.WatchdogOptions;
 pub const StateCheck = run_types.StateCheck;
 pub const runAttribute = run_types.runAttribute;
 pub const TraceError = world_module.TraceError;
 
 /// Infrastructure errors from the runners themselves; scenario failures
 /// are reported through `RunReport`, not as errors.
-pub const RunError = std.mem.Allocator.Error || TraceError;
+pub const RunError = std.mem.Allocator.Error || TraceError || error{
+    InvalidWatchdogOptions,
+    WatchdogUnavailable,
+    WatchdogTraceTooLarge,
+};
 /// Errors specific to the `expect*` wrappers: outcome mismatches and invalid
 /// expectation configuration.
 pub const ExpectError = error{
     ExpectedRunFailure,
     ExpectedRunPass,
+    UnexpectedRunFailure,
     InvalidSeedCount,
 };
 pub const ExpectRunError = RunError || ExpectError;
@@ -45,6 +53,157 @@ const RunOnceResult = union(enum) {
         }
         self.* = undefined;
     }
+};
+
+const watchdog_supported = switch (builtin.os.tag) {
+    .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => true,
+    else => false,
+};
+
+const WatchdogStatus = enum(u8) {
+    running,
+    passed,
+    failed,
+    out_of_memory,
+    invalid_trace,
+    trace_too_large,
+    result_too_large,
+};
+
+const max_watchdog_identity_len = 512;
+
+const WatchdogHeader = extern struct {
+    done: std.atomic.Value(u8) = .init(0),
+    progress: std.atomic.Value(u64) = .init(0),
+    trace_len: std.atomic.Value(usize) = .init(0),
+    event_count: std.atomic.Value(u64) = .init(0),
+    task_running: std.atomic.Value(u8) = .init(0),
+    task_id: std.atomic.Value(u64) = .init(0),
+    trace_truncated: std.atomic.Value(u8) = .init(0),
+    status: WatchdogStatus = .running,
+    failure_kind: RunFailureKind = .scenario_error,
+    error_name_len: u16 = 0,
+    check_name_len: u16 = 0,
+    error_name: [max_watchdog_identity_len]u8 = @splat(0),
+    check_name: [max_watchdog_identity_len]u8 = @splat(0),
+};
+
+const WatchdogShared = struct {
+    mapping: []align(std.heap.page_size_min) u8,
+    header: *WatchdogHeader,
+    trace: []u8,
+
+    fn init(options: WatchdogOptions) RunError!WatchdogShared {
+        const trace_offset = std.mem.alignForward(usize, @sizeOf(WatchdogHeader), @alignOf(u64));
+        const raw_len = std.math.add(usize, trace_offset, options.trace_capacity) catch
+            return error.InvalidWatchdogOptions;
+        const page_size = std.heap.pageSize();
+        const padded_len = std.math.add(usize, raw_len, page_size - 1) catch
+            return error.InvalidWatchdogOptions;
+        const mapping_len = std.mem.alignBackward(usize, padded_len, page_size);
+        const mapping = std.posix.mmap(
+            null,
+            mapping_len,
+            .{ .READ = true, .WRITE = true },
+            .{ .TYPE = .SHARED, .ANONYMOUS = true },
+            -1,
+            0,
+        ) catch return error.WatchdogUnavailable;
+        errdefer std.posix.munmap(mapping);
+
+        const header: *WatchdogHeader = @ptrCast(@alignCast(mapping.ptr));
+        header.* = .{};
+        return .{
+            .mapping = mapping,
+            .header = header,
+            .trace = mapping[trace_offset..raw_len],
+        };
+    }
+
+    fn deinit(self: *WatchdogShared) void {
+        std.posix.munmap(self.mapping);
+        self.* = undefined;
+    }
+
+    fn observer(self: *WatchdogShared) world_module.ExecutionObserver {
+        return .{ .ptr = self, .vtable = &watchdog_observer_vtable };
+    }
+
+    fn publishTrace(raw: *anyopaque, trace: []const u8, event_count: u64, replace_from: usize) void {
+        const self: *WatchdogShared = @ptrCast(@alignCast(raw));
+        const copy_len = @min(trace.len, self.trace.len);
+        const copy_from = @min(replace_from, copy_len);
+        if (copy_len > copy_from) @memcpy(self.trace[copy_from..copy_len], trace[copy_from..copy_len]);
+        if (trace.len > self.trace.len) self.header.trace_truncated.store(1, .release);
+        self.header.event_count.store(event_count, .release);
+        self.header.trace_len.store(copy_len, .release);
+        _ = self.header.progress.fetchAdd(1, .release);
+    }
+
+    fn taskStart(raw: *anyopaque, task_id: u64) void {
+        const self: *WatchdogShared = @ptrCast(@alignCast(raw));
+        self.header.task_id.store(task_id, .release);
+        self.header.task_running.store(1, .release);
+        _ = self.header.progress.fetchAdd(1, .release);
+    }
+
+    fn taskStop(raw: *anyopaque, task_id: u64) void {
+        const self: *WatchdogShared = @ptrCast(@alignCast(raw));
+        std.debug.assert(self.header.task_id.load(.acquire) == task_id);
+        self.header.task_running.store(0, .release);
+        _ = self.header.progress.fetchAdd(1, .release);
+    }
+
+    fn copyIdentity(destination: []u8, source: ?[]const u8) u16 {
+        const text = source orelse return 0;
+        if (text.len > destination.len) return std.math.maxInt(u16);
+        @memcpy(destination[0..text.len], text);
+        return @intCast(text.len);
+    }
+
+    fn publishResult(self: *WatchdogShared, result: RunOnceResult) void {
+        if (self.header.trace_truncated.load(.acquire) != 0) {
+            self.header.status = .trace_too_large;
+            self.header.done.store(1, .release);
+            return;
+        }
+        switch (result) {
+            .passed => |passed| {
+                self.header.status = .passed;
+                self.header.event_count.store(passed.event_count, .release);
+            },
+            .failed => |failure| {
+                const error_len = copyIdentity(&self.header.error_name, failure.error_name);
+                const check_len = copyIdentity(&self.header.check_name, failure.check_name);
+                if (error_len == std.math.maxInt(u16) or check_len == std.math.maxInt(u16)) {
+                    self.header.status = .result_too_large;
+                    self.header.done.store(1, .release);
+                    return;
+                }
+                self.header.status = .failed;
+                self.header.failure_kind = failure.kind;
+                self.header.error_name_len = error_len;
+                self.header.check_name_len = check_len;
+                self.header.event_count.store(failure.first_event_count, .release);
+            },
+        }
+        self.header.done.store(1, .release);
+    }
+
+    fn publishRunError(self: *WatchdogShared, err: RunError) void {
+        self.header.status = switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            error.InvalidTracePayload => .invalid_trace,
+            else => .result_too_large,
+        };
+        self.header.done.store(1, .release);
+    }
+};
+
+const watchdog_observer_vtable: world_module.ExecutionObserver.VTable = .{
+    .trace = WatchdogShared.publishTrace,
+    .task_start = WatchdogShared.taskStart,
+    .task_stop = WatchdogShared.taskStop,
 };
 
 /// Standard simulation scenario state: the world-owned simulator handles plus
@@ -86,7 +245,7 @@ pub fn SimCase(comptime App: type) type {
 /// - `scenario: fn (*mar.SimCase(App)) !void`
 ///
 /// Optional fields are `seed`, `start_ns`, `tick_ns`, `name`, `tags`,
-/// `attributes`, and `checks`.
+/// `attributes`, `checks`, and `watchdog`.
 pub fn runSimCase(config: anytype) RunError!RunReport {
     return runSimCaseWithSeed(config, null);
 }
@@ -105,15 +264,26 @@ pub fn expectSimPass(config: anytype) ExpectRunError!void {
     }
 }
 
-/// Expect a simulation case to fail. Use `runSimCase` directly when the test
-/// needs to inspect the failure details.
+/// Expect a simulation case to fail. An optional `failure` field constrains
+/// the accepted kind, error name, and/or check name. Use `runSimCase` directly
+/// when the test needs to inspect the full failure details.
 pub fn expectSimFailure(config: anytype) ExpectRunError!void {
     var report = try runSimCase(config);
     defer report.deinit();
 
     switch (report) {
         .passed => return error.ExpectedRunFailure,
-        .failed => {},
+        .failed => |failure| {
+            const expectation: FailureExpectation = fieldOrDefault(
+                config,
+                "failure",
+                FailureExpectation{},
+            );
+            if (!expectation.matches(failure)) {
+                failure.print();
+                return error.UnexpectedRunFailure;
+            }
+        },
     }
 }
 
@@ -186,6 +356,7 @@ fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
         .name = configRunName(config),
         .tags = fieldOrDefault(config, "tags", @as([]const []const u8, &.{})),
         .attributes = fieldOrDefault(config, "attributes", @as([]const RunAttribute, &.{})),
+        .watchdog = fieldOrDefault(config, "watchdog", @as(?WatchdogOptions, null)),
     };
 }
 
@@ -310,12 +481,260 @@ fn runTwiceWithSimCase(
     // Always execute both runs, even when the first fails: a failure that
     // does not reproduce with the same seed is itself a determinism leak,
     // and a failure that does reproduce is verified replayable.
-    var first = try runOnceWithSimCase(allocator, options, simulate_options, App, init_app, scenario, state_checks);
+    var first = try runOnceDispatched(allocator, options, simulate_options, App, init_app, scenario, state_checks);
     errdefer first.deinit();
 
-    const second = try runOnceWithSimCase(allocator, options, simulate_options, App, init_app, scenario, state_checks);
+    const second = try runOnceDispatched(allocator, options, simulate_options, App, init_app, scenario, state_checks);
 
     return compareRunOnceResults(allocator, first, second);
+}
+
+fn runOnceDispatched(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    simulate_options: World.SimulateOptions,
+    comptime App: type,
+    comptime init_app: fn (World.Simulation) anyerror!App,
+    comptime scenario: fn (*SimCase(App)) anyerror!void,
+    comptime state_checks: []const StateCheck(SimCase(App)),
+) RunError!RunOnceResult {
+    if (options.watchdog) |watchdog| {
+        try watchdog.validate();
+        return runOnceWithWatchdog(
+            allocator,
+            options,
+            simulate_options,
+            App,
+            init_app,
+            scenario,
+            state_checks,
+            watchdog,
+        );
+    }
+    return runOnceWithSimCase(
+        allocator,
+        options,
+        simulate_options,
+        App,
+        init_app,
+        scenario,
+        state_checks,
+        null,
+    );
+}
+
+fn runOnceWithWatchdog(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    simulate_options: World.SimulateOptions,
+    comptime App: type,
+    comptime init_app: fn (World.Simulation) anyerror!App,
+    comptime scenario: fn (*SimCase(App)) anyerror!void,
+    comptime state_checks: []const StateCheck(SimCase(App)),
+    watchdog: WatchdogOptions,
+) RunError!RunOnceResult {
+    if (comptime !watchdog_supported) return error.WatchdogUnavailable;
+
+    var shared = try WatchdogShared.init(watchdog);
+    defer shared.deinit();
+
+    const pid = try forkWatchdogWorker();
+    if (pid == 0) {
+        var child_result = runOnceWithSimCase(
+            allocator,
+            options,
+            simulate_options,
+            App,
+            init_app,
+            scenario,
+            state_checks,
+            shared.observer(),
+        ) catch |err| {
+            shared.publishRunError(err);
+            exitWatchdogWorker();
+        };
+        shared.publishResult(child_result);
+        child_result.deinit();
+        exitWatchdogWorker();
+    }
+
+    const started_at = watchdogNowNs();
+    var last_progress_at = started_at;
+    var last_progress = shared.header.progress.load(.acquire);
+    while (shared.header.done.load(.acquire) == 0) {
+        const now = watchdogNowNs();
+        const progress = shared.header.progress.load(.acquire);
+        if (progress != last_progress) {
+            last_progress = progress;
+            last_progress_at = now;
+        }
+
+        const stalled = now -| last_progress_at >= watchdog.stall_timeout_ns;
+        const expired = now -| started_at >= watchdog.run_timeout_ns;
+        const trace_full = shared.header.trace_truncated.load(.acquire) != 0;
+        if (stalled or expired or trace_full) {
+            killWatchdogWorker(pid);
+            return watchdogFailureFromShared(
+                allocator,
+                options,
+                &shared,
+                if (stalled) .non_yielding else .livelock,
+            );
+        }
+
+        std.Io.sleep(
+            std.Options.debug_io,
+            .fromMilliseconds(1),
+            .awake,
+        ) catch {};
+    }
+
+    waitWatchdogWorker(pid);
+    return resultFromWatchdogShared(allocator, options, &shared);
+}
+
+fn forkWatchdogWorker() RunError!std.posix.pid_t {
+    const rc = std.posix.system.fork();
+    return switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => error.WatchdogUnavailable,
+    };
+}
+
+fn waitWatchdogWorker(pid: std.posix.pid_t) void {
+    if (comptime builtin.os.tag == .linux and !builtin.link_libc) {
+        var status: u32 = 0;
+        while (true) {
+            const rc = std.os.linux.waitpid(pid, &status, 0);
+            if (std.posix.errno(rc) == .SUCCESS) return;
+        }
+    } else {
+        var status: c_int = 0;
+        while (std.c.waitpid(pid, &status, 0) < 0) {}
+    }
+}
+
+fn exitWatchdogWorker() noreturn {
+    if (comptime builtin.os.tag == .linux and !builtin.link_libc) {
+        std.os.linux.exit(0);
+    } else {
+        std.c._exit(0);
+    }
+}
+
+fn killWatchdogWorker(pid: std.posix.pid_t) void {
+    std.posix.kill(pid, .KILL) catch |err| switch (err) {
+        error.ProcessNotFound => {},
+        else => {},
+    };
+    waitWatchdogWorker(pid);
+}
+
+fn watchdogNowNs() u64 {
+    const timestamp = std.Io.Clock.awake.now(std.Options.debug_io).nanoseconds;
+    return @intCast(@max(timestamp, 0));
+}
+
+fn resultFromWatchdogShared(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    shared: *const WatchdogShared,
+) RunError!RunOnceResult {
+    const header = shared.header;
+    switch (header.status) {
+        .out_of_memory => return error.OutOfMemory,
+        .invalid_trace => return error.InvalidTracePayload,
+        .trace_too_large => return watchdogFailureFromShared(allocator, options, shared, .livelock),
+        .result_too_large => return error.WatchdogTraceTooLarge,
+        .running => return error.WatchdogUnavailable,
+        .passed => {
+            const trace = try allocator.dupe(u8, shared.trace[0..header.trace_len.load(.acquire)]);
+            errdefer allocator.free(trace);
+            const owned_options = try cloneRunOptions(allocator, options);
+            return .{ .passed = .{
+                .allocator = allocator,
+                .options = owned_options,
+                .owns_options = true,
+                .trace = trace,
+                .event_count = header.event_count.load(.acquire),
+            } };
+        },
+        .failed => {
+            const trace = try allocator.dupe(u8, shared.trace[0..header.trace_len.load(.acquire)]);
+            errdefer allocator.free(trace);
+            var owned_options = try cloneRunOptions(allocator, options);
+            errdefer deinitRunOptions(allocator, &owned_options);
+
+            const error_name = if (header.error_name_len == 0)
+                null
+            else
+                try allocator.dupe(u8, header.error_name[0..header.error_name_len]);
+            errdefer if (error_name) |name| allocator.free(name);
+            const check_name = if (header.check_name_len == 0)
+                null
+            else
+                try allocator.dupe(u8, header.check_name[0..header.check_name_len]);
+            errdefer if (check_name) |name| allocator.free(name);
+
+            return .{ .failed = .{
+                .allocator = allocator,
+                .options = owned_options,
+                .owns_options = true,
+                .kind = header.failure_kind,
+                .first_trace = trace,
+                .first_event_count = header.event_count.load(.acquire),
+                .error_name = error_name,
+                .owns_error_name = error_name != null,
+                .check_name = check_name,
+                .owns_check_name = check_name != null,
+            } };
+        },
+    }
+}
+
+fn watchdogFailureFromShared(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    shared: *const WatchdogShared,
+    kind: RunFailureKind,
+) RunError!RunOnceResult {
+    var prefix = shared.trace[0..shared.header.trace_len.load(.acquire)];
+    if (shared.header.trace_truncated.load(.acquire) != 0) {
+        if (std.mem.lastIndexOfScalar(u8, prefix, '\n')) |last_newline| {
+            prefix = prefix[0 .. last_newline + 1];
+        } else {
+            prefix = &.{};
+        }
+    }
+    const event_count: u64 = @intCast(std.mem.count(u8, prefix, "event="));
+    const task_id = shared.header.task_id.load(.acquire);
+    const task_running = shared.header.task_running.load(.acquire) != 0;
+    const suffix = if (kind == .non_yielding and !task_running)
+        try std.fmt.allocPrint(
+            allocator,
+            "event={} watchdog.{s} task=main\n",
+            .{ event_count, @tagName(kind) },
+        )
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            "event={} watchdog.{s} task={}\n",
+            .{ event_count, @tagName(kind), task_id },
+        );
+    defer allocator.free(suffix);
+    const trace = try std.mem.concat(allocator, u8, &.{ prefix, suffix });
+    errdefer allocator.free(trace);
+    const owned_options = try cloneRunOptions(allocator, options);
+
+    return .{ .failed = .{
+        .allocator = allocator,
+        .options = owned_options,
+        .owns_options = true,
+        .kind = kind,
+        .first_trace = trace,
+        .first_event_count = event_count + 1,
+        .error_name = if (kind == .non_yielding) "WatchdogStall" else "WatchdogTimeout",
+    } };
 }
 
 fn compareRunOnceResults(
@@ -361,6 +780,7 @@ fn compareRunOnceResults(
                     .second_event_count = second_failure.first_event_count,
                     .kind = .second_run_failed,
                     .error_name = second_failure.error_name,
+                    .owns_error_name = second_failure.owns_error_name,
                     .check_name = second_failure.check_name,
                     .owns_check_name = second_failure.owns_check_name,
                 } };
@@ -381,15 +801,26 @@ fn compareRunOnceResults(
                     .first_event_count = first_failure.first_event_count,
                     .second_event_count = second_passed.event_count,
                     .error_name = first_failure.error_name,
+                    .owns_error_name = first_failure.owns_error_name,
                     .check_name = first_failure.check_name,
                     .owns_check_name = first_failure.owns_check_name,
                 } };
             },
             .failed => |second_failure| {
+                const traces_reproduced = std.mem.eql(
+                    u8,
+                    first_failure.first_trace,
+                    second_failure.first_trace,
+                ) or (first_failure.kind == second_failure.kind and
+                    isWatchdogFailure(first_failure.kind) and
+                    watchdogTracePrefixesCompatible(
+                        first_failure.first_trace,
+                        second_failure.first_trace,
+                    ));
                 const reproduced = first_failure.kind == second_failure.kind and
                     optionalTextEqual(first_failure.error_name, second_failure.error_name) and
                     optionalTextEqual(first_failure.check_name, second_failure.check_name) and
-                    std.mem.eql(u8, first_failure.first_trace, second_failure.first_trace);
+                    traces_reproduced;
                 if (reproduced) {
                     // Verified replayable failure: report the first run's
                     // failure as-is.
@@ -411,9 +842,11 @@ fn compareRunOnceResults(
                     .first_event_count = first_failure.first_event_count,
                     .second_event_count = second_failure.first_event_count,
                     .error_name = first_failure.error_name,
+                    .owns_error_name = first_failure.owns_error_name,
                     .check_name = first_failure.check_name,
                     .owns_check_name = first_failure.owns_check_name,
                     .second_error_name = second_failure.error_name,
+                    .owns_second_error_name = second_failure.owns_error_name,
                     .second_check_name = second_failure.check_name,
                     .owns_second_check_name = second_failure.owns_check_name,
                 } };
@@ -427,6 +860,26 @@ fn optionalTextEqual(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
+fn isWatchdogFailure(kind: RunFailureKind) bool {
+    return kind == .non_yielding or kind == .livelock;
+}
+
+fn watchdogTracePrefixesCompatible(first: []const u8, second: []const u8) bool {
+    const first_prefix = traceBeforeFinalEvent(first);
+    const second_prefix = traceBeforeFinalEvent(second);
+    const common_len = @min(first_prefix.len, second_prefix.len);
+    return std.mem.eql(u8, first_prefix[0..common_len], second_prefix[0..common_len]);
+}
+
+fn traceBeforeFinalEvent(trace: []const u8) []const u8 {
+    const without_final_newline = if (std.mem.endsWith(u8, trace, "\n"))
+        trace[0 .. trace.len - 1]
+    else
+        trace;
+    const final_line_start = std.mem.lastIndexOfScalar(u8, without_final_newline, '\n') orelse return &.{};
+    return trace[0 .. final_line_start + 1];
+}
+
 fn runOnceWithSimCase(
     allocator: std.mem.Allocator,
     options: RunOptions,
@@ -435,9 +888,11 @@ fn runOnceWithSimCase(
     comptime init_app: fn (World.Simulation) anyerror!App,
     comptime scenario: fn (*SimCase(App)) anyerror!void,
     comptime state_checks: []const StateCheck(SimCase(App)),
+    observer: ?world_module.ExecutionObserver,
 ) RunError!RunOnceResult {
     var world = try World.init(allocator, options.worldOptions());
     defer world.deinit();
+    if (observer) |execution_observer| world.attachExecutionObserver(execution_observer);
     try recordRunContext(&world, options);
 
     const sim = world.simulate(simulate_options) catch |err| switch (err) {
@@ -471,22 +926,44 @@ fn runOnceWithSimCase(
     defer if (state_live) state.deinit();
 
     scenario(&state) catch |err| {
+        const scheduler_failure = state.control().tasks.failure();
         state.deinit();
         state_live = false;
-        return .{ .failed = try failureFromWorld(
+        if (scheduler_failure) |failure| {
+            return .{ .failed = try schedulerFailureFromWorld(
+                allocator,
+                options,
+                &world,
+                failure,
+            ) };
+        }
+        return .{ .failed = try failureFromWorld(allocator, options, .scenario_error, &world, err, null) };
+    };
+
+    if (state.control().tasks.failure()) |failure| {
+        state.deinit();
+        state_live = false;
+        return .{ .failed = try schedulerFailureFromWorld(
             allocator,
             options,
-            .scenario_error,
             &world,
-            err,
-            null,
+            failure,
         ) };
-    };
+    }
 
     for (state_checks) |check| {
         check.check(&state) catch |err| {
+            const scheduler_failure = state.control().tasks.failure();
             state.deinit();
             state_live = false;
+            if (scheduler_failure) |failure| {
+                return .{ .failed = try schedulerFailureFromWorld(
+                    allocator,
+                    options,
+                    &world,
+                    failure,
+                ) };
+            }
             return .{ .failed = try failureFromWorld(
                 allocator,
                 options,
@@ -511,6 +988,32 @@ fn runOnceWithSimCase(
         .trace = trace,
         .event_count = world.nextEventIndex(),
     } };
+}
+
+fn schedulerFailureFromWorld(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    world: *World,
+    failure: @import("io/root.zig").internal.TaskControl.Failure,
+) RunError!RunFailure {
+    return switch (failure) {
+        .deadlock => failureFromWorldName(
+            allocator,
+            options,
+            .scheduler_deadlock,
+            world,
+            "Deadlock",
+            null,
+        ),
+        .scheduler_error => |error_name| failureFromWorldName(
+            allocator,
+            options,
+            .scheduler_error,
+            world,
+            error_name,
+            null,
+        ),
+    };
 }
 
 fn recordRunContext(world: *World, options: RunOptions) RunError!void {
@@ -564,6 +1067,13 @@ fn recordRunContext(world: *World, options: RunOptions) RunError!void {
             },
         }
     }
+    if (options.watchdog) |watchdog| {
+        try world.recordFields("run.watchdog", &.{
+            traceField("stall_timeout_ns", .{ .uint = watchdog.stall_timeout_ns }),
+            traceField("run_timeout_ns", .{ .uint = watchdog.run_timeout_ns }),
+            traceField("trace_capacity", .{ .uint = @intCast(watchdog.trace_capacity) }),
+        });
+    }
 }
 
 fn failureFromWorld(
@@ -572,6 +1082,24 @@ fn failureFromWorld(
     kind: RunFailureKind,
     world: *World,
     err: anyerror,
+    check_name: ?[]const u8,
+) std.mem.Allocator.Error!RunFailure {
+    return failureFromWorldName(
+        allocator,
+        options,
+        kind,
+        world,
+        @errorName(err),
+        check_name,
+    );
+}
+
+fn failureFromWorldName(
+    allocator: std.mem.Allocator,
+    options: RunOptions,
+    kind: RunFailureKind,
+    world: *World,
+    error_name: ?[]const u8,
     check_name: ?[]const u8,
 ) std.mem.Allocator.Error!RunFailure {
     const trace = try allocator.dupe(u8, world.traceBytes());
@@ -590,7 +1118,7 @@ fn failureFromWorld(
         .kind = kind,
         .first_trace = trace,
         .first_event_count = world.nextEventIndex(),
-        .error_name = @errorName(err),
+        .error_name = error_name,
         .check_name = owned_check_name,
         .owns_check_name = owned_check_name != null,
     };
@@ -904,7 +1432,229 @@ test "expectSimFailure accepts failing simulation cases" {
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
+        .failure = FailureExpectation{
+            .kind = .check_failed,
+            .error_name = "SimCaseInvariantBroken",
+            .check_name = "sim case fails",
+        },
     });
+}
+
+test "expectSimFailure rejects a replayable failure with the wrong identity" {
+    const case_checks = [_]StateCheck(SimCase(SimCaseApp)){
+        .{ .name = "sim case fails", .check = failingSimCaseCheck },
+    };
+
+    try std.testing.expectError(error.UnexpectedRunFailure, expectSimFailure(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .init = SimCaseApp.init,
+        .scenario = simCaseScenario,
+        .checks = &case_checks,
+        .failure = FailureExpectation{ .error_name = "DifferentFailure" },
+    }));
+}
+
+const DeadlockApp = struct {
+    io: std.Io,
+
+    fn init(sim: World.Simulation) DeadlockApp {
+        return .{ .io = sim.env.io() };
+    }
+};
+
+fn neverCompletes(io: std.Io, word: *u32) void {
+    io.futexWaitUncancelable(u32, word, 0);
+}
+
+fn awaitDeadlockedFuture(case: *SimCase(DeadlockApp)) !void {
+    var word: u32 = 0;
+    var future = try std.Io.concurrent(case.app.io, neverCompletes, .{ case.app.io, &word });
+    future.await(case.app.io);
+}
+
+test "runSimCase: main-context await deadlock is a structured replayable failure" {
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xDEAD10CC,
+        .simulate = World.SimulateOptions{},
+        .init = DeadlockApp.init,
+        .scenario = awaitDeadlockedFuture,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.scheduler_deadlock, failure.kind);
+            try std.testing.expectEqualStrings("Deadlock", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scheduler.wait_state waits=0:") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scheduler.deadlock") != null);
+        },
+    }
+}
+
+fn nonYieldingTask() void {
+    var counter: u64 = 0;
+    while (true) {
+        counter +%= 1;
+        std.mem.doNotOptimizeAway(counter);
+    }
+}
+
+fn awaitNonYieldingTask(case: *SimCase(DeadlockApp)) !void {
+    var future = try std.Io.concurrent(case.app.io, nonYieldingTask, .{});
+    future.await(case.app.io);
+}
+
+fn runNonYieldingOnMain(_: *SimCase(DeadlockApp)) !void {
+    nonYieldingTask();
+}
+
+fn livelockedTask(io: std.Io) void {
+    while (true) {
+        std.Io.sleep(io, .fromNanoseconds(10), .awake) catch return;
+    }
+}
+
+fn awaitLivelockedTask(case: *SimCase(DeadlockApp)) !void {
+    var future = try std.Io.concurrent(case.app.io, livelockedTask, .{case.app.io});
+    future.await(case.app.io);
+}
+
+test "runSimCase: watchdog classifies a non-yielding task and preserves its trace" {
+    if (!watchdog_supported) return error.SkipZigTest;
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xBAD1009,
+        .simulate = World.SimulateOptions{},
+        .init = DeadlockApp.init,
+        .scenario = awaitNonYieldingTask,
+        .watchdog = WatchdogOptions{
+            .stall_timeout_ns = 20 * std.time.ns_per_ms,
+            .run_timeout_ns = 500 * std.time.ns_per_ms,
+            .trace_capacity = 64 * 1024,
+        },
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.non_yielding, failure.kind);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scheduler.select") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "watchdog.non_yielding task=0") != null);
+        },
+    }
+}
+
+test "runSimCase: watchdog contains non-yielding main-context application code" {
+    if (!watchdog_supported) return error.SkipZigTest;
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xBAD1CA11,
+        .simulate = World.SimulateOptions{},
+        .init = DeadlockApp.init,
+        .scenario = runNonYieldingOnMain,
+        .watchdog = WatchdogOptions{
+            .stall_timeout_ns = 20 * std.time.ns_per_ms,
+            .run_timeout_ns = 500 * std.time.ns_per_ms,
+            .trace_capacity = 64 * 1024,
+        },
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.non_yielding, failure.kind);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "watchdog.non_yielding task=main") != null);
+        },
+    }
+}
+
+test "expectSimFailure keeps exact failure identity across watchdog isolation" {
+    if (!watchdog_supported) return error.SkipZigTest;
+
+    const case_checks = [_]StateCheck(SimCase(SimCaseApp)){
+        .{ .name = "sim case fails", .check = failingSimCaseCheck },
+    };
+    try expectSimFailure(.{
+        .allocator = std.testing.allocator,
+        .seed = 1234,
+        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .init = SimCaseApp.init,
+        .scenario = simCaseScenario,
+        .checks = &case_checks,
+        .failure = FailureExpectation{
+            .kind = .check_failed,
+            .error_name = "SimCaseInvariantBroken",
+            .check_name = "sim case fails",
+        },
+        .watchdog = WatchdogOptions{
+            .stall_timeout_ns = 100 * std.time.ns_per_ms,
+            .run_timeout_ns = 1 * std.time.ns_per_s,
+            .trace_capacity = 64 * 1024,
+        },
+    });
+}
+
+test "runSimCase: watchdog distinguishes a yielding livelock" {
+    if (!watchdog_supported) return error.SkipZigTest;
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0x11FE10CC,
+        .tick_ns = 10,
+        .simulate = World.SimulateOptions{},
+        .init = DeadlockApp.init,
+        .scenario = awaitLivelockedTask,
+        .watchdog = WatchdogOptions{
+            .stall_timeout_ns = 100 * std.time.ns_per_ms,
+            .run_timeout_ns = 1 * std.time.ns_per_s,
+            .trace_capacity = 4 * 1024,
+        },
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.livelock, failure.kind);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scheduler.timeout") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "watchdog.livelock task=0") != null);
+        },
+    }
+}
+
+test "runSimCase: watchdog total-time livelock replays compatible trace prefixes" {
+    if (!watchdog_supported) return error.SkipZigTest;
+
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0x71AE0CC,
+        .tick_ns = 10,
+        .simulate = World.SimulateOptions{},
+        .init = DeadlockApp.init,
+        .scenario = awaitLivelockedTask,
+        .watchdog = WatchdogOptions{
+            .stall_timeout_ns = 100 * std.time.ns_per_ms,
+            .run_timeout_ns = 100 * std.time.ns_per_ms,
+            .trace_capacity = 64 * 1024 * 1024,
+        },
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.livelock, failure.kind);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "watchdog.livelock task=0") != null);
+        },
+    }
 }
 
 const FallibleSimApp = struct {

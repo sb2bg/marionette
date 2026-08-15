@@ -135,7 +135,10 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .file) catch |err| return err;
             defer backend.freeOpScratch(path);
-            backend.reserveFileMutationPaths(path, null) catch return error.SystemResources;
+            backend.reserveFileMutationPaths(path, null) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.SystemResources,
+            };
             var path_reserved = true;
             defer if (path_reserved) backend.releaseFileMutationPaths(path, null);
             if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) return error.IsDir;
@@ -156,6 +159,7 @@ pub fn Ops(comptime Backend: type) type {
                 ) catch |err| switch (err) {
                     error.OutOfMemory => return error.SystemResources,
                     error.WouldBlock => return error.WouldBlock,
+                    error.Canceled => return error.Canceled,
                 };
                 errdefer backend.retireFileHandle(file.handle);
                 const meta = backend.files.items[index];
@@ -164,6 +168,7 @@ pub fn Ops(comptime Backend: type) type {
                     var reservation = acquireFilePathReservation(backend, meta) catch |err| switch (err) {
                         error.OutOfMemory => return error.SystemResources,
                         error.FileDeleted => return error.FileNotFound,
+                        error.Canceled => return error.Canceled,
                     };
                     defer reservation.deinit();
                     const old_len = meta.len;
@@ -203,6 +208,7 @@ pub fn Ops(comptime Backend: type) type {
             ) catch |err| return switch (err) {
                 error.OutOfMemory => error.SystemResources,
                 error.WouldBlock => error.WouldBlock,
+                error.Canceled => error.Canceled,
             };
             errdefer backend.retireFileHandle(file.handle);
             if (backend.files.items[file_index].deleted) return error.FileNotFound;
@@ -219,7 +225,10 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
-            backend.acquireFilePathLease(path) catch return error.SystemResources;
+            backend.acquireFilePathLease(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.SystemResources,
+            };
             var path_leased = true;
             defer if (path_leased) backend.releaseFilePathLease(path);
             if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) {
@@ -240,6 +249,7 @@ pub fn Ops(comptime Backend: type) type {
             ) catch |err| return switch (err) {
                 error.OutOfMemory => error.SystemResources,
                 error.WouldBlock => error.WouldBlock,
+                error.Canceled => error.Canceled,
             };
             errdefer backend.retireFileHandle(file.handle);
             if (backend.files.items[file_index].deleted) return error.FileNotFound;
@@ -271,7 +281,10 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
-            backend.acquireFilePathLease(path) catch return error.SystemResources;
+            backend.acquireFilePathLease(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.SystemResources,
+            };
             defer backend.releaseFilePathLease(path);
             if (backend.disk.statDir(.{ .path = path })) |stat| {
                 return buildDirectoryStat(backend, stat);
@@ -298,7 +311,10 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
-            backend.acquireFilePathLease(path) catch return error.SystemResources;
+            backend.acquireFilePathLease(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.SystemResources,
+            };
             defer backend.releaseFilePathLease(path);
             if (backend.directoryExists(path) catch return error.FileNotFound) return;
             _ = (findOrDiscoverFileMeta(backend, path) catch {
@@ -369,7 +385,10 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .file) catch |err| return err;
             defer backend.freeOpScratch(path);
-            backend.reserveFileMutationPaths(path, null) catch return error.SystemResources;
+            backend.reserveFileMutationPaths(path, null) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.SystemResources,
+            };
             defer backend.releaseFileMutationPaths(path, null);
             if (backend.directoryExists(path) catch return error.FileNotFound) return error.IsDir;
             _ = (findOrDiscoverFileMeta(backend, path) catch |err| {
@@ -395,7 +414,10 @@ pub fn Ops(comptime Backend: type) type {
             defer backend.freeOpScratch(old_path);
             const new_path = resolvePath(backend, new_dir, new_sub_path, .file) catch |err| return err;
             defer backend.freeOpScratch(new_path);
-            backend.reserveFileMutationPaths(old_path, new_path) catch return error.SystemResources;
+            backend.reserveFileMutationPaths(old_path, new_path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.SystemResources,
+            };
             defer backend.releaseFileMutationPaths(old_path, new_path);
             if (backend.directoryExists(old_path) catch return error.FileNotFound) return error.IsDir;
             if (backend.directoryExists(new_path) catch return error.FileNotFound) return error.IsDir;
@@ -505,6 +527,7 @@ pub fn Ops(comptime Backend: type) type {
             var lease = acquireFilePathLease(backend, meta) catch |err| switch (err) {
                 error.OutOfMemory => return error.SystemResources,
                 error.FileDeleted => return error.NotOpenForReading,
+                error.Canceled => return error.Canceled,
             };
             defer lease.deinit();
             if (offset >= meta.len) return 0;
@@ -542,6 +565,7 @@ pub fn Ops(comptime Backend: type) type {
             var lease = acquireFilePathLease(backend, meta) catch |err| switch (err) {
                 error.OutOfMemory => return error.SystemResources,
                 error.FileDeleted => return error.NotOpenForWriting,
+                error.Canceled => return error.Canceled,
             };
             defer lease.deinit();
             var cursor = offset;
@@ -670,6 +694,7 @@ pub fn Ops(comptime Backend: type) type {
             var lease = acquireFilePathLease(backend, backend.fileMeta(state)) catch |err| switch (err) {
                 error.OutOfMemory => return errors.mapDiskSyncError(error.OutOfMemory),
                 error.FileDeleted => return error.AccessDenied,
+                error.Canceled => return error.Canceled,
             };
             defer lease.deinit();
             backend.disk.sync(.{ .path = lease.path }) catch |err| return errors.mapDiskSyncError(err);
@@ -685,6 +710,7 @@ pub fn Ops(comptime Backend: type) type {
             var lease = acquireFilePathLease(backend, meta) catch |err| switch (err) {
                 error.OutOfMemory => return errors.mapDiskSetLengthError(error.OutOfMemory),
                 error.FileDeleted => return error.AccessDenied,
+                error.Canceled => return error.Canceled,
             };
             defer lease.deinit();
             const old_len = meta.len;
@@ -767,6 +793,7 @@ pub fn Ops(comptime Backend: type) type {
         fn mapCreateDirError(err: disk_module.DiskError) Io.Dir.CreateDirError {
             return switch (err) {
                 error.OutOfMemory => error.SystemResources,
+                error.Canceled => error.Canceled,
                 error.PathAlreadyExists => error.PathAlreadyExists,
                 error.FileNotFound => error.FileNotFound,
                 error.NotDir => error.NotDir,
@@ -777,6 +804,7 @@ pub fn Ops(comptime Backend: type) type {
         fn mapDiskOpenError(err: disk_module.DiskError) Io.File.OpenError {
             return switch (err) {
                 error.OutOfMemory => error.SystemResources,
+                error.Canceled => error.Canceled,
                 error.FileNotFound => error.FileNotFound,
                 error.NotDir => error.NotDir,
                 error.IsDir => error.IsDir,
@@ -839,7 +867,7 @@ pub fn Ops(comptime Backend: type) type {
         fn acquireFilePathLease(
             backend: *Backend,
             meta: *const Backend.FileMeta,
-        ) (std.mem.Allocator.Error || error{FileDeleted})!FilePathLease {
+        ) (std.mem.Allocator.Error || error{ FileDeleted, Canceled })!FilePathLease {
             while (true) {
                 if (!backend.processIsAlive() or meta.deleted) return error.FileDeleted;
                 const path = try snapshotFilePath(backend, meta);
@@ -848,6 +876,7 @@ pub fn Ops(comptime Backend: type) type {
                     return switch (err) {
                         error.OutOfMemory => error.OutOfMemory,
                         error.ProcessKilled => error.FileDeleted,
+                        error.Canceled => error.Canceled,
                     };
                 };
                 if (!backend.processIsAlive() or meta.deleted) {
@@ -867,7 +896,7 @@ pub fn Ops(comptime Backend: type) type {
         fn acquireFilePathReservation(
             backend: *Backend,
             meta: *const Backend.FileMeta,
-        ) (std.mem.Allocator.Error || error{FileDeleted})!FilePathReservation {
+        ) (std.mem.Allocator.Error || error{ FileDeleted, Canceled })!FilePathReservation {
             while (true) {
                 if (!backend.processIsAlive() or meta.deleted) return error.FileDeleted;
                 const path = try snapshotFilePath(backend, meta);
@@ -876,6 +905,7 @@ pub fn Ops(comptime Backend: type) type {
                     return switch (err) {
                         error.OutOfMemory => error.OutOfMemory,
                         error.ProcessKilled => error.FileDeleted,
+                        error.Canceled => error.Canceled,
                     };
                 };
                 if (!backend.processIsAlive() or meta.deleted) {

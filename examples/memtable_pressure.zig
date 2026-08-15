@@ -179,6 +179,11 @@ test "memtable: phantom commit fails through expectation helper" {
         .init = Memtable.init,
         .scenario = buggyScenario,
         .checks = &checks,
+        .failure = mar.FailureExpectation{
+            .kind = .check_failed,
+            .error_name = "PhantomCommit",
+            .check_name = "committed puts match stored entries",
+        },
     });
 }
 

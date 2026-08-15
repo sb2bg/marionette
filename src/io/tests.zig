@@ -2438,6 +2438,7 @@ test "io: process kill from inside owned task completes as killed" {
                 @panic("missing process backend");
             backend.reserveFileMutationPaths("after-kill", null) catch |err| switch (err) {
                 error.ProcessKilled => self.gate_rejected = true,
+                error.Canceled => @panic("unexpected path gate cancellation"),
                 error.OutOfMemory => @panic("unexpected path gate OOM"),
             };
         }
@@ -3265,6 +3266,48 @@ test "io: cancel unparks a sleeping task before its deadline" {
     // The sleeper was interrupted, not timed out: the million-nanosecond
     // deadline is still far in the simulated future.
     try std.testing.expect(world.now() < 1_000_000);
+}
+
+test "io: cancel interrupts simulated disk latency" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        disk_canceled: bool = false,
+    };
+    const Helper = struct {
+        fn read(io: Io, file: Io.File, state: *State) Io.Cancelable!void {
+            var buffer: [4]u8 = undefined;
+            _ = file.readPositional(io, &.{&buffer}, 0) catch |err| switch (err) {
+                error.Canceled => {
+                    state.disk_canceled = true;
+                    return error.Canceled;
+                },
+                else => @panic("unexpected disk read failure"),
+            };
+        }
+
+        fn canceler(io: Io, future: *Io.Future(Io.Cancelable!void)) void {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            _ = future.cancel(io) catch {};
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xD15C, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4, .min_latency_ns = 1_000 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "cancel-disk", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "data", 0);
+
+    var state = State{};
+    var read_future = try Io.concurrent(io, Helper.read, .{ io, file, &state });
+    var cancel_future = try Io.concurrent(io, Helper.canceler, .{ io, &read_future });
+    cancel_future.await(io);
+
+    try std.testing.expect(state.disk_canceled);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver task=0") != null);
 }
 
 test "io: uncancelable futex waits defer delivery to the next cancellation point" {
@@ -4954,6 +4997,50 @@ test "io: file locks coordinate processes and blocking acquisition waits" {
     });
     second.close(node_one_io);
     close_future.await(node_zero_io);
+}
+
+test "io: cancel interrupts blocking file lock acquisition" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        lock_canceled: bool = false,
+    };
+    const Helper = struct {
+        fn waitForLock(io: Io, state: *State) Io.Cancelable!void {
+            var file = Io.Dir.cwd().openFile(io, "cancel-lock", .{
+                .lock = .exclusive,
+                .lock_nonblocking = false,
+            }) catch |err| switch (err) {
+                error.Canceled => {
+                    state.lock_canceled = true;
+                    return error.Canceled;
+                },
+                else => @panic("unexpected blocking lock failure"),
+            };
+            file.close(io);
+        }
+
+        fn canceler(io: Io, future: *Io.Future(Io.Cancelable!void)) void {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            _ = future.cancel(io) catch {};
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x10CC, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const holder_io = (try sim.envForNode(0)).io();
+    const waiter_io = (try sim.envForNode(1)).io();
+
+    var holder = try Io.Dir.cwd().createFile(holder_io, "cancel-lock", .{ .lock = .exclusive });
+    defer holder.close(holder_io);
+    var state = State{};
+    var lock_future = try Io.concurrent(waiter_io, Helper.waitForLock, .{ waiter_io, &state });
+    var cancel_future = try Io.concurrent(waiter_io, Helper.canceler, .{ waiter_io, &lock_future });
+    cancel_future.await(waiter_io);
+
+    try std.testing.expect(state.lock_canceled);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver task=0") != null);
 }
 
 test "io: process kill retires blocked file lock waiters" {

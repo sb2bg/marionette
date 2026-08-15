@@ -119,7 +119,7 @@ derived seeds.
 Marionette requires Zig 0.16.x.
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.2.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.3.tar.gz
 ```
 
 Add the module to your test build:
@@ -147,6 +147,8 @@ const mar = @import("marionette");
   partitions, healing, and process lifecycle events.
 - Cooperative `std.Io` tasks, groups, cancellation, and futex waits used by
   `Mutex` / `Condition` code.
+- Structured deadlock and scheduler failures with compact wait-state traces,
+  plus an opt-in worker watchdog for non-yielding loops and livelocks.
 - Deterministic allocation faults and an explicit transition from fault
   exploration to liveness checking.
 - Experimental typed endpoints for testing protocol and state-machine behavior

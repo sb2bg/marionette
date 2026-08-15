@@ -32,6 +32,7 @@ pub const DiskError = error{
     InvalidRange,
     DirectorySyncUnsupported,
     DiskCrashed,
+    Canceled,
     ReadError,
     WriteError,
 } || std.mem.Allocator.Error || @import("../world.zig").TraceError;
@@ -45,15 +46,15 @@ pub const DiskLatencyRuntime = struct {
 
     pub const VTable = struct {
         in_task: *const fn (ptr: *anyopaque) bool,
-        wait_until: *const fn (ptr: *anyopaque, deadline_ns: clock_module.Timestamp) void,
+        wait_until: *const fn (ptr: *anyopaque, deadline_ns: clock_module.Timestamp) error{Canceled}!void,
     };
 
     pub fn inTask(self: DiskLatencyRuntime) bool {
         return self.vtable.in_task(self.ptr);
     }
 
-    pub fn waitUntil(self: DiskLatencyRuntime, deadline_ns: clock_module.Timestamp) void {
-        self.vtable.wait_until(self.ptr, deadline_ns);
+    pub fn waitUntil(self: DiskLatencyRuntime, deadline_ns: clock_module.Timestamp) error{Canceled}!void {
+        try self.vtable.wait_until(self.ptr, deadline_ns);
     }
 };
 

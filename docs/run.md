@@ -57,6 +57,10 @@ Failure kinds are:
 
 - `scenario_error`;
 - `check_failed`;
+- `scheduler_deadlock`;
+- `scheduler_error`;
+- `non_yielding`;
+- `livelock`;
 - `determinism_mismatch`;
 - `first_run_failed`;
 - `second_run_failed`.
@@ -67,12 +71,53 @@ metadata and traces until `RunReport.deinit`.
 ## Test Helpers
 
 Use `expectSimPass` for normal cases and `expectSimFailure` for planted bugs.
-Use `runSimCase` directly when a test must assert the exact failure kind, error,
-check name, or trace.
+An optional `failure` field can require any combination of kind, error name,
+and check name:
+
+```zig
+try mar.expectSimFailure(.{
+    // allocator, simulation, initializer, and scenario omitted
+    .failure = mar.FailureExpectation{
+        .kind = .check_failed,
+        .error_name = "InvariantBroken",
+        .check_name = "service remains safe",
+    },
+});
+```
+
+Omitted constraints accept any value. A mismatch returns
+`error.UnexpectedRunFailure`. Use `runSimCase` directly when a test must inspect
+the full failure or trace.
 
 `expectSimFuzz` requires a nonzero `seeds` field. Each derived seed is replayed
 twice. Long campaigns belong in the nightly seed sweep; focused unit tests
 should use small counts.
+
+## Liveness Watchdog
+
+Cooperative tasks normally yield at simulated I/O boundaries. To contain code
+that never reaches one, opt into an isolated worker process:
+
+```zig
+.watchdog = mar.WatchdogOptions{
+    .stall_timeout_ns = 5 * std.time.ns_per_s,
+    .run_timeout_ns = 30 * std.time.ns_per_s,
+    .trace_capacity = 4 * 1024 * 1024,
+},
+```
+
+The stall bound classifies worker code with no observed progress as
+`non_yielding`, whether it runs directly in the scenario (`task=main`) or in a
+cooperative task. The total-time and partial-trace bounds classify continuing
+activity as `livelock`. Completed trace events are copied from shared memory
+and a final `watchdog.non_yielding` or `watchdog.livelock` event identifies the
+classification.
+
+The watchdog is available on Linux, macOS, FreeBSD, NetBSD, OpenBSD,
+DragonFly BSD, and illumos. Its deadlines use host monotonic time and do not
+enter simulated time or deterministic choices. It uses `fork`, so enable it
+from a single-threaded harness process before starting unrelated host threads.
+Without `.watchdog`, execution and allocator behavior are unchanged.
 
 ## CLI
 

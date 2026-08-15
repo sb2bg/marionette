@@ -75,6 +75,15 @@ Rules:
 - Cooperative cancellation records `scheduler.cancel_request task=<u64>` when
   a request is armed and `scheduler.cancel_deliver task=<u64>` when
   `error.Canceled` is delivered at a cancellation point.
+- A proven scheduler deadlock records
+  `scheduler.wait_state waits=<task>:<key>[@<deadline>],...` in task order,
+  followed by `scheduler.deadlock tasks=<u64> completed=<u64> blocked=<u64>`.
+- Watchdog-enabled runs record `run.watchdog` with the configured stall,
+  total-run, and trace-capacity bounds. If the host worker must be terminated,
+  the preserved trace ends with `watchdog.non_yielding task=<u64-or-main>` or
+  `watchdog.livelock task=<u64>`. Host timestamps are never recorded. These
+  optional and failure-only vocabulary additions do not change the text
+  envelope, so the trace format remains version 2.
 - Time-evolved simulator faults are preceded by
   `fault_evolution.boundary now_ns=<u64>`. Seeded scheduling draws and any
   network or process state transitions caused at that timestamp follow the

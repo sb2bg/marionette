@@ -4,15 +4,6 @@ This is the active Marionette defect backlog. Completed findings remain in Git
 history and release notes rather than this file. Confirmed bugs in external
 systems under test belong in `FOUND_BUGS.md`.
 
-## Open For 0.6.3
-
-| Severity | Finding | Primary location |
-| --- | --- | --- |
-| Medium | Main-context future waits convert deterministic deadlock and scheduler errors into panic before the runner can preserve a structured artifact. | task runtime await bridge in `src/scheduler.zig` |
-| Medium | Disk-latency and file-lock waits expose cancelable operations but do not consistently park through the cancelable scheduler path. | `src/scheduler.zig`, `src/io/backend.zig` |
-| Medium | A non-yielding SUT loop freezes the cooperative world before in-process detection can run; no worker watchdog preserves a partial artifact. | runner/worker boundary |
-| Medium | `expectSimFailure` accepts any replayable failure, so unrelated setup/scenario failures can satisfy a planted-bug test. | expectation helpers in `src/run.zig` |
-
 ## Later Or Scope-Dependent
 
 | Severity | Target | Finding | Primary location |

@@ -42,6 +42,16 @@ Simulated time begins at `start_ns` and changes only through deterministic
 clock/scheduler operations. Cooperative tasks run at modeled suspension
 boundaries. Host scheduling is outside the contract.
 
+The optional worker watchdog deliberately observes host monotonic time to
+contain a task that never returns to the cooperative scheduler. Its timeout is
+a liveness classification, not a simulated input: traces contain the configured
+bounds and the stable classification, never the observed wall-clock timestamp.
+Replay requires both isolated executions to produce the same failure identity.
+Exact traces still match directly; when host timing cuts off two watchdog
+failures after different event counts, the completed event stream from one run
+must be a byte prefix of the other. A divergence inside their shared prefix
+remains a determinism mismatch.
+
 ## Trace Stability
 
 Traces use global event indexes and stable scalar fields. They must not contain

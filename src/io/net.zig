@@ -479,7 +479,7 @@ pub fn Ops(comptime Backend: type) type {
                                         switch (wait_result) {
                                             .woken => {},
                                             .timed_out => {},
-                                            .canceled => return error.Canceled,
+                                            .canceled, .failed => return error.Canceled,
                                         }
                                     } else {
                                         backend.world.runFor(wait_until - backend.world.now()) catch
@@ -528,7 +528,7 @@ pub fn Ops(comptime Backend: type) type {
                                         switch (wait_result) {
                                             .woken => {},
                                             .timed_out => unreachable,
-                                            .canceled => return error.Canceled,
+                                            .canceled, .failed => return error.Canceled,
                                         }
                                         if (!backend.processIsAlive()) return error.NetworkDown;
                                         continue :probe_wait;
@@ -617,7 +617,7 @@ pub fn Ops(comptime Backend: type) type {
                 switch (wait_result) {
                     .woken => {},
                     .timed_out => unreachable,
-                    .canceled => {
+                    .canceled, .failed => {
                         // The listener may have been closed between the
                         // cancel unpark and this task resuming; a closed
                         // handle with no remaining waiters must still retire.
@@ -670,7 +670,7 @@ pub fn Ops(comptime Backend: type) type {
                 switch (wait_result) {
                     .woken => {},
                     .timed_out => {},
-                    .canceled => {
+                    .canceled, .failed => {
                         // Same closed-while-canceled race as the accept park:
                         // never skip retiring a closed idle handle.
                         if (connection.closed) backend.retireClosedNetHandleIfIdle(src);
@@ -798,7 +798,7 @@ pub fn Ops(comptime Backend: type) type {
                                     connection.waiters -= 1;
                                     switch (wait_result) {
                                         .woken, .timed_out => {},
-                                        .canceled => {
+                                        .canceled, .failed => {
                                             // Same closed-while-canceled race
                                             // as the read park: never skip
                                             // retiring a closed idle handle.

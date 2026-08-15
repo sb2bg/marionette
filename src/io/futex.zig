@@ -28,6 +28,9 @@ pub const FutexWaitResult = enum {
     /// The wait was interrupted by a consumed cancellation request. Only
     /// cancelable waits resume with this result.
     canceled,
+    /// The scheduler latched a terminal failure while the main context drove
+    /// this wait. Task-side waits never produce this result.
+    failed,
 };
 
 pub const FutexWaitSet = struct {
@@ -190,6 +193,7 @@ pub fn Ops(comptime Backend: type) type {
                 .woken => {},
                 .timed_out => {},
                 .canceled => return error.Canceled,
+                .failed => return error.Canceled,
             }
         }
 
@@ -224,6 +228,7 @@ pub fn Ops(comptime Backend: type) type {
                 .woken => {},
                 .timed_out => {},
                 .canceled => unreachable,
+                .failed => return,
             }
         }
 
