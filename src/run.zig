@@ -1495,6 +1495,40 @@ test "runSimCase: main-context await deadlock is a structured replayable failure
     }
 }
 
+fn groupMemberThatCannotCancel(io: std.Io, word: *u32) std.Io.Cancelable!void {
+    io.futexWaitUncancelable(u32, word, 0);
+}
+
+fn cancelDeadlockedGroup(case: *SimCase(DeadlockApp)) !void {
+    var word: u32 = 0;
+    var group: std.Io.Group = .init;
+    try group.concurrent(case.app.io, groupMemberThatCannotCancel, .{ case.app.io, &word });
+    try std.Io.sleep(case.app.io, .fromNanoseconds(10), .awake);
+    group.cancel(case.app.io);
+}
+
+test "runSimCase: Group.cancel preserves a scheduler deadlock as a structured failure" {
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xCACE1,
+        .tick_ns = 10,
+        .simulate = World.SimulateOptions{},
+        .init = DeadlockApp.init,
+        .scenario = cancelDeadlockedGroup,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => return error.ExpectedRunFailure,
+        .failed => |failure| {
+            try std.testing.expectEqual(RunFailureKind.scheduler_deadlock, failure.kind);
+            try std.testing.expectEqualStrings("Deadlock", failure.error_name.?);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scheduler.wait_state") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "scheduler.deadlock") != null);
+        },
+    }
+}
+
 fn nonYieldingTask() void {
     var counter: u64 = 0;
     while (true) {

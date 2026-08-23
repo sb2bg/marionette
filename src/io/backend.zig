@@ -2679,6 +2679,18 @@ fn releaseGroupState(state: *GroupState) void {
     backend.allocator.destroy(state);
 }
 
+/// Give up a group whose members cannot make further progress because the
+/// scheduler has entered a terminal failure state. The closures can outlive
+/// the public group token during backend teardown, so sever their pointers
+/// before releasing the shared state.
+fn abandonGroupState(state: *GroupState) void {
+    const backend = state.backend;
+    for (backend.group_closures.items) |closure| {
+        if (closure.state == state) closure.state = null;
+    }
+    releaseGroupState(state);
+}
+
 fn rollbackGroupSpawn(acquired: AcquiredGroupState) void {
     acquired.state.completeTask();
     if (acquired.created) releaseGroupState(acquired.state);
@@ -2793,9 +2805,15 @@ fn simGroupCancel(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) vo
     std.debug.assert(state.group == group);
 
     if (!state.done) requestGroupCancel(backend, state);
-    // The group-await park is not itself a cancellation point, so this cannot
-    // surface `error.Canceled`.
-    simGroupAwait(userdata, group, token) catch unreachable;
+    // A terminal scheduler failure is reported through Group.await's narrow
+    // cancellation channel. Group.cancel itself cannot return an error, so
+    // detach the unreachable members and still satisfy its token-clearing
+    // contract instead of panicking while the runner reports the deadlock.
+    simGroupAwait(userdata, group, token) catch {
+        if (group.token.load(.acquire)) |active_token| {
+            if (active_token == token) abandonGroupState(state);
+        }
+    };
 }
 
 /// Arm cancellation requests on every live member of `state`, in ascending
