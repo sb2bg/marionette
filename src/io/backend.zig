@@ -3016,10 +3016,16 @@ fn simCheckCancel(userdata: ?*anyopaque) Io.Cancelable!void {
 fn simOperate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
     return switch (operation) {
         .file_read_streaming => |read| .{
-            .file_read_streaming = file_ops.simFileReadStreaming(userdata, read.file, read.data),
+            .file_read_streaming = file_ops.simFileReadStreaming(userdata, read.file, read.data) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => @errorCast(err),
+            },
         },
         .file_write_streaming => |write| .{
-            .file_write_streaming = file_ops.simFileWriteStreaming(userdata, write.file, write.header, write.data, write.splat),
+            .file_write_streaming = file_ops.simFileWriteStreaming(userdata, write.file, write.header, write.data, write.splat) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => @errorCast(err),
+            },
         },
         .device_io_control => unreachable,
         .net_receive => .{ .net_receive = .{ error.NetworkDown, 0 } },

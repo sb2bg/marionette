@@ -3310,6 +3310,160 @@ test "io: cancel interrupts simulated disk latency" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver task=0") != null);
 }
 
+test "io: cancel interrupts streaming file operations" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const State = struct {
+        read_canceled: bool = false,
+        write_canceled: bool = false,
+    };
+    const Helper = struct {
+        fn read(io: Io, file: Io.File, state: *State) Io.Cancelable!void {
+            var buffer: [4]u8 = undefined;
+            _ = file.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+                error.Canceled => {
+                    state.read_canceled = true;
+                    return error.Canceled;
+                },
+                else => @panic("unexpected streaming read failure"),
+            };
+        }
+
+        fn write(io: Io, file: Io.File, state: *State) Io.Cancelable!void {
+            file.writeStreamingAll(io, "next") catch |err| switch (err) {
+                error.Canceled => {
+                    state.write_canceled = true;
+                    return error.Canceled;
+                },
+                else => @panic("unexpected streaming write failure"),
+            };
+        }
+
+        fn canceler(io: Io, future: *Io.Future(Io.Cancelable!void)) void {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            _ = future.cancel(io) catch {};
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x57EA, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4, .min_latency_ns = 1_000 } });
+    const io = sim.env.io();
+
+    var file = try Io.Dir.cwd().createFile(io, "cancel-streaming", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "data", 0);
+
+    var state = State{};
+    var read_future = try Io.concurrent(io, Helper.read, .{ io, file, &state });
+    var read_canceler = try Io.concurrent(io, Helper.canceler, .{ io, &read_future });
+    read_canceler.await(io);
+
+    var write_future = try Io.concurrent(io, Helper.write, .{ io, file, &state });
+    var write_canceler = try Io.concurrent(io, Helper.canceler, .{ io, &write_future });
+    write_canceler.await(io);
+
+    try std.testing.expect(state.read_canceled);
+    try std.testing.expect(state.write_canceled);
+}
+
+test "io: directory adapters preserve cancellation from disk latency" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Operation = enum {
+        create_path,
+        open_dir,
+        stat_dir,
+        stat_file,
+        access,
+        read_dir,
+        delete_file,
+        rename,
+        stat_directory_file,
+    };
+    const State = struct {
+        operation: Operation,
+        iterable_dir: Io.Dir,
+        directory_file: Io.File,
+        canceled: bool = false,
+
+        fn captureCancellation(state: *@This(), err: anyerror) Io.Cancelable!void {
+            if (err != error.Canceled) @panic("unexpected directory operation failure");
+            state.canceled = true;
+            return error.Canceled;
+        }
+    };
+    const Helper = struct {
+        fn operate(io: Io, state: *State) Io.Cancelable!void {
+            const cwd = Io.Dir.cwd();
+            switch (state.operation) {
+                .create_path => cwd.createDirPath(io, "cancel-path/nested") catch |err|
+                    return state.captureCancellation(err),
+                .open_dir => {
+                    const opened = cwd.openDir(io, "existing-dir", .{}) catch |err|
+                        return state.captureCancellation(err);
+                    opened.close(io);
+                },
+                .stat_dir => _ = state.iterable_dir.stat(io) catch |err|
+                    return state.captureCancellation(err),
+                .stat_file => _ = cwd.statFile(io, "existing-file", .{}) catch |err|
+                    return state.captureCancellation(err),
+                .access => cwd.access(io, "existing-file", .{}) catch |err|
+                    return state.captureCancellation(err),
+                .read_dir => {
+                    var reader_buffer: [Io.Dir.Reader.min_buffer_len]u8 align(@alignOf(usize)) = undefined;
+                    var reader = Io.Dir.Reader.init(state.iterable_dir, &reader_buffer);
+                    var entries: [1]Io.Dir.Entry = undefined;
+                    _ = reader.read(io, &entries) catch |err|
+                        return state.captureCancellation(err);
+                },
+                .delete_file => cwd.deleteFile(io, "delete-target") catch |err|
+                    return state.captureCancellation(err),
+                .rename => cwd.rename("rename-source", cwd, "rename-target", io) catch |err|
+                    return state.captureCancellation(err),
+                .stat_directory_file => _ = state.directory_file.stat(io) catch |err|
+                    return state.captureCancellation(err),
+            }
+            @panic("directory operation completed before cancellation");
+        }
+
+        fn canceler(io: Io, future: *Io.Future(Io.Cancelable!void)) void {
+            Io.sleep(io, .fromNanoseconds(10), .awake) catch unreachable;
+            _ = future.cancel(io) catch {};
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0xD1ACACE, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4, .min_latency_ns = 1_000 } });
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    try cwd.createDir(io, "existing-dir", .default_dir);
+    var iterable_dir = try cwd.openDir(io, "existing-dir", .{ .iterate = true });
+    defer iterable_dir.close(io);
+    var directory_file = try cwd.openFile(io, "existing-dir", .{ .allow_directory = true });
+    defer directory_file.close(io);
+    var existing_file = try cwd.createFile(io, "existing-file", .{});
+    existing_file.close(io);
+    var delete_target = try cwd.createFile(io, "delete-target", .{});
+    delete_target.close(io);
+    var rename_source = try cwd.createFile(io, "rename-source", .{});
+    rename_source.close(io);
+
+    for (std.enums.values(Operation)) |operation| {
+        var state = State{
+            .operation = operation,
+            .iterable_dir = iterable_dir,
+            .directory_file = directory_file,
+        };
+        var operation_future = try Io.concurrent(io, Helper.operate, .{ io, &state });
+        var cancel_future = try Io.concurrent(io, Helper.canceler, .{ io, &operation_future });
+        cancel_future.await(io);
+        try std.testing.expect(state.canceled);
+    }
+}
+
 test "io: uncancelable futex waits defer delivery to the next cancellation point" {
     if (!fiber_supported) return error.SkipZigTest;
 

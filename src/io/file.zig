@@ -88,6 +88,7 @@ pub fn Ops(comptime Backend: type) type {
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
             return backend.createDirectoryPath(path) catch |err| switch (err) {
+                error.Canceled => error.Canceled,
                 error.OutOfMemory => error.SystemResources,
                 error.PathAlreadyExists => error.PathAlreadyExists,
                 error.FileNotFound => error.FileNotFound,
@@ -119,6 +120,7 @@ pub fn Ops(comptime Backend: type) type {
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
             return backend.openDirectoryHandle(path, options.iterate) catch |err| switch (err) {
+                error.Canceled => error.Canceled,
                 error.OutOfMemory => error.SystemResources,
                 error.FileNotFound => error.FileNotFound,
                 error.NotDir => error.NotDir,
@@ -267,7 +269,10 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.StatError!Io.Dir.Stat {
             const backend = backendFromUserdata(userdata);
             const path = backend.directoryPath(dir) orelse return error.AccessDenied;
-            const stat = backend.disk.statDir(.{ .path = path }) catch return error.AccessDenied;
+            const stat = backend.disk.statDir(.{ .path = path }) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.AccessDenied,
+            };
             return buildDirectoryStat(backend, stat);
         }
 
@@ -289,14 +294,16 @@ pub fn Ops(comptime Backend: type) type {
             if (backend.disk.statDir(.{ .path = path })) |stat| {
                 return buildDirectoryStat(backend, stat);
             } else |err| switch (err) {
+                error.Canceled => return error.Canceled,
                 error.FileNotFound => {},
                 else => return error.FileNotFound,
             }
             // Discovery failures other than not-found collapse to
             // FileNotFound here: StatFileError has no closer member for a
             // crashed or unavailable disk.
-            const file_index = (findOrDiscoverFileMeta(backend, path) catch {
-                return error.FileNotFound;
+            const file_index = (findOrDiscoverFileMeta(backend, path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileNotFound,
             }) orelse return error.FileNotFound;
             return buildFileStat(backend, file_index);
         }
@@ -316,9 +323,13 @@ pub fn Ops(comptime Backend: type) type {
                 else => return error.SystemResources,
             };
             defer backend.releaseFilePathLease(path);
-            if (backend.directoryExists(path) catch return error.FileNotFound) return;
-            _ = (findOrDiscoverFileMeta(backend, path) catch {
-                return error.FileNotFound;
+            if (backend.directoryExists(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileNotFound,
+            }) return;
+            _ = (findOrDiscoverFileMeta(backend, path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileNotFound,
             }) orelse return error.FileNotFound;
         }
 
@@ -340,6 +351,7 @@ pub fn Ops(comptime Backend: type) type {
                 .allocator = backend.allocator,
                 .path = base,
             }) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
                 error.OutOfMemory => return error.SystemResources,
                 else => return error.AccessDenied,
             };
@@ -390,7 +402,10 @@ pub fn Ops(comptime Backend: type) type {
                 else => return error.SystemResources,
             };
             defer backend.releaseFileMutationPaths(path, null);
-            if (backend.directoryExists(path) catch return error.FileNotFound) return error.IsDir;
+            if (backend.directoryExists(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileNotFound,
+            }) return error.IsDir;
             _ = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskDeleteError(err);
             }) orelse return error.FileNotFound;
@@ -419,11 +434,20 @@ pub fn Ops(comptime Backend: type) type {
                 else => return error.SystemResources,
             };
             defer backend.releaseFileMutationPaths(old_path, new_path);
-            if (backend.directoryExists(old_path) catch return error.FileNotFound) return error.IsDir;
-            if (backend.directoryExists(new_path) catch return error.FileNotFound) return error.IsDir;
+            if (backend.directoryExists(old_path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileNotFound,
+            }) return error.IsDir;
+            if (backend.directoryExists(new_path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileNotFound,
+            }) return error.IsDir;
             const new_parent = std.fs.path.dirname(new_path) orelse ".";
             if (!std.mem.eql(u8, new_parent, ".") and
-                !(backend.directoryExists(new_parent) catch return error.FileNotFound))
+                !(backend.directoryExists(new_parent) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => return error.FileNotFound,
+                }))
             {
                 return error.FileNotFound;
             }
@@ -470,7 +494,10 @@ pub fn Ops(comptime Backend: type) type {
                 else
                     buildFileStat(backend, file_index),
                 .directory => |path| {
-                    const stat = backend.disk.statDir(.{ .path = path }) catch return error.AccessDenied;
+                    const stat = backend.disk.statDir(.{ .path = path }) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => return error.AccessDenied,
+                    };
                     return buildDirectoryStat(backend, stat);
                 },
             };
@@ -589,7 +616,7 @@ pub fn Ops(comptime Backend: type) type {
             userdata: ?*anyopaque,
             file: Io.File,
             data: []const []u8,
-        ) Io.Operation.FileReadStreaming.Result {
+        ) (Io.Operation.FileReadStreaming.Error || Io.Cancelable)!usize {
             const backend = backendFromUserdata(userdata);
             const state = backend.file(file.handle) orelse return error.NotOpenForReading;
             if (state.closed or !state.read) return error.NotOpenForReading;
@@ -598,6 +625,7 @@ pub fn Ops(comptime Backend: type) type {
 
             const cursor = state.cursor;
             const read_len = simFileReadPositional(userdata, file, data, cursor) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
                 error.NotOpenForReading => return error.NotOpenForReading,
                 error.AccessDenied => return error.AccessDenied,
                 error.SystemResources => return error.SystemResources,
@@ -622,7 +650,7 @@ pub fn Ops(comptime Backend: type) type {
             header: []const u8,
             data: []const []const u8,
             splat: usize,
-        ) Io.Operation.FileWriteStreaming.Result {
+        ) (Io.Operation.FileWriteStreaming.Error || Io.Cancelable)!usize {
             const backend = backendFromUserdata(userdata);
             const state = backend.file(file.handle) orelse return error.NotOpenForWriting;
             if (state.closed or !state.write) return error.NotOpenForWriting;
@@ -631,6 +659,7 @@ pub fn Ops(comptime Backend: type) type {
 
             const cursor = state.cursor;
             const write_len = simFileWritePositional(userdata, file, header, data, splat, cursor) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
                 error.NotOpenForWriting => return error.NotOpenForWriting,
                 error.AccessDenied => return error.AccessDenied,
                 error.PermissionDenied => return error.PermissionDenied,
