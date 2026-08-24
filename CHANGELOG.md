@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.3 - Unreleased
+## v0.6.3 - 2026-08-24
 
 - Makes scheduler failure a structured, replayable runner outcome. Main-context
   waits now preserve deterministic deadlocks and internal scheduler errors
