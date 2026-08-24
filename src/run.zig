@@ -606,11 +606,22 @@ fn waitWatchdogWorker(pid: std.posix.pid_t) void {
         var status: u32 = 0;
         while (true) {
             const rc = std.os.linux.waitpid(pid, &status, 0);
-            if (std.posix.errno(rc) == .SUCCESS) return;
+            switch (std.posix.errno(rc)) {
+                .SUCCESS, .CHILD => return,
+                .INTR => continue,
+                else => return,
+            }
         }
     } else {
         var status: c_int = 0;
-        while (std.c.waitpid(pid, &status, 0) < 0) {}
+        while (true) {
+            const rc = std.c.waitpid(pid, &status, 0);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS, .CHILD => return,
+                .INTR => continue,
+                else => return,
+            }
+        }
     }
 }
 
@@ -706,7 +717,7 @@ fn watchdogFailureFromShared(
             prefix = &.{};
         }
     }
-    const event_count: u64 = @intCast(std.mem.count(u8, prefix, "event="));
+    const event_count = retainedTraceEventCount(prefix);
     const task_id = shared.header.task_id.load(.acquire);
     const task_running = shared.header.task_running.load(.acquire) != 0;
     const suffix = if (kind == .non_yielding and !task_running)
@@ -735,6 +746,15 @@ fn watchdogFailureFromShared(
         .first_event_count = event_count + 1,
         .error_name = if (kind == .non_yielding) "WatchdogStall" else "WatchdogTimeout",
     } };
+}
+
+fn retainedTraceEventCount(trace: []const u8) u64 {
+    var count: u64 = 0;
+    var lines = std.mem.splitScalar(u8, trace, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "event=")) count += 1;
+    }
+    return count;
 }
 
 fn compareRunOnceResults(
@@ -1542,9 +1562,12 @@ fn awaitNonYieldingTask(case: *SimCase(DeadlockApp)) !void {
     future.await(case.app.io);
 }
 
-fn runNonYieldingOnMain(_: *SimCase(DeadlockApp)) !void {
+fn runNonYieldingOnMain(case: *SimCase(DeadlockApp)) !void {
+    try case.env().record("app.progress event=payload", .{});
     nonYieldingTask();
 }
+
+fn noOpDeadlockScenario(_: *SimCase(DeadlockApp)) !void {}
 
 fn livelockedTask(io: std.Io) void {
     while (true) {
@@ -1605,9 +1628,37 @@ test "runSimCase: watchdog contains non-yielding main-context application code" 
         .passed => return error.ExpectedRunFailure,
         .failed => |failure| {
             try std.testing.expectEqual(RunFailureKind.non_yielding, failure.kind);
+            try std.testing.expectEqual(retainedTraceEventCount(failure.first_trace), failure.first_event_count);
+            try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "app.progress event=payload") != null);
             try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "watchdog.non_yielding task=main") != null);
         },
     }
+}
+
+test "runSimCase: watchdog wait tolerates inherited SIGCHLD ignore" {
+    if (comptime !watchdog_supported or std.posix.Sigaction == void) return error.SkipZigTest;
+
+    var old_action: std.posix.Sigaction = undefined;
+    const ignored_action: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.CHLD, &ignored_action, &old_action);
+    defer std.posix.sigaction(.CHLD, &old_action, null);
+
+    try expectSimPass(.{
+        .allocator = std.testing.allocator,
+        .seed = 0x51C41D,
+        .simulate = World.SimulateOptions{},
+        .init = DeadlockApp.init,
+        .scenario = noOpDeadlockScenario,
+        .watchdog = WatchdogOptions{
+            .stall_timeout_ns = 100 * std.time.ns_per_ms,
+            .run_timeout_ns = 1 * std.time.ns_per_s,
+            .trace_capacity = 64 * 1024,
+        },
+    });
 }
 
 test "expectSimFailure keeps exact failure identity across watchdog isolation" {
