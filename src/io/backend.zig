@@ -2993,18 +2993,8 @@ fn retireKilledAsyncClosures(
 }
 
 fn simRandom(userdata: ?*anyopaque, buffer: []u8) void {
-    const world = worldFromUserdata(userdata);
-    world.unsafeUntracedRandom().bytes(buffer);
-
-    // Trace the draw so replay divergence is visible at the draw site. The
-    // digest stands in for the bytes: byte-identical draws produce
-    // byte-identical trace lines without inflating traces by buffer size.
-    // Wyhash with a fixed seed is deterministic across runs and platforms.
-    const digest = std.hash.Wyhash.hash(0, buffer);
-    world.recordFields("io.random", &.{
-        traceField("len", .{ .uint = @intCast(buffer.len) }),
-        traceField("digest", .{ .uint = digest }),
-    }) catch @panic("failed to record simulated io random");
+    worldFromUserdata(userdata).randomBytes(buffer) catch
+        @panic("failed to record simulated io random");
 }
 
 fn simRandomSecure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {

@@ -1002,6 +1002,22 @@ pub const World = struct {
         return &self.sim_clock;
     }
 
+    /// Fill a buffer from the world's scheduled random stream.
+    ///
+    /// The trace stores a fixed-size digest rather than the payload itself.
+    pub fn randomBytes(self: *World, buffer: []u8) !void {
+        const checkpoint = self.transactionCheckpoint();
+        errdefer self.rollbackTransaction(checkpoint);
+        try self.prepareRandomDraw();
+        self.random.random().bytes(buffer);
+        const digest = std.hash.Wyhash.hash(0, buffer);
+        try self.recordFields("io.random", &.{
+            traceField("len", .{ .uint = @intCast(buffer.len) }),
+            traceField("digest", .{ .uint = digest }),
+        });
+        self.random.finishDraw();
+    }
+
     /// Draw a traced `u64` from the world's scheduled random stream.
     pub fn randomU64(self: *World) !u64 {
         const checkpoint = self.transactionCheckpoint();
@@ -1505,13 +1521,18 @@ test "world: randomIntLessThan records unbiased bounded draws" {
     }
 }
 
-const TracedChoice = enum { integer, boolean, bounded };
+const TracedChoice = enum { integer, boolean, bounded, bytes };
 
 fn drawTracedChoice(world: *World, choice: TracedChoice) !u64 {
     return switch (choice) {
         .integer => try world.randomU64(),
         .boolean => @intFromBool(try world.randomBool()),
         .bounded => try world.randomIntLessThan(u64, 1_000_000),
+        .bytes => blk: {
+            var buffer: [32]u8 = undefined;
+            try world.randomBytes(&buffer);
+            break :blk std.hash.Wyhash.hash(0, &buffer);
+        },
     };
 }
 

@@ -1249,9 +1249,9 @@ test "runSimCase: applies seed schedules at exact random microsteps" {
     var report = try runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1,
-        .seed_schedule = &.{
+        .seed_schedule = @as(seed_module.SeedSchedule, &.{
             .{ .at = .{ .sim_time_ns = 0, .microstep = 1 }, .seed = 2 },
-        },
+        }),
         .simulate = World.SimulateOptions{},
         .init = SeedScheduleApp.init,
         .scenario = seedScheduleScenario,
@@ -1280,10 +1280,10 @@ test "runSimCase: rejects unordered seed schedules" {
     try std.testing.expectError(error.InvalidSeedSchedule, runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1,
-        .seed_schedule = &.{
+        .seed_schedule = @as(seed_module.SeedSchedule, &.{
             .{ .at = .{ .sim_time_ns = 10 }, .seed = 2 },
             .{ .at = .{ .sim_time_ns = 5 }, .seed = 3 },
-        },
+        }),
         .simulate = World.SimulateOptions{},
         .init = Functions.init,
         .scenario = Functions.scenario,
