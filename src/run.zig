@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 
 const env_module = @import("env.zig");
 const run_types = @import("run_types.zig");
+const seed_module = @import("seed.zig");
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
 
@@ -24,6 +25,7 @@ pub const TraceError = world_module.TraceError;
 /// Infrastructure errors from the runners themselves; scenario failures
 /// are reported through `RunReport`, not as errors.
 pub const RunError = std.mem.Allocator.Error || TraceError || error{
+    InvalidSeedSchedule,
     InvalidWatchdogOptions,
     WatchdogUnavailable,
     WatchdogTraceTooLarge,
@@ -244,8 +246,8 @@ pub fn SimCase(comptime App: type) type {
 /// - `init: fn (mar.Sim) App` or `fn (mar.Sim) !App`
 /// - `scenario: fn (*mar.SimCase(App)) !void`
 ///
-/// Optional fields are `seed`, `start_ns`, `tick_ns`, `name`, `tags`,
-/// `attributes`, `checks`, and `watchdog`.
+/// Optional fields are `seed`, `seed_schedule`, `start_ns`, `tick_ns`,
+/// `name`, `tags`, `attributes`, `checks`, and `watchdog`.
 pub fn runSimCase(config: anytype) RunError!RunReport {
     return runSimCaseWithSeed(config, null);
 }
@@ -351,6 +353,7 @@ fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64) RunOptions {
     return .{
         .seed = seed_override orelse configSeed(config),
+        .seed_schedule = fieldOrDefault(config, "seed_schedule", @as(seed_module.SeedSchedule, &.{})),
         .start_ns = fieldOrDefault(config, "start_ns", @as(u64, 0)),
         .tick_ns = fieldOrDefault(config, "tick_ns", @import("clock.zig").default_tick_ns),
         .name = configRunName(config),
@@ -1227,6 +1230,64 @@ test "runSimCase: simulation setup allocation errors remain runner errors" {
         .scenario = Functions.scenario,
     }));
     try std.testing.expect(failing.failed);
+}
+
+const SeedScheduleApp = struct {
+    world: *World,
+
+    fn init(sim: World.Simulation) SeedScheduleApp {
+        return .{ .world = sim.control.world };
+    }
+};
+
+fn seedScheduleScenario(case: *SimCase(SeedScheduleApp)) !void {
+    _ = try case.app.world.randomU64();
+    _ = try case.app.world.randomU64();
+}
+
+test "runSimCase: applies seed schedules at exact random microsteps" {
+    var report = try runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1,
+        .seed_schedule = &.{
+            .{ .at = .{ .sim_time_ns = 0, .microstep = 1 }, .seed = 2 },
+        },
+        .simulate = World.SimulateOptions{},
+        .init = SeedScheduleApp.init,
+        .scenario = seedScheduleScenario,
+    });
+    defer report.deinit();
+
+    switch (report) {
+        .passed => |passed| try expectTraceContains(
+            passed.trace,
+            "world.seed_cutover at_ns=0 microstep=1 applied_ns=0 applied_microstep=1 seed=2",
+        ),
+        .failed => return error.UnexpectedRunFailure,
+    }
+}
+
+test "runSimCase: rejects unordered seed schedules" {
+    const App = struct {};
+    const Functions = struct {
+        fn init(_: World.Simulation) App {
+            return .{};
+        }
+
+        fn scenario(_: *SimCase(App)) !void {}
+    };
+
+    try std.testing.expectError(error.InvalidSeedSchedule, runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1,
+        .seed_schedule = &.{
+            .{ .at = .{ .sim_time_ns = 10 }, .seed = 2 },
+            .{ .at = .{ .sim_time_ns = 5 }, .seed = 3 },
+        },
+        .simulate = World.SimulateOptions{},
+        .init = Functions.init,
+        .scenario = Functions.scenario,
+    }));
 }
 
 var sim_case_deinit_count: u8 = 0;

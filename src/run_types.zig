@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const clock_module = @import("clock.zig");
+const seed_module = @import("seed.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
@@ -100,8 +101,10 @@ pub fn StateCheck(comptime State: type) type {
 
 /// Configuration for one deterministic scenario run.
 pub const RunOptions = struct {
-    /// Seed for the world's random stream.
+    /// Initial seed for the world's random stream.
     seed: u64,
+    /// Ordered seed cutovers. The borrowed slice must remain valid for the run.
+    seed_schedule: seed_module.SeedSchedule = &.{},
     /// Initial simulated timestamp in nanoseconds.
     start_ns: clock_module.Timestamp = 0,
     /// Nanoseconds advanced by one world tick.
@@ -115,9 +118,11 @@ pub const RunOptions = struct {
     /// Optional out-of-process liveness watchdog. Disabled unless supplied so
     /// ordinary runs keep their existing execution/allocator behavior.
     watchdog: ?WatchdogOptions = null,
+
     pub fn worldOptions(self: RunOptions) World.Options {
         return .{
             .seed = self.seed,
+            .seed_schedule = self.seed_schedule,
             .start_ns = self.start_ns,
             .tick_ns = self.tick_ns,
         };
@@ -155,6 +160,9 @@ pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.me
     };
     errdefer deinitRunOptions(allocator, &cloned);
 
+    if (options.seed_schedule.len > 0) {
+        cloned.seed_schedule = try allocator.dupe(seed_module.SeedCutover, options.seed_schedule);
+    }
     if (options.name) |name| {
         cloned.name = try allocator.dupe(u8, name);
     }
@@ -184,6 +192,7 @@ pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.me
 }
 
 pub fn deinitRunOptions(allocator: std.mem.Allocator, options: *RunOptions) void {
+    allocator.free(options.seed_schedule);
     if (options.name) |name| allocator.free(name);
     for (options.tags) |tag| allocator.free(tag);
     allocator.free(options.tags);
@@ -353,6 +362,12 @@ pub const RunFailure = struct {
                 self.second_event_count,
             },
         );
+        for (self.options.seed_schedule) |cutover| {
+            try writer.print(
+                " seed_cutover={}:{}:{}",
+                .{ cutover.at.sim_time_ns, cutover.at.microstep, cutover.seed },
+            );
+        }
         if (self.options.watchdog) |watchdog| {
             try writer.print(
                 " watchdog_stall_ns={} watchdog_run_ns={} watchdog_trace_capacity={}",
@@ -415,4 +430,18 @@ test "runAttribute: accepts string literals" {
 
     try std.testing.expectEqualStrings("profile", attribute.key);
     try std.testing.expectEqualStrings("smoke", attribute.value.string);
+}
+
+test "cloneRunOptions owns seed schedule" {
+    const schedule = [_]seed_module.SeedCutover{
+        .{ .at = .{ .sim_time_ns = 10, .microstep = 2 }, .seed = 99 },
+    };
+    var cloned = try cloneRunOptions(std.testing.allocator, .{
+        .seed = 1,
+        .seed_schedule = &schedule,
+    });
+    defer deinitRunOptions(std.testing.allocator, &cloned);
+
+    try std.testing.expectEqualSlices(seed_module.SeedCutover, &schedule, cloned.seed_schedule);
+    try std.testing.expect(cloned.seed_schedule.ptr != schedule[0..].ptr);
 }

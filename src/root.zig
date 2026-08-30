@@ -197,6 +197,21 @@ pub const expectSimFuzz = run_module.expectSimFuzz;
 /// Errors returned by expectation helpers.
 pub const ExpectRunError = run_module.ExpectRunError;
 
+/// One superdense logical point in the deterministic choice stream.
+pub const DecisionPoint = seed_module.DecisionPoint;
+
+/// Switch the world's random stream at one logical point.
+pub const SeedCutover = seed_module.SeedCutover;
+
+/// Strictly ordered seed cutovers for one run.
+pub const SeedSchedule = seed_module.SeedSchedule;
+
+/// Errors returned by seed-schedule validation.
+pub const SeedScheduleError = seed_module.SeedScheduleError;
+
+/// Validate a seed schedule without constructing a world.
+pub const validateSeedSchedule = seed_module.validateSeedSchedule;
+
 /// Errors returned while parsing a user-supplied seed.
 pub const SeedParseError = seed_module.SeedParseError;
 

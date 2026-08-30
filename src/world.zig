@@ -1,6 +1,6 @@
 //! Deterministic simulation engine state.
 //!
-//! A `World` owns one fake clock, one seeded PRNG, one trace log, and the
+//! A `World` owns one fake clock, one scheduled PRNG, one trace log, and the
 //! registered disk, network, I/O, and scheduler resources for a simulation.
 
 const std = @import("std");
@@ -12,6 +12,7 @@ const env_module = @import("env.zig");
 const io_module = @import("io/root.zig");
 const network_module = @import("network/root.zig");
 const scheduler_module = @import("scheduler.zig");
+const seed_module = @import("seed.zig");
 
 /// Errors returned while writing deterministic trace records.
 pub const TraceError = error{
@@ -64,7 +65,7 @@ pub const ProcessLifecycle = struct {
 const TransactionCheckpoint = struct {
     trace_len: usize,
     event_index: u64,
-    rng: std.Random.DefaultPrng,
+    random: seed_module.RandomState,
 };
 
 /// Infallible observation seam used by the runner's out-of-process watchdog.
@@ -541,7 +542,7 @@ pub fn writeEscapedTraceText(writer: anytype, bytes: []const u8, allow_empty: bo
 
 /// Container for deterministic simulation engine state.
 ///
-/// `World` owns the fake clock, seeded random stream, and trace log used by
+/// `World` owns the fake clock, scheduled random stream, and trace log used by
 /// simulation tests. Application code should usually receive `Env` rather than
 /// `World` directly; `World` is the harness-owned engine.
 pub const World = struct {
@@ -549,8 +550,8 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     /// Fake clock advanced explicitly by the world.
     sim_clock: clock_module.SimClock,
-    /// Seeded pseudorandom number generator for reproducible choices.
-    rng: std.Random.DefaultPrng,
+    /// Scheduled pseudorandom state for reproducible choices.
+    random: seed_module.RandomState,
     /// Byte trace compared by determinism tests.
     trace_log: std.ArrayList(u8),
     /// Next event index to write into the trace.
@@ -573,23 +574,32 @@ pub const World = struct {
 
     /// Configuration for a simulation world.
     pub const Options = struct {
-        /// Seed for the world's random stream.
+        /// Initial seed for the world's random stream.
         seed: u64,
+        /// Ordered seed cutovers. The borrowed slice must outlive the world.
+        seed_schedule: seed_module.SeedSchedule = &.{},
         /// Initial simulated timestamp in nanoseconds.
         start_ns: clock_module.Timestamp = 0,
         /// Nanoseconds advanced by one world tick.
         tick_ns: clock_module.Duration = clock_module.default_tick_ns,
     };
 
+    pub const InitError = std.mem.Allocator.Error || seed_module.SeedScheduleError;
+
     /// Construct a world with deterministic time, randomness, and tracing.
-    pub fn init(allocator: std.mem.Allocator, options: Options) std.mem.Allocator.Error!World {
+    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!World {
+        const random = try seed_module.RandomState.init(
+            options.seed,
+            options.seed_schedule,
+            options.start_ns,
+        );
         var world: World = .{
             .allocator = allocator,
             .sim_clock = .init(.{
                 .start_ns = options.start_ns,
                 .tick_ns = options.tick_ns,
             }),
-            .rng = .init(options.seed),
+            .random = random,
             .trace_log = .empty,
             .event_index = 0,
             .simulation_created = false,
@@ -599,15 +609,25 @@ pub const World = struct {
         errdefer world.deinit();
 
         try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=2\n");
-        world.record(
+        try world.recordInit(
             "world.init seed={} start_ns={} tick_ns={}",
             .{ options.seed, options.start_ns, options.tick_ns },
-        ) catch |err| switch (err) {
+        );
+        for (options.seed_schedule, 0..) |cutover, index| {
+            try world.recordInit(
+                "world.seed_cutover_config index={} at_ns={} microstep={} seed={}",
+                .{ index, cutover.at.sim_time_ns, cutover.at.microstep, cutover.seed },
+            );
+        }
+
+        return world;
+    }
+
+    fn recordInit(self: *World, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
+        self.record(fmt, args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidTracePayload => unreachable,
         };
-
-        return world;
     }
 
     /// Release memory owned by the world.
@@ -982,44 +1002,57 @@ pub const World = struct {
         return &self.sim_clock;
     }
 
-    /// Return an untraced raw `std.Random` view over the world's seeded PRNG.
-    ///
-    /// This is useful for code that needs the full `std.Random` API, but
-    /// individual draws through the returned value are not automatically
-    /// traced. Prefer `randomU64()`, `randomBool()`, or `randomIntLessThan()`
-    /// for simulator choices.
-    pub fn unsafeUntracedRandom(self: *World) std.Random {
-        return self.rng.random();
-    }
-
-    /// Draw a traced `u64` from the world's seeded random stream.
+    /// Draw a traced `u64` from the world's scheduled random stream.
     pub fn randomU64(self: *World) !u64 {
-        const rng_before = self.rng;
-        errdefer self.rng = rng_before;
-        const value = self.rng.random().int(u64);
+        const checkpoint = self.transactionCheckpoint();
+        errdefer self.rollbackTransaction(checkpoint);
+        try self.prepareRandomDraw();
+        const value = self.random.random().int(u64);
         try self.record("world.random_u64 value={}", .{value});
+        self.random.finishDraw();
         return value;
     }
 
-    /// Draw a traced boolean from the world's seeded random stream.
+    /// Draw a traced boolean from the world's scheduled random stream.
     pub fn randomBool(self: *World) !bool {
-        const rng_before = self.rng;
-        errdefer self.rng = rng_before;
-        const value = self.rng.random().boolean();
+        const checkpoint = self.transactionCheckpoint();
+        errdefer self.rollbackTransaction(checkpoint);
+        try self.prepareRandomDraw();
+        const value = self.random.random().boolean();
         try self.record("world.random_bool value={}", .{value});
+        self.random.finishDraw();
         return value;
     }
 
     /// Draw a traced unbiased integer in the range `0 <= value < less_than`.
     pub fn randomIntLessThan(self: *World, comptime T: type, less_than: T) !T {
-        const rng_before = self.rng;
-        errdefer self.rng = rng_before;
-        const value = self.rng.random().intRangeLessThan(T, 0, less_than);
+        const checkpoint = self.transactionCheckpoint();
+        errdefer self.rollbackTransaction(checkpoint);
+        try self.prepareRandomDraw();
+        const value = self.random.random().intRangeLessThan(T, 0, less_than);
         try self.record(
             "world.random_int_less_than type={s} less_than={} value={}",
             .{ @typeName(T), less_than, value },
         );
+        self.random.finishDraw();
         return value;
+    }
+
+    fn prepareRandomDraw(self: *World) (std.mem.Allocator.Error || TraceError)!void {
+        self.random.syncTime(self.now());
+        while (self.random.nextDueCutover()) |_| {
+            const cutover = self.random.applyNextCutover();
+            try self.record(
+                "world.seed_cutover at_ns={} microstep={} applied_ns={} applied_microstep={} seed={}",
+                .{
+                    cutover.at.sim_time_ns,
+                    cutover.at.microstep,
+                    self.random.point.sim_time_ns,
+                    self.random.point.microstep,
+                    cutover.seed,
+                },
+            );
+        }
     }
 
     /// Snapshot the trace and seeded-choice state for a larger simulator
@@ -1030,7 +1063,7 @@ pub const World = struct {
         return .{
             .trace_len = self.trace_log.items.len,
             .event_index = self.event_index,
-            .rng = self.rng,
+            .random = self.random,
         };
     }
 
@@ -1039,7 +1072,7 @@ pub const World = struct {
         std.debug.assert(checkpoint.trace_len <= self.trace_log.items.len);
         self.trace_log.shrinkRetainingCapacity(checkpoint.trace_len);
         self.event_index = checkpoint.event_index;
-        self.rng = checkpoint.rng;
+        self.random = checkpoint.random;
         self.publishExecutionTrace(checkpoint.trace_len);
     }
 
@@ -1335,18 +1368,18 @@ test "world: failed simulation construction leaves the world retryable" {
     );
     const before_teardown_count = world.teardowns.items.len;
     const before_now = world.now();
-    var expected_rng = world.rng;
+    var expected_random = world.random;
 
     try std.testing.expectError(error.SimulationAlreadyCreated, world.simulate(.{}));
     try std.testing.expectEqual(before_teardown_count, world.teardowns.items.len);
     try std.testing.expectEqual(before_now, world.now());
     try std.testing.expectEqual(
-        expected_rng.random().int(u64),
-        world.rng.random().int(u64),
+        expected_random.random().int(u64),
+        world.random.random().int(u64),
     );
 }
 
-test "world: owns seeded random and simulated clock" {
+test "world: owns scheduled random and simulated clock" {
     var a = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer a.deinit();
     var b = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
@@ -1358,11 +1391,59 @@ test "world: owns seeded random and simulated clock" {
     try std.testing.expectEqual(@as(clock_module.Timestamp, 10), a.now());
     try std.testing.expectEqual(a.now(), b.now());
 
-    const random_a = a.unsafeUntracedRandom();
-    const random_b = b.unsafeUntracedRandom();
     for (0..128) |_| {
-        try std.testing.expectEqual(random_a.int(u64), random_b.int(u64));
+        try std.testing.expectEqual(try a.randomU64(), try b.randomU64());
     }
+}
+
+test "world: rejects unordered seed schedules" {
+    try std.testing.expectError(error.InvalidSeedSchedule, World.init(std.testing.allocator, .{
+        .seed = 0,
+        .seed_schedule = &.{
+            .{ .at = .{ .sim_time_ns = 10 }, .seed = 1 },
+            .{ .at = .{ .sim_time_ns = 5 }, .seed = 2 },
+        },
+    }));
+}
+
+test "world: seed cutover at time applies before the next draw" {
+    var scheduled = try World.init(std.testing.allocator, .{
+        .seed = 1,
+        .seed_schedule = &.{
+            .{ .at = .{ .sim_time_ns = 10 }, .seed = 2 },
+        },
+    });
+    defer scheduled.deinit();
+    var expected = try World.init(std.testing.allocator, .{
+        .seed = 2,
+        .start_ns = 10,
+    });
+    defer expected.deinit();
+
+    try scheduled.runFor(10);
+    try std.testing.expectEqual(try expected.randomU64(), try scheduled.randomU64());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        scheduled.traceBytes(),
+        "world.seed_cutover at_ns=10 microstep=0 applied_ns=10 applied_microstep=0 seed=2",
+    ) != null);
+}
+
+test "world: seed cutover microstep selects an exact draw" {
+    var scheduled = try World.init(std.testing.allocator, .{
+        .seed = 1,
+        .seed_schedule = &.{
+            .{ .at = .{ .sim_time_ns = 0, .microstep = 1 }, .seed = 2 },
+        },
+    });
+    defer scheduled.deinit();
+    var before = try World.init(std.testing.allocator, .{ .seed = 1 });
+    defer before.deinit();
+    var after = try World.init(std.testing.allocator, .{ .seed = 2 });
+    defer after.deinit();
+
+    try std.testing.expectEqual(try before.randomU64(), try scheduled.randomU64());
+    try std.testing.expectEqual(try after.randomU64(), try scheduled.randomU64());
 }
 
 test "world: runFor advances whole simulated ticks" {
@@ -1442,13 +1523,19 @@ fn fillTraceCapacity(world: *World) !void {
     );
 }
 
-test "world: trace allocation failure rolls back random draws" {
+test "world: trace allocation failure rolls back random draws and cutovers" {
+    const options = World.Options{
+        .seed = 0xA110C,
+        .seed_schedule = &.{
+            .{ .at = .{ .sim_time_ns = 0 }, .seed = 0xC070FF },
+        },
+    };
     for (std.enums.values(TracedChoice)) |choice| {
-        var expected = try World.init(std.testing.allocator, .{ .seed = 0xA110C });
+        var expected = try World.init(std.testing.allocator, options);
         defer expected.deinit();
         const expected_value = try drawTracedChoice(&expected, choice);
 
-        var world = try World.init(std.testing.allocator, .{ .seed = 0xA110C });
+        var world = try World.init(std.testing.allocator, options);
         defer world.deinit();
         try fillTraceCapacity(&world);
 
