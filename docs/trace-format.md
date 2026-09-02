@@ -84,6 +84,13 @@ Rules:
   `watchdog.livelock task=<u64>`. Host timestamps are never recorded. These
   optional and failure-only vocabulary additions do not change the text
   envelope, so the trace format remains version 2.
+- A non-empty seed schedule records one `world.seed_cutover_config` event per
+  ordered cutover during world initialization, with `index`, `at_ns`,
+  `microstep`, and `seed` fields. When a cutover takes effect,
+  `world.seed_cutover` records its requested `at_ns`/`microstep`, the actual
+  `applied_ns`/`applied_microstep` next random-call boundary, and the new
+  `seed`. These optional events use the existing event grammar, so the text
+  envelope remains version 2.
 - Time-evolved simulator faults are preceded by
   `fault_evolution.boundary now_ns=<u64>`. Seeded scheduling draws and any
   network or process state transitions caused at that timestamp follow the
@@ -140,7 +147,7 @@ Do not record:
 
 Trace bytes are guaranteed only within the full determinism contract: same
 Marionette version, Zig version, target platform, user code, simulation
-options, and seed.
+options, initial seed, and seed schedule.
 
 If Marionette changes the trace layout, it must bump the trace format version.
 If Zig's formatter changes output for a value, that is outside the cross-version

@@ -112,14 +112,17 @@ test "WAL recovery is deterministic" {
 The complete, runnable version is
 [`examples/kv_store.zig`](examples/kv_store.zig). `expectSimPass` runs the case
 twice and compares traces, `expectSimFuzz` repeats that replay check across
-derived seeds.
+derived seeds. Advanced harnesses can supply a strictly ordered
+`seed_schedule` to reset the random stream at a simulated-time/random-call
+microstep; schedules are same-build controls rather than cross-version replay
+artifacts.
 
 ## Install
 
 Marionette requires Zig 0.16.x.
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.3.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.7.0.tar.gz
 ```
 
 Add the module to your test build:

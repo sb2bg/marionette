@@ -12,7 +12,6 @@ const futex_module = @import("futex.zig");
 const net_module = @import("net.zig");
 const network_module = @import("../network/root.zig");
 const World = @import("../world.zig").World;
-const traceField = @import("../world.zig").traceField;
 
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;

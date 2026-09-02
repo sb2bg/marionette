@@ -481,6 +481,11 @@ fn runTwiceWithSimCase(
     comptime scenario: fn (*SimCase(App)) anyerror!void,
     comptime state_checks: []const StateCheck(SimCase(App)),
 ) RunError!RunReport {
+    // Validate runner configuration before optional watchdog isolation. Runner
+    // errors discovered only in the worker must cross a deliberately narrow
+    // shared-memory result channel, so configuration errors belong here.
+    try seed_module.validateSeedSchedule(options.seed_schedule);
+
     // Always execute both runs, even when the first fails: a failure that
     // does not reproduce with the same seed is itself a determinism leak,
     // and a failure that does reproduce is verified replayable.
@@ -1284,6 +1289,30 @@ test "runSimCase: rejects unordered seed schedules" {
             .{ .at = .{ .sim_time_ns = 10 }, .seed = 2 },
             .{ .at = .{ .sim_time_ns = 5 }, .seed = 3 },
         }),
+        .simulate = World.SimulateOptions{},
+        .init = Functions.init,
+        .scenario = Functions.scenario,
+    }));
+}
+
+test "runSimCase: rejects unordered seed schedules before watchdog isolation" {
+    const App = struct {};
+    const Functions = struct {
+        fn init(_: World.Simulation) App {
+            return .{};
+        }
+
+        fn scenario(_: *SimCase(App)) !void {}
+    };
+
+    try std.testing.expectError(error.InvalidSeedSchedule, runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 1,
+        .seed_schedule = @as(seed_module.SeedSchedule, &.{
+            .{ .at = .{ .sim_time_ns = 10 }, .seed = 2 },
+            .{ .at = .{ .sim_time_ns = 5 }, .seed = 3 },
+        }),
+        .watchdog = WatchdogOptions{},
         .simulate = World.SimulateOptions{},
         .init = Functions.init,
         .scenario = Functions.scenario,

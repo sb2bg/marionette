@@ -49,8 +49,8 @@ test "scenario" {
 
 Required runner fields are `allocator`, `simulate`, `init`, and `scenario`.
 `simulate` must be a `mar.World.SimulateOptions` value. Optional fields are
-`seed`, `start_ns`, `tick_ns`, `name`, `tags`, `attributes`, `checks`, and
-`watchdog`.
+`seed`, `seed_schedule`, `start_ns`, `tick_ns`, `name`, `tags`, `attributes`,
+`checks`, and `watchdog`.
 
 - `runSimCase` returns an owned `RunReport`.
 - `expectSimPass` accepts only a passing replay.
@@ -111,8 +111,13 @@ allocator, and an optional recorder into an `Env`. Call `deinit` when finished.
 
 ## World And Simulation
 
-`World.init(allocator, options)` owns seeded randomness, virtual time, trace
-bytes, and simulator resources. Call `deinit`.
+`World.init(allocator, options)` owns scheduled randomness, virtual time, trace
+bytes, and simulator resources. Call `deinit`. `World.Options.seed_schedule`
+borrows a strictly ordered `SeedSchedule` for the lifetime of the world.
+
+Traced harness/model randomness uses `World.randomU64`, `World.randomBool`,
+`World.randomIntLessThan`, or `World.randomBytes`. Application randomness uses
+`std.Random.IoSource` over `Env.io()` so the same schedule covers both layers.
 
 `World.simulate(options)` is one-shot and returns `Sim`:
 
@@ -155,10 +160,18 @@ not invalidate the trace grammar. See [Trace Format](trace-format.md).
 `summarize(allocator, trace)` builds an owned `Summary` with event, subsystem,
 run metadata, and network counts. Call `Summary.deinit`.
 
-## Seed Parsing
+## Seeds And Schedules
 
 `parseSeed` accepts a decimal `u64` or a 40-character Git hash. Hashes map to
 the first eight raw digest bytes in big-endian order.
+
+`DecisionPoint` identifies a traced random-call boundary by simulated time and
+microstep. `SeedCutover` assigns a new seed at one point, `SeedSchedule` is a
+borrowed ordered slice of cutovers, and `validateSeedSchedule` checks strict
+lexicographic ordering. Invalid schedules return `error.InvalidSeedSchedule`.
+
+Schedules are positional and guaranteed only by the same-build determinism
+contract; they do not replace a semantic decision tape for durable replay.
 
 ## Build Tidy
 

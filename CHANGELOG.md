@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.7.0 - Unreleased
+
+- Adds strictly ordered superdense seed schedules. A run can reset its
+  pseudorandom stream at a `(sim_time_ns, microstep)` decision point, where
+  the microstep counts successfully traced random calls at that simulated
+  timestamp. Configuration and applied cutovers are trace-visible, retained
+  in owned run metadata, and included in failure summaries.
+
+- Routes world, simulator, scheduler, allocation, and simulated `std.Io`
+  randomness through the scheduled stream. Random state, cutover position,
+  and logical microstep roll back together when a larger traced transaction
+  fails, preserving exact retries after allocation or trace errors.
+
+- Removes the untraced `World.unsafeUntracedRandom` escape hatch. Harness and
+  model randomness now use traced world methods, while application randomness
+  continues to flow through `std.Random.IoSource` over `Env.io()`.
+
+- Validates seed schedules before optional watchdog isolation so malformed
+  schedules consistently return `error.InvalidSeedSchedule` instead of being
+  misreported as a watchdog result-channel overflow.
+
 ## v0.6.3 - 2026-08-24
 
 - Makes scheduler failure a structured, replayable runner outcome. Main-context

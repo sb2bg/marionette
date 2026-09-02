@@ -49,6 +49,42 @@ The runner owns world and application cleanup. If the app type defines
 `deinit`, it runs before each world is destroyed and remains part of replay
 comparison.
 
+## Seed Schedules
+
+Use `seed_schedule` to reset the deterministic random stream at exact traced
+random-call boundaries without changing simulated time:
+
+```zig
+const schedule = [_]mar.SeedCutover{
+    .{
+        .at = .{ .sim_time_ns = 10, .microstep = 0 },
+        .seed = 0xA11CE,
+    },
+    .{
+        .at = .{ .sim_time_ns = 10, .microstep = 3 },
+        .seed = 0xB0B,
+    },
+};
+
+var report = try mar.runSimCase(.{
+    .allocator = allocator,
+    .seed = 0xC0FFEE,
+    .seed_schedule = @as(mar.SeedSchedule, &schedule),
+    // simulate, init, and scenario omitted
+});
+defer report.deinit();
+```
+
+Cutovers must be strictly increasing by `(sim_time_ns, microstep)` or the
+runner returns `error.InvalidSeedSchedule`. A microstep counts one successfully
+traced random API call at that simulated timestamp, including one
+`Io.random` call regardless of its buffer length. If execution passes a point
+without drawing randomness there, the cutover takes effect before the next
+later draw. Schedules are reproduced in traces and failure summaries.
+
+This is a same-build positional control, not a durable replay format. Code that
+adds or removes an earlier random call can shift later microsteps.
+
 ## Outcomes
 
 `RunReport` is either `passed` or `failed`.

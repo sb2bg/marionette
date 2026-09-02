@@ -1,13 +1,13 @@
 # Determinism Contract
 
-For a fixed build, target, configuration, seed, and application input,
-Marionette must produce the same trace and outcome.
+For a fixed build, target, configuration, initial seed, seed schedule, and
+application input, Marionette must produce the same trace and outcome.
 
 ## Controlled Inputs
 
 Simulation behavior may depend on:
 
-- the configured seed and virtual start time;
+- the configured initial seed, seed schedule, and virtual start time;
 - typed simulator options and fault profiles;
 - application input supplied by the harness;
 - deterministic `std.Io` time, randomness, files, network, and task behavior;
@@ -28,10 +28,24 @@ to each. Large campaigns run in the nightly seed sweep.
 
 ## Randomness
 
-Harness and model choices use the world's seeded PRNG. Application algorithms
-should draw through `std.Random.IoSource` over `Env.io()`. Direct
-`World.unsafeUntracedRandom` draws are deterministic today but are not recorded
-as individual decisions; avoid them in durable replay-sensitive code.
+Harness and model choices use the world's scheduled PRNG. Application
+algorithms should draw through `std.Random.IoSource` over `Env.io()`. Harnesses
+and model code use the traced `World.randomU64`, `World.randomBool`,
+`World.randomIntLessThan`, or `World.randomBytes` methods.
+
+An optional seed schedule resets the PRNG before the first traced random call
+at or after a superdense `(sim_time_ns, microstep)` point. `microstep` starts at
+zero at each simulated timestamp and counts successfully committed traced
+random calls, not internal PRNG words. One `Io.random` call therefore advances
+one microstep regardless of buffer length. If no random call occurs at the
+scheduled point, the cutover is applied before the next later call; multiple
+due cutovers are applied in schedule order.
+
+Seed schedules are exact only for the same build and configuration. They are a
+positional control surface, not a durable cross-version replay artifact:
+inserting, removing, or reordering an earlier random call can move every later
+microstep. Durable replay requires semantic decision-site identities and
+recorded selected values rather than only a PRNG reset position.
 
 Disabled probabilistic faults consume no random values, so toggling one off
 does not shift unrelated choices.
