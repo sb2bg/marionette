@@ -100,3 +100,18 @@ The final metadata serialization changes were additionally rerun through the
 complete core matrix. No remaining release-blocking source defect was found in
 this review. Linux execution and final-revision hosted CI remain unverified
 locally; publishing/tagging has not been performed.
+
+## Hosted Release Gate Follow-up
+
+The first release-candidate CI run exposed an allocation-failure cleanup crash
+in Linux Debug that the local macOS matrix did not expose. Both execution capture
+and capsule decoding assigned a tagged failure union containing a fallible clone.
+The destination tag could become visible before the clone completed; failure
+cleanup then inspected an unfinished payload. Failure and optional divergence
+payloads now finish cloning in local storage before ownership is published.
+
+The original crash was reproduced using an x86 Linux test binary in Docker.
+The fixed ownership tests and all seven replay-capsule tests passed in that
+container, and the macOS Debug suite passed. An additional allocation-failure
+regression exercises nested diagnostic ownership. Final release approval still
+requires a successful hosted CI run for the corrected commit.
