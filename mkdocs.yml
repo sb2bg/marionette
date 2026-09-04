@@ -35,6 +35,7 @@ nav:
       - API: api.md
       - Examples: examples.md
       - Determinism: determinism.md
+      - Decision Tapes: decision-tapes.md
       - Trace Format: trace-format.md
       - BUGGIFY: buggify.md
       - Network Model: network.md

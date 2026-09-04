@@ -10,19 +10,15 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Current: 0.7 — Replay, Reduce, Explain
+## Next: Reduction And Explanation
 
-Turn a failure into a durable, minimal, executable artifact.
+0.7 delivers seed schedules, typed decisions including application random bytes,
+exact replay, persistent capsules for pinned builds/workloads, structured
+divergence, and opt-in simulated handle checks. These completed foundations are
+documented in `CHANGELOG.md` and `docs/decision-tapes.md`.
 
-### Decision Tape And Replay
-
-- Record globally ordered typed choices with stable semantic site IDs, logical
-  time, microstep, alternatives, and selected value.
-- Cover scheduling, network/disk faults, allocation, workload generation, and
-  application randomness.
-- Store build, target, SUT, model, options, seed, trace, failure fingerprint,
-  and the decision tape in a versioned replay capsule.
-- On divergence, report the first mismatched site and preceding causal event.
+The remaining replay roadmap turns those artifacts into minimal failures and
+adds richer diagnostics; these features are not part of the 0.7 release scope.
 
 ### Properties And Reduction
 
@@ -33,8 +29,12 @@ Turn a failure into a durable, minimal, executable artifact.
 
 ### Harness
 
-- Add one concise high-level entry point that owns lifecycle, profiles,
-  properties, replay, and artifacts.
+- Opt-in simulated handle checks are implemented at explicit harness checkpoints
+  and after application cleanup, with replayable `resource_leak` diagnostics.
+  Allocation-site stacks and generic user-resource tracking remain future work.
+
+- Extend `runSimCase` with properties and artifact-directory management; keep
+  the single scenario lifecycle entry point.
 - Keep application code on `std.Io`, `std.Io.Dir`, `Recorder`, and
   application-owned interfaces.
 - Own routine process restart/reopen wiring without hiding expanded simulator

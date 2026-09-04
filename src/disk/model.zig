@@ -35,7 +35,7 @@ pub const DiskError = error{
     Canceled,
     ReadError,
     WriteError,
-} || std.mem.Allocator.Error || @import("../world.zig").TraceError;
+} || std.mem.Allocator.Error || @import("../world.zig").TraceError || @import("../world.zig").DecisionError;
 
 /// Scheduler hook used by `SimDisk` to suspend task-side operations until
 /// their simulated completion deadline without depending on the scheduler
@@ -115,7 +115,11 @@ pub const Disk = struct {
     pub const DirEntry = DiskDirEntry;
     pub const DirEntryKind = DiskDirEntryKind;
     pub const DirList = DiskDirList;
+    /// Non-suspending simulator metadata view. Host adapters leave it absent.
+    /// Paths are borrowed only until the next disk mutation.
+    pub const Snapshot = struct { path: []const u8, inode: u64, size: u64, mtime_ns: u64 };
     pub const VTable = struct {
+        inspect: ?*const fn (*anyopaque, u64) ?Snapshot = null,
         read: *const fn (*anyopaque, Read) DiskError!void,
         write: *const fn (*anyopaque, Write) DiskError!void,
         sync: *const fn (*anyopaque, Sync) DiskError!void,

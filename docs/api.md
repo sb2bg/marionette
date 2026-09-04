@@ -1,5 +1,9 @@
 # API Reference
 
+Opt-in runner `.check_resources = true` checks handles after application
+cleanup; `sim.control.checkResources()` checks at an explicit checkpoint.
+See [handle-check semantics](run.md#outcomes) for scope and failure behavior.
+
 Import the package as:
 
 ```zig
@@ -13,7 +17,8 @@ still change between minor releases.
 
 `runSimCase` is the primary runner. It creates a world, constructs the
 simulation, initializes application state, runs the scenario and named checks,
-then repeats the execution with the same seed and compares traces.
+then repeats the execution using the first execution's semantic decision tape
+and compares traces.
 
 ```zig
 const Case = mar.SimCase(App);
@@ -50,7 +55,7 @@ test "scenario" {
 Required runner fields are `allocator`, `simulate`, `init`, and `scenario`.
 `simulate` must be a `mar.World.SimulateOptions` value. Optional fields are
 `seed`, `seed_schedule`, `start_ns`, `tick_ns`, `name`, `tags`, `attributes`,
-`checks`, and `watchdog`.
+`checks`, `watchdog`, and `check_resources`.
 
 - `runSimCase` returns an owned `RunReport`.
 - `expectSimPass` accepts only a passing replay.
@@ -60,22 +65,24 @@ Required runner fields are `allocator`, `simulate`, `init`, and `scenario`.
 - `expectSimFuzz` repeats a case across a derived seed sequence; add `seeds`.
 - `expectTraceContains` prints the trace tail when an expected event is absent.
 
-Call `RunReport.deinit`. A passed report contains the first trace and event
-count. A failed report contains its failure kind, error/check names, partial
-first trace, and a second trace when replay diverged.
+Call `RunReport.deinit`. A passed report contains the first trace, event count,
+and owned decision tape. A failed report contains its failure kind,
+error/check names, owned decision tape, partial first trace, and a second trace
+when replay diverged. `takeDecisionTape` transfers tape ownership.
 
 `RunFailureKind` includes scenario and check errors, structured scheduler
-deadlocks/errors, watchdog-classified `non_yielding`/`livelock` failures, and
-the three replay-mismatch outcomes.
+deadlocks/errors, watchdog-classified `non_yielding`/`livelock`/`worker_crashed` failures,
+`replay_diverged`, and the three trace/outcome replay-mismatch kinds.
 
 `WatchdogOptions` enables optional worker-process containment with
-`stall_timeout_ns`, `run_timeout_ns`, and `trace_capacity` bounds. It is
+`stall_timeout_ns`, `run_timeout_ns`, `trace_capacity`, and `result_capacity` bounds. It is
 available on Linux, macOS, the supported BSD hosts, and illumos. The watchdog
 uses host monotonic time outside simulation and should be enabled only from a
 single-threaded harness process. Unsupported hosts return
 `error.WatchdogUnavailable`; invalid or unrepresentable bounds return
 `error.InvalidWatchdogOptions`. `error.WatchdogTraceTooLarge` indicates that
-failure identity metadata could not fit the worker result channel.
+the encoded completed execution (including its tape) could not fit the worker
+result channel.
 
 ## Scenario State
 
@@ -132,6 +139,13 @@ Traced harness/model randomness uses `World.randomU64`, `World.randomBool`,
 optional network topology, task stacks, start jitter, and fiber overflow
 diagnostics.
 
+`World.Options.decisions` selects decision recording (the default) or exact
+replay from a borrowed `[]const Decision`. `chooseU64`, `chooseBool`, and
+`chooseIntLessThan` require stable semantic site IDs. `decisionTape` borrows
+the current entries, `cloneDecisionTape` returns owned storage, and
+`finishDecisionReplay` rejects an unconsumed replay suffix. See
+[Decision Tapes](decision-tapes.md).
+
 ## Control
 
 `Control` contains:
@@ -178,3 +192,19 @@ contract; they do not replace a semantic decision tape for durable replay.
 The build API exports `addTidyStep` and `addTidyExecutable`. The AST-based scan
 rejects configured ambient host authorities while ignoring comments and string
 literals. Prefer narrow pattern allowlists to whole-file exemptions.
+
+
+## Persistent Replay
+
+`ReplayIdentity` identifies the pinned build, workload/SUT, toolchain, target,
+optimization mode, and disk model. `ReplayCapsule.encode` returns caller-owned
+JSON bytes from a complete reproducible report; the report retains the simulation
+options actually used.
+`ReplayCapsule.decode` owns the parsed artifact; call `deinit` after use.
+`replaySimCase(config, &capsule, identity)` verifies compatibility and reexecutes
+the recorded choices, checking the trace and failure identity. Its config supplies
+allocator, initializer, scenario, and original checks. The capsule supplies runtime
+options. See [Decision Tapes And Replay Capsules](decision-tapes.md).
+
+The unused legacy `NetworkOptions` topology type was removed in 0.7. Configure
+the active runtime through `World.SimulateOptions.network` instead.

@@ -6,6 +6,7 @@ const std = @import("std");
 
 const allocation_module = @import("allocation.zig");
 const clock_module = @import("clock.zig");
+const decision_module = @import("decision.zig");
 const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
 const fault_module = @import("fault.zig");
@@ -41,6 +42,33 @@ pub const NetworkError = network_module.NetworkError;
 
 /// Default simulated tick size in nanoseconds.
 pub const default_tick_ns = clock_module.default_tick_ns;
+
+/// One globally ordered semantic choice stored in a decision tape.
+pub const Decision = decision_module.Decision;
+
+/// Actual semantic choice boundary presented during exact replay.
+pub const DecisionRequest = decision_module.Request;
+
+/// Typed alternatives presented at a deterministic choice site.
+pub const DecisionAlternatives = decision_module.Alternatives;
+
+/// Record choices or replay a borrowed decision tape.
+pub const DecisionMode = decision_module.Mode;
+
+/// Owned decision tape returned by runner results.
+pub const DecisionTape = decision_module.Tape;
+
+/// First exact-replay mismatch and its expected/actual choice boundary.
+pub const DecisionDivergence = decision_module.Divergence;
+
+/// Exact-replay mismatch classification.
+pub const DecisionDivergenceKind = decision_module.DivergenceKind;
+
+/// Current in-memory decision-tape semantic version.
+pub const decision_tape_format_version = decision_module.format_version;
+
+/// Errors returned while recording or exact-replaying semantic decisions.
+pub const DecisionError = decision_module.Error;
 
 /// App-facing disk capability.
 pub const Disk = disk_module.Disk;
@@ -112,9 +140,6 @@ pub const AllocationControl = env_module.AllocationControl;
 /// Deterministic simulation engine state.
 pub const World = @import("world.zig").World;
 
-/// Fixed topology and per-path capacity for one network simulation.
-pub const NetworkOptions = network_module.NetworkOptions;
-
 /// Runtime network loss configuration.
 pub const NetworkLossOptions = network_module.NetworkLossOptions;
 
@@ -157,6 +182,10 @@ pub const FailureExpectation = run_module.FailureExpectation;
 pub const RunFailureKind = run_module.RunFailureKind;
 
 /// Result of `runSimCase`: either a verified replay or a failure report.
+pub const ReplayCapsule = @import("replay.zig").Capsule;
+pub const ReplayIdentity = @import("replay.zig").Identity;
+pub const replaySimCase = run_module.replaySimCase;
+
 pub const RunReport = run_module.RunReport;
 /// Optional out-of-process liveness watchdog configuration.
 pub const WatchdogOptions = run_module.WatchdogOptions;
@@ -255,6 +284,7 @@ test "public roots hide internal wiring" {
 
 test {
     _ = @import("disk/root.zig");
+    _ = @import("decision.zig");
     _ = @import("env.zig");
     _ = @import("message_pool.zig");
     _ = @import("network/root.zig");

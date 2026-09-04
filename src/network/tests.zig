@@ -2,16 +2,12 @@ const std = @import("std");
 
 const clock_module = @import("../clock.zig");
 const endpoint_module = @import("endpoint.zig");
-const packet_core = @import("packet_core.zig");
 const sim_module = @import("sim.zig");
 const types = @import("types.zig");
 const World = @import("../world.zig").World;
 
 const Endpoint = endpoint_module.Endpoint;
-const NetworkOptions = types.NetworkOptions;
 const NodeId = types.NodeId;
-const NetworkSimulation = packet_core.NetworkSimulation;
-const UnstableNetwork = packet_core.UnstableNetwork;
 const commitReadyStreamEventFromControl = sim_module.commitReadyStreamEventFromControl;
 const initSimControl = sim_module.initSimControl;
 const peekReadyStreamEventFromControl = sim_module.peekReadyStreamEventFromControl;
@@ -24,125 +20,6 @@ const TestPayload = struct {
 const OtherTestPayload = struct {
     value: u64,
 };
-
-const test_options: NetworkOptions = .{
-    .node_count = 3,
-    .client_count = 1,
-    .path_capacity = 8,
-};
-
-test "network: delivers ready packets by time then packet id" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try network.send(0, 2, .{ .value = 2 }, .{ .min_latency_ns = 10 });
-
-    try std.testing.expectEqual(@as(?clock_module.Timestamp, 10), network.nextDeliveryAt());
-    try std.testing.expectEqual(@as(?Network.Packet, null), try network.popReady());
-
-    try world.runFor(10);
-    const first = (try network.popReady()).?;
-    const second = (try network.popReady()).?;
-
-    try std.testing.expectEqual(@as(u64, 0), first.id);
-    try std.testing.expectEqual(@as(u64, 1), second.id);
-    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.send id=0 from=0 to=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=1 from=0 to=2") != null);
-}
-
-test "network: traces deterministic drops" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try network.send(0, 1, .{ .value = 1 }, .{ .drop_rate = .always() });
-
-    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 drop_rate=1/1") != null);
-}
-
-test "network: queue capacity is per directed path" {
-    const Network = UnstableNetwork(TestPayload, .{
-        .node_count = 3,
-        .client_count = 1,
-        .path_capacity = 1,
-    });
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try std.testing.expectError(error.EventQueueFull, network.send(0, 1, .{ .value = 2 }, .{ .min_latency_ns = 10 }));
-
-    try network.send(0, 2, .{ .value = 3 }, .{ .min_latency_ns = 10 });
-    try std.testing.expectEqual(@as(usize, 2), network.pendingCount());
-}
-
-test "network: invalid nodes are runtime errors" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    const invalid_node: NodeId = @intCast(Network.process_count);
-
-    try std.testing.expectError(error.InvalidNode, network.nodeUp(invalid_node));
-    try std.testing.expectError(error.InvalidNode, network.linkEnabled(0, invalid_node));
-    try std.testing.expectError(error.InvalidNode, network.control().setNode(invalid_node, false));
-    try std.testing.expectError(
-        error.InvalidNode,
-        network.send(0, invalid_node, .{ .value = 1 }, .{ .min_latency_ns = 10 }),
-    );
-}
-
-test "network: invalid durations are runtime errors" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-
-    try std.testing.expectError(error.InvalidDuration, sim.control().network.clog(0, 1, 0));
-    try std.testing.expectError(error.InvalidDuration, sim.control().network.clog(0, 1, 11));
-    try std.testing.expectError(
-        error.InvalidDuration,
-        sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 11 }),
-    );
-    try std.testing.expectError(
-        error.InvalidDuration,
-        sim.packetCore().send(0, 1, .{ .value = 1 }, .{
-            .min_latency_ns = 10,
-            .latency_jitter_ns = 11,
-        }),
-    );
-    try std.testing.expectError(
-        error.InvalidDuration,
-        sim.packetCore().send(0, 1, .{ .value = 1 }, .{
-            .min_latency_ns = 10,
-            .latency_jitter_ns = std.math.maxInt(clock_module.Duration) - 9,
-        }),
-    );
-    try std.testing.expectError(
-        error.InvalidDuration,
-        sim.control().network.setFaults(.{
-            .min_latency_ns = 10,
-            .latency_jitter_ns = std.math.maxInt(clock_module.Duration) - 9,
-        }),
-    );
-    // Misaligned `runFor` durations are harness misuse and assert rather
-    // than returning an error; see the runFor misuse contract.
-}
 
 test "network: full-range latency jitter does not overflow its draw bound" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0x1A7E, .tick_ns = 1 });
@@ -157,306 +34,6 @@ test "network: full-range latency jitter does not overflow its draw bound" {
     try sender.send(1, .{ .value = 1 });
 
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.random_u64") != null);
-}
-
-test "network: invalid drop rates are runtime errors" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-
-    try std.testing.expectError(
-        error.InvalidRate,
-        network.send(0, 1, .{ .value = 1 }, .{
-            .drop_rate = .{ .numerator = 1, .denominator = 0 },
-            .min_latency_ns = 10,
-        }),
-    );
-    try std.testing.expectError(
-        error.InvalidRate,
-        network.send(0, 1, .{ .value = 1 }, .{
-            .drop_rate = .{ .numerator = 2, .denominator = 1 },
-            .min_latency_ns = 10,
-        }),
-    );
-}
-
-test "network simulation: control view owns fault orchestration" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-    try sim.control().network.setLink(0, 1, false);
-    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try sim.runFor(10);
-
-    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.link from=0 to=1 enabled=false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=link_disabled") != null);
-}
-
-test "network: clogged path waits while other paths deliver" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-    try sim.control().network.clog(0, 1, 30);
-    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try sim.packetCore().send(0, 2, .{ .value = 2 }, .{ .min_latency_ns = 10 });
-
-    try std.testing.expectEqual(@as(?clock_module.Timestamp, 10), sim.packetCore().nextDeliveryAt());
-    try world.runFor(10);
-    const first = (try sim.packetCore().popReady()).?;
-    try std.testing.expectEqual(@as(NodeId, 2), first.to);
-    try std.testing.expectEqual(@as(u64, 1), first.id);
-
-    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
-    try std.testing.expectEqual(@as(?clock_module.Timestamp, 30), sim.packetCore().nextDeliveryAt());
-
-    try sim.runFor(20);
-    const second = (try sim.packetCore().popReady()).?;
-    try std.testing.expectEqual(@as(NodeId, 1), second.to);
-    try std.testing.expectEqual(@as(u64, 0), second.id);
-
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.clog from=0 to=1 duration_ns=30 until_ns=30") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.unclog from=0 to=1 active=false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=1 from=0 to=2 now_ns=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1 now_ns=30") != null);
-}
-
-test "network: explicit unclog releases queued packets early" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-    try sim.control().network.clog(0, 1, 30);
-    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-
-    try sim.runFor(10);
-    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try sim.packetCore().popReady());
-    try sim.control().network.unclog(0, 1);
-
-    const packet = (try sim.packetCore().popReady()).?;
-    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.unclog from=0 to=1 active=true") != null);
-}
-
-test "network simulation: outer tick advances time and faults" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-    try sim.control().network.clog(0, 1, 10);
-    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-
-    try sim.tick();
-
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
-    const packet = (try sim.packetCore().popReady()).?;
-    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "world.tick now_ns=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.unclog from=0 to=1 active=false") != null);
-}
-
-test "network: heal clears active clogs" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-    try sim.control().network.clog(0, 1, 30);
-    try sim.control().network.heal();
-
-    try sim.packetCore().send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try sim.runFor(10);
-    const packet = (try sim.packetCore().popReady()).?;
-    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal disabled_count=0 down_count=0 clogged_count=1") != null);
-}
-
-test "network: disabled links drop ready packets at delivery" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try network.control().setLink(0, 1, false);
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try world.runFor(10);
-
-    try std.testing.expectEqual(@as(?Network.Packet, null), try network.popReady());
-    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.link from=0 to=1 enabled=false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=link_disabled") != null);
-}
-
-test "network: partition disables crossing links and heal resets network state" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    const left = [_]NodeId{0};
-    const right = [_]NodeId{ 1, 2 };
-
-    try network.control().partition(&left, &right);
-    try network.control().setNode(2, false);
-    try std.testing.expect(!try network.linkEnabled(0, 1));
-    try std.testing.expect(!try network.linkEnabled(1, 0));
-    try std.testing.expect(!try network.linkEnabled(0, 2));
-    try std.testing.expect(!try network.linkEnabled(2, 0));
-    try std.testing.expect(try network.linkEnabled(1, 2));
-    try std.testing.expect(!try network.nodeUp(2));
-
-    try network.control().heal();
-    try std.testing.expect(try network.linkEnabled(0, 1));
-    try std.testing.expect(try network.linkEnabled(1, 0));
-    try std.testing.expect(try network.nodeUp(2));
-
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try world.runFor(10);
-    const packet = (try network.popReady()).?;
-    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
-
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.partition left_count=1 right_count=2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.link from=0 to=1 enabled=false") == null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal disabled_count=4 down_count=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
-}
-
-test "network: healLinks leaves node state unchanged" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try network.control().setLink(0, 1, false);
-    try network.control().setNode(1, false);
-
-    try network.control().healLinks();
-    try std.testing.expect(try network.linkEnabled(0, 1));
-    try std.testing.expect(!try network.nodeUp(1));
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.heal_links disabled_count=1") != null);
-}
-
-test "network: down source cannot send" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try std.testing.expect(try network.nodeUp(0));
-
-    try network.control().setNode(0, false);
-    try std.testing.expect(!try network.nodeUp(0));
-
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.node node=0 up=false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=source_down") != null);
-}
-
-test "network: down destination drops ready packets at delivery" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 10 });
-    try network.control().setNode(1, false);
-    try world.runFor(10);
-
-    try std.testing.expectEqual(@as(?Network.Packet, null), try network.popReady());
-    try std.testing.expectEqual(@as(usize, 0), network.pendingCount());
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.drop id=0 from=0 to=1 reason=destination_down") != null);
-}
-
-test "network: restarted destination can receive queued packets" {
-    const Network = UnstableNetwork(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    var network = Network.init(&world);
-    try network.send(0, 1, .{ .value = 1 }, .{ .min_latency_ns = 20 });
-    try network.control().setNode(1, false);
-    try world.runFor(10);
-    try network.control().setNode(1, true);
-    try world.runFor(10);
-
-    const packet = (try network.popReady()).?;
-    try std.testing.expectEqual(@as(NodeId, 1), packet.to);
-    try std.testing.expectEqual(@as(u64, 1), packet.payload.value);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.node node=1 up=false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.node node=1 up=true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver id=0 from=0 to=1") != null);
-}
-
-test "network simulation: nextDelivery drains queued packets" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-    const network = sim.network();
-    var values: [4]u64 = undefined;
-    var count: usize = 0;
-
-    try sim.control().network.setFaults(.{ .min_latency_ns = 10 });
-    try network.send(0, 1, .{ .value = 1 });
-    try network.send(0, 1, .{ .value = 2 });
-    while (try network.nextDelivery()) |packet| {
-        values[count] = packet.payload.value;
-        count += 1;
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), count);
-    try std.testing.expectEqual(@as(u64, 1), values[0]);
-    try std.testing.expectEqual(@as(u64, 2), values[1]);
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
-    try std.testing.expectEqual(@as(usize, 0), sim.packetCore().pendingCount());
-}
-
-test "network simulation: nextDelivery advances time and returns packets" {
-    const Sim = NetworkSimulation(TestPayload, test_options);
-
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const authorities = try world.simulate(.{});
-    var sim = try Sim.init(authorities.control);
-    const network = sim.network();
-
-    try sim.control().network.setFaults(.{ .min_latency_ns = 20 });
-    try network.send(0, 1, .{ .value = 1 });
-
-    const packet = (try network.nextDelivery()).?;
-    try std.testing.expectEqual(@as(u64, 1), packet.payload.value);
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
-    try std.testing.expectEqual(@as(?Sim.PacketCore.Packet, null), try network.nextDelivery());
 }
 
 test "composition network: endpoints for the same payload share one runtime" {
@@ -950,4 +527,116 @@ test "composition network: manual and automatic partitions compose" {
     try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try node_2.receive());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_heal") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=link_disabled") != null);
+}
+
+// Coverage migrated from the deleted fixed-topology packet implementation.
+test "network contract: invalid node rate and duration validation" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const control = sim.control.network;
+    const sender = try sim.endpoint(TestPayload, 0);
+    try std.testing.expectError(error.InvalidNode, sim.endpoint(TestPayload, 3));
+    try std.testing.expectError(error.InvalidNode, sender.send(3, .{ .value = 1 }));
+    try std.testing.expectError(error.InvalidNode, control.setNode(3, false));
+    try std.testing.expectError(error.InvalidNode, control.setLink(0, 3, false));
+    try std.testing.expectError(error.InvalidDuration, control.clog(0, 1, 0));
+    try std.testing.expectError(error.InvalidDuration, control.clog(0, 1, 11));
+    try std.testing.expectError(error.InvalidDuration, control.setLatency(.{ .min_latency_ns = 11 }));
+    try std.testing.expectError(error.InvalidDuration, control.setLatency(.{ .latency_jitter_ns = 11 }));
+    try std.testing.expectError(error.InvalidDuration, control.setLatency(.{ .min_latency_ns = 10, .latency_jitter_ns = std.math.maxInt(u64) - 9 }));
+    try std.testing.expectError(error.InvalidRate, control.setLossiness(.{ .drop_rate = .{ .numerator = 1, .denominator = 0 } }));
+    try std.testing.expectError(error.InvalidRate, control.setLossiness(.{ .drop_rate = .{ .numerator = 2, .denominator = 1 } }));
+}
+
+test "network contract: same destination orders by delivery time then packet id and drains" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const first = try sim.endpoint(TestPayload, 0);
+    const second = try sim.endpoint(TestPayload, 1);
+    const receiver = try sim.endpoint(TestPayload, 2);
+    try sim.control.network.setLatency(.{ .min_latency_ns = 20 });
+    try first.send(2, .{ .value = 3 });
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try second.send(2, .{ .value = 1 });
+    try first.send(2, .{ .value = 2 });
+    for ([_]u64{ 1, 2, 3 }) |value| {
+        try std.testing.expectEqual(value, (try receiver.receive()).?.message.value);
+    }
+    try std.testing.expectEqual(@as(u64, 20), world.now());
+    try std.testing.expect((try receiver.receive()) == null);
+}
+
+test "network contract: clog isolation expiry explicit unclog and heal" {
+    for (0..4) |mode| {
+        var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+        defer world.deinit();
+        const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+        const sender = try sim.endpoint(TestPayload, 0);
+        const blocked = try sim.endpoint(TestPayload, 1);
+        const other = try sim.endpoint(TestPayload, 2);
+        try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+        try sim.control.network.clog(0, 1, 30);
+        try sender.send(1, .{ .value = 1 });
+        try sender.send(2, .{ .value = 2 });
+        try std.testing.expectEqual(@as(u64, 2), (try other.receive()).?.message.value);
+        try std.testing.expectEqual(@as(u64, 10), world.now());
+        switch (mode) {
+            0 => {},
+            1 => try sim.control.network.unclog(0, 1),
+            2 => try sim.control.network.heal(),
+            3 => {
+                try sim.control.tick();
+                try sim.control.tick();
+            },
+            else => unreachable,
+        }
+        try std.testing.expectEqual(@as(u64, 1), (try blocked.receive()).?.message.value);
+        try std.testing.expectEqual(@as(u64, if (mode == 0 or mode == 3) 30 else 10), world.now());
+    }
+}
+
+test "network contract: partition healLinks and node lifecycle retain distinct meanings" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const a = try sim.endpoint(TestPayload, 0);
+    const b = try sim.endpoint(TestPayload, 1);
+    const c = try sim.endpoint(TestPayload, 2);
+    const control = sim.control.network;
+    try control.partition(&.{0}, &.{1});
+    try a.send(1, .{ .value = 1 });
+    try std.testing.expect((try b.receive()) == null);
+    try b.send(0, .{ .value = 2 });
+    try std.testing.expect((try a.receive()) == null);
+    try a.send(2, .{ .value = 3 });
+    try std.testing.expectEqual(@as(u64, 3), (try c.receive()).?.message.value);
+    try control.setNode(1, false);
+    try control.healLinks();
+    try b.send(0, .{ .value = 4 });
+    try std.testing.expect((try a.receive()) == null); // source still down
+    try a.send(1, .{ .value = 5 });
+    try std.testing.expect((try b.receive()) == null); // destination still down
+    try control.heal();
+    try a.send(1, .{ .value = 6 });
+    try std.testing.expectEqual(@as(u64, 6), (try b.receive()).?.message.value);
+    try control.setNode(1, false);
+    try a.send(1, .{ .value = 7 });
+    try control.setNode(1, true);
+    try std.testing.expectEqual(@as(u64, 7), (try b.receive()).?.message.value);
+    try control.setLink(0, 1, false);
+    try a.send(1, .{ .value = 8 });
+    try std.testing.expect((try b.receive()) == null);
+}
+
+test "network: disabled loss consumes no decision for typed and stream sends" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sender = try sim.endpoint(TestPayload, 0);
+    const before = world.decisions.recorded.items.len;
+    try sender.send(1, .{ .value = 1 });
+    _ = try sendStreamBytesFromControl(sim.control.network, 0, 1, 1, "hello", 0);
+    try std.testing.expectEqual(before, world.decisions.recorded.items.len);
 }

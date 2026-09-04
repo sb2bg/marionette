@@ -18,7 +18,6 @@ const NetworkError = types.NetworkError;
 const NetworkFaultOptions = types.NetworkFaultOptions;
 const NetworkLatencyOptions = types.NetworkLatencyOptions;
 const NetworkLossOptions = types.NetworkLossOptions;
-const NetworkOptions = types.NetworkOptions;
 const NetworkPartitionDynamicsOptions = types.NetworkPartitionDynamicsOptions;
 const NodeId = types.NodeId;
 const SimNetworkOptions = types.SimNetworkOptions;
@@ -533,7 +532,11 @@ const SharedRuntime = struct {
         };
         if (at_ns > self.world.now()) return;
 
-        const isolated_index = try self.world.randomIntLessThan(usize, self.service_node_count);
+        const isolated_index = try self.world.chooseIntLessThan(
+            "network.auto_partition_node",
+            usize,
+            self.service_node_count,
+        );
         const isolated: NodeId = @intCast(isolated_index);
         self.applyAutoPartition(isolated);
         self.auto_partitioned_node = isolated;
@@ -574,7 +577,10 @@ const SharedRuntime = struct {
         link.auto_clog_schedule = .pending;
         if (self.faults.path_clog_rate.numerator == 0) return;
         if (link.clogged_until != 0 and link.clogged_until >= from_ns) return;
-        const ticks = try self.sampleNextOccurrenceTicks(self.faults.path_clog_rate);
+        const ticks = try self.sampleNextOccurrenceTicks(
+            "network.auto_clog_schedule",
+            self.faults.path_clog_rate,
+        );
         const at_ns = addDurationTicks(from_ns, ticks, self.world.clock().tick_ns) catch {
             link.auto_clog_schedule = .beyond_clock;
             return;
@@ -599,7 +605,10 @@ const SharedRuntime = struct {
             return;
         };
         const eligible_from = if (floor_ns <= from_ns) from_ns else floor_ns - self.world.clock().tick_ns;
-        const ticks = try self.sampleNextOccurrenceTicks(rate);
+        const ticks = if (self.auto_partitioned_node == null)
+            try self.sampleNextOccurrenceTicks("network.auto_partition_schedule", rate)
+        else
+            try self.sampleNextOccurrenceTicks("network.auto_heal_schedule", rate);
         const at_ns = addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns) catch {
             self.auto_partition_schedule = .beyond_clock;
             return;
@@ -607,13 +616,21 @@ const SharedRuntime = struct {
         self.auto_partition_schedule = .{ .at = at_ns };
     }
 
-    fn sampleNextOccurrenceTicks(self: *SharedRuntime, rate: env_module.BuggifyRate) !u64 {
+    fn sampleNextOccurrenceTicks(
+        self: *SharedRuntime,
+        comptime site_id: []const u8,
+        rate: env_module.BuggifyRate,
+    ) !u64 {
         std.debug.assert(rate.numerator > 0);
         std.debug.assert(rate.numerator <= rate.denominator);
         if (rate.numerator == rate.denominator) return 1;
 
         const random_space: u64 = 1 << 53;
-        const draw = try self.world.randomIntLessThan(u64, random_space);
+        const draw = try self.world.chooseIntLessThan(
+            site_id,
+            u64,
+            random_space,
+        );
         const uniform = (@as(f64, @floatFromInt(draw)) + 1.0) / (@as(f64, @floatFromInt(random_space)) + 1.0);
         const failure_probability =
             @as(f64, @floatFromInt(rate.denominator - rate.numerator)) /
@@ -970,9 +987,13 @@ fn sampleLatency(shared: *SharedRuntime) !clock_module.Duration {
 
     const max_jitter_ticks = faults.latency_jitter_ns / tick_ns;
     const jitter_ticks = if (max_jitter_ticks == std.math.maxInt(clock_module.Duration))
-        try shared.world.randomU64()
+        try shared.world.chooseU64("network.stream_latency")
     else
-        try shared.world.randomIntLessThan(clock_module.Duration, max_jitter_ticks + 1);
+        try shared.world.chooseIntLessThan(
+            "network.stream_latency",
+            clock_module.Duration,
+            max_jitter_ticks + 1,
+        );
     const jitter_ns = std.math.mul(clock_module.Duration, jitter_ticks, tick_ns) catch unreachable;
     return std.math.add(clock_module.Duration, faults.min_latency_ns, jitter_ns) catch unreachable;
 }
@@ -1045,7 +1066,11 @@ fn TypedRuntime(comptime Payload: type) type {
                 return;
             }
 
-            const drop_roll = try shared.world.randomIntLessThan(u32, shared.faults.drop_rate.denominator);
+            const drop_roll: u32 = if (shared.faults.drop_rate.numerator == 0) 0 else try shared.world.chooseIntLessThan(
+                "network.typed_drop",
+                u32,
+                shared.faults.drop_rate.denominator,
+            );
             if (drop_roll < shared.faults.drop_rate.numerator) {
                 try shared.world.record(
                     "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
@@ -1297,7 +1322,11 @@ const SimByteRuntime = struct {
             return .dropped;
         }
 
-        const drop_roll = try shared.world.randomIntLessThan(u32, shared.faults.drop_rate.denominator);
+        const drop_roll: u32 = if (shared.faults.drop_rate.numerator == 0) 0 else try shared.world.chooseIntLessThan(
+            "network.stream_drop",
+            u32,
+            shared.faults.drop_rate.denominator,
+        );
         if (drop_roll < shared.faults.drop_rate.numerator) {
             try shared.world.record(
                 "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",

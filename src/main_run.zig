@@ -167,10 +167,10 @@ fn printTraceOrSummary(
             var summary = try mar.summarize(allocator, trace);
             defer summary.deinit();
 
-            var buffer: [16 * 1024]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buffer);
-            try summary.writeSummary(&writer);
-            std.debug.print("{s}", .{writer.buffered()});
+            var writer = std.Io.Writer.Allocating.init(allocator);
+            defer writer.deinit();
+            try summary.writeSummary(&writer.writer);
+            std.debug.print("{s}", .{writer.written()});
         },
     }
 }
@@ -193,10 +193,10 @@ fn printReport(
             if (mode == .trace) {
                 std.debug.print("{s}", .{failure.first_trace});
             } else {
-                var buffer: [4096]u8 = undefined;
-                var writer: std.Io.Writer = .fixed(&buffer);
-                try failure.writeSummary(&writer);
-                std.debug.print("{s}", .{writer.buffered()});
+                var writer = std.Io.Writer.Allocating.init(allocator);
+                defer writer.deinit();
+                try failure.writeSummary(&writer.writer);
+                std.debug.print("{s}", .{writer.written()});
             }
             if (!expect_failure) std.process.exit(1);
         },

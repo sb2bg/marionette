@@ -51,6 +51,7 @@ pub const SimDisk = struct {
         inode: u64,
         path: []u8,
         len: u64 = 0,
+        mtime_ns: u64 = 0,
         metadata_durable: bool = true,
         sectors: std.ArrayList(Sector) = .empty,
 
@@ -92,6 +93,7 @@ pub const SimDisk = struct {
         offset: u64,
         bytes: []u8,
         logical_len: ?u64,
+        written_at_ns: u64 = 0,
 
         fn deinit(self: *PendingWrite, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
@@ -1097,6 +1099,7 @@ pub const SimDisk = struct {
             try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, 0, "ok", latency_ns);
             const file = self.findFile(options.path).?;
             self.truncateFile(file, options.len);
+            if (file.len != options.len) file.mtime_ns = self.world.now();
             file.len = options.len;
             return;
         }
@@ -1139,6 +1142,7 @@ pub const SimDisk = struct {
             try self.applyWriteToFile(&staged_file, pending, pending.bytes.len);
         }
         self.truncateFile(&staged_file, options.len);
+        if (staged_file.len != options.len) staged_file.mtime_ns = self.world.now();
         staged_file.len = options.len;
         try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, committed, "ok", latency_ns);
 
@@ -1376,6 +1380,16 @@ pub const SimDisk = struct {
 
         if (self.crash_observer) |observer| try observer.prepare(observer.ptr);
 
+        // portable_v1 retains the latest observable timestamp across a crash,
+        // even when the corresponding unsynced data is lost.
+        for (self.files.items) |*file| {
+            if (inspectFile(self, file.inode)) |snapshot| file.mtime_ns = snapshot.mtime_ns;
+        }
+        for (staged.file_changes.items) |*change| {
+            if (change.file) |*file| {
+                if (inspectFile(self, file.inode)) |snapshot| file.mtime_ns = snapshot.mtime_ns;
+            }
+        }
         staged.commit();
         self.clearPendingWrites();
         self.clearPendingMetadata();
@@ -1480,7 +1494,8 @@ pub const SimDisk = struct {
         if (jitter_ns == 0) return self.options.min_latency_ns;
 
         const tick_ns = self.world.clock().tick_ns;
-        const jitter_ticks = try self.world.randomIntLessThan(
+        const jitter_ticks = try self.world.chooseIntLessThan(
+            "disk.latency",
             clock_module.Duration,
             jitter_ns / tick_ns + 1,
         );
@@ -1491,13 +1506,17 @@ pub const SimDisk = struct {
         self: *Self,
         op_id: u64,
         path: []const u8,
-        kind: []const u8,
+        comptime kind: []const u8,
         rate: env_module.BuggifyRate,
     ) DiskError!bool {
         try rate.validate();
         if (rate.numerator == 0) return false;
 
-        const roll = try self.world.randomIntLessThan(u32, rate.denominator);
+        const roll = try self.world.chooseIntLessThan(
+            "disk.fault." ++ kind,
+            u32,
+            rate.denominator,
+        );
         const fired = roll < rate.numerator;
 
         var rate_buffer: [32]u8 = undefined;
@@ -1623,6 +1642,7 @@ pub const SimDisk = struct {
             .offset = offset,
             .bytes = owned_bytes,
             .logical_len = logical_len,
+            .written_at_ns = self.world.now(),
         });
         if (existing_inode == null) self.next_file_inode += 1;
     }
@@ -1751,6 +1771,7 @@ pub const SimDisk = struct {
             .inode = source.inode,
             .path = path,
             .len = source.len,
+            .mtime_ns = source.mtime_ns,
             .metadata_durable = source.metadata_durable,
         };
         errdefer cloned.deinit(self.world.allocator);
@@ -1831,6 +1852,7 @@ pub const SimDisk = struct {
         try self.writeBytes(file, pending.offset, pending.bytes[0..write_len]);
         const physical_end = try endOffset(pending.offset, write_len);
         file.len = @max(file.len, pending.logical_len orelse physical_end);
+        if (pending.bytes.len != 0) file.mtime_ns = pending.written_at_ns;
     }
 
     fn findSector(_: *Self, file: *File, index: u64) ?*Sector {
@@ -2131,6 +2153,7 @@ pub const SimDisk = struct {
     }
 
     const disk_vtable: Disk.VTable = .{
+        .inspect = inspectFile,
         .read = diskRead,
         .write = diskWrite,
         .sync = diskSync,
@@ -2156,6 +2179,25 @@ pub const SimDisk = struct {
 
     fn fromOpaque(ptr: *anyopaque) *Self {
         return @ptrCast(@alignCast(ptr));
+    }
+
+    fn inspectFile(ptr: *anyopaque, inode: u64) ?Disk.Snapshot {
+        const self = fromOpaque(ptr);
+        if (self.crashed) return null;
+        var result: ?Disk.Snapshot = null;
+        for (self.files.items) |file| {
+            if (file.inode == inode) {
+                result = .{ .path = file.path, .inode = inode, .size = file.len, .mtime_ns = file.mtime_ns };
+                break;
+            }
+        }
+        for (self.pending_writes.items) |pending| {
+            if (pending.inode != inode) continue;
+            if (result == null) result = .{ .path = pending.path, .inode = inode, .size = 0, .mtime_ns = 0 };
+            result.?.size = @max(result.?.size, pending.logical_len orelse (pending.offset + pending.bytes.len));
+            if (pending.bytes.len != 0) result.?.mtime_ns = pending.written_at_ns;
+        }
+        return result;
     }
 
     fn diskRead(ptr: *anyopaque, options: Disk.Read) DiskError!void {

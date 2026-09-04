@@ -19,7 +19,7 @@ Deterministic I/O and simulation testing for Zig.
 Marionette makes failures involving time, disk, networking, and cooperative
 concurrency reproducible. Write production-shaped code against `std.Io`, run
 it under deterministic simulation, inject faults from your test, and replay a
-failure from its seed and trace.
+failure from its recorded decisions, configuration, and trace.
 
 The long-term target is a deterministic `std.Io` for Zig. Today, Marionette
 provides the simulator, fault models, structured traces, replay checks, and the
@@ -32,7 +32,7 @@ A torn write during recovery, a response arriving just after a timeout, or a
 late completion racing a new lease may appear once in millions of ordinary
 test runs. In Marionette, simulated choices come from a seed and every run
 produces a structured trace. When a check fails, the same seed recreates the
-same execution.
+same execution for a fixed build and workload.
 
 Marionette is a library, not a production runtime or a framework that owns your
 application. Your composition root supplies explicit I/O authorities, but ordinary
@@ -110,12 +110,14 @@ test "WAL recovery is deterministic" {
 ```
 
 The complete, runnable version is
-[`examples/kv_store.zig`](examples/kv_store.zig). `expectSimPass` runs the case
-twice and compares traces, `expectSimFuzz` repeats that replay check across
-derived seeds. Advanced harnesses can supply a strictly ordered
-`seed_schedule` to reset the random stream at a simulated-time/random-call
-microstep; schedules are same-build controls rather than cross-version replay
-artifacts.
+[`examples/kv_store.zig`](examples/kv_store.zig). `expectSimPass` records
+semantic choices on the first execution, exact-replays them on the second, and
+compares traces; `expectSimFuzz` repeats that replay check across derived seeds.
+Advanced harnesses can supply a strictly ordered `seed_schedule` to reset
+the random stream at a simulated-time/random-call microstep. Schedules are
+same-build exploration controls; recorded decisions are the replay authority.
+Versioned [replay capsules](docs/decision-tapes.md) persist those decisions,
+including application random bytes, for a pinned build and workload.
 
 ## Install
 
@@ -143,7 +145,8 @@ const mar = @import("marionette");
 
 ## What it can simulate
 
-- Seeded randomness, virtual time, structured traces, and byte-identical replay.
+- Seeded randomness, virtual time, typed decision tapes, exact choice replay,
+  and byte-identical structured traces.
 - A directory-aware `std.Io.File` / `Dir` subset with lost, torn, reordered,
   corrupt, and failed disk operations.
 - Scheduler-backed `std.Io.net` streams with latency, timeouts, loss,

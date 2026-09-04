@@ -4,6 +4,7 @@ const std = @import("std");
 
 const clock_module = @import("clock.zig");
 const seed_module = @import("seed.zig");
+const decision_module = @import("decision.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
@@ -15,7 +16,27 @@ pub const RunAttributeValue = union(enum) {
     boolean: bool,
     float: f64,
 
-    fn write(self: RunAttributeValue, writer: anytype) !void {
+    /// Preserve the tagged union shape, using JSON strings for nonfinite floats.
+    /// Zig's generic float serializer can emit bare `inf`, which is not JSON.
+    pub fn jsonStringify(self: RunAttributeValue, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField(@tagName(self));
+        switch (self) {
+            .float => |value| {
+                if (std.math.isFinite(value)) {
+                    try writer.write(value);
+                } else if (std.math.isNan(value)) {
+                    try writer.write(if (std.math.signbit(value)) "-nan" else "nan");
+                } else {
+                    try writer.write(if (std.math.signbit(value)) "-inf" else "inf");
+                }
+            },
+            inline else => |value| try writer.write(value),
+        }
+        try writer.endObject();
+    }
+
+    pub fn write(self: RunAttributeValue, writer: anytype) !void {
         switch (self) {
             .string => |value| {
                 try writer.print("string:", .{});
@@ -24,7 +45,7 @@ pub const RunAttributeValue = union(enum) {
             .int => |value| try writer.print("int:{}", .{value}),
             .uint => |value| try writer.print("uint:{}", .{value}),
             .boolean => |value| try writer.print("bool:{}", .{value}),
-            .float => |value| try writer.print("float:{d}", .{value}),
+            .float => |value| try writer.print("float:{e}", .{value}),
         }
     }
 };
@@ -36,6 +57,13 @@ pub const RunAttributeValue = union(enum) {
 pub const RunAttribute = struct {
     key: []const u8,
     value: RunAttributeValue,
+
+    pub fn write(self: RunAttribute, writer: anytype) !void {
+        try writer.writeAll("run.attribute key=");
+        try world_module.writeEscapedTraceText(writer, self.key, false);
+        try writer.writeAll(" value=");
+        try self.value.write(writer);
+    }
 };
 
 /// Build one replay-visible typed attribute from a scalar value.
@@ -119,6 +147,8 @@ pub const RunOptions = struct {
     /// ordinary runs keep their existing execution/allocator behavior.
     watchdog: ?WatchdogOptions = null,
 
+    /// Check simulated handles after successful scenario/checks and App.deinit.
+    check_resources: bool = false,
     pub fn worldOptions(self: RunOptions) World.Options {
         return .{
             .seed = self.seed,
@@ -141,9 +171,11 @@ pub const WatchdogOptions = struct {
     run_timeout_ns: u64 = 30 * std.time.ns_per_s,
     /// Maximum partial trace retained in shared memory.
     trace_capacity: usize = 4 * 1024 * 1024,
+    /// Maximum encoded completed result (including decisions) in worker shared memory.
+    result_capacity: usize = 16 * 1024 * 1024,
 
     pub fn validate(self: WatchdogOptions) error{InvalidWatchdogOptions}!void {
-        if (self.stall_timeout_ns == 0 or self.run_timeout_ns == 0 or self.trace_capacity == 0) {
+        if (self.stall_timeout_ns == 0 or self.run_timeout_ns == 0 or self.trace_capacity == 0 or self.result_capacity == 0) {
             return error.InvalidWatchdogOptions;
         }
         if (self.stall_timeout_ns > self.run_timeout_ns) return error.InvalidWatchdogOptions;
@@ -157,6 +189,7 @@ pub fn cloneRunOptions(allocator: std.mem.Allocator, options: RunOptions) std.me
         .start_ns = options.start_ns,
         .tick_ns = options.tick_ns,
         .watchdog = options.watchdog,
+        .check_resources = options.check_resources,
     };
     errdefer deinitRunOptions(allocator, &cloned);
 
@@ -228,13 +261,20 @@ fn deinitRunAttributeValue(allocator: std.mem.Allocator, value: RunAttributeValu
 pub const RunResult = struct {
     allocator: std.mem.Allocator,
     options: RunOptions,
+    /// Simulation configuration retained by value for replay artifacts.
+    simulate_options: World.SimulateOptions = .{},
     owns_options: bool = false,
     trace: []u8,
     event_count: u64,
+    /// Owned semantic choices from the recorded execution.
+    decision_tape: decision_module.Tape = .{},
+    /// False when watchdog termination prevented a complete decision record.
+    tape_complete: bool = true,
 
     /// Release the owned trace.
     pub fn deinit(self: *RunResult) void {
         self.allocator.free(self.trace);
+        self.decision_tape.deinit();
         if (self.owns_options) deinitRunOptions(self.allocator, &self.options);
         self.* = undefined;
     }
@@ -244,7 +284,16 @@ pub const RunResult = struct {
         const trace = self.trace;
         self.trace = &.{};
         self.event_count = 0;
+        self.tape_complete = false;
         return trace;
+    }
+
+    /// Transfer ownership of the recorded semantic choices to the caller.
+    pub fn takeDecisionTape(self: *RunResult) decision_module.Tape {
+        const tape = self.decision_tape;
+        self.decision_tape = .empty();
+        self.tape_complete = false;
+        return tape;
     }
 };
 
@@ -263,6 +312,11 @@ pub const RunFailureKind = enum(u8) {
     non_yielding,
     /// A watchdog observed continuing scheduler activity without completion.
     livelock,
+    /// The isolated worker exited without publishing a completed result.
+    worker_crashed,
+    /// Exact replay reached a different semantic decision boundary or left
+    /// recorded decisions unconsumed.
+    replay_diverged,
     /// Two executions with the same seed produced different traces.
     determinism_mismatch,
     /// The first run passed but the second failed with the same seed. This
@@ -275,6 +329,8 @@ pub const RunFailureKind = enum(u8) {
     /// (and `check_name`, if set) describe the first run's failure, and the
     /// second trace is the passing run's trace.
     first_run_failed,
+    /// Application cleanup left simulated file, directory, or socket handles.
+    resource_leak,
 };
 
 /// Optional identity constraints for `expectSimFailure`.
@@ -307,6 +363,8 @@ pub const FailureExpectation = struct {
 pub const RunFailure = struct {
     allocator: std.mem.Allocator,
     options: RunOptions,
+    /// Simulation configuration retained by value for replay artifacts.
+    simulate_options: World.SimulateOptions = .{},
     owns_options: bool = false,
     kind: RunFailureKind,
     first_trace: []u8,
@@ -322,11 +380,19 @@ pub const RunFailure = struct {
     owns_second_error_name: bool = false,
     second_check_name: ?[]const u8 = null,
     owns_second_check_name: bool = false,
+    /// Owned semantic choices from the first execution.
+    decision_tape: decision_module.Tape = .{},
+    /// False when watchdog termination prevented a complete decision record.
+    tape_complete: bool = true,
+    /// Detailed first exact-replay mismatch, when `kind` is `replay_diverged`.
+    replay_divergence: ?decision_module.Divergence = null,
 
     /// Release owned traces.
     pub fn deinit(self: *RunFailure) void {
         self.allocator.free(self.first_trace);
         self.allocator.free(self.second_trace);
+        self.decision_tape.deinit();
+        if (self.replay_divergence) |*divergence| divergence.deinit(self.allocator);
         if (self.owns_options) deinitRunOptions(self.allocator, &self.options);
         if (self.owns_check_name) {
             if (self.check_name) |name| self.allocator.free(name);
@@ -370,8 +436,8 @@ pub const RunFailure = struct {
         }
         if (self.options.watchdog) |watchdog| {
             try writer.print(
-                " watchdog_stall_ns={} watchdog_run_ns={} watchdog_trace_capacity={}",
-                .{ watchdog.stall_timeout_ns, watchdog.run_timeout_ns, watchdog.trace_capacity },
+                " watchdog_stall_ns={} watchdog_run_ns={} watchdog_trace_capacity={} watchdog_result_capacity={}",
+                .{ watchdog.stall_timeout_ns, watchdog.run_timeout_ns, watchdog.trace_capacity, watchdog.result_capacity },
             );
         }
         for (self.options.tags) |tag| {
@@ -398,7 +464,39 @@ pub const RunFailure = struct {
             try writer.print(" second_check=", .{});
             try world_module.writeEscapedTraceText(writer, name, false);
         }
+        if (self.replay_divergence) |divergence| {
+            try writer.print(
+                " replay={s} tape_index={}",
+                .{ @tagName(divergence.kind), divergence.tape_index },
+            );
+            if (divergence.expected) |expected| {
+                try writer.print(
+                    " expected_site={s} expected_time_ns={} expected_microstep={}",
+                    .{ expected.site_id, expected.logical_time_ns, expected.microstep },
+                );
+                if (expected.preceding_event_index) |event_index| {
+                    try writer.print(" expected_after_event={}", .{event_index});
+                }
+            }
+            if (divergence.actual) |actual| {
+                try writer.print(
+                    " actual_site={s} actual_time_ns={} actual_microstep={}",
+                    .{ actual.site_id, actual.logical_time_ns, actual.microstep },
+                );
+                if (actual.preceding_event_index) |event_index| {
+                    try writer.print(" actual_after_event={}", .{event_index});
+                }
+            }
+        }
         try writer.writeByte('\n');
+    }
+
+    /// Transfer ownership of the recorded semantic choices to the caller.
+    pub fn takeDecisionTape(self: *RunFailure) decision_module.Tape {
+        const tape = self.decision_tape;
+        self.decision_tape = .empty();
+        self.tape_complete = false;
+        return tape;
     }
 
     /// Print a compact failure report.

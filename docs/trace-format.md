@@ -1,7 +1,16 @@
 # Trace Format
 
-The trace is Marionette's replay artifact. Same seed means byte-identical
-trace, so the bytes need a small spec.
+Opt-in handle checks add `run.resources enabled=true` and, on failure,
+`resource.leak node=<id> kind=<file|directory|listener|connection> handle=<id>
+path=<escaped-path>` events. Socket paths are `-`; file paths reflect current
+model metadata. Events follow process order and deterministic handle-table
+order. These additive events consume no random decisions. A successful
+explicit checkpoint emits no events.
+
+The trace is Marionette's human-readable explanatory artifact and a
+byte-identical replay check. The typed [decision tape](decision-tapes.md)
+controls exact choice replay; the trace verifies and explains the resulting
+execution, so its bytes still need a small spec.
 
 ## Text Format
 
@@ -10,7 +19,7 @@ Traces use newline-delimited UTF-8 text.
 The first line is a header:
 
 ```text
-marionette.trace format=text version=2
+marionette.trace format=text version=3
 ```
 
 Version 1 (2026-06-11) added `io.random` events: every `Io.random` /
@@ -22,6 +31,12 @@ Version 2 (2026-08-02) adds the mandatory `disk.model` event emitted when a
 simulated disk is composed. This makes the portable disk semantic contract
 and sector size explicit before any disk operation is traced.
 
+Version 3 (0.7) adds seed cutover context, uses scientific notation for float
+attributes, records watchdog result capacity, and removes loss draws for disabled
+network loss. Random-byte choices retain their existing length/digest trace shape
+and store full bytes separately in the tape. Old trace bytes are not claimed to
+match the new model; capsules reject unsupported trace versions.
+
 Every later line is one event:
 
 ```text
@@ -31,7 +46,7 @@ event=<u64> <component>.<action> <key>=<value> ...
 Example:
 
 ```text
-marionette.trace format=text version=2
+marionette.trace format=text version=3
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1
 event=1 run.name value=smoke
 event=2 run.tag value=scenario:smoke

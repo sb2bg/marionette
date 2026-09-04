@@ -5,7 +5,6 @@
 
 const control = @import("control.zig");
 const endpoint = @import("endpoint.zig");
-const packet_core = @import("packet_core.zig");
 const sim = @import("sim.zig");
 const types = @import("types.zig");
 
@@ -15,7 +14,6 @@ pub const NetworkClogOptions = types.NetworkClogOptions;
 pub const NetworkError = types.NetworkError;
 pub const NetworkLatencyOptions = types.NetworkLatencyOptions;
 pub const NetworkLossOptions = types.NetworkLossOptions;
-pub const NetworkOptions = types.NetworkOptions;
 pub const NetworkPartitionDynamicsOptions = types.NetworkPartitionDynamicsOptions;
 pub const NodeId = types.NodeId;
 pub const SimNetworkOptions = types.SimNetworkOptions;
@@ -24,13 +22,11 @@ pub const SimNetworkOptions = types.SimNetworkOptions;
 /// production environment.
 pub const internal = struct {
     pub const NetworkFaultOptions = types.NetworkFaultOptions;
-    pub const NetworkSimulation = packet_core.NetworkSimulation;
     pub const SimByteDropReason = sim.SimByteDropReason;
     pub const SimByteSendResult = sim.SimByteSendResult;
     pub const SimProbeDropReason = sim.SimProbeDropReason;
     pub const SimProbeResult = sim.SimProbeResult;
     pub const StreamWaitObserver = sim.StreamWaitObserver;
-    pub const UnstableNetwork = packet_core.UnstableNetwork;
 
     pub const discardStreamFramesFromControl = sim.discardStreamFramesFromControl;
     pub const endpointFromControl = sim.endpointFromControl;

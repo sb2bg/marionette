@@ -27,16 +27,6 @@ pub fn validateRate(rate: env_module.BuggifyRate) NetworkError!void {
     if (rate.numerator > rate.denominator) return error.InvalidRate;
 }
 
-/// Fixed topology and per-path capacity for one unstable network instance.
-pub const NetworkOptions = struct {
-    /// Number of simulated service/replica nodes.
-    node_count: usize,
-    /// Number of simulated client processes. Client ids follow node ids.
-    client_count: usize = 0,
-    /// Maximum packets queued on one directed path.
-    path_capacity: usize,
-};
-
 /// Runtime fault configuration for app-facing network sends.
 pub const NetworkFaultOptions = struct {
     drop_rate: env_module.BuggifyRate = .never(),

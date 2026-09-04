@@ -19,9 +19,11 @@ data when those values affect behavior or traces.
 
 ## Replay Check
 
-`runSimCase` executes every case twice, including failing cases. Matching
-failures require the same kind, error/check identity, and trace. A pass/fail
-split or different failure is reported as a determinism leak.
+`runSimCase` executes every case twice, including failing cases. The first
+ordinary execution records a typed semantic decision tape; the second consumes
+it exactly and still must reproduce the same trace. Matching failures require
+the same kind, error/check identity, and trace. A changed decision boundary is
+`replay_diverged`; a pass/fail split or other difference is a determinism leak.
 
 `expectSimFuzz` derives independent seeds and applies the same twice-run check
 to each. Large campaigns run in the nightly seed sweep.
@@ -47,8 +49,14 @@ inserting, removing, or reordering an earlier random call can move every later
 microstep. Durable replay requires semantic decision-site identities and
 recorded selected values rather than only a PRNG reset position.
 
-Disabled probabilistic faults consume no random values, so toggling one off
-does not shift unrelated choices.
+Disabled probabilistic faults consume no random values, so an already-disabled fault adds no positional noise. Enabling or disabling
+a previously active fault can change later positions in the shared stream.
+
+Scheduler, network, disk, allocation, automatic-process choices, and application
+`std.Io` random bytes have tape entries. Application workloads participate when
+they draw through these authorities. Versioned replay capsules persist the
+exact decisions for a pinned build and workload; see
+[Decision Tapes And Replay Capsules](decision-tapes.md).
 
 ## Time And Scheduling
 
