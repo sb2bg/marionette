@@ -62,7 +62,10 @@ pub const Wire = struct {
         };
         errdefer result.deinit();
         result.decision_tape = try decision.Tape.clone(allocator, self.decisions);
-        if (self.failure) |failure| result.outcome = .{ .failed = try failure.clone(allocator) };
+        if (self.failure) |failure| {
+            const owned = try failure.clone(allocator);
+            result.outcome = .{ .failed = owned };
+        }
         return result;
     }
 };

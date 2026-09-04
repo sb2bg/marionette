@@ -63,6 +63,8 @@
 - Removes the unused packet-core implementation, its `EventQueue`, and legacy
   `NetworkOptions` export. Unique network contract coverage now exercises the
   active runtime; use `World.SimulateOptions.network` for configuration.
+- Fixes allocation-failure cleanup on Linux by completing failure payload
+  cloning before publishing its union tag.
 - Separates owned execution results, report comparison, watchdog transport, and
   the shared replay codec. Adds configurable watchdog `result_capacity`.
 - Fixes cancellation of a parked file-lock waiter freeing the waiter twice.

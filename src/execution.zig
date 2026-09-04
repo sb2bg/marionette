@@ -15,7 +15,10 @@ pub const Failure = struct {
         errdefer result.deinit(allocator);
         if (self.error_name) |name| result.error_name = try allocator.dupe(u8, name);
         if (self.check_name) |name| result.check_name = try allocator.dupe(u8, name);
-        if (self.divergence) |value| result.divergence = try value.clone(allocator);
+        if (self.divergence) |value| {
+            const owned = try value.clone(allocator);
+            result.divergence = owned;
+        }
         return result;
     }
 
@@ -39,7 +42,12 @@ pub const Result = struct {
         var result: Result = .{ .allocator = allocator, .trace = try allocator.dupe(u8, world.traceBytes()), .event_count = world.nextEventIndex() };
         errdefer result.deinit();
         result.decision_tape = try world.cloneDecisionTape(allocator);
-        if (failure) |value| result.outcome = .{ .failed = try value.clone(allocator) };
+        if (failure) |value| {
+            // A fallible clone must not use the destination union as its result
+            // location: cleanup may observe the new tag before cloning succeeds.
+            const owned = try value.clone(allocator);
+            result.outcome = .{ .failed = owned };
+        }
         return result;
     }
 
@@ -57,3 +65,24 @@ pub const Result = struct {
         return self.decision_tape.entries;
     }
 };
+
+fn cloneFailureAllocationCase(allocator: std.mem.Allocator) !void {
+    const original: Failure = .{
+        .kind = .replay_diverged,
+        .error_name = "DecisionReplayDiverged",
+        .check_name = "owned check",
+        .divergence = .{
+            .kind = .site_mismatch,
+            .tape_index = 0,
+            .expected = .{ .site_id = "expected.choice", .logical_time_ns = 0, .microstep = 0, .preceding_event_index = null, .alternatives = .boolean, .selected = 1 },
+            .actual = .{ .site_id = "actual.choice", .logical_time_ns = 0, .microstep = 0, .preceding_event_index = null, .alternatives = .boolean },
+        },
+    };
+    var owned = try original.clone(allocator);
+    defer owned.deinit(allocator);
+    try std.testing.expectEqualStrings("actual.choice", owned.divergence.?.actual.?.site_id);
+}
+
+test "execution: failure diagnostics remain unowned until cloning succeeds" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, cloneFailureAllocationCase, .{});
+}
