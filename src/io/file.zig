@@ -49,15 +49,15 @@ pub fn Ops(comptime Backend: type) type {
         }
 
         fn cachedFileInodeForDirEntry(backend: *Backend, base: []const u8, name: []const u8) ?Io.File.INode {
-            for (backend.files.items) |file_meta| {
+            for (backend.fileStore().files.items) |file_meta| {
                 if (file_meta.deleted) continue;
                 const child_name = if (std.mem.eql(u8, base, ".")) b: {
-                    if (std.mem.indexOfScalar(u8, file_meta.path, '/') != null) continue;
-                    break :b file_meta.path;
+                    if (std.mem.indexOfScalar(u8, backend.currentFilePath(file_meta), '/') != null) continue;
+                    break :b backend.currentFilePath(file_meta);
                 } else b: {
-                    if (!std.mem.startsWith(u8, file_meta.path, base)) continue;
-                    if (file_meta.path.len <= base.len or file_meta.path[base.len] != '/') continue;
-                    const relative = file_meta.path[base.len + 1 ..];
+                    if (!std.mem.startsWith(u8, backend.currentFilePath(file_meta), base)) continue;
+                    if (backend.currentFilePath(file_meta).len <= base.len or backend.currentFilePath(file_meta)[base.len] != '/') continue;
+                    const relative = backend.currentFilePath(file_meta)[base.len + 1 ..];
                     if (std.mem.indexOfScalar(u8, relative, '/') != null) continue;
                     break :b relative;
                 };
@@ -164,7 +164,7 @@ pub fn Ops(comptime Backend: type) type {
                     error.Canceled => return error.Canceled,
                 };
                 errdefer backend.retireFileHandle(file.handle);
-                const meta = backend.files.items[index];
+                const meta = backend.fileStore().files.items[index];
                 if (meta.deleted) return error.FileNotFound;
                 if (options.truncate) {
                     var reservation = acquireFilePathReservation(backend, meta) catch |err| switch (err) {
@@ -194,8 +194,8 @@ pub fn Ops(comptime Backend: type) type {
                     backend.discardFileMeta(index);
                     return errors.mapDiskOpenError(err);
                 };
-                backend.files.items[index].len = stat_result.size;
-                backend.files.items[index].inode = stat_result.inode;
+                backend.fileStore().files.items[index].len = stat_result.size;
+                backend.fileStore().files.items[index].inode = stat_result.inode;
                 backend.releaseFileMutationPaths(path, null);
                 path_reserved = false;
                 break :b index;
@@ -213,7 +213,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.Canceled => error.Canceled,
             };
             errdefer backend.retireFileHandle(file.handle);
-            if (backend.files.items[file_index].deleted) return error.FileNotFound;
+            if (backend.fileStore().files.items[file_index].deleted) return error.FileNotFound;
             return file;
         }
 
@@ -254,7 +254,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.Canceled => error.Canceled,
             };
             errdefer backend.retireFileHandle(file.handle);
-            if (backend.files.items[file_index].deleted) return error.FileNotFound;
+            if (backend.fileStore().files.items[file_index].deleted) return error.FileNotFound;
             return file;
         }
 
@@ -406,7 +406,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.Canceled => return error.Canceled,
                 else => return error.FileNotFound,
             }) return error.IsDir;
-            _ = (findOrDiscoverFileMeta(backend, path) catch |err| {
+            const index = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskDeleteError(err);
             }) orelse return error.FileNotFound;
             backend.disk.delete(.{ .path = path }) catch |err| switch (err) {
@@ -414,7 +414,7 @@ pub fn Ops(comptime Backend: type) type {
                 else => return errors.mapDiskDeleteError(err),
             };
 
-            backend.discardFileMetaForPathAcrossProcesses(path);
+            backend.discardFileIdentity(index);
         }
 
         pub fn simDirRename(
@@ -456,32 +456,23 @@ pub fn Ops(comptime Backend: type) type {
             }) orelse return error.FileNotFound;
             if (std.mem.eql(u8, old_path, new_path)) return;
 
-            backend.reserveFileLockPath(new_path) catch |err| switch (err) {
+            const destination_identity = backend.reserveFileLockPath(new_path) catch |err| switch (err) {
                 error.OutOfMemory => return error.SystemResources,
                 error.WouldBlock => return error.FileBusy,
             };
-            var destination_reserved = true;
-            defer if (destination_reserved) backend.releaseFileLockPathReservation(new_path);
+            defer backend.releaseFileLockReservation(destination_identity);
             var prepared_meta = backend.prepareFileMetaRename(old_path, new_path) catch {
                 return error.SystemResources;
             };
             defer prepared_meta.deinit(backend.allocator);
-            var prepared_locks = backend.prepareFileLockRekey(old_path, new_path) catch {
-                return error.SystemResources;
-            };
-            defer prepared_locks.deinit(backend.allocator);
-
             backend.disk.rename(.{ .old_path = old_path, .new_path = new_path }) catch |err| switch (err) {
                 error.FileNotFound => {
-                    if (backend.files.items[old_index].len != 0) return error.FileNotFound;
+                    if (backend.fileStore().files.items[old_index].len != 0) return error.FileNotFound;
                 },
                 else => return errors.mapDiskRenameError(err),
             };
 
             backend.commitFileMetaRename(new_path, &prepared_meta);
-            backend.releaseFileLockPathReservation(new_path);
-            destination_reserved = false;
-            backend.commitFileLockRekey(old_path, &prepared_locks);
         }
 
         pub fn simFileStat(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
@@ -489,7 +480,7 @@ pub fn Ops(comptime Backend: type) type {
             const state = backend.file(file.handle) orelse return error.AccessDenied;
             if (state.closed) return error.AccessDenied;
             return switch (state.target) {
-                .file => |file_index| if (backend.files.items[file_index].deleted)
+                .file => |file_index| if (backend.fileMeta(state).deleted)
                     error.AccessDenied
                 else
                     buildFileStat(backend, file_index),
@@ -504,7 +495,7 @@ pub fn Ops(comptime Backend: type) type {
         }
 
         fn buildFileStat(backend: *Backend, file_index: usize) Io.File.Stat {
-            const meta = backend.files.items[file_index];
+            const meta = backend.fileStore().files.items[file_index];
             return .{
                 .inode = meta.inode,
                 .nlink = 1,
@@ -523,10 +514,7 @@ pub fn Ops(comptime Backend: type) type {
             const state = backend.file(file.handle) orelse return error.AccessDenied;
             if (state.closed) return error.AccessDenied;
             return switch (state.target) {
-                .file => |file_index| if (backend.files.items[file_index].deleted)
-                    error.AccessDenied
-                else
-                    backend.files.items[file_index].len,
+                .file => if (backend.fileMeta(state).deleted) error.AccessDenied else backend.fileMeta(state).len,
                 .directory => error.AccessDenied,
             };
         }
@@ -764,7 +752,7 @@ pub fn Ops(comptime Backend: type) type {
             path: []const u8,
         ) disk_module.DiskError!?usize {
             if (backend.findFileMetaIndex(path)) |index| {
-                const meta = backend.files.items[index];
+                const meta = backend.fileStore().files.items[index];
                 if (!meta.stale) return index;
 
                 const stat_result = backend.disk.stat(.{ .path = path }) catch |err| switch (err) {
@@ -786,7 +774,7 @@ pub fn Ops(comptime Backend: type) type {
             // has the file, revive the tombstone so the resurrected file
             // keeps its pre-crash timestamps.
             if (backend.findStaleDeletedFileMetaIndex(path)) |index| {
-                const meta = backend.files.items[index];
+                const meta = backend.fileStore().files.items[index];
                 const stat_result = backend.disk.stat(.{ .path = path }) catch |err| switch (err) {
                     error.FileNotFound, error.DiskUnavailable => {
                         meta.stale = false;
@@ -805,9 +793,10 @@ pub fn Ops(comptime Backend: type) type {
                 error.FileNotFound, error.DiskUnavailable => return null,
                 else => return err,
             };
-            const index = try backend.createFileMeta(path);
-            backend.files.items[index].len = stat_result.size;
-            backend.files.items[index].inode = stat_result.inode;
+            // Stat can suspend; another process may discover this inode first.
+            const index = backend.findFileMetaIndex(path) orelse try backend.createFileMeta(path);
+            backend.fileStore().files.items[index].len = stat_result.size;
+            backend.fileStore().files.items[index].inode = stat_result.inode;
             return index;
         }
 
@@ -866,8 +855,8 @@ pub fn Ops(comptime Backend: type) type {
             backend: *Backend,
             meta: *const Backend.FileMeta,
         ) std.mem.Allocator.Error![]u8 {
-            const path = try backend.allocOpScratch(meta.path.len);
-            @memcpy(path, meta.path);
+            const path = try backend.allocOpScratch(backend.currentFilePath(meta).len);
+            @memcpy(path, backend.currentFilePath(meta));
             return path;
         }
 
@@ -913,7 +902,7 @@ pub fn Ops(comptime Backend: type) type {
                     backend.freeOpScratch(path);
                     return error.FileDeleted;
                 }
-                if (std.mem.eql(u8, path, meta.path)) return .{
+                if (std.mem.eql(u8, path, backend.currentFilePath(meta))) return .{
                     .backend = backend,
                     .path = path,
                 };
@@ -942,7 +931,7 @@ pub fn Ops(comptime Backend: type) type {
                     backend.freeOpScratch(path);
                     return error.FileDeleted;
                 }
-                if (std.mem.eql(u8, path, meta.path)) return .{
+                if (std.mem.eql(u8, path, backend.currentFilePath(meta))) return .{
                     .backend = backend,
                     .path = path,
                 };

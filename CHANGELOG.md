@@ -20,6 +20,62 @@
 - Validates seed schedules before optional watchdog isolation so malformed
   schedules consistently return `error.InvalidSeedSchedule` instead of being
   misreported as a watchdog result-channel overflow.
+- Adds opt-in `check_resources` runner checks after successful application
+  cleanup, plus `sim.control.checkResources()` checkpoints. Surviving simulated
+  files, directories, listeners, and accepted/client sockets produce
+  `ResourceLeak` with deterministic process/handle/path diagnostics. Final
+  checks report `resource_leak`, including through watchdog replay. Checks
+  preserve primary failures, exclude closed sockets awaiting retirement and
+  listener-owned pending accepts, and respect process-kill cleanup.
+
+- Adds the version-1 in-memory decision-tape foundation. Ordinary scenario
+  runs now record globally ordered typed choices with stable semantic site IDs,
+  logical time, microstep, preceding trace event, alternatives, and selected
+  value, then exact-replay that tape during the second execution. Scheduler,
+  network, disk, allocation, and automatic-process choices use named sites;
+  trace and PRNG rollback also roll tape state back transactionally.
+
+- Returns an owned first-execution tape in passing and failing reports and
+  classifies the first site, time, microstep, causal-event, alternatives, or
+  tape-length mismatch as `replay_diverged` with expected/actual diagnostics.
+  Direct `World` users can record, clone, replay, and finish tapes. Completed
+  watchdog workers carry the same full execution record. Terminated workers
+  explicitly mark their tapes incomplete and cannot produce replay capsules.
+
+- Adds versioned JSON replay capsules containing exact choices (including
+  application `std.Io` random bytes), runtime/model options, trace, failure
+  identity, and pinned build/SUT/toolchain/target identities. `replaySimCase`
+  rejects incompatible identities or malformed artifacts and verifies the
+  full recorded execution. Seeds remain same-build exploration controls;
+  arbitrary cross-version replay and reduction are outside this release.
+  Nonfinite float metadata uses valid tagged JSON strings and round-trips.
+
+- Fixes SIM-001: shared file metadata and disk identity lookup make live
+  processes observe each other's writes/truncation and direct disk mutations.
+  Process-local cursors and descriptor lifetimes remain separate. Crash and
+  rename/delete behavior retain the named disk contract.
+- Fixes SIM-002: fatal replay divergence survives retryable transaction rollback.
+  World scalar choice entry points share one transactional implementation.
+- Fixes SIM-003 and SIM-004: runner configuration owns inferred tuple metadata
+  before its backing storage expires; trace/report attributes share dynamic
+  formatting with scientific floats. CLI report writers no longer have fixed
+  summary buffers. Reproductions now run in the ordinary regression suite.
+- Removes the unused packet-core implementation, its `EventQueue`, and legacy
+  `NetworkOptions` export. Unique network contract coverage now exercises the
+  active runtime; use `World.SimulateOptions.network` for configuration.
+- Separates owned execution results, report comparison, watchdog transport, and
+  the shared replay codec. Adds configurable watchdog `result_capacity`.
+- Fixes cancellation of a parked file-lock waiter freeing the waiter twice.
+- Keys file locks by stable shared file identity. Direct disk rename followed by
+  reuse of the old pathname no longer inherits an unrelated lock. Deletes
+  lock-path rekeying, copied handle lock paths, and retired-path storage while
+  preserving destination reservations and source/destination waiter behavior.
+- Stops disabled network loss from consuming random decisions, matching the
+  documented disabled-fault contract for typed and stream sends.
+- Classifies workers that exit before publishing a result as `worker_crashed`
+  instead of waiting for and reporting a scheduler stall.
+- Advances the text trace contract to version 3 for seed context, attribute
+  formatting, watchdog result bounds, and disabled-network-loss draw changes.
 
 ## v0.6.3 - 2026-08-24
 

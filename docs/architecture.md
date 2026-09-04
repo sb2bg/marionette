@@ -12,12 +12,14 @@ runSimCase
      -> Env / std.Io                 application authority
      -> Control                      harness authority
      -> disk, network, scheduler     deterministic models
-     -> trace                        replay evidence
+     -> decision tape                executable choices
+     -> trace                        explanatory evidence
 ```
 
-`runSimCase` constructs this graph twice with the same seed. It initializes app
-state from `Sim`, executes the scenario, runs named checks, deinitializes app
-state, and compares traces. Failures remain owned data in `RunReport`.
+`runSimCase` constructs this graph twice. It initializes app state from `Sim`,
+executes the scenario, runs named checks, and deinitializes app state. The first
+ordinary execution records semantic choices; the second exact-replays them and
+compares traces. Failures remain owned data in `RunReport`.
 
 ## Authorities
 
@@ -71,11 +73,14 @@ tasks, closes its resources, and invokes its registered lifecycle callback.
 Restart reruns the initializer against surviving durable state. Harness-owned
 application memory must be explicitly reset in the lifecycle callback.
 
-## Tracing
+## Decisions And Tracing
 
-Every event has a global index. Dynamic text is percent-escaped and simulator
-traces avoid addresses, wall-clock values, unordered iteration, and unstable
-error formatting. The runner checks determinism by executing each case twice.
+Decision entries identify a semantic site, logical time, microstep, preceding
+trace event, typed alternatives, and selected value. Every trace event has a
+global index. Dynamic text is percent-escaped and simulator traces avoid
+addresses, wall-clock values, unordered iteration, and unstable error
+formatting. The tape controls replay while the trace explains and verifies the
+result.
 
 ## Production Boundary
 
@@ -85,3 +90,29 @@ Marionette is not a production runtime and does not ship a socket transport.
 
 Typed `Endpoint(Message)` is an experimental protocol-modeling surface. It is
 not wire parity; socket-facing code should use `std.Io.net`.
+
+
+## Shared Filesystem Metadata
+
+A simulation's process registry owns one file metadata store. Descriptor access
+mode, cursor, lock ownership, and process lifetime remain local; the shared lock
+table is keyed by stable file identity. Rename needs no lock-path rekeying. The
+simulated disk is
+the authority for identity, visible length, and modification time, including
+pending writes. A non-suspending identity lookup refreshes metadata and resolves
+paths after direct disk mutations. Custom disks may omit this optional lookup;
+they retain the cached adapter contract. Crash recovery still rediscovers
+stale metadata under the named disk semantics.
+
+## Owned Execution Results
+
+The runner normalizes and owns runtime configuration once across both executions.
+Each execution returns one owned trace, decision tape, completion flag, and
+pass/failure outcome (`execution.zig`). The comparator creates the public report
+and owns shared metadata once. `watchdog.zig` handles worker isolation and
+bounded transport; `execution_codec.zig` supplies the versioned payload shared
+with persistent capsules. Worker termination explicitly marks an incomplete tape.
+
+The redundant fixed packet runtime and its private `EventQueue` were removed.
+Typed endpoints and streams exercise the active shared network runtime; useful
+legacy contract tests now run against that implementation.

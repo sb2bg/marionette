@@ -72,6 +72,9 @@ pub const default_patterns = [_]Pattern{
 };
 
 pub const default_allowed = [_]Allow{
+    .{ .path = "src/watchdog.zig", .needle = "std.posix" },
+    .{ .path = "src/watchdog.zig", .needle = "std.os" },
+    .{ .path = "src/watchdog.zig", .needle = "std.Options.debug_io" },
     .{ .path = "src/tidy.zig" },
     // Fiber stacks come from mmap so a guard page can sit below them; a
     // documented exception to allocator discipline.
@@ -83,11 +86,10 @@ pub const default_allowed = [_]Allow{
     .{ .path = "src/main_tidy.zig", .needle = "std.process.exit" },
     .{ .path = "src/main_tidy.zig", .needle = "std.debug.print" },
     .{ .path = "src/run.zig", .needle = "std.debug.print" },
-    // The runner's optional watchdog is a composition boundary: it isolates
-    // simulation in a host worker process and observes real time externally.
+    // Runner regression tests verify behavior with inherited SIGCHLD handlers.
     .{ .path = "src/run.zig", .needle = "std.posix" },
-    .{ .path = "src/run.zig", .needle = "std.os" },
-    .{ .path = "src/run.zig", .needle = "std.Options.debug_io" },
+    // Deliberately terminate the isolated child to test watchdog crash reporting.
+    .{ .path = "tests/replay_capsule.zig", .needle = "std.process.exit" },
     .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.debug.print" },
     .{ .path = "validation/dusty_http.zig", .needle = "std.debug.print" },
     .{ .path = "validation/nightly_seed_sweep.zig", .needle = "std.debug.print" },

@@ -12,6 +12,7 @@ const futex_module = @import("futex.zig");
 const net_module = @import("net.zig");
 const network_module = @import("../network/root.zig");
 const World = @import("../world.zig").World;
+const traceField = @import("../world.zig").traceField;
 
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
@@ -22,7 +23,7 @@ const FileLockRegistry = struct {
     next_key: usize = 1,
 
     const LockState = struct {
-        path: []u8,
+        file_index: usize,
         key: usize,
         shared: usize = 0,
         exclusive: bool = false,
@@ -30,7 +31,6 @@ const FileLockRegistry = struct {
         waiters: std.ArrayList(*Waiter) = .empty,
 
         fn deinit(self: *LockState, allocator: std.mem.Allocator) void {
-            allocator.free(self.path);
             for (self.waiters.items) |waiter| allocator.destroy(waiter);
             self.waiters.deinit(allocator);
             self.* = undefined;
@@ -53,28 +53,26 @@ const FileLockRegistry = struct {
         self.* = undefined;
     }
 
-    fn find(self: *FileLockRegistry, path: []const u8) ?*LockState {
-        const index = self.findIndex(path) orelse return null;
+    fn find(self: *FileLockRegistry, file_index: usize) ?*LockState {
+        const index = self.findIndex(file_index) orelse return null;
         return &self.locks.items[index];
     }
 
-    fn findIndex(self: *FileLockRegistry, path: []const u8) ?usize {
+    fn findIndex(self: *FileLockRegistry, file_index: usize) ?usize {
         for (self.locks.items, 0..) |*lock, index| {
-            if (std.mem.eql(u8, lock.path, path)) {
+            if (lock.file_index == file_index) {
                 return index;
             }
         }
         return null;
     }
 
-    fn getOrCreate(self: *FileLockRegistry, path: []const u8) std.mem.Allocator.Error!*LockState {
-        if (self.find(path)) |lock| return lock;
-        const owned_path = try self.allocator.dupe(u8, path);
-        errdefer self.allocator.free(owned_path);
+    fn getOrCreate(self: *FileLockRegistry, file_index: usize) std.mem.Allocator.Error!*LockState {
+        if (self.find(file_index)) |lock| return lock;
         const key = self.next_key;
         self.next_key += 1;
         try self.locks.append(self.allocator, .{
-            .path = owned_path,
+            .file_index = file_index,
             .key = key,
         });
         return &self.locks.items[self.locks.items.len - 1];
@@ -84,14 +82,14 @@ const FileLockRegistry = struct {
         self: *FileLockRegistry,
         owner: *anyopaque,
         runtime: ?TaskRuntime,
-        path: []const u8,
+        file_index: usize,
         lock_mode: Io.File.Lock,
         nonblocking: bool,
     ) (std.mem.Allocator.Error || error{ WouldBlock, Canceled })!void {
         if (lock_mode == .none) return;
 
         while (true) {
-            const lock = try self.getOrCreate(path);
+            const lock = try self.getOrCreate(file_index);
             const available = switch (lock_mode) {
                 .none => true,
                 .shared => lock.reservations == 0 and !lock.exclusive,
@@ -110,12 +108,14 @@ const FileLockRegistry = struct {
             const task_runtime = runtime orelse return error.WouldBlock;
             const in_task = task_runtime.inTask();
             const waiter = try self.allocator.create(Waiter);
-            errdefer self.allocator.destroy(waiter);
+            var waiter_owned = true;
+            errdefer if (waiter_owned) self.allocator.destroy(waiter);
             waiter.* = .{
                 .owner = owner,
                 .task_owned = in_task,
             };
             try lock.waiters.append(self.allocator, waiter);
+            waiter_owned = false;
             const key = lock.key;
             if (in_task) {
                 task_runtime.blockCancelable(futex_module.waitKey(.file_lock, key)) catch |err| switch (err) {
@@ -137,11 +137,11 @@ const FileLockRegistry = struct {
     fn release(
         self: *FileLockRegistry,
         runtime: ?TaskRuntime,
-        path: []const u8,
+        file_index: usize,
         lock_mode: Io.File.Lock,
     ) void {
         if (lock_mode == .none) return;
-        const lock = self.find(path) orelse unreachable;
+        const lock = self.find(file_index) orelse unreachable;
         switch (lock_mode) {
             .none => {},
             .shared => {
@@ -163,78 +163,27 @@ const FileLockRegistry = struct {
             );
         }
         if (empty) {
-            const index = self.findIndex(path) orelse unreachable;
+            const index = self.findIndex(file_index) orelse unreachable;
             var removed = self.locks.orderedRemove(index);
             removed.deinit(self.allocator);
         }
     }
 
-    fn rekey(
+    fn reserveIdentity(
         self: *FileLockRegistry,
-        runtime: ?TaskRuntime,
-        old_path: []const u8,
-        new_path: []u8,
-    ) void {
-        const lock_index = self.findIndex(old_path) orelse {
-            self.allocator.free(new_path);
-            return;
-        };
-        if (self.findIndex(new_path)) |existing_index| {
-            if (existing_index != lock_index) {
-                const existing = &self.locks.items[existing_index];
-                std.debug.assert(existing.shared == 0);
-                std.debug.assert(!existing.exclusive);
-                std.debug.assert(existing.reservations == 0);
-                const source = &self.locks.items[lock_index];
-                std.debug.assert(source.reservations == 0);
-                existing.shared = source.shared;
-                existing.exclusive = source.exclusive;
-                source.shared = 0;
-                source.exclusive = false;
-                self.wakeLockWaiters(runtime, existing);
-                self.wakeLockWaiters(runtime, source);
-                self.allocator.free(new_path);
-                if (source.waiters.items.len == 0) {
-                    var removed = self.locks.orderedRemove(lock_index);
-                    removed.deinit(self.allocator);
-                }
-                return;
-            }
-        }
-        const lock = &self.locks.items[lock_index];
-        self.allocator.free(lock.path);
-        lock.path = new_path;
-    }
-
-    fn wakeLockWaiters(
-        _: *FileLockRegistry,
-        runtime: ?TaskRuntime,
-        lock: *LockState,
-    ) void {
-        for (lock.waiters.items) |waiter| waiter.ready = true;
-        if (runtime) |task_runtime| {
-            _ = task_runtime.wake(
-                futex_module.waitKey(.file_lock, lock.key),
-                std.math.maxInt(usize),
-            );
-        }
-    }
-
-    fn reservePath(
-        self: *FileLockRegistry,
-        path: []const u8,
+        file_index: usize,
     ) (std.mem.Allocator.Error || error{WouldBlock})!void {
-        const lock = try self.getOrCreate(path);
+        const lock = try self.getOrCreate(file_index);
         if (lock.shared != 0 or lock.exclusive or lock.reservations != 0) return error.WouldBlock;
         lock.reservations += 1;
     }
 
-    fn releasePathReservation(
+    fn releaseIdentityReservation(
         self: *FileLockRegistry,
         runtime: ?TaskRuntime,
-        path: []const u8,
+        file_index: usize,
     ) void {
-        const lock = self.find(path) orelse unreachable;
+        const lock = self.find(file_index) orelse unreachable;
         std.debug.assert(lock.reservations > 0);
         lock.reservations -= 1;
         for (lock.waiters.items) |waiter| waiter.ready = true;
@@ -247,7 +196,7 @@ const FileLockRegistry = struct {
             );
         }
         if (empty) {
-            const index = self.findIndex(path) orelse unreachable;
+            const index = self.findIndex(file_index) orelse unreachable;
             var removed = self.locks.orderedRemove(index);
             removed.deinit(self.allocator);
         }
@@ -567,6 +516,18 @@ pub const ProcessId = @import("task.zig").ProcessId;
 pub const ProcessTaskControl = @import("task.zig").ProcessTaskControl;
 pub const TaskRuntime = @import("task.zig").TaskRuntime;
 
+pub const FileStore = struct {
+    files: std.ArrayList(*Backend.FileMeta) = .empty,
+
+    fn deinit(self: *FileStore, allocator: std.mem.Allocator) void {
+        for (self.files.items) |meta| {
+            meta.deinit(allocator);
+            allocator.destroy(meta);
+        }
+        self.files.deinit(allocator);
+    }
+};
+
 pub const Backend = struct {
     allocator: std.mem.Allocator,
     world: *World,
@@ -591,8 +552,7 @@ pub const Backend = struct {
     next_futex_key: usize = 1,
     /// The index table may grow while file operations are suspended on disk
     /// latency, so metadata lives in separately allocated, stable storage.
-    files: std.ArrayList(*FileMeta) = .empty,
-    retired_file_paths: std.ArrayList([]u8) = .empty,
+    local_files: FileStore = .{},
     directory_handles: std.ArrayList(DirectoryHandle) = .empty,
     handles: std.ArrayList(HandleEntry) = .empty,
     next_handle: SocketHandle = 1000,
@@ -703,7 +663,6 @@ pub const Backend = struct {
         read: bool,
         write: bool,
         lock: Io.File.Lock = .none,
-        lock_path: ?[]u8 = null,
         cursor: u64 = 0,
         closed: bool = false,
 
@@ -717,44 +676,48 @@ pub const Backend = struct {
                 .file => {},
                 .directory => |path| allocator.free(path),
             }
-            if (self.lock_path) |path| allocator.free(path);
             allocator.destroy(self);
         }
     };
 
-    pub const FileLockRekey = struct {
-        registry_path: ?[]u8 = null,
-        handle_paths: std.ArrayList(HandlePath) = .empty,
-
-        pub const HandlePath = struct {
-            backend: *Backend,
-            state: *FileState,
-            path: []u8,
-        };
-
-        pub fn deinit(self: *FileLockRekey, allocator: std.mem.Allocator) void {
-            if (self.registry_path) |path| allocator.free(path);
-            for (self.handle_paths.items) |entry| entry.backend.allocator.free(entry.path);
-            self.handle_paths.deinit(allocator);
-            self.* = undefined;
-        }
-    };
-
     pub const FileMetaRename = struct {
-        entries: std.ArrayList(Entry) = .empty,
+        entry: ?Entry = null,
+        replaced: ?usize = null,
 
         pub const Entry = struct {
-            backend: *Backend,
             index: usize,
             path: []u8,
         };
 
         pub fn deinit(self: *FileMetaRename, allocator: std.mem.Allocator) void {
-            for (self.entries.items) |entry| entry.backend.allocator.free(entry.path);
-            self.entries.deinit(allocator);
+            if (self.entry) |entry| allocator.free(entry.path);
             self.* = undefined;
         }
     };
+
+    pub fn fileStore(self: *Backend) *FileStore {
+        return if (self.process_registry) |registry| &registry.files else &self.local_files;
+    }
+
+    pub fn refreshFileMeta(self: *Backend, meta: *FileMeta) void {
+        if (meta.stale) return; // Crash recovery rediscovery retains its existing contract.
+        if (self.disk.vtable.inspect) |inspect| {
+            if (inspect(self.disk.ptr, meta.inode)) |snapshot| {
+                meta.len = snapshot.size;
+                meta.mtime = Io.Timestamp.fromNanoseconds(@intCast(snapshot.mtime_ns));
+            } else {
+                meta.deleted = true;
+                meta.len = 0;
+            }
+        }
+    }
+
+    pub fn currentFilePath(self: *Backend, meta: *const FileMeta) []const u8 {
+        if (self.disk.vtable.inspect) |inspect| {
+            if (inspect(self.disk.ptr, meta.inode)) |snapshot| return snapshot.path;
+        }
+        return meta.path;
+    }
 
     pub fn init(allocator: std.mem.Allocator, world: *World, disk: disk_module.Disk, sector_size: u64) Backend {
         return .{
@@ -779,13 +742,7 @@ pub const Backend = struct {
         self.group_closures.deinit(self.allocator);
         for (self.group_states.items) |state| self.allocator.destroy(state);
         self.group_states.deinit(self.allocator);
-        for (self.files.items) |file_meta| {
-            file_meta.deinit(self.allocator);
-            self.allocator.destroy(file_meta);
-        }
-        self.files.deinit(self.allocator);
-        for (self.retired_file_paths.items) |path| self.allocator.free(path);
-        self.retired_file_paths.deinit(self.allocator);
+        self.local_files.deinit(self.allocator);
         for (self.directory_handles.items) |*handle| handle.deinit(self.allocator);
         self.directory_handles.deinit(self.allocator);
         self.locks.deinit();
@@ -1399,7 +1356,9 @@ pub const Backend = struct {
     }
 
     pub fn fileMeta(self: *Backend, file_state: *const FileState) *FileMeta {
-        return self.files.items[file_state.target.file];
+        const meta = self.fileStore().files.items[file_state.target.file];
+        self.refreshFileMeta(meta);
+        return meta;
     }
 
     pub fn fileDirectoryPath(file_state: *const FileState) ?[]const u8 {
@@ -1517,9 +1476,10 @@ pub const Backend = struct {
     }
 
     pub fn findFileMetaIndex(self: *Backend, path: []const u8) ?usize {
-        for (self.files.items, 0..) |file_meta, index| {
+        for (self.fileStore().files.items, 0..) |file_meta, index| {
+            self.refreshFileMeta(file_meta);
             if (file_meta.deleted) continue;
-            if (std.mem.eql(u8, file_meta.path, path)) return index;
+            if (std.mem.eql(u8, self.currentFilePath(file_meta), path)) return index;
         }
         return null;
     }
@@ -1529,7 +1489,7 @@ pub const Backend = struct {
     /// authoritative deletion, but after a crash the disk may have
     /// resurrected the file.
     pub fn findStaleDeletedFileMetaIndex(self: *Backend, path: []const u8) ?usize {
-        for (self.files.items, 0..) |file_meta, index| {
+        for (self.fileStore().files.items, 0..) |file_meta, index| {
             if (!file_meta.deleted or !file_meta.stale) continue;
             if (std.mem.eql(u8, file_meta.path, path)) return index;
         }
@@ -1549,30 +1509,20 @@ pub const Backend = struct {
             .path = owned_path,
             .inode = inode,
         };
-        try self.files.append(self.allocator, file_meta);
-        return self.files.items.len - 1;
+        try self.fileStore().files.append(self.allocator, file_meta);
+        return self.fileStore().files.items.len - 1;
     }
 
     pub fn discardFileMeta(self: *Backend, index: usize) void {
-        self.files.items[index].deleted = true;
-        self.files.items[index].stale = false;
-        self.files.items[index].len = 0;
+        self.fileStore().files.items[index].deleted = true;
+        self.fileStore().files.items[index].stale = false;
+        self.fileStore().files.items[index].len = 0;
     }
 
-    pub fn discardFileMetaForPathAcrossProcesses(self: *Backend, path: []const u8) void {
+    pub fn discardFileIdentity(self: *Backend, index: usize) void {
         if (self.process_registry) |registry| {
-            for (registry.backends) |*backend| {
-                backend.discardFileMetaForPath(path);
-            }
-            return;
-        }
-
-        self.discardFileMetaForPath(path);
-    }
-
-    fn discardFileMetaForPath(self: *Backend, path: []const u8) void {
-        const index = self.findFileMetaIndex(path) orelse return;
-        self.closeFileHandlesForIndex(index);
+            for (registry.backends) |*backend| backend.closeFileHandlesForIndex(index);
+        } else self.closeFileHandlesForIndex(index);
         self.discardFileMeta(index);
     }
 
@@ -1637,7 +1587,7 @@ pub const Backend = struct {
             // Tombstones go stale too: a crash can roll back an unsynced
             // deletion, in which case the tombstoned entry must be revivable
             // with its timestamps intact.
-            for (self.files.items) |file_meta| {
+            for (self.fileStore().files.items) |file_meta| {
                 file_meta.stale = true;
             }
         }
@@ -1704,30 +1654,8 @@ pub const Backend = struct {
         lock: Io.File.Lock,
         lock_nonblocking: bool,
     ) (std.mem.Allocator.Error || error{ WouldBlock, Canceled })!Io.File {
-        var lock_acquire_path = self.files.items[file_index].path;
-        while (true) {
-            try self.fileLockRegistry().acquire(
-                self,
-                self.task_runtime,
-                lock_acquire_path,
-                lock,
-                lock_nonblocking,
-            );
-            const current_path = self.files.items[file_index].path;
-            if (std.mem.eql(u8, lock_acquire_path, current_path)) break;
-            self.fileLockRegistry().release(self.task_runtime, lock_acquire_path, lock);
-            lock_acquire_path = current_path;
-        }
-        errdefer self.fileLockRegistry().release(
-            self.task_runtime,
-            lock_acquire_path,
-            lock,
-        );
-        const lock_path = if (lock == .none)
-            null
-        else
-            try self.allocator.dupe(u8, lock_acquire_path);
-        errdefer if (lock_path) |path| self.allocator.free(path);
+        try self.fileLockRegistry().acquire(self, self.task_runtime, file_index, lock, lock_nonblocking);
+        errdefer self.fileLockRegistry().release(self.task_runtime, file_index, lock);
         const file_state = try self.allocator.create(FileState);
         errdefer self.allocator.destroy(file_state);
         file_state.* = .{
@@ -1735,7 +1663,6 @@ pub const Backend = struct {
             .read = read,
             .write = write,
             .lock = lock,
-            .lock_path = lock_path,
         };
 
         const handle = try self.createHandle(.{ .file = file_state });
@@ -1746,8 +1673,10 @@ pub const Backend = struct {
     }
 
     fn releaseFileLock(self: *Backend, state: *const FileState) void {
-        const path = state.lock_path orelse return;
-        self.fileLockRegistry().release(self.task_runtime, path, state.lock);
+        switch (state.target) {
+            .file => |index| self.fileLockRegistry().release(self.task_runtime, index, state.lock),
+            .directory => {},
+        }
     }
 
     fn fileLockRegistry(self: *Backend) *FileLockRegistry {
@@ -1778,141 +1707,34 @@ pub const Backend = struct {
         self.pathGate().releaseReservation(self.task_runtime, first_path, second_path);
     }
 
-    pub fn reserveFileLockPath(self: *Backend, path: []const u8) (std.mem.Allocator.Error || error{WouldBlock})!void {
-        try self.fileLockRegistry().reservePath(path);
+    /// Reserve the current destination identity while the pathname gate prevents
+    /// new opens. Return the identity so release cannot resolve a replaced path.
+    pub fn reserveFileLockPath(self: *Backend, path: []const u8) (std.mem.Allocator.Error || error{WouldBlock})!?usize {
+        const index = self.findFileMetaIndex(path) orelse return null;
+        try self.fileLockRegistry().reserveIdentity(index);
+        return index;
     }
 
-    pub fn releaseFileLockPathReservation(self: *Backend, path: []const u8) void {
-        self.fileLockRegistry().releasePathReservation(self.task_runtime, path);
+    pub fn releaseFileLockReservation(self: *Backend, index: ?usize) void {
+        if (index) |value| self.fileLockRegistry().releaseIdentityReservation(self.task_runtime, value);
     }
 
-    pub fn prepareFileMetaRename(
-        self: *Backend,
-        old_path: []const u8,
-        new_path: []const u8,
-    ) std.mem.Allocator.Error!FileMetaRename {
-        var prepared: FileMetaRename = .{};
-        errdefer prepared.deinit(self.allocator);
+    pub fn prepareFileMetaRename(self: *Backend, old_path: []const u8, new_path: []const u8) std.mem.Allocator.Error!FileMetaRename {
+        const index = self.findFileMetaIndex(old_path) orelse return .{};
+        return .{
+            .entry = .{ .index = index, .path = try self.allocator.dupe(u8, new_path) },
+            .replaced = self.findFileMetaIndex(new_path),
+        };
+    }
 
-        if (self.process_registry) |registry| {
-            for (registry.backends) |*backend| {
-                try backend.prepareFileMetaPath(self.allocator, &prepared, old_path, new_path);
-            }
-        } else {
-            try self.prepareFileMetaPath(self.allocator, &prepared, old_path, new_path);
+    pub fn commitFileMetaRename(self: *Backend, _: []const u8, prepared: *FileMetaRename) void {
+        if (prepared.replaced) |index| self.discardFileIdentity(index);
+        if (prepared.entry) |entry| {
+            const meta = self.fileStore().files.items[entry.index];
+            self.allocator.free(meta.path);
+            meta.path = entry.path;
         }
-
-        return prepared;
-    }
-
-    fn prepareFileMetaPath(
-        self: *Backend,
-        list_allocator: std.mem.Allocator,
-        prepared: *FileMetaRename,
-        old_path: []const u8,
-        new_path: []const u8,
-    ) std.mem.Allocator.Error!void {
-        const index = self.findFileMetaIndex(old_path) orelse return;
-        try self.retired_file_paths.ensureUnusedCapacity(self.allocator, 1);
-        const owned_path = try self.allocator.dupe(u8, new_path);
-        var path_owned = true;
-        errdefer if (path_owned) self.allocator.free(owned_path);
-        try prepared.entries.append(list_allocator, .{
-            .backend = self,
-            .index = index,
-            .path = owned_path,
-        });
-        path_owned = false;
-    }
-
-    pub fn commitFileMetaRename(
-        self: *Backend,
-        new_path: []const u8,
-        prepared: *FileMetaRename,
-    ) void {
-        self.discardFileMetaForPathAcrossProcesses(new_path);
-
-        for (prepared.entries.items) |entry| {
-            const old_path = entry.backend.files.items[entry.index].path;
-            if (entry.backend.fileLockPathHasWaiters(old_path)) {
-                entry.backend.retired_file_paths.appendAssumeCapacity(old_path);
-            } else {
-                entry.backend.allocator.free(old_path);
-            }
-            entry.backend.files.items[entry.index].path = entry.path;
-        }
-        prepared.entries.clearRetainingCapacity();
-    }
-
-    fn fileLockPathHasWaiters(self: *Backend, path: []const u8) bool {
-        const lock = self.fileLockRegistry().find(path) orelse return false;
-        return lock.waiters.items.len != 0;
-    }
-
-    pub fn prepareFileLockRekey(
-        self: *Backend,
-        old_path: []const u8,
-        new_path: []const u8,
-    ) std.mem.Allocator.Error!FileLockRekey {
-        var prepared: FileLockRekey = .{};
-        errdefer prepared.deinit(self.allocator);
-
-        if (self.fileLockRegistry().find(old_path) != null) {
-            prepared.registry_path = try self.allocator.dupe(u8, new_path);
-        }
-
-        if (self.process_registry) |registry| {
-            for (registry.backends) |*backend| {
-                try backend.prepareFileLockHandlePaths(self.allocator, &prepared, old_path, new_path);
-            }
-        } else {
-            try self.prepareFileLockHandlePaths(self.allocator, &prepared, old_path, new_path);
-        }
-
-        return prepared;
-    }
-
-    fn prepareFileLockHandlePaths(
-        self: *Backend,
-        list_allocator: std.mem.Allocator,
-        prepared: *FileLockRekey,
-        old_path: []const u8,
-        new_path: []const u8,
-    ) std.mem.Allocator.Error!void {
-        for (self.handles.items) |entry| {
-            const file_state = switch (entry.state) {
-                .file => |state| state,
-                .listener, .connection => continue,
-            };
-            const lock_path = file_state.lock_path orelse continue;
-            if (!std.mem.eql(u8, lock_path, old_path)) continue;
-            const owned_path = try self.allocator.dupe(u8, new_path);
-            var path_owned = true;
-            errdefer if (path_owned) self.allocator.free(owned_path);
-            try prepared.handle_paths.append(list_allocator, .{
-                .backend = self,
-                .state = file_state,
-                .path = owned_path,
-            });
-            path_owned = false;
-        }
-    }
-
-    pub fn commitFileLockRekey(
-        self: *Backend,
-        old_path: []const u8,
-        prepared: *FileLockRekey,
-    ) void {
-        if (prepared.registry_path) |path| {
-            self.fileLockRegistry().rekey(self.task_runtime, old_path, path);
-            prepared.registry_path = null;
-        }
-        for (prepared.handle_paths.items) |entry| {
-            const old_lock_path = entry.state.lock_path orelse unreachable;
-            entry.backend.allocator.free(old_lock_path);
-            entry.state.lock_path = entry.path;
-        }
-        prepared.handle_paths.clearRetainingCapacity();
+        prepared.entry = null;
     }
 
     fn retireFileWaitersAndPathOwners(self: *Backend, task_control: ?ProcessTaskControl) void {
@@ -1940,6 +1762,7 @@ pub const Backend = struct {
 };
 
 pub const ProcessRegistry = struct {
+    files: FileStore = .{},
     allocator: std.mem.Allocator,
     backends: []Backend = &.{},
     listeners: std.ArrayList(ListenerRegistration) = .empty,
@@ -1973,6 +1796,7 @@ pub const ProcessRegistry = struct {
     }
 
     pub fn deinit(self: *ProcessRegistry) void {
+        self.files.deinit(self.allocator);
         self.futex_keys.deinit(self.allocator);
         self.listeners.deinit(self.allocator);
         self.locks.deinit();
@@ -2154,6 +1978,53 @@ pub const ProcessRuntime = struct {
         return &self.backends[node];
     }
 
+    /// Inventory application-owned handles without changing their lifetime.
+    pub fn checkResources(self: *ProcessRuntime) !void {
+        var leaked = false;
+        for (self.backends, 0..) |*backend, node| {
+            for (backend.handles.items) |entry| {
+                const path: []const u8 = switch (entry.state) {
+                    .file => |file| switch (file.target) {
+                        .file => |index| backend.currentFilePath(backend.fileStore().files.items[index]),
+                        .directory => |name| name,
+                    },
+                    .listener => |listener| if (listener.closed) continue else "-",
+                    .connection => |connection| blk: {
+                        if (connection.closed) continue;
+                        // A connection waiting for accept belongs to its listener.
+                        for (backend.handles.items) |owner| switch (owner.state) {
+                            .listener => |listener| {
+                                for (listener.pending.items) |pending| {
+                                    if (pending == entry.handle) break :blk "";
+                                }
+                            },
+                            else => {},
+                        };
+                        break :blk "-";
+                    },
+                };
+                if (path.len == 0) continue;
+                leaked = true;
+                try self.world.recordFields("resource.leak", &.{
+                    traceField("node", .{ .uint = node }),
+                    traceField("kind", .{ .text = @tagName(entry.state) }),
+                    traceField("handle", .{ .uint = @intCast(entry.handle) }),
+                    traceField("path", .{ .text = path }),
+                });
+            }
+            for (backend.directory_handles.items) |dir| {
+                leaked = true;
+                try self.world.recordFields("resource.leak", &.{
+                    traceField("node", .{ .uint = node }),
+                    traceField("kind", .{ .text = "directory" }),
+                    traceField("handle", .{ .uint = @intCast(dir.handle) }),
+                    traceField("path", .{ .text = dir.path }),
+                });
+            }
+        }
+        if (leaked) return error.ResourceLeak;
+    }
+
     pub fn io(self: *ProcessRuntime, node: network_module.NodeId) error{ InvalidNode, ProcessKilled }!Io {
         const backend = try self.backendForNode(node);
         if (!backend.processIsAlive()) return error.ProcessKilled;
@@ -2219,7 +2090,7 @@ pub const ProcessRuntime = struct {
 
     pub fn kill(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!void {
         const backend = try self.backendForNode(node);
-        backend.killProcess(.{ .invalidate_files = true });
+        backend.killProcess(.{});
         self.killProcessTasks(@intCast(node));
         retireKilledAsyncClosures(backend, self.task_control);
         retireKilledGroupClosures(backend, self.task_control);
@@ -2992,8 +2863,13 @@ fn retireKilledAsyncClosures(
 }
 
 fn simRandom(userdata: ?*anyopaque, buffer: []u8) void {
-    worldFromUserdata(userdata).randomBytes(buffer) catch
-        @panic("failed to record simulated io random");
+    worldFromUserdata(userdata).randomBytes(buffer) catch |err| switch (err) {
+        // The infallible std.Io ABI cannot return replay errors. The world has
+        // latched the diagnostic and the runner reports it after application
+        // cleanup; the generated bytes remain initialized for this call.
+        error.DecisionReplayDiverged => {},
+        else => @panic("failed to record simulated io random"),
+    };
 }
 
 fn simRandomSecure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {

@@ -14,11 +14,6 @@ const Io = std.Io;
 const World = world_module.World;
 const traceField = world_module.traceField;
 
-/// Errors returned by fixed-capacity event queues.
-pub const EventQueueError = error{
-    EventQueueFull,
-};
-
 /// Stable task identifier assigned by the deterministic scheduler.
 pub const TaskId = u64;
 
@@ -42,7 +37,7 @@ pub const TaskSchedulerError = error{
     TaskNotReady,
     TaskNotRunning,
     TaskSuspendedWithoutYield,
-} || fiber.Error || std.mem.Allocator.Error || world_module.TraceError;
+} || fiber.Error || std.mem.Allocator.Error || world_module.TraceError || world_module.DecisionError;
 
 /// Opaque wait-set key. Futexes will key this by address; timers and I/O can
 /// use scheduler-owned identifiers.
@@ -341,9 +336,13 @@ pub const TaskScheduler = struct {
             // The bound is inclusive, so `maxInt(u64)` means a full-range
             // draw; `+ 1` would overflow before reaching the bounded draw.
             task.start_delay_ns = if (self.task_start_jitter_ns == std.math.maxInt(u64))
-                try self.world.randomU64()
+                try self.world.chooseU64("scheduler.start_jitter")
             else
-                try self.world.randomIntLessThan(u64, self.task_start_jitter_ns + 1);
+                try self.world.chooseIntLessThan(
+                    "scheduler.start_jitter",
+                    u64,
+                    self.task_start_jitter_ns + 1,
+                );
             try self.recordStartJitter(task_id, task.start_delay_ns);
         }
         self.next_task_id += 1;
@@ -619,7 +618,11 @@ pub const TaskScheduler = struct {
                 var formatted = try self.formatTaskIds(candidates.items);
                 defer formatted.deinit(self.allocator);
 
-                const draw = try self.world.randomIntLessThan(usize, candidates.items.len);
+                const draw = try self.world.chooseIntLessThan(
+                    "scheduler.wake",
+                    usize,
+                    candidates.items.len,
+                );
                 const selected = candidates.items[draw];
                 try self.recordWake(key, formatted.items, candidates.items.len, draw, selected);
                 _ = candidates.orderedRemove(draw);
@@ -656,7 +659,11 @@ pub const TaskScheduler = struct {
             var candidates = try scheduler.formatReadySet();
             defer candidates.deinit(scheduler.allocator);
 
-            const draw = try scheduler.world.randomIntLessThan(usize, scheduler.ready.items.len);
+            const draw = try scheduler.world.chooseIntLessThan(
+                "scheduler.select",
+                usize,
+                scheduler.ready.items.len,
+            );
             const selected = scheduler.ready.items[draw];
             try scheduler.recordSelect(candidates.items, draw, selected);
             _ = scheduler.ready.orderedRemove(draw);
@@ -1355,114 +1362,6 @@ const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .recancel = taskRuntimeRecancel,
     .swap_cancel_protection = taskRuntimeSwapCancelProtection,
 };
-
-/// Fixed-capacity deterministic event queue.
-///
-/// `pop` uses a linear scan; capacities are fixed and deliberately small.
-pub fn EventQueue(
-    comptime Event: type,
-    comptime capacity: usize,
-    comptime lessThan: fn (Event, Event) bool,
-) type {
-    return struct {
-        const Self = @This();
-
-        items: [capacity]Event = undefined,
-        len: usize = 0,
-
-        pub fn init() Self {
-            return .{};
-        }
-
-        pub fn count(self: *const Self) usize {
-            return self.len;
-        }
-
-        pub fn peek(self: *const Self) ?Event {
-            if (self.len == 0) return null;
-            return self.items[self.nextIndex()];
-        }
-
-        pub fn push(self: *Self, event: Event) EventQueueError!void {
-            if (self.len == self.items.len) return error.EventQueueFull;
-            self.items[self.len] = event;
-            self.len += 1;
-        }
-
-        pub fn pop(self: *Self) ?Event {
-            if (self.len == 0) return null;
-
-            const index = self.nextIndex();
-            const event = self.items[index];
-            std.mem.copyForwards(
-                Event,
-                self.items[index .. self.len - 1],
-                self.items[index + 1 .. self.len],
-            );
-            self.len -= 1;
-            return event;
-        }
-
-        fn nextIndex(self: *const Self) usize {
-            std.debug.assert(self.len > 0);
-
-            var best: usize = 0;
-            for (self.items[1..self.len], 1..) |event, index| {
-                if (lessThan(event, self.items[best])) {
-                    best = index;
-                }
-            }
-            return best;
-        }
-    };
-}
-
-const TestEvent = struct {
-    ready_at: u64,
-    id: u64,
-};
-
-fn testEventLessThan(a: TestEvent, b: TestEvent) bool {
-    return a.ready_at < b.ready_at or (a.ready_at == b.ready_at and a.id < b.id);
-}
-
-test "EventQueue: pops events in deterministic order" {
-    const Queue = EventQueue(TestEvent, 4, testEventLessThan);
-    var queue = Queue.init();
-
-    try queue.push(.{ .ready_at = 20, .id = 2 });
-    try queue.push(.{ .ready_at = 10, .id = 3 });
-    try queue.push(.{ .ready_at = 10, .id = 1 });
-
-    try std.testing.expectEqual(@as(usize, 3), queue.count());
-    try std.testing.expectEqual(TestEvent{ .ready_at = 10, .id = 1 }, queue.pop().?);
-    try std.testing.expectEqual(TestEvent{ .ready_at = 10, .id = 3 }, queue.pop().?);
-    try std.testing.expectEqual(TestEvent{ .ready_at = 20, .id = 2 }, queue.pop().?);
-    try std.testing.expectEqual(@as(?TestEvent, null), queue.pop());
-}
-
-test "EventQueue: peeks without popping" {
-    const Queue = EventQueue(TestEvent, 4, testEventLessThan);
-    var queue = Queue.init();
-
-    try queue.push(.{ .ready_at = 20, .id = 2 });
-    try queue.push(.{ .ready_at = 10, .id = 1 });
-
-    try std.testing.expectEqual(TestEvent{ .ready_at = 10, .id = 1 }, queue.peek().?);
-    try std.testing.expectEqual(@as(usize, 2), queue.count());
-    try std.testing.expectEqual(TestEvent{ .ready_at = 10, .id = 1 }, queue.pop().?);
-}
-
-test "EventQueue: reports capacity overflow" {
-    const Queue = EventQueue(TestEvent, 1, testEventLessThan);
-    var queue = Queue.init();
-
-    try queue.push(.{ .ready_at = 1, .id = 1 });
-    try std.testing.expectError(
-        EventQueueError.EventQueueFull,
-        queue.push(.{ .ready_at = 2, .id = 2 }),
-    );
-}
 
 const ToyTask = struct {
     remaining: u8,

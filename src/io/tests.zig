@@ -194,8 +194,8 @@ test "io: failed post-create stat does not publish file metadata" {
         error.FileNotFound,
         Io.Dir.cwd().createFile(io, "ghost", .{}),
     );
-    try std.testing.expectEqual(@as(usize, 1), backend.files.items.len);
-    try std.testing.expect(backend.files.items[0].deleted);
+    try std.testing.expectEqual(@as(usize, 1), backend.fileStore().files.items.len);
+    try std.testing.expect(backend.fileStore().files.items[0].deleted);
 
     try std.testing.expectError(
         error.FileNotFound,
@@ -3842,10 +3842,10 @@ test "io: file metadata stays stable across table growth during disk latency" {
 
     var file = try Io.Dir.cwd().createFile(io, "target", .{});
     defer file.close(io);
-    try std.testing.expectEqual(@as(usize, 1), backend.files.items.len);
-    try backend.files.shrinkAndFreePrecise(backend.allocator, backend.files.items.len);
-    const table_before = backend.files.items.ptr;
-    const target_meta = backend.files.items[0];
+    try std.testing.expectEqual(@as(usize, 1), backend.fileStore().files.items.len);
+    try backend.fileStore().files.shrinkAndFreePrecise(backend.allocator, backend.fileStore().files.items.len);
+    const table_before = backend.fileStore().files.items.ptr;
+    const target_meta = backend.fileStore().files.items[0];
 
     var scenario: Scenario = .{ .io = io, .file = file };
     var writer = Io.async(io, Scenario.write, .{&scenario});
@@ -3854,8 +3854,8 @@ test "io: file metadata stays stable across table growth during disk latency" {
     }
 
     _ = try backend.createFileMeta("growth-entry");
-    try std.testing.expect(table_before != backend.files.items.ptr);
-    try std.testing.expectEqual(target_meta, backend.files.items[0]);
+    try std.testing.expect(table_before != backend.fileStore().files.items.ptr);
+    try std.testing.expectEqual(target_meta, backend.fileStore().files.items[0]);
 
     writer.await(io);
     try std.testing.expectEqual(@as(u64, 4), target_meta.len);
@@ -3948,8 +3948,8 @@ test "io: rename can replace a path during a suspended streaming write" {
     backend.commitFileMetaRename("new-name", &prepared);
 
     writer.await(io);
-    try std.testing.expectEqualStrings("new-name", backend.files.items[0].path);
-    try std.testing.expectEqual(@as(u64, 4), backend.files.items[0].len);
+    try std.testing.expectEqualStrings("new-name", backend.fileStore().files.items[0].path);
+    try std.testing.expectEqual(@as(u64, 4), backend.fileStore().files.items[0].len);
     try std.testing.expectEqual(@as(u64, 4), backend.file(file.handle).?.cursor);
 }
 

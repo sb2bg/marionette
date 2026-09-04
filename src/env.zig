@@ -189,6 +189,7 @@ pub const ProcessControl = struct {
         evolve_tick_faults: *const fn (*anyopaque) anyerror!void,
         next_fault_boundary_before_or_at: *const fn (*anyopaque, clock_module.Timestamp) anyerror!?clock_module.Timestamp,
         finish_run_for: *const fn (*anyopaque) anyerror!void,
+        check_resources: *const fn (*anyopaque) anyerror!void,
     };
 
     /// Configure automatic crash/restart rates for one node. Replaces any
@@ -319,6 +320,13 @@ pub const SimControl = struct {
     process: ProcessControl,
     tasks: io_task_module.TaskControl,
     world: *World,
+
+    /// Fail with ResourceLeak and record surviving simulated file, directory,
+    /// and socket handles across all processes. Does not close resources.
+    /// Call after application cleanup; process kill already reclaims handles.
+    pub fn checkResources(self: SimControl) !void {
+        try self.process.vtable.check_resources(self.process.ptr);
+    }
 
     /// Advance simulated time by one tick, then evolve time-based faults
     /// at the new boundary.

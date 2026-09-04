@@ -15,6 +15,7 @@ and installation instructions.
 
 - [Architecture](architecture.md)
 - [Determinism](determinism.md)
+- [Decision tapes](decision-tapes.md)
 - [Trace format](trace-format.md)
 - [Disk fault model](disk-fault-model.md)
 - [Network model](network.md)

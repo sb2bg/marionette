@@ -7,6 +7,7 @@ const std = @import("std");
 
 const allocation_module = @import("allocation.zig");
 const clock_module = @import("clock.zig");
+const decision_module = @import("decision.zig");
 const disk_module = @import("disk/root.zig");
 const env_module = @import("env.zig");
 const io_module = @import("io/root.zig");
@@ -19,6 +20,9 @@ pub const TraceError = error{
     /// The formatted trace payload is not a valid line-oriented trace event.
     InvalidTracePayload,
 };
+
+/// Errors returned while recording or exact-replaying semantic decisions.
+pub const DecisionError = decision_module.Error;
 
 /// One structured trace field written by `World.recordFields`.
 pub const TraceField = struct {
@@ -66,6 +70,7 @@ const TransactionCheckpoint = struct {
     trace_len: usize,
     event_index: u64,
     random: seed_module.RandomState,
+    decisions: decision_module.Engine.Checkpoint,
 };
 
 /// Infallible observation seam used by the runner's out-of-process watchdog.
@@ -106,6 +111,10 @@ pub const internal = struct {
 
     pub fn rollbackTransaction(world: *World, checkpoint: TransactionCheckpoint) void {
         world.rollbackTransaction(checkpoint);
+    }
+
+    pub fn hasExecutionObserver(world: *const World) bool {
+        return world.execution_observer != null;
     }
 };
 
@@ -389,7 +398,10 @@ pub const ProcessSupervisor = struct {
             return;
         };
         const eligible_from = if (floor_ns <= from_ns) from_ns else floor_ns - self.world.clock().tick_ns;
-        const ticks = try self.sampleNextOccurrenceTicks(rate);
+        const ticks = switch (self.states[index]) {
+            .alive => try self.sampleNextOccurrenceTicks("process.crash_schedule", rate),
+            .killed => try self.sampleNextOccurrenceTicks("process.restart_schedule", rate),
+        };
         const at_ns = addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns) catch {
             self.transition_schedules[index] = .beyond_clock;
             return;
@@ -420,13 +432,21 @@ pub const ProcessSupervisor = struct {
         }
     }
 
-    fn sampleNextOccurrenceTicks(self: *ProcessSupervisor, rate: env_module.BuggifyRate) !u64 {
+    fn sampleNextOccurrenceTicks(
+        self: *ProcessSupervisor,
+        comptime site_id: []const u8,
+        rate: env_module.BuggifyRate,
+    ) !u64 {
         std.debug.assert(rate.numerator > 0);
         std.debug.assert(rate.numerator <= rate.denominator);
         if (rate.numerator == rate.denominator) return 1;
 
         const random_space: u64 = 1 << 53;
-        const draw = try self.world.randomIntLessThan(u64, random_space);
+        const draw = try self.world.chooseIntLessThan(
+            site_id,
+            u64,
+            random_space,
+        );
         const uniform = (@as(f64, @floatFromInt(draw)) + 1.0) / (@as(f64, @floatFromInt(random_space)) + 1.0);
         const failure_probability =
             @as(f64, @floatFromInt(rate.denominator - rate.numerator)) /
@@ -449,7 +469,17 @@ const process_control_vtable: env_module.ProcessControl.VTable = .{
     .evolve_tick_faults = processControlEvolveAtBoundary,
     .next_fault_boundary_before_or_at = processControlNextBoundaryBeforeOrAt,
     .finish_run_for = processControlFinishRunFor,
+    .check_resources = processControlCheckResources,
 };
+
+fn processControlCheckResources(ptr: *anyopaque) anyerror!void {
+    const supervisor = processControl(ptr);
+    const checkpoint = supervisor.world.transactionCheckpoint();
+    supervisor.io_runtime.checkResources() catch |err| {
+        if (err != error.ResourceLeak) supervisor.world.rollbackTransaction(checkpoint);
+        return err;
+    };
+}
 
 fn processControl(ptr: *anyopaque) *ProcessSupervisor {
     return @ptrCast(@alignCast(ptr));
@@ -462,7 +492,7 @@ fn allocationTraceRecord(ptr: *anyopaque, payload: []const u8) !void {
 
 fn allocationRandomIntLessThan(ptr: *anyopaque, less_than: u32) !u32 {
     const world: *World = @ptrCast(@alignCast(ptr));
-    return try world.randomIntLessThan(u32, less_than);
+    return try world.chooseIntLessThan("allocation.failure", u32, less_than);
 }
 
 fn processControlSetDynamics(
@@ -552,6 +582,8 @@ pub const World = struct {
     sim_clock: clock_module.SimClock,
     /// Scheduled pseudorandom state for reproducible choices.
     random: seed_module.RandomState,
+    /// Globally ordered semantic decisions recorded or consumed by this world.
+    decisions: decision_module.Engine,
     /// Byte trace compared by determinism tests.
     trace_log: std.ArrayList(u8),
     /// Next event index to write into the trace.
@@ -582,6 +614,8 @@ pub const World = struct {
         start_ns: clock_module.Timestamp = 0,
         /// Nanoseconds advanced by one world tick.
         tick_ns: clock_module.Duration = clock_module.default_tick_ns,
+        /// Record a new decision tape or replay an existing borrowed tape.
+        decisions: decision_module.Mode = .record,
     };
 
     pub const InitError = std.mem.Allocator.Error || seed_module.SeedScheduleError;
@@ -600,6 +634,7 @@ pub const World = struct {
                 .tick_ns = options.tick_ns,
             }),
             .random = random,
+            .decisions = .init(allocator, options.decisions),
             .trace_log = .empty,
             .event_index = 0,
             .simulation_created = false,
@@ -608,7 +643,7 @@ pub const World = struct {
         };
         errdefer world.deinit();
 
-        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=2\n");
+        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=3\n");
         try world.recordInit(
             "world.init seed={} start_ns={} tick_ns={}",
             .{ options.seed, options.start_ns, options.tick_ns },
@@ -640,6 +675,7 @@ pub const World = struct {
         }
         self.teardowns.deinit(self.allocator);
         self.trace_log.deinit(self.allocator);
+        self.decisions.deinit();
         self.* = undefined;
     }
 
@@ -1010,6 +1046,8 @@ pub const World = struct {
         errdefer self.rollbackTransaction(checkpoint);
         try self.prepareRandomDraw();
         self.random.random().bytes(buffer);
+        const request = try self.decisions.request("io.random", self.now(), self.precedingEventIndex(), .{ .bytes = buffer.len });
+        try self.decisions.chooseBytes(request, buffer);
         const digest = std.hash.Wyhash.hash(0, buffer);
         try self.recordFields("io.random", &.{
             traceField("len", .{ .uint = @intCast(buffer.len) }),
@@ -1018,40 +1056,90 @@ pub const World = struct {
         self.random.finishDraw();
     }
 
-    /// Draw a traced `u64` from the world's scheduled random stream.
+    /// Draw a traced `u64` from the world's seeded random stream using the
+    /// legacy generic site id. Simulator components should use `chooseU64`
+    /// with a stable semantic site id.
     pub fn randomU64(self: *World) !u64 {
-        const checkpoint = self.transactionCheckpoint();
-        errdefer self.rollbackTransaction(checkpoint);
-        try self.prepareRandomDraw();
-        const value = self.random.random().int(u64);
-        try self.record("world.random_u64 value={}", .{value});
-        self.random.finishDraw();
-        return value;
+        return self.chooseU64("world.random_u64");
     }
 
-    /// Draw a traced boolean from the world's scheduled random stream.
+    /// Draw a traced boolean using the legacy generic site id.
     pub fn randomBool(self: *World) !bool {
-        const checkpoint = self.transactionCheckpoint();
-        errdefer self.rollbackTransaction(checkpoint);
-        try self.prepareRandomDraw();
-        const value = self.random.random().boolean();
-        try self.record("world.random_bool value={}", .{value});
-        self.random.finishDraw();
-        return value;
+        return self.chooseBool("world.random_bool");
     }
 
-    /// Draw a traced unbiased integer in the range `0 <= value < less_than`.
+    /// Draw a traced unbiased integer using the legacy generic site id.
     pub fn randomIntLessThan(self: *World, comptime T: type, less_than: T) !T {
+        return self.chooseIntLessThan("world.random_int_less_than", T, less_than);
+    }
+
+    /// Choose an unsigned scalar at a stable semantic site.
+    pub fn chooseU64(self: *World, comptime site_id: []const u8) !u64 {
+        return self.chooseScalar(u64, site_id, .any_u64);
+    }
+
+    pub fn chooseBool(self: *World, comptime site_id: []const u8) !bool {
+        return (try self.chooseScalar(u64, site_id, .boolean)) != 0;
+    }
+
+    pub fn chooseIntLessThan(self: *World, comptime site_id: []const u8, comptime T: type, less_than: T) !T {
+        const info = @typeInfo(T);
+        if (info != .int or info.int.signedness != .unsigned or info.int.bits > 64)
+            @compileError("decision choices require unsigned integers no wider than u64");
+        if (less_than == 0) return error.InvalidDecisionRequest;
+        return @intCast(try self.chooseScalar(T, site_id, .{ .unsigned_less_than = .{
+            .bits = info.int.bits,
+            .less_than = @intCast(less_than),
+        } }));
+    }
+
+    fn chooseScalar(self: *World, comptime T: type, comptime site_id: []const u8, alternatives: decision_module.Alternatives) !u64 {
         const checkpoint = self.transactionCheckpoint();
         errdefer self.rollbackTransaction(checkpoint);
         try self.prepareRandomDraw();
-        const value = self.random.random().intRangeLessThan(T, 0, less_than);
-        try self.record(
-            "world.random_int_less_than type={s} less_than={} value={}",
-            .{ @typeName(T), less_than, value },
-        );
+        const generated: u64 = switch (alternatives) {
+            .any_u64 => self.random.random().int(u64),
+            .boolean => @intFromBool(self.random.random().boolean()),
+            .unsigned_less_than => |bounded| @intCast(self.random.random().intRangeLessThan(T, 0, @intCast(bounded.less_than))),
+            .bytes => unreachable,
+        };
+        const request = try self.decisions.request(site_id, self.now(), self.precedingEventIndex(), alternatives);
+        const selected = try self.decisions.choose(request, generated);
+        switch (alternatives) {
+            .any_u64 => try self.record("world.random_u64 value={}", .{selected}),
+            .boolean => try self.record("world.random_bool value={}", .{selected != 0}),
+            .unsigned_less_than => |bounded| try self.record("world.random_int_less_than type={s} less_than={} value={}", .{ @typeName(T), bounded.less_than, selected }),
+            .bytes => unreachable,
+        }
         self.random.finishDraw();
-        return value;
+        return selected;
+    }
+
+    /// Borrow the complete recorded or supplied decision tape.
+    pub fn decisionTape(self: *const World) []const decision_module.Decision {
+        return self.decisions.entries();
+    }
+
+    /// Clone the decision tape so it remains valid after this world exits.
+    pub fn cloneDecisionTape(
+        self: *const World,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!decision_module.Tape {
+        return decision_module.Tape.clone(allocator, self.decisionTape());
+    }
+
+    /// Return the first exact-replay mismatch, if replay has diverged.
+    pub fn decisionDivergence(self: *const World) ?decision_module.Divergence {
+        return self.decisions.divergence;
+    }
+
+    /// Verify that exact replay consumed every supplied decision.
+    pub fn finishDecisionReplay(self: *World) decision_module.Error!void {
+        try self.decisions.finishReplay();
+    }
+
+    fn precedingEventIndex(self: *const World) ?u64 {
+        return if (self.event_index == 0) null else self.event_index - 1;
     }
 
     fn prepareRandomDraw(self: *World) (std.mem.Allocator.Error || TraceError)!void {
@@ -1080,6 +1168,7 @@ pub const World = struct {
             .trace_len = self.trace_log.items.len,
             .event_index = self.event_index,
             .random = self.random,
+            .decisions = self.decisions.checkpoint(),
         };
     }
 
@@ -1089,6 +1178,7 @@ pub const World = struct {
         self.trace_log.shrinkRetainingCapacity(checkpoint.trace_len);
         self.event_index = checkpoint.event_index;
         self.random = checkpoint.random;
+        self.decisions.rollback(checkpoint.decisions);
         self.publishExecutionTrace(checkpoint.trace_len);
     }
 
@@ -1484,7 +1574,7 @@ test "world: trace records deterministic actions" {
     try world.record("service.allowed request_id={}", .{7});
 
     try std.testing.expectEqualStrings(
-        \\marionette.trace format=text version=2
+        \\marionette.trace format=text version=3
         \\event=0 world.init seed=12648430 start_ns=5 tick_ns=2
         \\event=1 world.tick now_ns=7
         \\event=2 world.run_for start_ns=7 duration_ns=4 end_ns=11
@@ -1519,6 +1609,71 @@ test "world: randomIntLessThan records unbiased bounded draws" {
         const value = try world.randomIntLessThan(u64, 1_000_000);
         try std.testing.expect(value < 1_000_000);
     }
+}
+
+test "world: semantic choices record logical time microsteps and causal events" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99, .start_ns = 7 });
+    defer world.deinit();
+
+    _ = try world.chooseIntLessThan("scheduler.select", usize, 3);
+    _ = try world.chooseBool("network.drop");
+    try world.tick();
+    _ = try world.chooseU64("disk.latency");
+
+    const tape = world.decisionTape();
+    try std.testing.expectEqual(@as(usize, 3), tape.len);
+    try std.testing.expectEqualStrings("scheduler.select", tape[0].site_id);
+    try std.testing.expectEqual(@as(u64, 7), tape[0].logical_time_ns);
+    try std.testing.expectEqual(@as(u64, 0), tape[0].microstep);
+    try std.testing.expectEqual(@as(?u64, 0), tape[0].preceding_event_index);
+    try std.testing.expectEqual(@as(u64, 1), tape[1].microstep);
+    try std.testing.expectEqual(@as(u64, 0), tape[2].microstep);
+    try std.testing.expectEqual(@as(?u64, 3), tape[2].preceding_event_index);
+}
+
+test "world: exact replay returns tape values independently of the new seed" {
+    var recording = try World.init(std.testing.allocator, .{ .seed = 99 });
+    defer recording.deinit();
+    const selected_index = try recording.chooseIntLessThan("scheduler.select", usize, 7);
+    const selected_bool = try recording.chooseBool("network.drop");
+
+    var replaying = try World.init(std.testing.allocator, .{
+        .seed = 0xDEADBEEF,
+        .decisions = .{ .replay = recording.decisionTape() },
+    });
+    defer replaying.deinit();
+    try std.testing.expectEqual(
+        selected_index,
+        try replaying.chooseIntLessThan("scheduler.select", usize, 7),
+    );
+    try std.testing.expectEqual(selected_bool, try replaying.chooseBool("network.drop"));
+    try replaying.finishDecisionReplay();
+}
+
+test "world: exact replay reports the first semantic site divergence" {
+    const tape = [_]decision_module.Decision{.{
+        .site_id = "scheduler.select",
+        .logical_time_ns = 0,
+        .microstep = 0,
+        .preceding_event_index = 0,
+        .alternatives = .{ .unsigned_less_than = .{ .bits = @bitSizeOf(usize), .less_than = 3 } },
+        .selected = 1,
+    }};
+    var world = try World.init(std.testing.allocator, .{
+        .seed = 0,
+        .decisions = .{ .replay = &tape },
+    });
+    defer world.deinit();
+
+    try std.testing.expectError(
+        error.DecisionReplayDiverged,
+        world.chooseIntLessThan("scheduler.wake", usize, 3),
+    );
+    const divergence = world.decisionDivergence().?;
+    try std.testing.expectEqual(decision_module.DivergenceKind.site_mismatch, divergence.kind);
+    try std.testing.expectEqualStrings("scheduler.select", divergence.expected.?.site_id);
+    try std.testing.expectEqualStrings("scheduler.wake", divergence.actual.?.site_id);
+    try std.testing.expectEqual(@as(?u64, 0), divergence.actual.?.preceding_event_index);
 }
 
 const TracedChoice = enum { integer, boolean, bounded, bytes };
@@ -1565,7 +1720,9 @@ test "world: trace allocation failure rolls back random draws and cutovers" {
         try std.testing.expectError(error.OutOfMemory, drawTracedChoice(&world, choice));
         world.allocator = std.testing.allocator;
 
+        try std.testing.expectEqual(@as(usize, 0), world.decisionTape().len);
         try std.testing.expectEqual(expected_value, try drawTracedChoice(&world, choice));
+        try std.testing.expectEqual(@as(usize, 1), world.decisionTape().len);
     }
 }
 
