@@ -1,4 +1,7 @@
-# 0.7.0 Release Review — 2026-09-04
+# 0.7.0 Pre-release Review — 2026-09-04
+
+This document records the local review before publication. Hosted release
+checks are recorded in GitHub Actions for the release commit.
 
 ## Verdict
 

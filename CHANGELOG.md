@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.0 - Unreleased
+## v0.7.0 - 2026-09-04
 
 - Adds strictly ordered superdense seed schedules. A run can reset its
   pseudorandom stream at a `(sim_time_ns, microstep)` decision point, where
