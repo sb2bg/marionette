@@ -119,6 +119,15 @@ same-build exploration controls; recorded decisions are the replay authority.
 Versioned [replay capsules](docs/decision-tapes.md) persist those decisions,
 including application random bytes, for a pinned build and workload.
 
+## Next Release (Unreleased)
+
+[Reduction and Explanation](docs/reduction-and-explanation.md) adds explicit
+property checkpoints, reducible action/decision groups, causal operation spans,
+CI artifact directories, and managed process restart/reopen. Try the complete
+example with `zig build run-example -- reduce-idempotency --seed 1234 --trace
+--expect-failure`. These features require this development branch; the released
+installation below remains 0.7.0.
+
 ## Install
 
 Marionette requires Zig 0.16.x.

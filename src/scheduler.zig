@@ -1119,6 +1119,37 @@ pub const TaskScheduler = struct {
                 traceField("waits", .{ .text = waits.items }),
             });
         }
+        // Task-completion waits have exact owners. Futex/group/I/O waits do
+        // not, so leave those in wait_state rather than inventing edges.
+        var path: std.ArrayList(TaskId) = .empty;
+        defer path.deinit(self.allocator);
+        for (blocked.items) |origin| {
+            path.clearRetainingCapacity();
+            var current_id = origin;
+            while (true) {
+                var repeated: ?usize = null;
+                for (path.items, 0..) |prior, index| {
+                    if (prior == current_id) {
+                        repeated = index;
+                        break;
+                    }
+                }
+                if (repeated) |start| {
+                    var cycle: std.ArrayList(u8) = .empty;
+                    defer cycle.deinit(self.allocator);
+                    for (path.items[start..]) |id| try cycle.print(self.allocator, "{},", .{id});
+                    try cycle.print(self.allocator, "{}", .{current_id});
+                    try self.world.recordFields("scheduler.deadlock_cycle", &.{traceField("tasks", .{ .text = cycle.items })});
+                    try self.recordCensus("scheduler.deadlock");
+                    return;
+                }
+                const task = self.findTask(current_id) orelse break;
+                if (task.state != .blocked or task.blocked_deadline_ns != null) break;
+                const target = futex_module.taskWaitTarget(task.blocked_key.?) orelse break;
+                try path.append(self.allocator, current_id);
+                current_id = target;
+            }
+        }
         try self.recordCensus("scheduler.deadlock");
     }
 
@@ -1692,6 +1723,7 @@ test "TaskScheduler: blocked tasks without a wake report deadlock" {
     try std.testing.expectError(error.Deadlock, scheduler.runUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), scheduler.blockedCount());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.deadlock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.deadlock_cycle") == null);
 
     try std.testing.expectEqual(@as(usize, 1), try scheduler.wake(scenario.key, 1));
     try scheduler.runUntilIdle();
@@ -2775,4 +2807,25 @@ test "TaskScheduler: std.Io.net partition loss terminates the reliable stream" {
     try expectTraceOrder(first, "network.partition left_count=1 right_count=1", "network.drop id=1 from=1 to=0 reason=link_disabled");
     try expectTraceOrder(first, "network.drop id=1 from=1 to=0 reason=link_disabled", "io.net.partition.read_error error=Timeout");
     try expectTraceOrder(first, "io.net.partition.read_error error=Timeout", "network.heal disabled_count=2");
+}
+
+test "TaskScheduler: compact cycle follows task completion dependencies only" {
+    if (!fiber.supported) return error.SkipZigTest;
+    const Cycle = struct {
+        target: TaskId,
+        fn wait(scheduler: *TaskScheduler, arg: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(arg));
+            scheduler.blockCurrent(futex_module.waitKey(.task, @intCast(self.target)));
+        }
+    };
+    var world = try World.init(std.testing.allocator, .{ .seed = 1 });
+    defer world.deinit();
+    var scheduler = TaskScheduler.init(std.testing.allocator, &world);
+    defer scheduler.deinit();
+    var first: Cycle = .{ .target = 1 };
+    var second: Cycle = .{ .target = 0 };
+    _ = try scheduler.spawn(.{ .entry = Cycle.wait, .arg = &first });
+    _ = try scheduler.spawn(.{ .entry = Cycle.wait, .arg = &second });
+    try std.testing.expectError(error.Deadlock, scheduler.runUntilIdle());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.deadlock_cycle tasks=0,1,0") != null);
 }

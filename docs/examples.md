@@ -36,3 +36,10 @@ provide host values directly.
 
 Keep fault injection and assertions in scenario code through `case.control()`.
 Do not pass `Control` into the application merely to make an example shorter.
+
+## Reduce an Idempotency Failure
+
+`zig build run-example -- reduce-idempotency --seed 1234 --trace --expect-failure`
+removes an unrelated telemetry action and retains the request/duplicate pair
+that violates a stable property. See `examples/reduction.zig` and
+[Reduction and Explanation](reduction-and-explanation.md).

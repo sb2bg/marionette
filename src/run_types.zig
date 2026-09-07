@@ -121,6 +121,8 @@ pub const CheckPhase = enum {
     after_init,
     after_scenario,
     both,
+    checkpoint,
+    always,
 };
 
 /// Named property over user-owned scenario state.
@@ -129,7 +131,7 @@ pub fn StateCheck(comptime State: type) type {
         /// Stable property ID included in failure reports and capsules.
         /// Must be nonempty and unique within the case's checks.
         name: []const u8,
-        /// Evaluate after successful initialization, successful scenario, or both.
+        /// Select lifecycle boundaries, explicit checkpoints, or all safe points.
         /// Checks run in declaration order, before application teardown.
         phase: CheckPhase = .after_scenario,
         /// Check function. It may inspect state and record through authorities

@@ -106,6 +106,9 @@ pub const Production = env_module.Production;
 
 /// Narrow structured recording capability for `std.Io`-shaped code.
 pub const Recorder = env_module.Recorder;
+pub const Operation = env_module.Operation;
+/// World-global trace event index, also used for causal references.
+pub const EventId = u64;
 
 /// Simulator-control capability bundle.
 pub const Control = env_module.SimControl;
@@ -298,3 +301,14 @@ test {
     _ = @import("tidy.zig");
     _ = @import("trace_summary.zig");
 }
+
+/// Stable failure identity and bounded semantic-group reduction.
+pub const FailureFingerprint = @import("reduce.zig").FailureFingerprint;
+pub const ReductionOptions = @import("reduce.zig").Options;
+pub const ReductionResult = @import("reduce.zig").Result;
+pub const reduceSimCase = @import("reduce.zig").reduceSimCase;
+
+pub const ArtifactOptions = @import("artifact.zig").Options;
+pub const writeRunArtifacts = @import("artifact.zig").write;
+
+pub const ManagedProcess = @import("world.zig").ManagedProcess;

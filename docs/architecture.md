@@ -17,7 +17,8 @@ runSimCase
 ```
 
 `runSimCase` constructs this graph twice. It initializes app state from `Sim`,
-executes the scenario, runs named checks, and deinitializes app state. The first
+evaluates configured lifecycle properties, executes the scenario and explicit
+checkpoints, and deinitializes app and managed process state before capture. The first
 ordinary execution records semantic choices; the second exact-replays them and
 compares traces. Failures remain owned data in `RunReport`.
 
@@ -116,3 +117,16 @@ with persistent capsules. Worker termination explicitly marks an incomplete tape
 The redundant fixed packet runtime and its private `EventQueue` were removed.
 Typed endpoints and streams exercise the active shared network runtime; useful
 legacy contract tests now run against that implementation.
+
+## Reduction and Artifact Boundaries
+
+`reduceSimCase` reuses the same lifecycle runner. Candidate exploration matches
+semantic site occurrences and records a new tape; acceptance requires exact
+replay and full failure-identity equality. A minimized capsule therefore runs
+through `replaySimCase` against the unchanged pinned harness.
+
+`Recorder` carries explicit causal event references and operation span tokens.
+Managed processes own volatile state and reopen it through revived `Env` values;
+process tasks stop before that state is freed. `runSimCase` writes requested
+artifacts only after deterministic execution, using caller-supplied host I/O.
+See [Reduction and Explanation](reduction-and-explanation.md) for the contracts.

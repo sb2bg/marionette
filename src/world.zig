@@ -62,9 +62,45 @@ pub fn traceField(key: []const u8, value: TraceValue) TraceField {
 /// state.
 pub const ProcessLifecycle = struct {
     ptr: *anyopaque,
+    cleanup_at_run_end: bool = false,
     on_kill: ?*const fn (*anyopaque) void = null,
     restart: *const fn (*anyopaque, env_module.Env) anyerror!void,
 };
+
+/// World-owned volatile application state for one logical process. A successful
+/// reopen publishes a whole new App; kill and failed restart clear it once.
+pub fn ManagedProcess(comptime App: type) type {
+    return struct {
+        const Self = @This();
+        app: ?App = null,
+        initialize: *const fn (env_module.Env) anyerror!App,
+        runtime: *io_module.internal.ProcessRuntime,
+        node: network_module.NodeId,
+
+        pub fn state(self: *Self) ?*App {
+            return if (self.app) |*value| value else null;
+        }
+        fn killed(ptr: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            if (self.app) |*value| {
+                if (@hasDecl(App, "deinit")) value.deinit();
+                self.app = null;
+            }
+        }
+        fn reopened(ptr: *anyopaque, env: env_module.Env) !void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            const fresh = try self.initialize(env);
+            self.app = fresh;
+        }
+        fn destroy(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            // Stop every task before freeing the state it may reference.
+            if (self.app != null) self.runtime.kill(self.node) catch unreachable;
+            killed(ptr);
+            allocator.destroy(self);
+        }
+    };
+}
 
 const TransactionCheckpoint = struct {
     trace_len: usize,
@@ -789,6 +825,39 @@ pub const World = struct {
             return handles;
         }
 
+        /// Own process state and routine kill/reopen callbacks. The initializer
+        /// receives the revived node's Env and reopens surviving durable state.
+        pub fn manageProcess(self: Simulation, comptime App: type, node: network_module.NodeId, comptime initialize: fn (env_module.Env) anyerror!App) !*ManagedProcess(App) {
+            const supervisor = self.processSupervisor();
+            const index = try supervisor.nodeIndex(node);
+            if (supervisor.lifecycles[index] != null) return error.ProcessAlreadyRegistered;
+            const world = self.control.world;
+            const managed = try world.allocator.create(ManagedProcess(App));
+            errdefer world.allocator.destroy(managed);
+            managed.* = .{ .initialize = initialize, .runtime = supervisor.io_runtime, .node = node };
+            const initial = try initialize(try self.envForNode(node));
+            managed.app = initial;
+            errdefer ManagedProcess(App).killed(managed);
+            try world.registerTeardown(managed, ManagedProcess(App).destroy);
+            // Registration cannot fail after validating the node above.
+            supervisor.lifecycles[index] = .{ .ptr = managed, .cleanup_at_run_end = true, .on_kill = ManagedProcess(App).killed, .restart = ManagedProcess(App).reopened };
+            return managed;
+        }
+
+        /// Finish managed processes before the runner captures traces or checks
+        /// resources. Explicitly registered lifecycles keep their default policy.
+        pub fn finishManagedProcesses(self: Simulation) (std.mem.Allocator.Error || TraceError)!void {
+            const supervisor = self.processSupervisor();
+            for (supervisor.lifecycles, 0..) |maybe_lifecycle, index| {
+                const lifecycle = maybe_lifecycle orelse continue;
+                if (!lifecycle.cleanup_at_run_end or supervisor.states[index] == .killed) continue;
+                supervisor.killProcess(@intCast(index)) catch |err| switch (err) {
+                    error.InvalidNode => unreachable,
+                    else => |failure| return failure,
+                };
+            }
+        }
+
         /// Register lifecycle callbacks for one logical process.
         pub fn registerProcess(self: Simulation, node: network_module.NodeId, lifecycle: ProcessLifecycle) !void {
             try self.processSupervisor().registerProcess(node, lifecycle);
@@ -1113,6 +1182,20 @@ pub const World = struct {
         }
         self.random.finishDraw();
         return selected;
+    }
+
+    /// A reducible harness action is enabled during exploration and controlled
+    /// by its boolean tape entry during exact replay or reduction.
+    pub fn actionEnabled(self: *World, comptime id: []const u8) !bool {
+        const checkpoint = self.transactionCheckpoint();
+        errdefer self.rollbackTransaction(checkpoint);
+        const request = try self.decisions.request("action." ++ id, self.now(), self.precedingEventIndex(), .boolean);
+        const enabled = (try self.decisions.choose(request, 1)) != 0;
+        try self.recordFields("run.action", &.{
+            traceField("id", .{ .text = id }),
+            traceField("enabled", .{ .boolean = enabled }),
+        });
+        return enabled;
     }
 
     /// Borrow the complete recorded or supplied decision tape.

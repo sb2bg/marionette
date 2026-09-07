@@ -11,7 +11,7 @@ const RunOptions = types.RunOptions;
 const WatchdogOptions = types.WatchdogOptions;
 const RunFailureKind = types.RunFailureKind;
 const RunOnceResult = execution.Result;
-pub const Error = error{ InvalidWatchdogOptions, WatchdogUnavailable, WatchdogTraceTooLarge, OutOfMemory, InvalidTracePayload, InvalidSeedSchedule, InvalidStateChecks };
+pub const Error = @import("artifact.zig").Error || error{ InvalidWatchdogOptions, WatchdogUnavailable, WatchdogTraceTooLarge, OutOfMemory, InvalidTracePayload, InvalidSeedSchedule, InvalidStateChecks };
 const RunError = Error;
 
 pub const supported = switch (builtin.os.tag) {

@@ -20,11 +20,13 @@ const Scenario = struct {
     runner: union(enum) {
         trace: TraceRunner,
         report: ReportRunner,
+        reduction: *const fn (std.mem.Allocator, u64) anyerror!mar.ReductionResult,
         std_io_net: std_io_net_kv_validation.ScenarioMode,
     },
 };
 
 const scenarios = [_]Scenario{
+    .{ .name = "reduce-idempotency", .runner = .{ .reduction = examples.reduction.run } },
     .{ .name = "retry-queue", .runner = .{ .trace = examples.retry_queue.runScenario } },
     .{ .name = "retry-queue-bug", .runner = .{ .report = examples.retry_queue.runBuggyScenarioReport } },
     .{ .name = "replicated-register", .runner = .{ .trace = examples.replicated_register.runScenario } },
@@ -87,6 +89,15 @@ fn runScenario(
         if (!std.mem.eql(u8, scenario, entry.name)) continue;
 
         switch (entry.runner) {
+            .reduction => |reduce_case| {
+                var reduced = try reduce_case(allocator, seed);
+                defer reduced.deinit();
+                std.debug.print("reduction: groups={}->{} attempts={} one_minimal={}\n", .{ reduced.original_groups, reduced.remaining_groups, reduced.attempts, reduced.one_minimal });
+                const failure = reduced.report().failed;
+                try printTraceOrSummary(allocator, failure.first_trace, mode);
+                failure.print();
+                if (!expect_failure) std.process.exit(1);
+            },
             .trace => |run_trace| {
                 const trace = try run_trace(allocator, seed);
                 defer allocator.free(trace);

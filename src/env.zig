@@ -54,9 +54,52 @@ pub const Recorder = struct {
         return .{ .world = world };
     }
 
+    /// Record an event with an optional earlier causal event ID. The returned
+    /// ID is world-global; disabled production recorders return null.
+    pub fn event(self: Recorder, name: []const u8, fields: []const world_module.TraceField, cause: ?u64) !?u64 {
+        const world = self.world orelse return null;
+        const id = world.nextEventIndex();
+        if (cause) |parent| {
+            if (parent >= id) return error.InvalidCausalEvent;
+        }
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.key, "cause")) return error.ReservedTraceField;
+        }
+        if (cause) |parent| {
+            const linked = try world.allocator.alloc(world_module.TraceField, fields.len + 1);
+            defer world.allocator.free(linked);
+            @memcpy(linked[0..fields.len], fields);
+            linked[fields.len] = world_module.traceField("cause", .{ .uint = parent });
+            try world.recordFields(name, linked);
+        } else try world.recordFields(name, fields);
+        return id;
+    }
+
+    /// Start an operation span. Move the returned value; end it exactly once.
+    pub fn beginOperation(self: Recorder, name: []const u8, cause: ?u64) !Operation {
+        return .{ .recorder = self, .start = try self.event("operation.begin", &.{world_module.traceField("name", .{ .text = name })}, cause) };
+    }
+
     /// Format and append one user trace event.
     pub fn record(self: Recorder, comptime fmt: []const u8, args: anytype) RecorderError!void {
         if (self.world) |world| try world.record(fmt, args);
+    }
+};
+
+/// An explicit span anchored to its begin event, independent of task switches.
+pub const Operation = struct {
+    recorder: Recorder,
+    start: ?u64,
+    ended: bool = false,
+
+    pub fn event(self: *const Operation, name: []const u8, fields: []const world_module.TraceField) !?u64 {
+        if (self.ended) return error.OperationEnded;
+        return self.recorder.event(name, fields, self.start);
+    }
+    pub fn end(self: *Operation) !void {
+        if (self.ended) return error.OperationEnded;
+        _ = try self.recorder.event("operation.end", &.{}, self.start);
+        self.ended = true;
     }
 };
 

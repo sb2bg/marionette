@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Adds explicit property checkpoints, `checkpoint`/`always` phases, and a fatal
+  first-property latch that survives caught errors and later state repair.
+- Adds reducible action groups and bounded semantic decision-group reduction.
+  Candidates retain the complete failure fingerprint and must pass exact replay;
+  minimized capsules execute against the unchanged pinned harness.
+- Adds causal event references and explicit operation spans through `Recorder`,
+  plus compact deadlock cycles for known task-completion dependencies.
+- Adds caller-owned artifact directories with traces, replay capsules when
+  available, complete failure/configuration manifests, and overwrite protection.
+- Adds world-owned managed process state with automatic kill/reopen wiring,
+  failed-reopen retry, and runner cleanup before trace capture/resource checks.
+- Adds the runnable `reduce-idempotency` example and end-to-end, allocation-failure,
+  capsule, artifact, process, and diagnostic coverage.
+
 - Extends `StateCheck` with deterministic `after_init`, `after_scenario`
   (default), and `both` lifecycle phases. Checks run in declaration order and
   stop on the first failure, with application cleanup included in replay.

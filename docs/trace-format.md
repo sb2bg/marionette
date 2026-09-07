@@ -38,10 +38,16 @@ and store full bytes separately in the tape. Old trace bytes are not claimed to
 match the new model; capsules reject unsupported trace versions.
 
 Version 4 (unreleased) adds `run.check id=<escaped-text>
-phase=<after_init|after_scenario>` immediately before each state-check callback.
+phase=<after_init|after_scenario|checkpoint>` immediately before each state-check callback.
 The ID is the check's stable `name`; checks configured for `both` emit one event
 at each reached boundary. Events consume no random choices. Their positions
 identify the first attempted property and phase, including watchdog stalls.
+Version 4 also adds `run.checkpoint id=<text>`, `run.action id=<text>
+enabled=<bool>`, `operation.begin name=<text>`, `operation.end`, and optional
+`cause=<event-id>` references through `Recorder.event`. Operation child events
+and ends reference the begin event. `scheduler.deadlock_cycle tasks=<closed-path>`
+reports known task-completion cycles. Managed process cleanup occurs before
+runner capture. These changes are part of the same unreleased version 4 contract.
 Version 3 capsules are rejected by the current execution codec.
 
 Every later line is one event:

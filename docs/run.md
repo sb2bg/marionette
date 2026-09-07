@@ -70,8 +70,9 @@ const checks = [_]mar.StateCheck(Case){
 
 `.after_init` runs after successful initialization and before the scenario.
 `.after_scenario` is the default and runs after a successful scenario.
-`.both` runs at each boundary. Within a boundary, checks run in declaration
-order. The first failure stops later checks and the scenario if it has not
+`.both` runs at each lifecycle boundary. `.checkpoint` runs only at explicit
+`case.checkpoint("semantic.id")` calls; `.always` runs at all three kinds of
+boundary. Within a boundary, checks run in declaration order. The first failure stops later checks and the scenario if it has not
 started. Successfully initialized application state is cleaned up exactly
 once per execution, including failed checks; cleanup remains part of replay.
 Initialization and scenario errors skip subsequent boundaries. Scheduler
@@ -82,8 +83,8 @@ This identifies the boundary even if the callback never returns. Checks should
 inspect state without advancing the simulation or mutating the application;
 recording diagnostics is supported. These boundaries do not drain tasks or
 imply quiescence. They are harness call boundaries, not automatic checks after
-every scheduler step. Mid-scenario property checkpoints and reduction are
-future work.
+every scheduler step. See [Reduction and Explanation](reduction-and-explanation.md) for explicit
+checkpoints, action groups, reduction, artifacts, and managed process cleanup.
 
 Capsules retain failure IDs and lifecycle trace events; callbacks and their
 phase configuration remain part of the pinned harness build. Supply the same

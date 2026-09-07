@@ -36,6 +36,7 @@ nav:
       - Examples: examples.md
       - Determinism: determinism.md
       - Decision Tapes: decision-tapes.md
+      - Reduction and Explanation: reduction-and-explanation.md
       - Trace Format: trace-format.md
       - BUGGIFY: buggify.md
       - Network Model: network.md

@@ -24,7 +24,9 @@ matching executable/source/dependencies, and provide the matching initializer,
 scenario, checks, and application input. Include the input/workload identity in
 `sut`; capsules do not serialize arbitrary application state or closures.
 Changing code requires a new identity and exploration, not relabeling the old
-artifact. Cross-version migration and reduction are future work.
+artifact. Cross-version migration remains future work.
+[Reduction](reduction-and-explanation.md) explores simpler choices and records
+a fresh exact-replay-verified capsule for the same pinned harness.
 
 ## Entry Contract
 
@@ -38,7 +40,7 @@ Site IDs use lowercase ASCII words, digits, and `_`, separated by single `.`
 characters. The decision contract and capsule envelope are independently
 versioned at version 1. The execution payload is shared with watchdog transport.
 
-Scheduler, network, disk, allocation, automatic process events, named world
+Reducible `action.*` groups, scheduler, network, disk, allocation, automatic process events, named world
 choices, legacy traced `World.random*` calls, and `std.Io` application random
 bytes participate. Workload/BUGGIFY choices participate when they use those
 controlled authorities. Ambient host randomness is outside the contract.

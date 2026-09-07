@@ -77,6 +77,10 @@ pub const Mode = union(enum) {
     record,
     /// Return and validate choices from this borrowed tape.
     replay: []const Decision,
+    /// Exploratory reduction, never exact replay. Match source selections by
+    /// semantic site occurrence; omitted groups use zero/false/zero bytes.
+    /// New or incompatible sites use generated values. Record a fresh tape.
+    reduce: struct { source: []const Decision, omitted_sites: []const []const u8 },
 };
 
 /// Why exact replay stopped at one decision boundary.
@@ -247,6 +251,7 @@ pub const Engine = struct {
         _ = try self.chooseValue(choice_request, std.hash.Wyhash.hash(0, buffer), buffer);
         switch (self.mode) {
             .record => {},
+            .reduce => @memcpy(buffer, self.recorded.items[self.recorded.items.len - 1].byte_value),
             .replay => |entries_value| @memcpy(buffer, entries_value[index].byte_value),
         }
     }
@@ -256,20 +261,60 @@ pub const Engine = struct {
         if (!isValidSiteId(choice_request.site_id) or !validAlternatives(choice_request.alternatives) or !choice_request.alternatives.accepts(generated)) return error.InvalidDecisionRequest;
 
         const selected = switch (self.mode) {
-            .record => record: {
+            .record, .reduce => record: {
+                var value = generated;
+                var selected_bytes = bytes;
+                var zeros: ?[]u8 = null;
+                defer if (zeros) |owned| self.allocator.free(owned);
+                if (self.mode == .reduce) {
+                    const plan = self.mode.reduce;
+                    var omitted = false;
+                    for (plan.omitted_sites) |site| {
+                        if (std.mem.eql(u8, site, choice_request.site_id)) {
+                            omitted = true;
+                            break;
+                        }
+                    }
+                    if (omitted) {
+                        value = 0;
+                        if (choice_request.alternatives == .bytes) {
+                            zeros = try self.allocator.alloc(u8, bytes.len);
+                            @memset(zeros.?, 0);
+                            selected_bytes = zeros.?;
+                            value = std.hash.Wyhash.hash(0, selected_bytes);
+                        }
+                    } else {
+                        var occurrence: usize = 0;
+                        for (self.recorded.items) |prior| {
+                            if (std.mem.eql(u8, prior.site_id, choice_request.site_id)) occurrence += 1;
+                        }
+                        for (plan.source) |prior| {
+                            if (!std.mem.eql(u8, prior.site_id, choice_request.site_id)) continue;
+                            if (occurrence != 0) {
+                                occurrence -= 1;
+                                continue;
+                            }
+                            if (validDecision(prior) and alternativesEqual(prior.alternatives, choice_request.alternatives) and prior.alternatives.accepts(prior.selected)) {
+                                value = prior.selected;
+                                selected_bytes = prior.byte_value;
+                            }
+                            break;
+                        }
+                    }
+                }
                 const entry: Decision = .{
                     .site_id = choice_request.site_id,
                     .logical_time_ns = choice_request.logical_time_ns,
                     .microstep = choice_request.microstep,
                     .preceding_event_index = choice_request.preceding_event_index,
                     .alternatives = choice_request.alternatives,
-                    .selected = generated,
-                    .byte_value = bytes,
+                    .selected = value,
+                    .byte_value = selected_bytes,
                 };
                 const owned = try entry.clone(self.allocator);
                 errdefer owned.deinit(self.allocator);
                 try self.recorded.append(self.allocator, owned);
-                break :record generated;
+                break :record value;
             },
             .replay => |tape_entries| replay: {
                 if (self.replay_index >= tape_entries.len) {
@@ -311,7 +356,7 @@ pub const Engine = struct {
     pub fn finishReplay(self: *Engine) Error!void {
         if (self.divergence != null) return error.DecisionReplayDiverged;
         switch (self.mode) {
-            .record => {},
+            .record, .reduce => {},
             .replay => |tape_entries| {
                 if (self.replay_index != tape_entries.len) {
                     const expected = tape_entries[self.replay_index];
@@ -323,7 +368,7 @@ pub const Engine = struct {
 
     pub fn entries(self: *const Engine) []const Decision {
         return switch (self.mode) {
-            .record => self.recorded.items,
+            .record, .reduce => self.recorded.items,
             .replay => |entries_value| entries_value,
         };
     }
@@ -541,4 +586,21 @@ test "decision: divergence cloning is leak-free across allocation failures" {
         cloneDivergenceWithAllocator,
         .{},
     );
+}
+
+fn reductionBytesAllocationCase(allocator: std.mem.Allocator) !void {
+    var engine = Engine.init(allocator, .{ .reduce = .{ .source = &.{}, .omitted_sites = &.{"app.bytes"} } });
+    defer engine.deinit();
+    const before = engine.checkpoint();
+    var bytes = [_]u8{9} ** 16;
+    const request_value = try engine.request("app.bytes", 10, 0, .{ .bytes = bytes.len });
+    try engine.chooseBytes(request_value, &bytes);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &bytes);
+    engine.rollback(before);
+    try std.testing.expectEqual(@as(usize, 0), engine.entries().len);
+    try std.testing.expectEqual(@as(?u64, null), engine.last_time_ns);
+}
+
+test "decision: reduction zero-byte scratch and recorded entries roll back" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, reductionBytesAllocationCase, .{});
 }

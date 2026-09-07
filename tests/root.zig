@@ -10,3 +10,7 @@ test {
 test {
     _ = @import("replay_capsule.zig");
 }
+
+test {
+    _ = @import("reduction_explanation.zig");
+}

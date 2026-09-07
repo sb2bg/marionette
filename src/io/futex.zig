@@ -242,3 +242,9 @@ pub fn Ops(comptime Backend: type) type {
         }
     };
 }
+
+/// Decode the one modeled wait dependency with a unique owner: task completion.
+pub fn taskWaitTarget(key: usize) ?u64 {
+    if (key & ((1 << wait_key_tag_bits) - 1) != @intFromEnum(WaitKeyTag.task)) return null;
+    return key >> wait_key_tag_bits;
+}

@@ -26,7 +26,7 @@ pub const TraceError = world_module.TraceError;
 
 /// Infrastructure errors from the runners themselves; scenario failures
 /// are reported through `RunReport`, not as errors.
-pub const RunError = std.mem.Allocator.Error || TraceError || error{
+pub const RunError = std.mem.Allocator.Error || TraceError || @import("artifact.zig").Error || error{
     InvalidSeedSchedule,
     InvalidStateChecks,
     InvalidWatchdogOptions,
@@ -60,6 +60,40 @@ pub fn SimCase(comptime App: type) type {
 
         sim: World.Simulation,
         app: App,
+        state_checks: []const StateCheck(Self) = &.{},
+        property_failure: ?struct { err: anyerror, name: []const u8 } = null,
+
+        /// Execute an optional action group. Keep dependencies and required
+        /// setup outside actions; disabled groups are visible in the tape.
+        pub fn action(self: *Self, comptime id: []const u8, comptime callback: fn (*Self) anyerror!void) !void {
+            if (try self.control().world.actionEnabled(id)) try callback(self);
+        }
+
+        /// Evaluate explicitly selected properties at a named harness safe point.
+        /// The first failure stays fatal even if the scenario catches the error.
+        pub fn checkpoint(self: *Self, comptime id: []const u8) !void {
+            if (comptime !decision_module.isValidSiteId(id)) @compileError("checkpoint IDs must be semantic site IDs");
+            if (self.property_failure) |failure| return failure.err;
+            try self.control().world.recordFields("run.checkpoint", &.{traceField("id", .{ .text = id })});
+            try self.evaluateChecks(.checkpoint);
+        }
+
+        fn evaluateChecks(self: *Self, phase: CheckPhase) !void {
+            if (self.property_failure) |failure| return failure.err;
+            for (self.state_checks) |check| {
+                if (check.phase != .always and check.phase != phase and
+                    !(check.phase == .both and phase != .checkpoint)) continue;
+                try self.control().world.recordFields("run.check", &.{
+                    traceField("id", .{ .text = check.name }),
+                    traceField("phase", .{ .text = @tagName(phase) }),
+                });
+                check.check(self) catch |err| {
+                    self.property_failure = .{ .err = err, .name = check.name };
+                    return err;
+                };
+                if (self.control().tasks.failure() != null) return error.PropertySchedulerFailure;
+            }
+        }
 
         /// The node-0 app-facing environment.
         pub fn env(self: *const Self) env_module.Env {
@@ -91,9 +125,13 @@ pub fn SimCase(comptime App: type) type {
 /// - `scenario: fn (*mar.SimCase(App)) !void`
 ///
 /// Optional fields are `seed`, `seed_schedule`, `start_ns`, `tick_ns`,
-/// `name`, `tags`, `attributes`, `checks`, `watchdog`, and `check_resources`.
+/// `name`, `tags`, `attributes`, `checks`, `watchdog`, `check_resources`,
+/// and host-owned `artifacts`.
 pub fn runSimCase(config: anytype) RunError!RunReport {
-    return runSimCaseWithSeed(config, null);
+    var report = try runSimCaseWithSeed(config, null);
+    errdefer report.deinit();
+    if (@hasField(@TypeOf(config), "artifacts")) try @import("artifact.zig").write(config.allocator, &report, config.artifacts);
+    return report;
 }
 
 /// Execute a saved capsule against the exact harness build/input identity.
@@ -210,6 +248,7 @@ fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
         fallibleSimInit(App, config.init),
         fallibleSimScenario(Case, config.scenario),
         case_checks,
+        .record,
     );
 }
 
@@ -220,6 +259,17 @@ fn validateStateChecks(comptime State: type, checks: []const StateCheck(State)) 
             if (std.mem.eql(u8, previous.name, check.name)) return error.InvalidStateChecks;
         }
     }
+}
+
+/// Internal candidate execution: generate a fresh tape, then verify exact replay.
+pub fn runReductionCandidate(config: anytype, source: []const decision_module.Decision, omitted_sites: []const []const u8) RunError!RunReport {
+    const App = appTypeFromSimInit(config.init);
+    const Case = SimCase(App);
+    const checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &[_]StateCheck(Case){};
+    try validateStateChecks(Case, checks);
+    var options = try runOptionsFromConfig(config, null);
+    defer deinitRunOptions(config.allocator, &options);
+    return runTwiceWithSimCase(config.allocator, options, config.simulate, App, fallibleSimInit(App, config.init), fallibleSimScenario(Case, config.scenario), checks, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
 }
 
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.Error!RunOptions {
@@ -375,6 +425,7 @@ fn runTwiceWithSimCase(
     comptime init_app: fn (World.Simulation) anyerror!App,
     comptime scenario: fn (*SimCase(App)) anyerror!void,
     comptime state_checks: []const StateCheck(SimCase(App)),
+    initial_mode: decision_module.Mode,
 ) RunError!RunReport {
     // Validate runner configuration before optional watchdog isolation. Runner
     // errors discovered only in the worker must cross a deliberately narrow
@@ -392,7 +443,7 @@ fn runTwiceWithSimCase(
         init_app,
         scenario,
         state_checks,
-        .record,
+        initial_mode,
     );
     errdefer first.deinit();
 
@@ -590,7 +641,9 @@ fn runOnceWithSimCase(
 
     var state: SimCase(App) = .{
         .sim = sim,
+        .state_checks = state_checks,
         .app = init_app(sim) catch |err| {
+            try sim.finishManagedProcesses();
             return try failureFromWorld(
                 allocator,
                 options,
@@ -605,70 +658,31 @@ fn runOnceWithSimCase(
     defer if (state_live) state.deinit();
 
     for ([_]CheckPhase{ .after_init, .after_scenario }) |phase| {
-        if (phase == .after_scenario) {
-            scenario(&state) catch |err| {
-                const scheduler_failure = state.control().tasks.failure();
-                state.deinit();
-                state_live = false;
-                if (scheduler_failure) |failure| {
-                    return try schedulerFailureFromWorld(
-                        allocator,
-                        options,
-                        &world,
-                        failure,
-                    );
-                }
-                return try failureFromWorld(allocator, options, .scenario_error, &world, err, null);
+        var scenario_error: ?anyerror = null;
+        if (phase == .after_scenario) scenario(&state) catch |err| {
+            scenario_error = err;
+        };
+        // A caught checkpoint failure must win over later scenario/check errors.
+        if (scenario_error == null and state.property_failure == null and state.control().tasks.failure() == null) {
+            state.evaluateChecks(phase) catch |err| {
+                if (state.property_failure == null and state.control().tasks.failure() == null) return @errorCast(err);
             };
-
-            if (state.control().tasks.failure()) |failure| {
-                state.deinit();
-                state_live = false;
-                return try schedulerFailureFromWorld(
-                    allocator,
-                    options,
-                    &world,
-                    failure,
-                );
-            }
         }
-        for (state_checks) |check| {
-            if (check.phase != .both and check.phase != phase) continue;
-            try world.recordFields("run.check", &.{
-                traceField("id", .{ .text = check.name }),
-                traceField("phase", .{ .text = @tagName(phase) }),
-            });
-            check.check(&state) catch |err| {
-                const scheduler_failure = state.control().tasks.failure();
-                state.deinit();
-                state_live = false;
-                if (scheduler_failure) |failure| {
-                    return try schedulerFailureFromWorld(
-                        allocator,
-                        options,
-                        &world,
-                        failure,
-                    );
-                }
-                return try failureFromWorld(
-                    allocator,
-                    options,
-                    .check_failed,
-                    &world,
-                    err,
-                    check.name,
-                );
-            };
-            if (state.control().tasks.failure()) |failure| {
-                state.deinit();
-                state_live = false;
-                return try schedulerFailureFromWorld(allocator, options, &world, failure);
-            }
+        const scheduler_failure = state.control().tasks.failure();
+        const property_failure = state.property_failure;
+        if (scheduler_failure != null or property_failure != null or scenario_error != null) {
+            state.deinit();
+            state_live = false;
+            try sim.finishManagedProcesses();
+            if (scheduler_failure) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
+            if (property_failure) |failure| return try failureFromWorld(allocator, options, .check_failed, &world, failure.err, failure.name);
+            return try failureFromWorld(allocator, options, .scenario_error, &world, scenario_error.?, null);
         }
     }
 
     state.deinit();
     state_live = false;
+    try sim.finishManagedProcesses();
     if (options.check_resources) {
         sim.control.checkResources() catch |err| switch (err) {
             error.ResourceLeak => return try failureFromWorld(

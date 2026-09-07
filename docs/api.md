@@ -16,7 +16,7 @@ still change between minor releases.
 ## Simulation Runner
 
 `runSimCase` is the primary runner. It creates a world, constructs the
-simulation, initializes application state, runs the scenario and named checks,
+simulation, initializes application state, runs the scenario and configured properties,
 then repeats the execution using the first execution's semantic decision tape
 and compares traces.
 
@@ -97,7 +97,7 @@ If `App` defines `deinit`, the runner calls it after every replay.
 
 `StateCheck(State)` contains a unique, nonempty stable property `name`, a
 function taking `*const State`, and a `phase: CheckPhase` (`after_init`,
-`after_scenario`, or `both`). The default is `after_scenario`. Check errors
+`after_scenario`, `both`, `checkpoint`, or `always`). The default is `after_scenario`. Check errors
 become `check_failed` reports; invalid names return `InvalidStateChecks`.
 See [Property Lifecycle](run.md#property-lifecycle) for ordering and cleanup.
 
@@ -211,3 +211,13 @@ options. See [Decision Tapes And Replay Capsules](decision-tapes.md).
 
 The unused legacy `NetworkOptions` topology type was removed in 0.7. Configure
 the active runtime through `World.SimulateOptions.network` instead.
+
+## Reduction and Explanation
+
+`reduceSimCase(config, ReductionOptions)` returns an owned `ReductionResult`.
+`FailureFingerprint` compares full stable failure identities. `ArtifactOptions`
+and `writeRunArtifacts` persist reports through caller-supplied host I/O.
+`Recorder.event` returns `?EventId`; `Recorder.beginOperation` returns an
+`Operation` span. `sim.manageProcess(App, node, initialize)` returns world-owned
+`*ManagedProcess(App)` state with automatic restart/reopen and runner cleanup.
+See the [complete contracts and examples](reduction-and-explanation.md).
