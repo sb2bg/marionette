@@ -116,11 +116,22 @@ fn stringAttributeValue(comptime Value: type, comptime pointer_info: std.builtin
     }
 }
 
-/// Named scenario check over user-owned scenario state.
+/// Deterministic application lifecycle boundaries for state checks.
+pub const CheckPhase = enum {
+    after_init,
+    after_scenario,
+    both,
+};
+
+/// Named property over user-owned scenario state.
 pub fn StateCheck(comptime State: type) type {
     return struct {
-        /// Stable name included in failure reports.
+        /// Stable property ID included in failure reports and capsules.
+        /// Must be nonempty and unique within the case's checks.
         name: []const u8,
+        /// Evaluate after successful initialization, successful scenario, or both.
+        /// Checks run in declaration order, before application teardown.
+        phase: CheckPhase = .after_scenario,
         /// Check function. It may inspect state and record through authorities
         /// owned by the state.
         check: *const fn (*const State) anyerror!void,

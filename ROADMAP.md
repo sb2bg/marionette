@@ -22,7 +22,8 @@ adds richer diagnostics; these features are not part of the 0.7 release scope.
 
 ### Properties And Reduction
 
-- Give properties stable IDs and deterministic safe-point lifecycles.
+- Add explicit mid-scenario property checkpoints on top of stable `StateCheck`
+  IDs and deterministic initialization/scenario boundaries.
 - Reduce decision/action groups while preserving the same failure fingerprint.
 - Add causal event IDs, operation spans, compact deadlock cycles, and CI-ready
   artifact directories.

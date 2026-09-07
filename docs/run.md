@@ -50,6 +50,45 @@ The runner owns world and application cleanup. If the app type defines
 `deinit`, it runs before each world is destroyed and remains part of replay
 comparison.
 
+## Property Lifecycle
+
+`StateCheck.name` is the stable property ID used in `check_name` failure reports,
+expectations, and replay capsules. Choose a semantic name such as
+`service.safety`; changing the name changes failure identity. Empty or duplicate
+names return `error.InvalidStateChecks` before initialization or watchdog
+isolation, including when replaying a capsule.
+
+Set `phase` to choose a deterministic lifecycle boundary:
+
+```zig
+const checks = [_]mar.StateCheck(Case){
+    .{ .name = "service.initial", .phase = .after_init, .check = initial },
+    .{ .name = "service.safety", .phase = .both, .check = safe },
+    .{ .name = "service.complete", .check = complete },
+};
+```
+
+`.after_init` runs after successful initialization and before the scenario.
+`.after_scenario` is the default and runs after a successful scenario.
+`.both` runs at each boundary. Within a boundary, checks run in declaration
+order. The first failure stops later checks and the scenario if it has not
+started. Successfully initialized application state is cleaned up exactly
+once per execution, including failed checks; cleanup remains part of replay.
+Initialization and scenario errors skip subsequent boundaries. Scheduler
+failures detected during a check take precedence over its returned error.
+
+Before invoking a check, the runner records `run.check` with its ID and phase.
+This identifies the boundary even if the callback never returns. Checks should
+inspect state without advancing the simulation or mutating the application;
+recording diagnostics is supported. These boundaries do not drain tasks or
+imply quiescence. They are harness call boundaries, not automatic checks after
+every scheduler step. Mid-scenario property checkpoints and reduction are
+future work.
+
+Capsules retain failure IDs and lifecycle trace events; callbacks and their
+phase configuration remain part of the pinned harness build. Supply the same
+`checks` to `replaySimCase`.
+
 ## Seed Schedules
 
 Use `seed_schedule` to reset the deterministic random stream at exact traced

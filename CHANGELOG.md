@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Extends `StateCheck` with deterministic `after_init`, `after_scenario`
+  (default), and `both` lifecycle phases. Checks run in declaration order and
+  stop on the first failure, with application cleanup included in replay.
+- Requires nonempty, unique check names as stable property IDs. Invalid IDs
+  return `InvalidStateChecks` before simulation or watchdog isolation.
+- Records each property ID and lifecycle phase before evaluation, including
+  checks that stall. Advances the trace format to version 4; old version 3
+  capsules require the matching released harness build.
+- Preserves scheduler failure precedence when a check catches a scheduler
+  error and returns successfully.
+
 ## v0.7.0 - 2026-09-04
 
 - Adds strictly ordered superdense seed schedules. A run can reset its

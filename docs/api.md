@@ -95,8 +95,11 @@ result channel.
 
 If `App` defines `deinit`, the runner calls it after every replay.
 
-`StateCheck(State)` contains a stable name and a function taking
-`*const State`. Check errors become `check_failed` reports.
+`StateCheck(State)` contains a unique, nonempty stable property `name`, a
+function taking `*const State`, and a `phase: CheckPhase` (`after_init`,
+`after_scenario`, or `both`). The default is `after_scenario`. Check errors
+become `check_failed` reports; invalid names return `InvalidStateChecks`.
+See [Property Lifecycle](run.md#property-lifecycle) for ordering and cleanup.
 
 ## Application Capabilities
 

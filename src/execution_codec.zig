@@ -25,7 +25,7 @@ pub const Wire = struct {
     pub fn validate(self: Wire) !void {
         if (self.version != 1 or self.decision_version != decision.format_version) return error.UnsupportedReplayVersion;
         var lines = std.mem.splitScalar(u8, self.trace, '\n');
-        if (!std.mem.eql(u8, lines.next() orelse return error.InvalidReplayArtifact, "marionette.trace format=text version=3")) return error.UnsupportedReplayVersion;
+        if (!std.mem.eql(u8, lines.next() orelse return error.InvalidReplayArtifact, "marionette.trace format=text version=4")) return error.UnsupportedReplayVersion;
         var count: u64 = 0;
         while (lines.next()) |line| {
             if (line.len == 0 and lines.index == null) break;

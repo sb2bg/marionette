@@ -19,7 +19,7 @@ Traces use newline-delimited UTF-8 text.
 The first line is a header:
 
 ```text
-marionette.trace format=text version=3
+marionette.trace format=text version=4
 ```
 
 Version 1 (2026-06-11) added `io.random` events: every `Io.random` /
@@ -37,6 +37,13 @@ network loss. Random-byte choices retain their existing length/digest trace shap
 and store full bytes separately in the tape. Old trace bytes are not claimed to
 match the new model; capsules reject unsupported trace versions.
 
+Version 4 (unreleased) adds `run.check id=<escaped-text>
+phase=<after_init|after_scenario>` immediately before each state-check callback.
+The ID is the check's stable `name`; checks configured for `both` emit one event
+at each reached boundary. Events consume no random choices. Their positions
+identify the first attempted property and phase, including watchdog stalls.
+Version 3 capsules are rejected by the current execution codec.
+
 Every later line is one event:
 
 ```text
@@ -46,7 +53,7 @@ event=<u64> <component>.<action> <key>=<value> ...
 Example:
 
 ```text
-marionette.trace format=text version=3
+marionette.trace format=text version=4
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1
 event=1 run.name value=smoke
 event=2 run.tag value=scenario:smoke

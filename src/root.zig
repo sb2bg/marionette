@@ -173,6 +173,9 @@ pub const runAttribute = run_module.runAttribute;
 /// Named scenario check over user-owned scenario state.
 pub const StateCheck = run_module.StateCheck;
 
+/// Deterministic lifecycle boundaries for state checks.
+pub const CheckPhase = run_module.CheckPhase;
+
 /// Data-bearing scenario failure.
 pub const RunFailure = run_module.RunFailure;
 /// Optional exact identity constraints for `expectSimFailure`.

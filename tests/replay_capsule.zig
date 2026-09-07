@@ -178,3 +178,174 @@ test "byte tape overrides a different generated seed and rejects damaged bytes" 
     try std.testing.expectError(error.DecisionReplayDiverged, damaged.randomBytes(&actual));
     try std.testing.expectEqual(mar.DecisionDivergenceKind.invalid_tape_entry, damaged.decisionDivergence().?.kind);
 }
+
+const PropertyApp = struct {
+    sim: mar.Sim,
+    value: u8 = 0,
+
+    fn init(sim: mar.Sim) @This() {
+        return .{ .sim = sim };
+    }
+    fn brokenInit(_: mar.Sim) !@This() {
+        return error.InitFailed;
+    }
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        case.app.value = 1;
+        try case.env().record("property.scenario", .{});
+    }
+    fn brokenScenario(case: *mar.SimCase(@This())) !void {
+        try scenario(case);
+        return error.ScenarioFailed;
+    }
+    fn initial(case: *const mar.SimCase(@This())) !void {
+        if (case.app.value != 0) return error.BadInitialState;
+        try case.env().record("property.initial", .{});
+    }
+    fn final(case: *const mar.SimCase(@This())) !void {
+        if (case.app.value != 1) return error.BadFinalState;
+        try case.env().record("property.final", .{});
+    }
+    fn invariant(case: *const mar.SimCase(@This())) !void {
+        try case.env().record("property.invariant value={}", .{case.app.value});
+    }
+    fn fail(_: *const mar.SimCase(@This())) !void {
+        return error.InvariantBroken;
+    }
+    pub fn deinit(self: *@This()) void {
+        self.sim.env.record("property.cleanup", .{}) catch {};
+    }
+};
+
+test "properties: lifecycle order, default phase, and capsule replay" {
+    const checks = [_]mar.StateCheck(mar.SimCase(PropertyApp)){
+        .{ .name = "initial", .phase = .after_init, .check = PropertyApp.initial },
+        .{ .name = "invariant", .phase = .both, .check = PropertyApp.invariant },
+        .{ .name = "final", .check = PropertyApp.final },
+    };
+    var report = try mar.runSimCase(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{},
+        .init = PropertyApp.init,
+        .scenario = PropertyApp.scenario,
+        .checks = &checks,
+    });
+    defer report.deinit();
+    try std.testing.expect(report == .passed);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, report.passed.trace, "property.cleanup"));
+    var remaining = report.passed.trace;
+    for ([_][]const u8{
+        "property.initial",           "property.invariant value=0", "property.scenario",
+        "property.invariant value=1", "property.final",             "property.cleanup",
+    }) |needle| {
+        const index = std.mem.indexOf(u8, remaining, needle) orelse return error.MissingLifecycleEvent;
+        remaining = remaining[index + needle.len ..];
+    }
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    var replay = try mar.replaySimCase(.{
+        .allocator = std.testing.allocator,
+        .init = PropertyApp.init,
+        .scenario = PropertyApp.scenario,
+        .checks = &checks,
+    }, &capsule, identity);
+    defer replay.deinit();
+    try std.testing.expect(replay == .passed);
+    const invalid = [_]mar.StateCheck(mar.SimCase(PropertyApp)){
+        .{ .name = "", .check = PropertyApp.fail },
+    };
+    try std.testing.expectError(error.InvalidStateChecks, mar.replaySimCase(.{
+        .allocator = std.testing.allocator,
+        .init = PropertyApp.brokenInit,
+        .scenario = PropertyApp.scenario,
+        .checks = &invalid,
+    }, &capsule, identity));
+    const legacy = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "version=4", "version=3");
+    defer std.testing.allocator.free(legacy);
+    try std.testing.expectError(error.UnsupportedReplayVersion, mar.ReplayCapsule.decode(std.testing.allocator, legacy));
+}
+
+test "properties: first failure stops lifecycle and survives watchdog and capsule" {
+    inline for (.{ @as(?mar.WatchdogOptions, null), @as(?mar.WatchdogOptions, .{}) }) |watchdog| {
+        if (watchdog != null and !@import("builtin").os.tag.isDarwin() and @import("builtin").os.tag != .linux) continue;
+        const checks = [_]mar.StateCheck(mar.SimCase(PropertyApp)){
+            .{ .name = "service.safety", .phase = .both, .check = PropertyApp.fail },
+            .{ .name = "must.not.run", .phase = .both, .check = PropertyApp.invariant },
+        };
+        var report = try mar.runSimCase(.{
+            .allocator = std.testing.allocator,
+            .simulate = mar.World.SimulateOptions{},
+            .init = PropertyApp.init,
+            .scenario = PropertyApp.scenario,
+            .checks = &checks,
+            .watchdog = watchdog,
+        });
+        defer report.deinit();
+        try std.testing.expect(report == .failed);
+        try std.testing.expectEqual(mar.RunFailureKind.check_failed, report.failed.kind);
+        try std.testing.expectEqualStrings("service.safety", report.failed.check_name.?);
+        try std.testing.expectEqualStrings("InvariantBroken", report.failed.error_name.?);
+        try std.testing.expectEqual(@as(usize, 0), report.failed.second_trace.len);
+        try mar.expectTraceContains(report.failed.first_trace, "phase=after_init");
+        try mar.expectTraceContains(report.failed.first_trace, "property.cleanup");
+        try std.testing.expect(std.mem.indexOf(u8, report.failed.first_trace, "property.scenario") == null);
+        try std.testing.expect(std.mem.indexOf(u8, report.failed.first_trace, "must.not.run") == null);
+        const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+        defer std.testing.allocator.free(bytes);
+        var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+        defer capsule.deinit();
+        var replay = try mar.replaySimCase(.{
+            .allocator = std.testing.allocator,
+            .init = PropertyApp.init,
+            .scenario = PropertyApp.scenario,
+            .checks = &checks,
+        }, &capsule, identity);
+        defer replay.deinit();
+        try std.testing.expect(replay == .failed);
+        try std.testing.expectEqual(mar.RunFailureKind.check_failed, replay.failed.kind);
+        try std.testing.expectEqualStrings("service.safety", replay.failed.check_name.?);
+    }
+}
+
+test "properties: invalid IDs are rejected before initialization or watchdog validation" {
+    inline for (.{
+        &[_]mar.StateCheck(mar.SimCase(PropertyApp)){
+            .{ .name = "", .check = PropertyApp.fail },
+        },
+        &[_]mar.StateCheck(mar.SimCase(PropertyApp)){
+            .{ .name = "duplicate", .phase = .after_init, .check = PropertyApp.fail },
+            .{ .name = "duplicate", .check = PropertyApp.fail },
+        },
+    }) |checks| {
+        try std.testing.expectError(error.InvalidStateChecks, mar.runSimCase(.{
+            .allocator = std.testing.allocator,
+            .simulate = mar.World.SimulateOptions{},
+            .init = PropertyApp.brokenInit,
+            .scenario = PropertyApp.scenario,
+            .checks = checks,
+            .watchdog = mar.WatchdogOptions{ .trace_capacity = 0 },
+        }));
+    }
+}
+
+test "properties: initialization and scenario errors skip later checks" {
+    const checks = [_]mar.StateCheck(mar.SimCase(PropertyApp)){
+        .{ .name = "initial", .phase = .after_init, .check = PropertyApp.initial },
+        .{ .name = "final", .check = PropertyApp.fail },
+    };
+    inline for (.{ PropertyApp.brokenInit, PropertyApp.init }, 0..) |init, index| {
+        var report = try mar.runSimCase(.{
+            .allocator = std.testing.allocator,
+            .simulate = mar.World.SimulateOptions{},
+            .init = init,
+            .scenario = PropertyApp.brokenScenario,
+            .checks = &checks,
+        });
+        defer report.deinit();
+        try std.testing.expect(report == .failed);
+        try std.testing.expectEqual(mar.RunFailureKind.scenario_error, report.failed.kind);
+        try std.testing.expectEqualStrings(if (index == 0) "InitFailed" else "ScenarioFailed", report.failed.error_name.?);
+        try std.testing.expect(std.mem.indexOf(u8, report.failed.first_trace, "phase=after_scenario") == null);
+    }
+}

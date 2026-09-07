@@ -20,6 +20,7 @@ pub const RunReport = run_types.RunReport;
 pub const RunResult = run_types.RunResult;
 pub const WatchdogOptions = run_types.WatchdogOptions;
 pub const StateCheck = run_types.StateCheck;
+pub const CheckPhase = run_types.CheckPhase;
 pub const runAttribute = run_types.runAttribute;
 pub const TraceError = world_module.TraceError;
 
@@ -27,6 +28,7 @@ pub const TraceError = world_module.TraceError;
 /// are reported through `RunReport`, not as errors.
 pub const RunError = std.mem.Allocator.Error || TraceError || error{
     InvalidSeedSchedule,
+    InvalidStateChecks,
     InvalidWatchdogOptions,
     WatchdogUnavailable,
     WatchdogTraceTooLarge,
@@ -104,6 +106,7 @@ pub fn replaySimCase(config: anytype, capsule: *const @import("replay.zig").Caps
     validateSimScenario(Case, config.scenario);
     const no_checks = [_]StateCheck(Case){};
     const checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_checks;
+    try validateStateChecks(Case, checks);
     var expected = try capsule.executionResult(config.allocator);
     errdefer expected.deinit();
     const options = capsule.options();
@@ -196,6 +199,7 @@ fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
     const no_case_checks = [_]StateCheck(Case){};
     const case_checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_case_checks;
 
+    try validateStateChecks(Case, case_checks);
     var options = try runOptionsFromConfig(config, seed_override);
     defer deinitRunOptions(config.allocator, &options);
     return runTwiceWithSimCase(
@@ -207,6 +211,15 @@ fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
         fallibleSimScenario(Case, config.scenario),
         case_checks,
     );
+}
+
+fn validateStateChecks(comptime State: type, checks: []const StateCheck(State)) error{InvalidStateChecks}!void {
+    for (checks, 0..) |check, index| {
+        if (check.name.len == 0) return error.InvalidStateChecks;
+        for (checks[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.name, check.name)) return error.InvalidStateChecks;
+        }
+    }
 }
 
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.Error!RunOptions {
@@ -591,38 +604,26 @@ fn runOnceWithSimCase(
     var state_live = true;
     defer if (state_live) state.deinit();
 
-    scenario(&state) catch |err| {
-        const scheduler_failure = state.control().tasks.failure();
-        state.deinit();
-        state_live = false;
-        if (scheduler_failure) |failure| {
-            return try schedulerFailureFromWorld(
-                allocator,
-                options,
-                &world,
-                failure,
-            );
-        }
-        return try failureFromWorld(allocator, options, .scenario_error, &world, err, null);
-    };
+    for ([_]CheckPhase{ .after_init, .after_scenario }) |phase| {
+        if (phase == .after_scenario) {
+            scenario(&state) catch |err| {
+                const scheduler_failure = state.control().tasks.failure();
+                state.deinit();
+                state_live = false;
+                if (scheduler_failure) |failure| {
+                    return try schedulerFailureFromWorld(
+                        allocator,
+                        options,
+                        &world,
+                        failure,
+                    );
+                }
+                return try failureFromWorld(allocator, options, .scenario_error, &world, err, null);
+            };
 
-    if (state.control().tasks.failure()) |failure| {
-        state.deinit();
-        state_live = false;
-        return try schedulerFailureFromWorld(
-            allocator,
-            options,
-            &world,
-            failure,
-        );
-    }
-
-    for (state_checks) |check| {
-        check.check(&state) catch |err| {
-            const scheduler_failure = state.control().tasks.failure();
-            state.deinit();
-            state_live = false;
-            if (scheduler_failure) |failure| {
+            if (state.control().tasks.failure()) |failure| {
+                state.deinit();
+                state_live = false;
                 return try schedulerFailureFromWorld(
                     allocator,
                     options,
@@ -630,15 +631,40 @@ fn runOnceWithSimCase(
                     failure,
                 );
             }
-            return try failureFromWorld(
-                allocator,
-                options,
-                .check_failed,
-                &world,
-                err,
-                check.name,
-            );
-        };
+        }
+        for (state_checks) |check| {
+            if (check.phase != .both and check.phase != phase) continue;
+            try world.recordFields("run.check", &.{
+                traceField("id", .{ .text = check.name }),
+                traceField("phase", .{ .text = @tagName(phase) }),
+            });
+            check.check(&state) catch |err| {
+                const scheduler_failure = state.control().tasks.failure();
+                state.deinit();
+                state_live = false;
+                if (scheduler_failure) |failure| {
+                    return try schedulerFailureFromWorld(
+                        allocator,
+                        options,
+                        &world,
+                        failure,
+                    );
+                }
+                return try failureFromWorld(
+                    allocator,
+                    options,
+                    .check_failed,
+                    &world,
+                    err,
+                    check.name,
+                );
+            };
+            if (state.control().tasks.failure()) |failure| {
+                state.deinit();
+                state_live = false;
+                return try schedulerFailureFromWorld(allocator, options, &world, failure);
+            }
+        }
     }
 
     state.deinit();
@@ -1777,5 +1803,29 @@ test "execution result comparison owns all outcome pairs across allocation failu
                 try std.testing.checkAllAllocationFailures(std.testing.allocator, compareOwnershipAllocationCase, .{ first_failed, second_failed, differs });
             }
         }
+    }
+}
+
+test "properties: successful check cannot hide a scheduler deadlock" {
+    const Checks = struct {
+        fn scenario(_: *SimCase(DeadlockApp)) void {}
+        fn deadlock(state: *const SimCase(DeadlockApp)) !void {
+            var word: u32 = 0;
+            var future = try std.Io.concurrent(state.app.io, neverCompletes, .{ state.app.io, &word });
+            future.await(state.app.io);
+        }
+    };
+    inline for (.{ CheckPhase.after_init, CheckPhase.after_scenario }) |phase| {
+        const checks = [_]StateCheck(SimCase(DeadlockApp)){
+            .{ .name = "scheduler.failure", .phase = phase, .check = Checks.deadlock },
+        };
+        try expectSimFailure(.{
+            .allocator = std.testing.allocator,
+            .simulate = World.SimulateOptions{},
+            .init = DeadlockApp.init,
+            .scenario = Checks.scenario,
+            .checks = &checks,
+            .failure = FailureExpectation{ .kind = .scheduler_deadlock, .error_name = "Deadlock" },
+        });
     }
 }

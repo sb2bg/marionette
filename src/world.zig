@@ -643,7 +643,7 @@ pub const World = struct {
         };
         errdefer world.deinit();
 
-        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=3\n");
+        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=4\n");
         try world.recordInit(
             "world.init seed={} start_ns={} tick_ns={}",
             .{ options.seed, options.start_ns, options.tick_ns },
@@ -1574,7 +1574,7 @@ test "world: trace records deterministic actions" {
     try world.record("service.allowed request_id={}", .{7});
 
     try std.testing.expectEqualStrings(
-        \\marionette.trace format=text version=3
+        \\marionette.trace format=text version=4
         \\event=0 world.init seed=12648430 start_ns=5 tick_ns=2
         \\event=1 world.tick now_ns=7
         \\event=2 world.run_for start_ns=7 duration_ns=4 end_ns=11
