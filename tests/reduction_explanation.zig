@@ -331,3 +331,113 @@ test "reduction: candidate plans cross watchdog isolation and exact replay" {
     try std.testing.expect(result.report().failed.tape_complete);
     try std.testing.expectEqual(@as(usize, 0), result.report().failed.second_trace.len);
 }
+
+const CheckpointDeadlock = struct {
+    io: std.Io,
+    fn init(sim: mar.Sim) @This() {
+        return .{ .io = sim.env.io() };
+    }
+    fn check(_: *const mar.SimCase(@This())) !void {
+        return error.InvariantBroken;
+    }
+    fn wait(io: std.Io, word: *u32) void {
+        io.futexWaitUncancelable(u32, word, 0);
+    }
+    fn deadlock(case: *const mar.SimCase(@This())) !void {
+        var word: u32 = 0;
+        var future = try std.Io.concurrent(case.app.io, wait, .{ case.app.io, &word });
+        future.await(case.app.io);
+    }
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        case.checkpoint("first") catch {};
+        try deadlock(case);
+    }
+    fn deadlockingCheck(case: *const mar.SimCase(@This())) !void {
+        try deadlock(case);
+        return error.LaterCheckError;
+    }
+    fn noop(_: *mar.SimCase(@This())) void {}
+};
+
+test "checkpoints: first property identity survives a later scheduler deadlock" {
+    const properties = [_]mar.StateCheck(mar.SimCase(CheckpointDeadlock)){
+        .{ .name = "app.safety", .phase = .checkpoint, .check = CheckpointDeadlock.check },
+    };
+    try mar.expectSimFailure(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{},
+        .init = CheckpointDeadlock.init,
+        .scenario = CheckpointDeadlock.scenario,
+        .checks = &properties,
+        .failure = mar.FailureExpectation{ .kind = .check_failed, .check_name = "app.safety", .error_name = "InvariantBroken" },
+    });
+}
+
+test "properties: a check error after deadlocking does not replace the scheduler failure" {
+    const properties = [_]mar.StateCheck(mar.SimCase(CheckpointDeadlock)){
+        .{ .name = "app.safety", .phase = .after_init, .check = CheckpointDeadlock.deadlockingCheck },
+    };
+    try mar.expectSimFailure(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{},
+        .init = CheckpointDeadlock.init,
+        .scenario = CheckpointDeadlock.noop,
+        .checks = &properties,
+        .failure = mar.FailureExpectation{ .kind = .scheduler_deadlock, .error_name = "Deadlock" },
+    });
+}
+
+test "managed processes: ownership is reserved before initialization starts tasks" {
+    const Service = struct {
+        var failing: *std.testing.FailingAllocator = undefined;
+        var destroyed = false;
+        var task_ran = false;
+        var dependency_destroyed_after_app = false;
+
+        fn task() void {
+            task_ran = true;
+        }
+        fn init(env: mar.Env) !@This() {
+            const world = env.recorder().world.?;
+            try world.registerTeardown(world, destroyDependency);
+            _ = try std.Io.concurrent(env.io(), task, .{});
+            while (world.teardowns.items.len < world.teardowns.capacity) try world.registerTeardown(world, noop);
+            // Once initialization succeeds, publishing ownership must not
+            // allocate: failure would free App while this task is runnable.
+            failing.fail_index = failing.alloc_index;
+            failing.resize_fail_index = failing.resize_index;
+            return .{};
+        }
+        pub fn deinit(_: *@This()) void {
+            destroyed = true;
+        }
+        fn destroyDependency(_: *anyopaque, _: std.mem.Allocator) void {
+            dependency_destroyed_after_app = destroyed;
+        }
+        fn noop(_: *anyopaque, _: std.mem.Allocator) void {}
+    };
+    Service.destroyed = false;
+    Service.task_ran = false;
+    Service.dependency_destroyed_after_app = false;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    Service.failing = &failing;
+    {
+        var world = try mar.World.init(failing.allocator(), .{ .seed = 1 });
+        defer world.deinit();
+        defer {
+            failing.fail_index = std.math.maxInt(usize);
+            failing.resize_fail_index = std.math.maxInt(usize);
+        }
+        const sim = try world.simulate(.{});
+        while (world.teardowns.items.len < world.teardowns.capacity) try world.registerTeardown(&world, Service.noop);
+        const managed = try sim.manageProcess(Service, 0, Service.init);
+        try std.testing.expect(managed.state() != null);
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expect(!Service.destroyed);
+        // World teardown must stop the queued task and destroy App before
+        // destroying any dependencies registered by its initializer.
+    }
+    try std.testing.expect(Service.destroyed);
+    try std.testing.expect(!Service.task_ran);
+    try std.testing.expect(Service.dependency_destroyed_after_app);
+}

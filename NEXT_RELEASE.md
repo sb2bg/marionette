@@ -1,6 +1,6 @@
 # Reduction and Explanation release acceptance — complete
 
-Working branch: `feat/next-release-properties` (based on post-0.7 main).
+Working branch: `feat/0.7.1` (based on post-0.7 main).
 This checklist covers the unnumbered Reduction and Explanation release target
 following 0.7.0. The roadmap now advances to the subsequent 0.8 Guided Exploration
 campaign work. Release numbering and publication remain separate release tasks.
@@ -22,7 +22,7 @@ in the roadmap; no new production runtime or broad model extensions are needed.
 
 ## Verification
 
-- 470/470 tests pass in Debug, ReleaseSafe, and ReleaseFast.
+- 473/473 tests pass in Debug, ReleaseSafe, and ReleaseFast.
 - All five external validation targets pass in all three modes (37 tests per mode):
   xitdb, mailbox, Ochi, Dusty, and beanstalkz.
 - Tidy, tracked/new source formatting, and whitespace checks pass.

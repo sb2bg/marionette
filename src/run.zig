@@ -88,6 +88,8 @@ pub fn SimCase(comptime App: type) type {
                     traceField("phase", .{ .text = @tagName(phase) }),
                 });
                 check.check(self) catch |err| {
+                    // A scheduler failure inside the check predates its error.
+                    if (self.control().tasks.failure() != null) return error.PropertySchedulerFailure;
                     self.property_failure = .{ .err = err, .name = check.name };
                     return err;
                 };
@@ -662,7 +664,7 @@ fn runOnceWithSimCase(
         if (phase == .after_scenario) scenario(&state) catch |err| {
             scenario_error = err;
         };
-        // A caught checkpoint failure must win over later scenario/check errors.
+        // A caught checkpoint failure must win over later execution failures.
         if (scenario_error == null and state.property_failure == null and state.control().tasks.failure() == null) {
             state.evaluateChecks(phase) catch |err| {
                 if (state.property_failure == null and state.control().tasks.failure() == null) return @errorCast(err);
@@ -674,8 +676,8 @@ fn runOnceWithSimCase(
             state.deinit();
             state_live = false;
             try sim.finishManagedProcesses();
-            if (scheduler_failure) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
             if (property_failure) |failure| return try failureFromWorld(allocator, options, .check_failed, &world, failure.err, failure.name);
+            if (scheduler_failure) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
             return try failureFromWorld(allocator, options, .scenario_error, &world, scenario_error.?, null);
         }
     }

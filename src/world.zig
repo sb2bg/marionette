@@ -835,10 +835,15 @@ pub const World = struct {
             const managed = try world.allocator.create(ManagedProcess(App));
             errdefer world.allocator.destroy(managed);
             managed.* = .{ .initialize = initialize, .runtime = supervisor.io_runtime, .node = node };
-            const initial = try initialize(try self.envForNode(node));
-            managed.app = initial;
-            errdefer ManagedProcess(App).killed(managed);
+            // Reserve ownership before initialization can start tasks. No
+            // allocation may fail between publishing App and its lifecycle.
+            const teardown_index = world.teardowns.items.len;
             try world.registerTeardown(managed, ManagedProcess(App).destroy);
+            errdefer _ = world.teardowns.orderedRemove(teardown_index);
+            managed.app = try initialize(try self.envForNode(node));
+            // Initializers may register dependencies: destroy App before them.
+            const teardown = world.teardowns.orderedRemove(teardown_index);
+            world.teardowns.appendAssumeCapacity(teardown);
             // Registration cannot fail after validating the node above.
             supervisor.lifecycles[index] = .{ .ptr = managed, .cleanup_at_run_end = true, .on_kill = ManagedProcess(App).killed, .restart = ManagedProcess(App).reopened };
             return managed;
