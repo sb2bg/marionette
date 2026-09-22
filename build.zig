@@ -235,6 +235,35 @@ pub fn build(b: *std.Build) void {
         );
     }
 
+    if (b.lazyDependency("redis", .{
+        .target = target,
+        .optimize = optimize,
+    })) |redis_dep| {
+        const validate_redis_mod = b.createModule(.{
+            .root_source_file = b.path("validation/redis_client.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validate_redis_mod.addImport("marionette", mod);
+        validate_redis_mod.addImport("redis", redis_dep.module("redis"));
+        _ = addValidation(b, validate_redis_mod, "validate-redis", "Run the unmodified Redis client under Marionette");
+    }
+
+    if (b.lazyDependency("pg", .{
+        .target = target,
+        .optimize = optimize,
+        .openssl = false,
+    })) |pg_dep| {
+        const validate_pg_mod = b.createModule(.{
+            .root_source_file = b.path("validation/pg_client.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validate_pg_mod.addImport("marionette", mod);
+        validate_pg_mod.addImport("pg", pg_dep.module("pg"));
+        _ = addValidation(b, validate_pg_mod, "validate-pg", "Run the unmodified pg.zig client under Marionette");
+    }
+
     const validate_bounded_queue_mod = b.createModule(.{
         .root_source_file = b.path("validation/bounded_queue_concurrency.zig"),
         .target = target,

@@ -4,6 +4,11 @@
     .fingerprint = 0x8afb77b114c43a8d, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        .redis = .{
+            .url = "git+https://github.com/lalinsky/redis.zig#4879d5a6e6318fe8ec8b0f3df4e37239c0c3e78c",
+            .hash = "redis-0.0.1-4ByUEg4PAQAISkFxe7ml4L8wVbqp2CBu7oAcLiCglQkw",
+            .lazy = true,
+        },
         .xitdb = .{
             .url = "git+https://github.com/xit-vcs/xitdb#f86134242e4d265cddfb0dbebd4d2d6dd4967274",
             .hash = "xitdb-0.0.0-EEFkxpHJBABxnXvbX5oyeUufyiwNgOwkH03bayvWeYxw",
@@ -22,6 +27,11 @@
         .dusty = .{
             .url = "git+https://github.com/lalinsky/dusty#e7a4f4b24c2d3c36244a48617e992a3056c62622",
             .hash = "dusty-0.1.0-Qdw7RpKkGwBUOpWaRSxO0vfX9mJHn9eywcPvqd9P1bOq",
+            .lazy = true,
+        },
+        .pg = .{
+            .url = "git+https://github.com/karlseguin/pg.zig#f6442abf3fb0bbcf1007fac4799607f35688a89e",
+            .hash = "pg-0.0.0-Wp_7gVzCBgDIFbqjSA6I7bJQj0gh66KzpmDxvx1Nn4PV",
             .lazy = true,
         },
         .beanstalkz = .{

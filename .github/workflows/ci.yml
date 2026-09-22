@@ -80,6 +80,8 @@ jobs:
           - validate-ochi
           - validate-dusty
           - validate-beanstalkz
+          - validate-pg
+          - validate-redis
         optimize:
           - Debug
           - ReleaseSafe

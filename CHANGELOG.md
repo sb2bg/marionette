@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Adds pinned lazy Redis client validation (`zig build validate-redis`) for
+  command errors, fragmented replies, ambiguous lost-reply retries, and
+  truncated pipelines. Checks pool recovery, execution counts, resource
+  cleanup, and same-seed replay in the three-optimization external CI matrix.
+
+- Adds pinned lazy pg.zig client validation (`zig build validate-pg`) for
+  password authentication, simple-query affected counts, SQL error recovery,
+  fragmented responses, and truncated frames, with same-seed trace replay
+  and the Debug/ReleaseSafe/ReleaseFast external CI matrix.
+
 ## v0.7.0 - 2026-09-04
 
 - Adds strictly ordered superdense seed schedules. A run can reset its
