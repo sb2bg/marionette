@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.1 - Unreleased
+## v0.7.1 - 2026-09-22
 
 - Adds explicit property checkpoints, `checkpoint`/`always` phases, and a fatal
   first-property latch that survives caught errors and later state repair.
