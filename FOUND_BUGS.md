@@ -337,3 +337,47 @@ byte-identical.
   should not hide uncharacterized failures.
 - Simulator-boundary findings are worth recording when they explain what the
   simulator can explore and what production hardware does or does not guarantee.
+
+## Redis Retry Semantics And Recovery
+
+**Project:** [lalinsky/redis.zig](https://github.com/lalinsky/redis.zig)
+
+**Pin:** `4879d5a6e6318fe8ec8b0f3df4e37239c0c3e78c`
+
+**Classification:** Characterized retry semantics; positive pool-recovery result.
+This is not counted as a confirmed SUT bug or an exactly-once violation.
+
+**Harness:** `validation/redis_client.zig` (`zig build validate-redis`).
+The unmodified client talks to a scripted RESP2 peer through simulated TCP.
+The peer verifies exact request bytes and independently counts applied INCRs.
+It models only the specified commands and responses, not a complete Redis server.
+
+### Lost INCR Reply Causes Reexecution
+
+The peer receives `INCR counter`, applies it (counter becomes 1), and closes
+without replying. With the client's default two retries, the same client call
+connects again and sends INCR again. The peer applies it (counter becomes 2),
+replies `:2`, and the call returns 2. Exactly two connections and two executions
+are observed. With `retry_attempts = 0`, the call returns `EndOfStream` after
+one execution; a subsequent PING still succeeds through a fresh connection.
+
+The shared `Client.withConnection` wrapper retries non-resumable operation
+errors without distinguishing idempotent and non-idempotent commands. Losing
+an acknowledgment leaves execution ambiguous; disabling retries does not undo
+an already-applied command. The harness preserves this behavior as an explicit
+characterization assertion, not an expected-failure marker. No upstream report
+has been sent.
+
+### Pool And Framing Recovery Held
+
+- A Redis command error leaves the connection reusable; a subsequent PING
+  succeeds on the same accepted connection.
+- Bytewise fragmented integer, error, and PONG responses preserve that behavior.
+- A two-INCR pipeline receives one complete response and a second response
+  missing its final LF. Execution returns `EndOfStream`; pipeline cleanup
+  discards the connection and a subsequent PING uses a fresh one.
+- Every scenario completes both tasks, has no blocked tasks or leaked simulated
+  handles, and produces byte-identical traces over two runs for each of four seeds.
+
+The campaign does not cover real Redis integration, persistence, authentication,
+TLS, concurrent pool contention, or read/write timeout options.

@@ -180,8 +180,16 @@ not only simulator-native examples:
 | Cooperative concurrency            | `g41797/mailbox`      |
 | HTTP over `std.Io.net`             | `lalinsky/dusty`      |
 | Queue protocol and process restart | `g41797/beanstalkz`   |
+| PostgreSQL client protocol and error recovery | `karlseguin/pg.zig` |
+| Redis retries, pipelining, and pool recovery | `lalinsky/redis.zig` |
 
 These campaigns have validated robust behavior and uncovered confirmed bugs in real third-party code. The [findings ledger](FOUND_BUGS.md) distinguishes confirmed system-under-test bugs from simulator boundaries and harness/model mistakes.
+
+On the development branch, `zig build validate-pg` and `zig build validate-redis`
+exercise unmodified clients against scripted protocol peers, including fragmented
+and truncated replies. These cover selected client behavior rather than complete
+database servers or TLS. The Redis lost-reply case characterizes automatic
+reexecution of `INCR`; it does not assert an exactly-once guarantee.
 
 ## Status
 
