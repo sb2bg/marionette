@@ -1,9 +1,10 @@
-# Reduction and Explanation release acceptance — complete
+# 0.7.1 release acceptance
 
 Working branch: `feat/0.7.1` (based on post-0.7 main).
-This checklist covers the unnumbered Reduction and Explanation release target
-following 0.7.0. The roadmap now advances to the subsequent 0.8 Guided Exploration
-campaign work. Release numbering and publication remain separate release tasks.
+The Reduction and Explanation implementation is complete. The PostgreSQL and
+Redis client validations are consolidated on this branch. Publication remains
+subject to the final candidate gates below; the proposed follow-up milestones
+and 1.0 criteria live in `ROADMAP.md`.
 
 - [x] Stable property IDs and initialization/scenario lifecycle checks.
 - [x] Explicit checkpoints; caught property failures remain fatal and replayable.
@@ -15,22 +16,35 @@ campaign work. Release numbering and publication remain separate release tasks.
       metadata, traces, capsule, and useful incomplete-failure diagnostics.
 - [x] Harness-owned typed process restart/reopen lifecycle helper.
 - [x] End-to-end examples, ownership/failure tests, contracts, roadmap/changelog.
-- [x] Debug/ReleaseSafe/ReleaseFast, external corpus, tidy/format, target/symbol gates.
+- [x] Seven pinned external validations in the three-optimization CI matrix.
 
 Allocation-site stacks and generic resource tracking are explicitly future work
 in the roadmap; no new production runtime or broad model extensions are needed.
 
-## Verification
+## Final Candidate Verification Gates
 
-- 473/473 tests pass in Debug, ReleaseSafe, and ReleaseFast.
-- All five external validation targets pass in all three modes (37 tests per mode):
-  xitdb, mailbox, Ochi, Dusty, and beanstalkz.
-- Tidy, tracked/new source formatting, and whitespace checks pass.
-- Linux x86_64 ReleaseSafe root-test compilation and the disabled Win64 fiber
-  compile check pass; release-symbol isolation passes.
-- Strict MkDocs build passes.
-- `reduce-idempotency` reduces three groups to two in five candidate attempts,
-  retaining the same property failure and reaching one-group minimality.
+- Run the 473 core/example tests and all seven external validation targets in
+  Debug, ReleaseSafe, and ReleaseFast. The external targets are xitdb, mailbox,
+  Ochi, Dusty, beanstalkz, pg.zig, and Redis: 45 external tests, 518 combined.
+- Require green Linux and macOS jobs on the final candidate commit, including
+  tidy, formatting, the disabled Win64 fiber compile check, and release-symbol
+  isolation. Check whitespace locally and exclude generated/vendor sources from
+  local formatting checks.
+- Build documentation with strict MkDocs validation.
+- Run `reduce-idempotency`: the reference seed 1234 reduces three groups to two
+  in five attempts, retaining the property failure and reaching one-group
+  minimality.
+
+## Publication Gates
+
+- [ ] Set package version, changelog heading, and install instructions to 0.7.1.
+- [ ] Require green CI and Pages for the prepared release commit.
+- [ ] Date the changelog, commit, and require green CI again.
+- [ ] Tag and publish the dated commit, then verify the documented package fetch
+      from a clean consumer.
+
+Trace format 4 and the nonempty/unique property-ID requirement must remain
+explicit in release notes. Old capsules require their matching pinned harness.
 
 ## Evidence and contracts
 
@@ -42,3 +56,5 @@ in the roadmap; no new production runtime or broad model extensions are needed.
 - `examples/reduction.zig`: executable request/duplicate failure reduction.
 - `docs/reduction-and-explanation.md`: API, scope, ownership, minimality, artifact,
   and diagnostic contracts.
+- `validation/pg_client.zig` and `validation/redis_client.zig`: scripted-peer
+  client framing, recovery, and retry characterization with same-seed replay.

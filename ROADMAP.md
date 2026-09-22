@@ -10,27 +10,80 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.8 — Guided Exploration
+## Current: 0.7.1 — Release Reduction And Explanation
 
-- Add scheduler policies in order: random, exact replay, PCT, then bounded
-  choice/preemption exploration.
-- Add campaign budgets, shards, resume, corpora, stable failure deduplication,
-  and JSON/JUnit output.
-- Report semantic coverage across choices, properties, faults, process states,
-  links, durability boundaries, and cancellation points.
-- Add small-history linearizability checking and bounded crash-point campaigns.
-- Add storage/network behavior only when a pinned SUT demonstrates the need.
-- Promote typed endpoints only after a real SUT establishes their ownership,
-  delivery, readiness, cancellation, close, and backpressure contract.
+Consolidate the completed reduction, property, artifact, and managed-process
+work with the pinned PostgreSQL and Redis client validations. Finish the
+release gates in `docs/releasing.md` before tagging. The acceptance record is
+`NEXT_RELEASE.md` in the repository root.
 
-## 0.9 And 1.0 — Stabilize The Narrow Core
+## Proposed Next: 0.7.2 — Bounded Cleanup
 
-- Define application, harness, and model-author compatibility tiers.
-- Narrow root exports around proven application and harness seams.
-- Publish model, trace, tape, and artifact compatibility policies.
-- Harden supported target/optimize matrices or explicitly narrow them.
-- Benchmark scheduler/event scaling before replacing data structures.
-- Make the external validation corpus release-blocking.
+- Isolate process supervision and managed-state ownership from `World`, retaining
+  the current public entry points and lifecycle semantics.
+- Share runner configuration/check preparation across normal runs, replay, and
+  reduction without adding another public runner abstraction.
+- Clarify application, harness, and experimental/model APIs in the documentation;
+  defer breaking export changes to an explicitly planned compatibility change.
+- Make local verification work after dependencies and generated files exist.
+- Record a small repeatable baseline for run throughput, trace/tape memory, and
+  reduction cost before attempting performance rewrites.
+
+Exit when these concrete changes are complete, the full validation matrix is
+green, and representative trace/decision fixtures and artifact formats are
+unchanged. Continue enforcing pinned-build identity checks. Avoid model expansion
+and unrelated module churn in this release. Findings that require semantic changes
+must be identified separately rather than hidden in a refactor.
+
+## Proposed 0.8 — Dependable Campaigns
+
+- Run bounded seed ranges with per-run watchdogs and a total campaign budget.
+  Add deterministic execution-step budgets for yielding workloads; preserve
+  external containment for code that never yields.
+- Save failure identities, traces, and complete replay capsules automatically;
+  retain explicit partial diagnostics for killed or crashed workers.
+- Deduplicate by full failure identity, resume interrupted campaigns, and upload
+  artifacts from CI. Apply bounded reduction only to eligible complete failures.
+- Exercise the complete campaign-to-regression workflow on existing real storage
+  and network/concurrency workloads with independent correctness oracles.
+- Track throughput, distinct failures, reproduction success, and reduction cost.
+
+Exit when an unattended campaign can survive a bad case, retain its evidence,
+resume its remaining work, and replay/reduce eligible failures from a fresh
+process using the pinned harness. Demonstrate this on at least two external
+workloads, including storage and network/concurrency behavior.
+
+## Stabilization And 1.0 Acceptance
+
+A 0.9 or release-candidate phase should close the following evidence gates.
+1.0 commits to the documented deterministic `std.Io` subset and testing workflow.
+
+- **Stable public contract:** identify supported application/harness APIs and
+  explicitly experimental surfaces; publish deprecation and compatibility rules.
+  Complete two consecutive stabilization candidates without breaking that API,
+  with a downstream upgrade exercised in CI.
+- **Trustworthy models:** contract and host-differential tests cover supported
+  semantics; unsupported operations fail explicitly. No unresolved defects may
+  invalidate determinism, ownership, or correctness results on supported targets.
+- **Durable evidence:** complete corpus failures exact-replay from a fresh
+  process with pinned build/SUT/toolchain identity; incompatible or malformed
+  artifacts are rejected. Reduction preserves the full failure identity and
+  produces an executable, replay-verified capsule within its budget. Cross-build
+  replay is not required; artifact versioning and retention rules are explicit.
+- **Operational reliability:** campaigns enforce budgets, retain partial failures,
+  deduplicate and resume correctly, and leave no leaked workers or owned resources.
+  Keep the seven pinned external validations release-blocking and require a
+  consecutive 30-day nightly run with no unexplained simulator failures or hangs.
+- **Independent usability:** at least two independently maintained real projects
+  can integrate, diagnose, replay, and preserve regressions using published APIs
+  and documentation without editing Marionette internals.
+- **Support and performance:** publish the exact OS/architecture/Zig/optimization
+  matrix, enforce it in CI, and test clean package installation. Publish measured
+  scaling and resource limits with regression budgets for representative workloads.
+
+PCT, bounded schedule exploration, linearizability checking, semantic coverage,
+campaign sharding, new transports, and broader platform support require concrete
+workload evidence. They are not prerequisites for a narrow, dependable 1.0.
 
 ## Deferred Harness Work
 
