@@ -10,14 +10,7 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Current: 0.7.1 — Release Reduction And Explanation
-
-Consolidate the completed reduction, property, artifact, and managed-process
-work with the pinned PostgreSQL and Redis client validations. Finish the
-release gates in `docs/releasing.md` before tagging. The acceptance record is
-`NEXT_RELEASE.md` in the repository root.
-
-## Proposed Next: 0.7.2 — Bounded Cleanup
+## Next: 0.7.2 — Bounded Cleanup
 
 - Isolate process supervision and managed-state ownership from `World`, retaining
   the current public entry points and lifecycle semantics.
@@ -35,7 +28,7 @@ unchanged. Continue enforcing pinned-build identity checks. Avoid model expansio
 and unrelated module churn in this release. Findings that require semantic changes
 must be identified separately rather than hidden in a refactor.
 
-## Proposed 0.8 — Dependable Campaigns
+## 0.8 — Dependable Campaigns
 
 - Run bounded seed ranges with per-run watchdogs and a total campaign budget.
   Add deterministic execution-step budgets for yielding workloads; preserve

@@ -1,6 +1,6 @@
 # Reduction and Explanation
 
-The next release builds on 0.7's pinned-build replay capsules. A failure can now
+Marionette 0.7.1 builds on 0.7's pinned-build replay capsules. A failure can now
 be checked at an explicit safe point, reduced to essential semantic groups,
 explained with causal references, and saved as a CI artifact directory.
 

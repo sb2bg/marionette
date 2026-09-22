@@ -119,21 +119,20 @@ same-build exploration controls; recorded decisions are the replay authority.
 Versioned [replay capsules](docs/decision-tapes.md) persist those decisions,
 including application random bytes, for a pinned build and workload.
 
-## Next Release (Unreleased)
+## New In 0.7.1
 
 [Reduction and Explanation](docs/reduction-and-explanation.md) adds explicit
 property checkpoints, reducible action/decision groups, causal operation spans,
 CI artifact directories, and managed process restart/reopen. Try the complete
 example with `zig build run-example -- reduce-idempotency --seed 1234 --trace
---expect-failure`. These features require this development branch; the released
-installation below remains 0.7.0.
+--expect-failure`.
 
 ## Install
 
 Marionette requires Zig 0.16.x.
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.7.0.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.7.1.tar.gz
 ```
 
 Add the module to your test build:
@@ -185,7 +184,7 @@ not only simulator-native examples:
 
 These campaigns have validated robust behavior and uncovered confirmed bugs in real third-party code. The [findings ledger](FOUND_BUGS.md) distinguishes confirmed system-under-test bugs from simulator boundaries and harness/model mistakes.
 
-On the development branch, `zig build validate-pg` and `zig build validate-redis`
+`zig build validate-pg` and `zig build validate-redis`
 exercise unmodified clients against scripted protocol peers, including fragmented
 and truncated replies. These cover selected client behavior rather than complete
 database servers or TLS. The Redis lost-reply case characterizes automatic
