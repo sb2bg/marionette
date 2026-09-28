@@ -1,0 +1,56 @@
+{
+  "format": "marionette.artifacts",
+  "version": 1,
+  "complete": true,
+  "outcome": "failed",
+  "identity": {
+    "build": "v0.7.1-format-fixture",
+    "sut": "compatibility_072",
+    "zig": "fixture",
+    "target": "fixture",
+    "optimize": "fixture",
+    "disk_version": 1
+  },
+  "options": {
+    "seed": 1234,
+    "seed_schedule": [],
+    "start_ns": 0,
+    "tick_ns": 1,
+    "name": null,
+    "tags": [],
+    "attributes": [],
+    "watchdog": null,
+    "check_resources": false
+  },
+  "simulate": {
+    "allocation": {
+      "fail_after": null,
+      "quota_bytes": null,
+      "buggify_rate": {
+        "numerator": 0,
+        "denominator": 1
+      }
+    },
+    "disk": {
+      "sector_size": 4096,
+      "min_latency_ns": null,
+      "latency_jitter_ns": 0
+    },
+    "network": null,
+    "task_stack_size": 1048576,
+    "task_start_jitter_ns": 0,
+    "fiber_overflow_diagnostics": true
+  },
+  "failure": {
+    "kind": "check_failed",
+    "error_name": "DuplicateApplied",
+    "check_name": "service.at_most_once"
+  },
+  "fingerprint": 2114033067149633405,
+  "capsule_available": true,
+  "tape_complete": true,
+  "replay_divergence": null,
+  "second_error_name": null,
+  "second_check_name": null,
+  "capsule_unavailable_reason": null
+}

@@ -1,0 +1,77 @@
+marionette.trace format=text version=4
+event=0 world.init seed=72 start_ns=0 tick_ns=1
+event=1 world.seed_cutover_config index=0 at_ns=3 microstep=0 seed=71
+event=2 run.resources enabled=true
+event=3 run.name value=managed%20lifecycle
+event=4 run.tag value=compatibility
+event=5 run.tag value=process
+event=6 run.attribute key=version value=uint:1
+event=7 disk.model contract=portable_v1 version=1 sector_size=4096 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=commit_pending
+event=8 world.run_for start_ns=0 duration_ns=1 end_ns=1
+event=9 disk.stat_dir op=0 path=state status=not_found latency_ns=1
+event=10 world.run_for start_ns=1 duration_ns=1 end_ns=2
+event=11 disk.stat op=1 path=state status=not_found latency_ns=1
+event=12 world.run_for start_ns=2 duration_ns=1 end_ns=3
+event=13 disk.write op=2 path=state offset=0 len=0 status=ok latency_ns=1
+event=14 world.run_for start_ns=3 duration_ns=1 end_ns=4
+event=15 disk.stat op=3 path=state status=ok size=0 latency_ns=1 inode=2
+event=16 scheduler.wake_empty key=4611686018427387919 max=18446744073709551615
+event=17 world.run_for start_ns=4 duration_ns=1 end_ns=5
+event=18 disk.stat_dir op=4 path=state status=not_found latency_ns=1
+event=19 scheduler.wake_empty key=4611686018427387927 max=18446744073709551615
+event=20 process.kill node=0 reason=manual
+event=21 world.run_for start_ns=5 duration_ns=1 end_ns=6
+event=22 disk.stat_dir op=5 path=state status=not_found latency_ns=1
+event=23 scheduler.wake_empty key=4611686018427387935 max=18446744073709551615
+event=24 process.restart node=0 automatic=false
+event=25 disk.crash_write op=2 path=state offset=0 len=0 result=landed
+event=26 disk.crash_metadata op=2 dir=. kind=create result=kept
+event=27 disk.crash pending_writes=1 landed=1 lost=0 torn=0 reordered=0 pending_metadata=1 metadata_kept=1 metadata_lost=0
+event=28 process.kill node=0 reason=disk_crash
+event=29 process.kill node=1 reason=disk_crash
+event=30 disk.restart status=ok
+event=31 world.run_for start_ns=6 duration_ns=1 end_ns=7
+event=32 disk.stat_dir op=6 path=state status=not_found latency_ns=1
+event=33 world.run_for start_ns=7 duration_ns=1 end_ns=8
+event=34 disk.stat op=7 path=state status=ok size=0 latency_ns=1 inode=2
+event=35 scheduler.wake_empty key=4611686018427387943 max=18446744073709551615
+event=36 process.restart node=0 automatic=false
+event=37 world.run_for start_ns=8 duration_ns=1 end_ns=9
+event=38 disk.stat_dir op=8 path=state status=not_found latency_ns=1
+event=39 scheduler.wake_empty key=4611686018427387951 max=18446744073709551615
+event=40 process.restart node=1 automatic=false
+event=41 process.dynamics node=1 crash_rate=1/2 restart_rate=1/1 crash_stability_min_ns=0 restart_stability_min_ns=0
+event=42 fault_evolution.boundary now_ns=9
+event=43 world.seed_cutover at_ns=3 microstep=0 applied_ns=9 applied_microstep=0 seed=71
+event=44 world.random_int_less_than type=u64 less_than=9007199254740992 value=5371621318264484
+event=45 world.run_for start_ns=9 duration_ns=1 end_ns=10
+event=46 fault_evolution.boundary now_ns=10
+event=47 process.kill node=1 reason=auto_crash
+event=48 world.run_for start_ns=10 duration_ns=1 end_ns=11
+event=49 fault_evolution.boundary now_ns=11
+event=50 world.run_for start_ns=11 duration_ns=1 end_ns=12
+event=51 disk.stat_dir op=9 path=state status=not_found latency_ns=1
+event=52 scheduler.wake_empty key=4611686018427387959 max=18446744073709551615
+event=53 process.restart node=1 automatic=true
+event=54 world.random_int_less_than type=u64 less_than=9007199254740992 value=2355155562316406
+event=55 world.run_for start_ns=12 duration_ns=2 end_ns=14
+event=56 fault_evolution.boundary now_ns=14
+event=57 process.kill node=1 reason=auto_crash
+event=58 world.run_for start_ns=14 duration_ns=1 end_ns=15
+event=59 fault_evolution.boundary now_ns=15
+event=60 world.run_for start_ns=15 duration_ns=1 end_ns=16
+event=61 disk.stat_dir op=10 path=state status=not_found latency_ns=1
+event=62 scheduler.wake_empty key=4611686018427387967 max=18446744073709551615
+event=63 process.restart node=1 automatic=true
+event=64 world.random_int_less_than type=u64 less_than=9007199254740992 value=2648204441076845
+event=65 world.run_for start_ns=16 duration_ns=1 end_ns=17
+event=66 fault_evolution.boundary now_ns=17
+event=67 liveness.transition core_count=2
+event=68 process.dynamics node=0 crash_rate=0/1 restart_rate=0/1 crash_stability_min_ns=0 restart_stability_min_ns=0
+event=69 process.dynamics node=1 crash_rate=0/1 restart_rate=0/1 crash_stability_min_ns=0 restart_stability_min_ns=0
+event=70 network.lossiness drop_rate=0/1
+event=71 network.clog_faults path_clog_rate=0/1 path_clog_duration_ns=0
+event=72 network.partition_dynamics partition_rate=0/1 unpartition_rate=0/1 partition_stability_min_ns=0 unpartition_stability_min_ns=0
+event=73 network.liveness_restore core_count=2 restored_links=0 cleared_clogs=0 revived_nodes=0
+event=74 process.kill node=0 reason=manual
+event=75 process.kill node=1 reason=manual

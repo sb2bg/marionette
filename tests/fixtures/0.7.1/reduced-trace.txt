@@ -1,0 +1,14 @@
+marionette.trace format=text version=4
+event=0 world.init seed=1234 start_ns=0 tick_ns=1
+event=1 disk.model contract=portable_v1 version=1 sector_size=4096 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=commit_pending
+event=2 run.action id=telemetry enabled=false
+event=3 run.action id=request enabled=true
+event=4 operation.begin name=apply.request
+event=5 service.applied count=1 cause=4
+event=6 operation.end cause=4
+event=7 run.action id=duplicate enabled=true
+event=8 operation.begin name=apply.request
+event=9 service.applied count=2 cause=8
+event=10 operation.end cause=8
+event=11 run.checkpoint id=after.retry
+event=12 run.check id=service.at_most_once phase=checkpoint

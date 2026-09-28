@@ -58,11 +58,6 @@ test "replay capsule: owned byte decisions survive JSON roundtrip and execute ag
             try std.testing.expectEqual(mar.RunFailureKind.scenario_error, replay.failed.kind);
             try std.testing.expectEqualStrings("PlantedFailure", replay.failed.error_name.?);
         }
-        try std.testing.expectError(error.IncompatibleReplay, mar.replaySimCase(.{
-            .allocator = std.testing.allocator,
-            .init = App.init,
-            .scenario = scenario,
-        }, &capsule, .{ .build = "changed-build", .sut = identity.sut }));
         try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeWithAllocator, .{bytes});
     }
 }
@@ -348,4 +343,22 @@ test "properties: initialization and scenario errors skip later checks" {
         try std.testing.expectEqualStrings(if (index == 0) "InitFailed" else "ScenarioFailed", report.failed.error_name.?);
         try std.testing.expect(std.mem.indexOf(u8, report.failed.first_trace, "phase=after_scenario") == null);
     }
+}
+
+test "replay capsule: every pinned identity dimension is enforced" {
+    var report = try mar.runSimCase(.{ .allocator = std.testing.allocator, .simulate = mar.World.SimulateOptions{}, .init = App.init, .scenario = App.scenario });
+    defer report.deinit();
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    const config = .{ .allocator = std.testing.allocator, .init = App.init, .scenario = App.scenario };
+    inline for (.{ "build", "sut", "zig", "target", "optimize" }) |field| {
+        var changed = identity;
+        @field(changed, field) = "different";
+        try std.testing.expectError(error.IncompatibleReplay, mar.replaySimCase(config, &capsule, changed));
+    }
+    var changed = identity;
+    changed.disk_version += 1;
+    try std.testing.expectError(error.IncompatibleReplay, mar.replaySimCase(config, &capsule, changed));
 }

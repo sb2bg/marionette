@@ -14,3 +14,7 @@ test {
 test {
     _ = @import("reduction_explanation.zig");
 }
+
+test {
+    _ = @import("compatibility_072.zig");
+}
