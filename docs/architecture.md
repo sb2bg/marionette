@@ -74,6 +74,13 @@ tasks, closes its resources, and invokes its registered lifecycle callback.
 Restart reruns the initializer against surviving durable state. Harness-owned
 application memory must be explicitly reset in the lifecycle callback.
 
+`process.zig` owns supervision, automatic transition schedules, and managed
+volatile state. `World` constructs it and exposes it through the `Sim` lifecycle
+entry points. Managed state reserves a world teardown slot before initialization;
+on success, its destructor runs before dependencies registered by the initializer.
+Tasks stop before app state is freed. Runner cleanup finishes managed processes
+before trace capture and resource checks.
+
 ## Decisions And Tracing
 
 Decision entries identify a semantic site, logical time, microstep, preceding
