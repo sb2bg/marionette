@@ -86,6 +86,19 @@ pub fn build(b: *std.Build) void {
     run_examples_mod.addImport("marionette", mod);
     run_examples_mod.addImport("examples", examples_mod);
 
+    const baseline_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/baseline.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    baseline_mod.addImport("marionette", mod);
+    baseline_mod.addImport("examples", examples_mod);
+    const baseline = b.addRunArtifact(b.addExecutable(.{
+        .name = "marionette-baseline",
+        .root_module = baseline_mod,
+    }));
+    b.step("baseline", "Measure fixed run/reduction workloads and retained trace/tape bytes").dependOn(&baseline.step);
+
     const run_examples_exe = b.addExecutable(.{
         .name = "marionette-run",
         .root_module = run_examples_mod,

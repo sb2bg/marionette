@@ -1,0 +1,347 @@
+{
+  "date": "2026-09-22",
+  "cpu": "Apple M1 Pro",
+  "os": "macOS 26.5.1",
+  "before_revision": "8fb0fa3 (v0.7.1) with baseline harness added",
+  "after_revision": "0.7.2-dev bounded cleanup based on 8fb0fa3",
+  "after_source_sha256": {
+    "benchmarks/baseline.zig": "e160c8f6fec9b0662490be1974fe617619a1dbb9bb44964750b96358e8e52660",
+    "src/process.zig": "c7ff83509a2eb7567f6664f38be7dd256d5fd94f5a678a2ce678dbed31a6bba6",
+    "src/world.zig": "149cb2a17eb25665b5dbd868b3fc4c7c49b329ce8791b321f603a4992dda9ff0",
+    "src/run.zig": "6461731dfd5321f7228295068c7fb4607a308e992c3fc738e007c298f5a36a81"
+  },
+  "before": [
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 220220250,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 261367583,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 203810334,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 258608292,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 205535083,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 255098458,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 200764542,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 254869666,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 201206708,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 254790875,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    }
+  ],
+  "after": [
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 204984333,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 257882542,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 205138458,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 262793833,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 209701833,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 260686000,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 223418458,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 265520750,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    },
+    {
+      "zig": "0.16.0",
+      "target": "aarch64-macos",
+      "optimize": "ReleaseFast",
+      "samples": 10000,
+      "first_seed": 12648430,
+      "kv": {
+        "elapsed_ns": 203303833,
+        "totals": {
+          "trace_bytes": 38549196,
+          "tape_bytes": 2163816,
+          "decisions": 17592,
+          "events": 513616
+        }
+      },
+      "reduction": {
+        "elapsed_ns": 262079166,
+        "max_attempts": 256,
+        "attempts": 50000,
+        "original": {
+          "trace_bytes": 7250000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 140000
+        },
+        "minimized": {
+          "trace_bytes": 6990000,
+          "tape_bytes": 3340000,
+          "decisions": 30000,
+          "events": 130000
+        }
+      }
+    }
+  ]
+}
