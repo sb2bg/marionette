@@ -130,7 +130,7 @@ pub fn SimCase(comptime App: type) type {
 /// `name`, `tags`, `attributes`, `checks`, `watchdog`, `check_resources`,
 /// and host-owned `artifacts`.
 pub fn runSimCase(config: anytype) RunError!RunReport {
-    var report = try runSimCaseWithSeed(config, null);
+    var report = try runConfiguredCase(config, null, .record);
     errdefer report.deinit();
     if (@hasField(@TypeOf(config), "artifacts")) try @import("artifact.zig").write(config.allocator, &report, config.artifacts);
     return report;
@@ -197,7 +197,7 @@ pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
 
     for (0..config.seeds) |iteration| {
         const seed = fuzzSeed(configSeed(config), iteration);
-        var report = try runSimCaseWithSeed(config, seed);
+        var report = try runConfiguredCase(config, seed, .record);
         defer report.deinit();
 
         switch (report) {
@@ -224,7 +224,7 @@ pub fn expectTraceContains(trace: []const u8, needle: []const u8) error{TraceNee
 }
 
 // Shared compile-time callbacks and property validation for ordinary runs,
-// exact capsule replay, and reduction. This is private runner preparation.
+// exact capsule replay, and reduction.
 fn PreparedHarness(
     comptime init_app: anytype,
     comptime scenario_fn: anytype,
@@ -243,10 +243,6 @@ fn PreparedHarness(
             try validateStateChecks(Case, checks);
         }
     };
-}
-
-fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
-    return runConfiguredCase(config, seed_override, .record);
 }
 
 fn runConfiguredCase(config: anytype, seed_override: ?u64, mode: decision_module.Mode) RunError!RunReport {

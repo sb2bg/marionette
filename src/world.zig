@@ -365,7 +365,7 @@ pub const World = struct {
         /// Own process state and routine kill/reopen callbacks. The initializer
         /// receives the revived node's Env and reopens surviving durable state.
         pub fn manageProcess(self: Simulation, comptime App: type, node: network_module.NodeId, comptime initialize: fn (env_module.Env) anyerror!App) !*ManagedProcess(App) {
-            return self.processSupervisor().manageProcess(App, node, initialize, self.env);
+            return self.processSupervisor().manageProcess(App, node, initialize);
         }
 
         /// Finish managed processes before the runner captures traces or checks

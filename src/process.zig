@@ -138,7 +138,7 @@ pub const ProcessSupervisor = struct {
     }
 
     /// Own volatile app state and publish its lifecycle only after initialization.
-    pub fn manageProcess(self: *ProcessSupervisor, comptime App: type, node: network_module.NodeId, comptime initialize: fn (env_module.Env) anyerror!App, base_env: env_module.Env) !*ManagedProcess(App) {
+    pub fn manageProcess(self: *ProcessSupervisor, comptime App: type, node: network_module.NodeId, comptime initialize: fn (env_module.Env) anyerror!App) !*ManagedProcess(App) {
         const index = try self.nodeIndex(node);
         if (self.lifecycles[index] != null) return error.ProcessAlreadyRegistered;
         const world = self.world;
@@ -150,7 +150,7 @@ pub const ProcessSupervisor = struct {
         const teardown_index = world.teardowns.items.len;
         try world.registerTeardown(managed, ManagedProcess(App).destroy);
         errdefer _ = world.teardowns.orderedRemove(teardown_index);
-        managed.app = try initialize(try self.environmentForNode(base_env, node));
+        managed.app = try initialize(try self.environmentForNode(node));
         // Initializers may register dependencies: destroy App before them.
         const teardown = world.teardowns.orderedRemove(teardown_index);
         world.teardowns.appendAssumeCapacity(teardown);
@@ -159,8 +159,8 @@ pub const ProcessSupervisor = struct {
         return managed;
     }
 
-    fn environmentForNode(self: *ProcessSupervisor, base_env: env_module.Env, node: network_module.NodeId) !env_module.Env {
-        var env = base_env;
+    fn environmentForNode(self: *ProcessSupervisor, node: network_module.NodeId) !env_module.Env {
+        var env = self.base_env;
         env.io_backend = try self.io_runtime.io(node);
         return env;
     }
@@ -260,9 +260,7 @@ pub const ProcessSupervisor = struct {
             if (lifecycle.on_kill) |on_kill| on_kill(lifecycle.ptr);
         }
 
-        var env = self.base_env;
-        env.io_backend = try self.io_runtime.io(node);
-        try lifecycle.restart(lifecycle.ptr, env);
+        try lifecycle.restart(lifecycle.ptr, try self.environmentForNode(node));
         try self.world.recordFields("process.restart", &.{
             traceField("node", .{ .uint = node }),
             traceField("automatic", .{ .boolean = automatic }),

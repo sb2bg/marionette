@@ -68,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
         .samples = samples,
         .first_seed = first_seed,
         .kv = .{ .elapsed_ns = run_ns, .totals = runs },
-        .reduction = .{ .elapsed_ns = reduction_ns, .max_attempts = 256, .attempts = attempts, .original = originals, .minimized = minimized },
+        .reduction = .{ .elapsed_ns = reduction_ns, .max_attempts = (mar.ReductionOptions{}).max_attempts, .attempts = attempts, .original = originals, .minimized = minimized },
     }, .{});
     defer init.gpa.free(bytes);
     try std.Io.File.stdout().writeStreamingAll(init.io, bytes);
