@@ -1,6 +1,9 @@
 //! Marionette: deterministic I/O and simulation testing for Zig.
 //!
-//! Public API entry point.
+//! Public API entry point. Application code uses std.Io and narrow recording
+//! capabilities; runner and fault controls belong to the harness. Typed
+//! endpoints and concrete model types are experimental/model-facing surfaces.
+//! See docs/api.md for API roles and compatibility policy.
 
 const std = @import("std");
 

@@ -10,8 +10,27 @@ Import the package as:
 const mar = @import("marionette");
 ```
 
-Marionette is pre-1.0. The root exports are the supported surface, but they may
-still change between minor releases.
+Marionette is pre-1.0. Import through `marionette`; the roles below distinguish
+application integration, harness controls, and model implementation surfaces.
+An exported type is not necessarily an application capability.
+
+## API Roles And Compatibility
+
+| Role | Entry points | Intended use |
+| --- | --- | --- |
+| Application | Host or simulated `std.Io`, `Recorder`, `Operation`, `TraceField`, `TraceValue`, `Env`, `Production` | Pass narrow capabilities to application code; use `Env` and `Production` at the composition root. `Disk` / `RealDisk` remain available for explicit disk-capability integrations. |
+| Harness | `SimCase`, `Sim`, `World.init` / `simulate`, `runSimCase`, `expectSim*`, `StateCheck`, `Control`, process lifecycle helpers, fault/profile options | Construct and drive simulations, inject faults, check properties, and own cleanup. These powers belong in tests. |
+| Evidence | `RunReport`, `DecisionTape`, `ReplayCapsule`, `ReplayIdentity`, `reduceSimCase`, artifact writers, trace summaries | Retain failures, exact-replay complete executions, and reduce them within a budget. Call each owned result's `deinit`. |
+| Experimental and model | `Endpoint(Message)`, `SimDisk`, `SimClock`, direct model operations and `World` engine fields | Explore protocol models or test simulator contracts. Typed endpoints do not promise production transport parity; prefer `std.Io` for application behavior. |
+| Implementation | Source-module `internal` namespaces, supervisor wiring, I/O backend, scheduler and fiber internals | Used by simulator components and white-box tests; not a downstream integration contract. |
+
+Breaking export changes are planned and documented with migration guidance.
+Pre-1.0 APIs may still change, so pin the package revision.
+
+API compatibility is separate from replay compatibility. A capsule still needs
+matching build, SUT/input, Zig, target, optimization, and disk-model identities.
+Unchanged trace and capsule formats do not authorize cross-build replay. Keep the
+matching harness with retained artifacts; see [Decision Tapes](decision-tapes.md).
 
 ## Simulation Runner
 
