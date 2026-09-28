@@ -39,9 +39,8 @@ jobs:
         with:
           version: 0.16.0
 
-      # `zig-pkg/` holds vendored dependencies and is deliberately excluded.
       - name: Check formatting
-        run: zig fmt --check build.zig src tests validation examples
+        run: tools/verify.sh fmt
 
   test:
     name: Zig test (${{ matrix.optimize }})

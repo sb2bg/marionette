@@ -44,5 +44,6 @@ nav:
       - std.Io.net Client/Server Example: std-io-net-example.md
       - Disk Fault Model: disk-fault-model.md
       - Roadmap: roadmap.md
+      - Local Verification: development.md
       - Performance Baseline: performance.md
       - Releasing: releasing.md
