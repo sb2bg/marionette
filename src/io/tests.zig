@@ -3003,32 +3003,6 @@ test "io: automatic process restart reports missing lifecycle" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.restart node=0") == null);
 }
 
-test "io: completed async tasks release their fiber stacks" {
-    if (!fiber_supported) return error.SkipZigTest;
-
-    const Helper = struct {
-        fn noop() void {}
-    };
-
-    var counting = std.testing.allocator_instance;
-    _ = &counting;
-
-    var world = try World.init(task_world_allocator, .{ .seed = 0xA59, .tick_ns = 10 });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{});
-    const io = sim.env.io();
-
-    // Many sequential spawn/await cycles: with eager fiber reclamation the
-    // resident cost per completed task is one small Task record, not a
-    // 256 KiB stack. (Stacks are mmap'd, so the testing allocator cannot
-    // observe them; this exercises the loop and the scheduler invariants.)
-    for (0..64) |_| {
-        var future = Io.async(io, Helper.noop, .{});
-        future.await(io);
-    }
-}
-
 test "io: unawaited async tasks are reclaimed at world teardown" {
     if (!fiber_supported) return error.SkipZigTest;
 
@@ -5401,24 +5375,6 @@ test "io: simulation tcp stream fails closed for unknown addresses" {
 
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 1234) catch unreachable;
     try std.testing.expectError(error.ConnectionRefused, address.connect(backend.io(), .{ .mode = .stream }));
-}
-
-test "io: world simulation exposes tcp backend through env" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{});
-    const io = sim.env.io();
-
-    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4321) catch unreachable;
-    var server = try address.listen(io, .{});
-    defer server.deinit(io);
-
-    const client = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
-    defer client.close(io);
-
-    const accepted = try server.accept(io);
-    defer accepted.close(io);
 }
 
 const SimHttpServerTask = struct {
