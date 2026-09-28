@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.7.2 - Unreleased
+
+- Isolates process supervision and managed app ownership from `World` while
+  preserving public lifecycle entry points, callback order, and teardown order.
+- Runs, replay, and reduction now share one private path for preparing callbacks
+  and property checks. Runs and reduction also share configuration setup.
+- Documents application, harness, evidence, and experimental/model API roles.
+- Adds `tools/verify.sh` for repeatable local checks that skip ignored
+  dependencies and generated Zig files.
+- Adds a repeatable `zig build baseline -Doptimize=ReleaseFast` workload for run
+  throughput, retained trace/tape sizes, and bounded reduction cost.
+- Locks representative lifecycle and reduction trace, decision, capsule, and
+  artifact bytes to fixtures captured from v0.7.1; formats remain unchanged.
+
 ## v0.7.1 - 2026-09-22
 
 - Adds explicit property checkpoints, `checkpoint`/`always` phases, and a fatal

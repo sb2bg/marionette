@@ -10,23 +10,22 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.7.2 — Bounded Cleanup
+## Next: 0.7.2 — Release Gate
 
-- Isolate process supervision and managed-state ownership from `World`, retaining
-  the current public entry points and lifecycle semantics.
-- Share runner configuration/check preparation across normal runs, replay, and
-  reduction without adding another public runner abstraction.
-- Clarify application, harness, and experimental/model APIs in the documentation;
-  defer breaking export changes to an explicitly planned compatibility change.
-- Make local verification work after dependencies and generated files exist.
-- Record a small repeatable baseline for run throughput, trace/tape memory, and
-  reduction cost before attempting performance rewrites.
+The bounded cleanup implementation is recorded in `CHANGELOG.md`. Before tagging:
 
-Exit when these concrete changes are complete, the full validation matrix is
-green, and representative trace/decision fixtures and artifact formats are
-unchanged. Continue enforcing pinned-build identity checks. Avoid model expansion
-and unrelated module churn in this release. Findings that require semantic changes
-must be identified separately rather than hidden in a refactor.
+- Require green release-blocking CI on the candidate commit, including Linux
+  x86_64, macOS, all three optimization modes where configured, the seven pinned
+  external validations, and Pages. Local aarch64 macOS/Linux checks supplement
+  these jobs rather than replacing them.
+- Keep the v0.7.1 trace, decision, capsule, and manifest fixtures unchanged and
+  continue enforcing every pinned-build identity dimension.
+- Complete the candidate, tag, and clean package-install steps in
+  `docs/releasing.md`; install examples stay on the published 0.7.1 tag until
+  release preparation.
+
+Avoid model expansion and unrelated module churn. Findings that require semantic
+changes must be identified separately rather than hidden in this cleanup.
 
 ## 0.8 — Dependable Campaigns
 
