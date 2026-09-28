@@ -81,6 +81,10 @@ on success, its destructor runs before dependencies registered by the initialize
 Tasks stop before app state is freed. Runner cleanup finishes managed processes
 before trace capture and resource checks.
 
+Normal runs, replay, and reduction share private callback and property preparation
+in `run.zig`. Normal runs and reduction also share owned configuration preparation;
+replay takes runtime configuration exclusively from its identity-checked capsule.
+
 ## Decisions And Tracing
 
 Decision entries identify a semantic site, logical time, microstep, preceding

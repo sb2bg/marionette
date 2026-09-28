@@ -321,6 +321,14 @@ test "properties: invalid IDs are rejected before initialization or watchdog val
             .checks = checks,
             .watchdog = mar.WatchdogOptions{ .trace_capacity = 0 },
         }));
+        try std.testing.expectError(error.InvalidStateChecks, mar.reduceSimCase(.{
+            .allocator = std.testing.allocator,
+            .simulate = mar.World.SimulateOptions{},
+            .init = PropertyApp.brokenInit,
+            .scenario = PropertyApp.scenario,
+            .checks = checks,
+            .watchdog = mar.WatchdogOptions{ .trace_capacity = 0 },
+        }, .{ .max_attempts = 0 }));
     }
 }
 

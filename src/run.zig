@@ -141,16 +141,12 @@ pub fn runSimCase(config: anytype) RunError!RunReport {
 /// Runtime options and simulation configuration come exclusively from the capsule.
 pub fn replaySimCase(config: anytype, capsule: *const @import("replay.zig").Capsule, identity: @import("replay.zig").Identity) !RunReport {
     try capsule.validateIdentity(identity);
-    const App = appTypeFromSimInit(config.init);
-    const Case = SimCase(App);
-    validateSimScenario(Case, config.scenario);
-    const no_checks = [_]StateCheck(Case){};
-    const checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_checks;
-    try validateStateChecks(Case, checks);
+    const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
+    try Harness.validate();
     var expected = try capsule.executionResult(config.allocator);
     errdefer expected.deinit();
     const options = capsule.options();
-    const actual = try runOnceDispatched(config.allocator, options, capsule.simulateOptions(), App, fallibleSimInit(App, config.init), fallibleSimScenario(Case, config.scenario), checks, .{ .replay = expected.decision_tape.entries });
+    const actual = try runOnceDispatched(config.allocator, options, capsule.simulateOptions(), Harness.App, Harness.initialize, Harness.scenario, Harness.checks, .{ .replay = expected.decision_tape.entries });
     const result = compareRunOnceResults(config.allocator, options, capsule.simulateOptions(), expected, actual);
     expected = .{ .allocator = config.allocator, .trace = &.{}, .event_count = 0 };
     return result;
@@ -227,30 +223,49 @@ pub fn expectTraceContains(trace: []const u8, needle: []const u8) error{TraceNee
     return error.TraceNeedleMissing;
 }
 
+// Shared compile-time callbacks and property validation for ordinary runs,
+// exact capsule replay, and reduction. This is private runner preparation.
+fn PreparedHarness(
+    comptime init_app: anytype,
+    comptime scenario_fn: anytype,
+    comptime state_checks: []const StateCheck(SimCase(appTypeFromSimInit(init_app))),
+) type {
+    const AppType = appTypeFromSimInit(init_app);
+    const Case = SimCase(AppType);
+    validateSimScenario(Case, scenario_fn);
+    return struct {
+        const App = AppType;
+        const initialize = fallibleSimInit(App, init_app);
+        const scenario = fallibleSimScenario(Case, scenario_fn);
+        const checks = state_checks;
+
+        fn validate() error{InvalidStateChecks}!void {
+            try validateStateChecks(Case, checks);
+        }
+    };
+}
+
 fn runSimCaseWithSeed(config: anytype, seed_override: ?u64) RunError!RunReport {
+    return runConfiguredCase(config, seed_override, .record);
+}
+
+fn runConfiguredCase(config: anytype, seed_override: ?u64, mode: decision_module.Mode) RunError!RunReport {
     if (!@hasField(@TypeOf(config), "simulate")) {
         @compileError("runSimCase config requires a `simulate` field");
     }
-
-    const App = appTypeFromSimInit(config.init);
-    const Case = SimCase(App);
-    validateSimScenario(Case, config.scenario);
-
-    const no_case_checks = [_]StateCheck(Case){};
-    const case_checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &no_case_checks;
-
-    try validateStateChecks(Case, case_checks);
+    const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
+    try Harness.validate();
     var options = try runOptionsFromConfig(config, seed_override);
     defer deinitRunOptions(config.allocator, &options);
     return runTwiceWithSimCase(
         config.allocator,
         options,
         config.simulate,
-        App,
-        fallibleSimInit(App, config.init),
-        fallibleSimScenario(Case, config.scenario),
-        case_checks,
-        .record,
+        Harness.App,
+        Harness.initialize,
+        Harness.scenario,
+        Harness.checks,
+        mode,
     );
 }
 
@@ -265,13 +280,7 @@ fn validateStateChecks(comptime State: type, checks: []const StateCheck(State)) 
 
 /// Internal candidate execution: generate a fresh tape, then verify exact replay.
 pub fn runReductionCandidate(config: anytype, source: []const decision_module.Decision, omitted_sites: []const []const u8) RunError!RunReport {
-    const App = appTypeFromSimInit(config.init);
-    const Case = SimCase(App);
-    const checks = if (@hasField(@TypeOf(config), "checks")) config.checks else &[_]StateCheck(Case){};
-    try validateStateChecks(Case, checks);
-    var options = try runOptionsFromConfig(config, null);
-    defer deinitRunOptions(config.allocator, &options);
-    return runTwiceWithSimCase(config.allocator, options, config.simulate, App, fallibleSimInit(App, config.init), fallibleSimScenario(Case, config.scenario), checks, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
+    return runConfiguredCase(config, null, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
 }
 
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.Error!RunOptions {
