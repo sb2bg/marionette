@@ -196,7 +196,7 @@ pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
     if (config.seeds == 0) return error.InvalidSeedCount;
 
     for (0..config.seeds) |iteration| {
-        const seed = fuzzSeed(configSeed(config), iteration);
+        const seed = caseSeed(config, iteration);
         var report = try runConfiguredCase(config, seed, .record);
         defer report.deinit();
 
@@ -274,6 +274,16 @@ fn validateStateChecks(comptime State: type, checks: []const StateCheck(State)) 
     }
 }
 
+/// Internal campaign execution: record one case with an explicit seed.
+pub fn runSeededCase(config: anytype, seed: u64) RunError!RunReport {
+    return runConfiguredCase(config, seed, .record);
+}
+
+/// Seed for fuzz iteration or campaign case `index`, keyed by the config seed.
+pub fn caseSeed(config: anytype, index: u64) u64 {
+    return fuzzSeed(configSeed(config), index);
+}
+
 /// Internal candidate execution: generate a fresh tape, then verify exact replay.
 pub fn runReductionCandidate(config: anytype, source: []const decision_module.Decision, omitted_sites: []const []const u8) RunError!RunReport {
     return runConfiguredCase(config, null, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
@@ -319,7 +329,7 @@ fn coerceCutover(value: anytype) seed_module.SeedCutover {
     } };
 }
 
-fn configSeed(config: anytype) u64 {
+pub fn configSeed(config: anytype) u64 {
     return fieldOrDefault(config, "seed", @as(u64, 0));
 }
 
@@ -334,8 +344,8 @@ fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) 
 /// bits cover identical seed sets, and `splitmix64(base + iteration)` makes
 /// adjacent bases overlap by all but one seed. Hashing the iteration before
 /// mixing makes cross-base collisions birthday-bound instead of structural.
-fn fuzzSeed(base_seed: u64, iteration: usize) u64 {
-    return splitmix64(base_seed ^ splitmix64(@intCast(iteration)));
+fn fuzzSeed(base_seed: u64, iteration: u64) u64 {
+    return splitmix64(base_seed ^ splitmix64(iteration));
 }
 
 fn splitmix64(input: u64) u64 {

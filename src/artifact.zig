@@ -15,10 +15,7 @@ pub const Options = struct {
 
 pub fn write(allocator: std.mem.Allocator, report: *const types.RunReport, options: Options) Error!void {
     if (report.* == .passed and !options.include_passes) return;
-    if (options.name.len == 0 or std.mem.eql(u8, options.name, ".") or std.mem.eql(u8, options.name, "..")) return error.InvalidArtifactPath;
-    for (options.name) |byte| {
-        if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '-' and byte != '_') return error.InvalidArtifactPath;
-    }
+    try validateName(options.name);
     if (options.identity.build.len == 0 or options.identity.sut.len == 0) return error.InvalidReplayIdentity;
     const capsule: ?[]u8 = replay.Capsule.encode(allocator, report, options.identity) catch |err| switch (err) {
         error.IncompleteDecisionTape, error.UnreproducibleRun => null,
@@ -59,6 +56,14 @@ pub fn write(allocator: std.mem.Allocator, report: *const types.RunReport, optio
     // complete manifest and never overwrites a previous run's artifacts.
     try writeFile(dir, options.io, "manifest.json", metadata);
 }
+/// Accept one relative ASCII component of letters, digits, `.`, `-`, and `_`.
+pub fn validateName(name: []const u8) error{InvalidArtifactPath}!void {
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidArtifactPath;
+    for (name) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '-' and byte != '_') return error.InvalidArtifactPath;
+    }
+}
+
 fn writeFile(dir: std.Io.Dir, io: std.Io, path: []const u8, bytes: []const u8) Error!void {
     dir.writeFile(io, .{ .sub_path = path, .data = bytes, .flags = .{ .exclusive = true } }) catch return error.ArtifactIoFailed;
 }

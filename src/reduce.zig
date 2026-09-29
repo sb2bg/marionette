@@ -56,7 +56,9 @@ pub const Result = struct {
     }
 };
 
-fn reproducible(report: types.RunReport) bool {
+/// A complete failure that reproduced exactly, so it has an executable capsule
+/// and is eligible for reduction.
+pub fn reproducible(report: types.RunReport) bool {
     return report == .failed and report.failed.tape_complete and
         report.failed.second_trace.len == 0 and report.failed.replay_divergence == null and
         report.failed.kind != .determinism_mismatch and report.failed.kind != .replay_diverged;
