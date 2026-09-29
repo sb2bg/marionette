@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.2 - Unreleased
+## v0.7.2 - 2026-09-29
 
 - Isolates process supervision and managed app ownership from `World` while
   preserving public lifecycle entry points, callback order, and teardown order.
