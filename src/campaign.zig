@@ -13,6 +13,9 @@ const types = @import("run_types.zig");
 
 pub const Error = std.mem.Allocator.Error || artifact.Error || error{
     InvalidCampaignOptions,
+    InvalidCampaignJournal,
+    IncompatibleCampaign,
+    CampaignFinished,
     InvalidSeedSchedule,
     InvalidStateChecks,
     InvalidWatchdogOptions,
@@ -25,20 +28,29 @@ pub const Options = struct {
     /// Cases to run. Case `i` uses the same seed as `expectSimFuzz`
     /// iteration `i` for the config's `seed`. Must be positive.
     cases: u64,
-    /// Host monotonic budget, checked after each case, so at least one case
-    /// runs. With a watchdog, one case adds at most two `run_timeout_ns`.
+    /// Host monotonic budget for the whole campaign, including earlier
+    /// invocations of a resumed campaign. Like `max_failures`, it is checked
+    /// before every case but the first. With a watchdog, one case adds at most
+    /// two `run_timeout_ns`.
     time_budget_ns: ?u64 = null,
-    /// Stop after this many failing cases.
+    /// Stop once the campaign has seen this many failing cases.
     max_failures: ?u64 = null,
-    /// Directory for per-failure artifacts and the campaign summary.
+    /// Directory for per-failure artifacts and the `campaign.json` journal.
     artifacts: ?Artifacts = null,
 };
 
 pub const Artifacts = struct {
     parent: std.Io.Dir,
-    /// New campaign directory: one relative component, never overwritten.
+    /// One relative directory component.
     name: []const u8,
     identity: replay.Identity,
+    /// Continue an interrupted or stopped campaign in an existing directory
+    /// instead of creating a new one.
+    resume_existing: bool = false,
+    /// Longest host time between journal checkpoints. New distinct failures
+    /// and stops always checkpoint; cases after the last checkpoint rerun on
+    /// resume.
+    checkpoint_interval_ns: u64 = std.time.ns_per_s,
 };
 
 pub const StopReason = enum { completed, time_budget, failure_limit };
@@ -65,10 +77,13 @@ pub const CaseError = struct {
     error_name: []const u8,
 };
 
+/// Owned campaign totals. Counts include earlier invocations of a resumed
+/// campaign; `start_case` is the first case this invocation ran.
 pub const Summary = struct {
     allocator: std.mem.Allocator,
     base_seed: u64,
     planned_cases: u64,
+    start_case: u64 = 0,
     executed_cases: u64 = 0,
     passed_cases: u64 = 0,
     failed_cases: u64 = 0,
@@ -80,9 +95,31 @@ pub const Summary = struct {
     pub fn deinit(self: *Summary) void {
         for (self.failures) |failure| deinitFailure(self.allocator, failure);
         self.allocator.free(self.failures);
+        for (self.errors) |case_error| self.allocator.free(case_error.error_name);
         self.allocator.free(self.errors);
         self.* = undefined;
     }
+};
+
+const journal_name = "campaign.json";
+const journal_format = "marionette.campaign";
+
+/// Serialized campaign state. `stop_reason` is null while the campaign runs or
+/// after it was killed; the executed count is the next case to run.
+const Journal = struct {
+    format: []const u8 = journal_format,
+    version: u32 = 1,
+    identity: replay.Identity,
+    name: ?[]const u8,
+    base_seed: u64,
+    planned_cases: u64,
+    executed_cases: u64,
+    passed_cases: u64,
+    failed_cases: u64,
+    stop_reason: ?StopReason,
+    elapsed_ns: u64,
+    failures: []const DistinctFailure,
+    errors: []const CaseError,
 };
 
 /// Run a bounded campaign. `config` is an ordinary `runSimCase` config; its
@@ -98,115 +135,215 @@ pub fn runCampaign(config: anytype, options: Options) Error!Summary {
     if (@hasField(@TypeOf(config), "watchdog")) {
         if (@as(?types.WatchdogOptions, config.watchdog) != null and !@import("watchdog.zig").supported) return error.WatchdogUnavailable;
     }
-    const allocator = config.allocator;
 
-    var directory: ?std.Io.Dir = null;
-    defer if (directory) |dir| dir.close(options.io);
-    if (options.artifacts) |target| directory = try createCampaignDir(options.io, target);
-
-    var failures: std.ArrayList(DistinctFailure) = .empty;
-    defer {
-        for (failures.items) |failure| deinitFailure(allocator, failure);
-        failures.deinit(allocator);
-    }
-    var errors: std.ArrayList(CaseError) = .empty;
-    defer errors.deinit(allocator);
-
-    var summary: Summary = .{
-        .allocator = allocator,
-        .base_seed = run.configSeed(config),
-        .planned_cases = options.cases,
+    var campaign: Campaign = .{
+        .allocator = config.allocator,
+        .io = options.io,
+        .name = if (@hasField(@TypeOf(config), "name")) @as(?[]const u8, config.name) else null,
+        .summary = .{ .allocator = config.allocator, .base_seed = run.configSeed(config), .planned_cases = options.cases },
     };
+    defer campaign.deinit();
+    if (options.artifacts) |target| try campaign.open(target);
+
+    const prior_elapsed = campaign.summary.elapsed_ns;
     const started = now(options.io);
-    for (0..options.cases) |case| {
-        try runCase(config, options, case, directory, &summary, &failures, &errors);
-        if (case + 1 == options.cases) break;
-        if (options.max_failures) |limit| if (summary.failed_cases >= limit) {
-            summary.stop_reason = .failure_limit;
-            break;
-        };
-        if (options.time_budget_ns) |budget| if (now(options.io) -| started >= budget) {
-            summary.stop_reason = .time_budget;
-            break;
-        };
-    }
-    summary.elapsed_ns = now(options.io) -| started;
-    summary.failures = try failures.toOwnedSlice(allocator);
-    errdefer {
-        for (summary.failures) |failure| deinitFailure(allocator, failure);
-        allocator.free(summary.failures);
-    }
-    summary.errors = try errors.toOwnedSlice(allocator);
-    errdefer allocator.free(summary.errors);
-    if (directory) |dir| try writeSummary(allocator, options.io, dir, options.artifacts.?.identity, config, &summary);
-    return summary;
+    var last_checkpoint = started;
+    var new_failure = false;
+    var case = campaign.summary.executed_cases;
+    campaign.summary.start_case = case;
+    const stop_reason: StopReason = while (case < options.cases) : (case += 1) {
+        // Limits apply before every case but the first, so a fresh campaign
+        // runs at least one case and a resumed one may run none.
+        if (case > 0) {
+            if (options.max_failures) |limit| if (campaign.summary.failed_cases >= limit) break .failure_limit;
+            if (options.time_budget_ns) |budget| if (campaign.summary.elapsed_ns >= budget) break .time_budget;
+            if (campaign.directory != null and (new_failure or
+                now(options.io) -| last_checkpoint >= options.artifacts.?.checkpoint_interval_ns))
+            {
+                try campaign.checkpoint(null);
+                last_checkpoint = now(options.io);
+            }
+        }
+        new_failure = try campaign.runCase(config, case);
+        campaign.summary.elapsed_ns = prior_elapsed + (now(options.io) -| started);
+    } else .completed;
+    campaign.summary.stop_reason = stop_reason;
+    if (campaign.directory) |_| try campaign.checkpoint(stop_reason);
+    return campaign.finish();
 }
 
-fn runCase(
-    config: anytype,
-    options: Options,
-    case: u64,
-    directory: ?std.Io.Dir,
-    summary: *Summary,
-    failures: *std.ArrayList(DistinctFailure),
-    errors: *std.ArrayList(CaseError),
-) Error!void {
-    const allocator = config.allocator;
-    const seed = run.caseSeed(config, case);
-    summary.executed_cases += 1;
-    var report = run.runSeededCase(config, seed) catch |err| switch (err) {
-        // Configuration errors would fail every case identically, and host
-        // memory exhaustion is not a property of one case.
-        error.InvalidSeedSchedule, error.InvalidStateChecks, error.InvalidWatchdogOptions, error.OutOfMemory => |fatal| return fatal,
-        else => return errors.append(allocator, .{ .case = case, .seed = seed, .error_name = @errorName(err) }),
-    };
-    defer report.deinit();
-    switch (report) {
-        .passed => summary.passed_cases += 1,
-        .failed => |failure| {
-            summary.failed_cases += 1;
-            try recordFailure(allocator, failures, &report, failure, case, seed, directory, options);
-        },
-    }
-}
-
-fn recordFailure(
+const Campaign = struct {
     allocator: std.mem.Allocator,
-    failures: *std.ArrayList(DistinctFailure),
-    report: *const types.RunReport,
-    failure: types.RunFailure,
-    case: u64,
-    seed: u64,
-    directory: ?std.Io.Dir,
-    options: Options,
-) Error!void {
-    const fingerprint = reduce.FailureFingerprint.from(failure);
-    for (failures.items) |*known| {
-        if (known.fingerprint.eql(fingerprint)) {
-            known.occurrences += 1;
-            return;
+    io: std.Io,
+    name: ?[]const u8,
+    summary: Summary,
+    failures: std.ArrayList(DistinctFailure) = .empty,
+    errors: std.ArrayList(CaseError) = .empty,
+    directory: ?std.Io.Dir = null,
+    identity: replay.Identity = undefined,
+
+    fn deinit(self: *Campaign) void {
+        for (self.failures.items) |failure| deinitFailure(self.allocator, failure);
+        self.failures.deinit(self.allocator);
+        for (self.errors.items) |case_error| self.allocator.free(case_error.error_name);
+        self.errors.deinit(self.allocator);
+        if (self.directory) |dir| dir.close(self.io);
+    }
+
+    /// Move retained state into the returned summary.
+    fn finish(self: *Campaign) std.mem.Allocator.Error!Summary {
+        var summary = self.summary;
+        summary.failures = try self.failures.toOwnedSlice(self.allocator);
+        errdefer self.failures = .fromOwnedSlice(summary.failures);
+        summary.errors = try self.errors.toOwnedSlice(self.allocator);
+        return summary;
+    }
+
+    fn open(self: *Campaign, target: Artifacts) Error!void {
+        if (target.identity.build.len == 0 or target.identity.sut.len == 0) return error.InvalidReplayIdentity;
+        try artifact.validateName(target.name);
+        self.identity = target.identity;
+        if (target.resume_existing) {
+            self.directory = target.parent.openDir(self.io, target.name, .{}) catch return error.InvalidCampaignJournal;
+            return self.load();
+        }
+        target.parent.createDir(self.io, target.name, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.ArtifactAlreadyExists,
+            else => return error.ArtifactIoFailed,
+        };
+        self.directory = target.parent.openDir(self.io, target.name, .{}) catch return error.ArtifactIoFailed;
+        try self.checkpoint(null);
+    }
+
+    fn load(self: *Campaign) Error!void {
+        const bytes = self.directory.?.readFileAlloc(self.io, journal_name, self.allocator, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidCampaignJournal,
+        };
+        defer self.allocator.free(bytes);
+        const parsed = std.json.parseFromSlice(Journal, self.allocator, bytes, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidCampaignJournal,
+        };
+        defer parsed.deinit();
+        const journal = parsed.value;
+        if (!std.mem.eql(u8, journal.format, journal_format) or journal.version != 1) return error.InvalidCampaignJournal;
+        if (!journal.identity.compatible(self.identity) or journal.base_seed != self.summary.base_seed or
+            journal.planned_cases != self.summary.planned_cases) return error.IncompatibleCampaign;
+        if (journal.executed_cases >= journal.planned_cases) return error.CampaignFinished;
+        self.summary.executed_cases = journal.executed_cases;
+        self.summary.passed_cases = journal.passed_cases;
+        self.summary.failed_cases = journal.failed_cases;
+        self.summary.elapsed_ns = journal.elapsed_ns;
+        try self.failures.ensureTotalCapacity(self.allocator, journal.failures.len);
+        for (journal.failures) |failure| {
+            var owned = failure;
+            owned.fingerprint = try cloneFingerprint(self.allocator, failure.fingerprint);
+            owned.artifact_name = null;
+            errdefer deinitFailure(self.allocator, owned);
+            if (failure.artifact_name) |name| owned.artifact_name = try self.allocator.dupe(u8, name);
+            self.failures.appendAssumeCapacity(owned);
+        }
+        try self.errors.ensureTotalCapacity(self.allocator, journal.errors.len);
+        for (journal.errors) |case_error| {
+            self.errors.appendAssumeCapacity(.{
+                .case = case_error.case,
+                .seed = case_error.seed,
+                .error_name = try self.allocator.dupe(u8, case_error.error_name),
+            });
         }
     }
-    var distinct: DistinctFailure = .{
-        .fingerprint = try cloneFingerprint(allocator, fingerprint),
-        .digest = fingerprint.digest(),
-        .first_case = case,
-        .first_seed = seed,
-        .reproducible = reduce.reproducible(report.*),
-    };
-    errdefer deinitFailure(allocator, distinct);
-    if (directory) |dir| {
-        const name = try std.fmt.allocPrint(allocator, "failure-{x:0>16}", .{distinct.digest});
-        distinct.artifact_name = name;
-        try artifact.write(allocator, report, .{
-            .io = options.io,
-            .parent = dir,
-            .name = name,
-            .identity = options.artifacts.?.identity,
-        });
+
+    /// Run one case and return whether it produced a new distinct failure.
+    fn runCase(self: *Campaign, config: anytype, case: u64) Error!bool {
+        const seed = run.caseSeed(config, case);
+        var report = run.runSeededCase(config, seed) catch |err| switch (err) {
+            // Configuration errors would fail every case identically, and host
+            // memory exhaustion is not a property of one case.
+            error.InvalidSeedSchedule, error.InvalidStateChecks, error.InvalidWatchdogOptions, error.OutOfMemory => |fatal| return fatal,
+            else => {
+                const name = try self.allocator.dupe(u8, @errorName(err));
+                errdefer self.allocator.free(name);
+                try self.errors.append(self.allocator, .{ .case = case, .seed = seed, .error_name = name });
+                self.summary.executed_cases += 1;
+                return false;
+            },
+        };
+        defer report.deinit();
+        const new_failure = switch (report) {
+            .passed => false,
+            .failed => |failure| try self.recordFailure(&report, failure, case, seed),
+        };
+        switch (report) {
+            .passed => self.summary.passed_cases += 1,
+            .failed => self.summary.failed_cases += 1,
+        }
+        self.summary.executed_cases += 1;
+        return new_failure;
     }
-    try failures.append(allocator, distinct);
-}
+
+    fn recordFailure(self: *Campaign, report: *const types.RunReport, failure: types.RunFailure, case: u64, seed: u64) Error!bool {
+        const fingerprint = reduce.FailureFingerprint.from(failure);
+        for (self.failures.items) |*known| {
+            if (known.fingerprint.eql(fingerprint)) {
+                known.occurrences += 1;
+                return false;
+            }
+        }
+        var distinct: DistinctFailure = .{
+            .fingerprint = try cloneFingerprint(self.allocator, fingerprint),
+            .digest = fingerprint.digest(),
+            .first_case = case,
+            .first_seed = seed,
+            .reproducible = reduce.reproducible(report.*),
+        };
+        errdefer deinitFailure(self.allocator, distinct);
+        if (self.directory) |dir| {
+            distinct.artifact_name = try std.fmt.allocPrint(self.allocator, "failure-{x:0>16}", .{distinct.digest});
+            try self.writeFailureArtifacts(dir, report, distinct.artifact_name.?);
+        }
+        try self.failures.append(self.allocator, distinct);
+        return true;
+    }
+
+    // A campaign killed after writing a failure but before checkpointing it
+    // reruns that case on resume. Keep complete evidence; replace partial.
+    fn writeFailureArtifacts(self: *Campaign, dir: std.Io.Dir, report: *const types.RunReport, name: []const u8) Error!void {
+        const artifact_options: artifact.Options = .{ .io = self.io, .parent = dir, .name = name, .identity = self.identity };
+        artifact.write(self.allocator, report, artifact_options) catch |err| switch (err) {
+            error.ArtifactAlreadyExists => {
+                const manifest = try std.fmt.allocPrint(self.allocator, "{s}/manifest.json", .{name});
+                defer self.allocator.free(manifest);
+                if (dir.access(self.io, manifest, .{})) |_| return else |_| {}
+                dir.deleteTree(self.io, name) catch return error.ArtifactIoFailed;
+                try artifact.write(self.allocator, report, artifact_options);
+            },
+            else => |other| return other,
+        };
+    }
+
+    /// Atomically replace the journal so a kill leaves the previous checkpoint.
+    fn checkpoint(self: *Campaign, stop_reason: ?StopReason) Error!void {
+        const dir = self.directory.?;
+        const bytes = try std.json.Stringify.valueAlloc(self.allocator, Journal{
+            .identity = self.identity,
+            .name = self.name,
+            .base_seed = self.summary.base_seed,
+            .planned_cases = self.summary.planned_cases,
+            .executed_cases = self.summary.executed_cases,
+            .passed_cases = self.summary.passed_cases,
+            .failed_cases = self.summary.failed_cases,
+            .stop_reason = stop_reason,
+            .elapsed_ns = self.summary.elapsed_ns,
+            .failures = self.failures.items,
+            .errors = self.errors.items,
+        }, .{ .whitespace = .indent_2 });
+        defer self.allocator.free(bytes);
+        const temporary = journal_name ++ ".tmp";
+        dir.writeFile(self.io, .{ .sub_path = temporary, .data = bytes }) catch return error.ArtifactIoFailed;
+        std.Io.Dir.rename(dir, temporary, dir, journal_name, self.io) catch return error.ArtifactIoFailed;
+    }
+};
 
 fn cloneFingerprint(allocator: std.mem.Allocator, fingerprint: reduce.FailureFingerprint) std.mem.Allocator.Error!reduce.FailureFingerprint {
     const error_name = if (fingerprint.error_name) |name| try allocator.dupe(u8, name) else null;
@@ -219,45 +356,6 @@ fn deinitFailure(allocator: std.mem.Allocator, failure: DistinctFailure) void {
     if (failure.fingerprint.error_name) |name| allocator.free(name);
     if (failure.fingerprint.check_name) |name| allocator.free(name);
     if (failure.artifact_name) |name| allocator.free(name);
-}
-
-fn createCampaignDir(io: std.Io, target: Artifacts) Error!std.Io.Dir {
-    if (target.identity.build.len == 0 or target.identity.sut.len == 0) return error.InvalidReplayIdentity;
-    try artifact.validateName(target.name);
-    target.parent.createDir(io, target.name, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => return error.ArtifactAlreadyExists,
-        else => return error.ArtifactIoFailed,
-    };
-    return target.parent.openDir(io, target.name, .{}) catch error.ArtifactIoFailed;
-}
-
-// The summary is written last, like an artifact manifest: its presence marks
-// a campaign that finished its bookkeeping.
-fn writeSummary(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    dir: std.Io.Dir,
-    identity: replay.Identity,
-    config: anytype,
-    summary: *const Summary,
-) Error!void {
-    const bytes = try std.json.Stringify.valueAlloc(allocator, .{
-        .format = "marionette.campaign",
-        .version = @as(u32, 1),
-        .identity = identity,
-        .name = if (@hasField(@TypeOf(config), "name")) @as(?[]const u8, config.name) else null,
-        .base_seed = summary.base_seed,
-        .planned_cases = summary.planned_cases,
-        .executed_cases = summary.executed_cases,
-        .passed_cases = summary.passed_cases,
-        .failed_cases = summary.failed_cases,
-        .stop_reason = summary.stop_reason,
-        .elapsed_ns = summary.elapsed_ns,
-        .failures = summary.failures,
-        .errors = summary.errors,
-    }, .{ .whitespace = .indent_2 });
-    defer allocator.free(bytes);
-    dir.writeFile(io, .{ .sub_path = "campaign.json", .data = bytes, .flags = .{ .exclusive = true } }) catch return error.ArtifactIoFailed;
 }
 
 fn now(io: std.Io) u64 {

@@ -7,8 +7,9 @@
   time budget; survive watchdog-contained hangs and crashes; group failures by
   full failure identity; and record case-level runner errors without stopping.
 - Campaign evidence directories hold the first occurrence of each distinct
-  failure in the existing artifact layout, plus a `campaign.json` summary
-  written last.
+  failure in the existing artifact layout and an atomically checkpointed
+  `campaign.json` journal. Killed or limit-stopped campaigns resume from their
+  last checkpoint without double counting or losing written evidence.
 
 ## v0.7.2 - 2026-09-29
 

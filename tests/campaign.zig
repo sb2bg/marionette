@@ -230,17 +230,131 @@ test "campaign: invalid options and existing directories are rejected before run
     }));
 }
 
+fn expectSameWork(expected: mar.CampaignSummary, actual: mar.CampaignSummary) !void {
+    try std.testing.expectEqual(expected.executed_cases, actual.executed_cases);
+    try std.testing.expectEqual(expected.passed_cases, actual.passed_cases);
+    try std.testing.expectEqual(expected.failed_cases, actual.failed_cases);
+    try std.testing.expectEqual(expected.failures.len, actual.failures.len);
+    for (expected.failures, actual.failures) |want, got| {
+        try std.testing.expect(want.fingerprint.eql(got.fingerprint));
+        try std.testing.expectEqual(want.first_case, got.first_case);
+        try std.testing.expectEqual(want.occurrences, got.occurrences);
+        try std.testing.expectEqualStrings(want.artifact_name.?, got.artifact_name.?);
+    }
+}
+
+fn artifacts(dir: std.Io.Dir, name: []const u8, resume_existing: bool) mar.CampaignArtifacts {
+    return .{ .parent = dir, .name = name, .identity = identity, .resume_existing = resume_existing };
+}
+
+test "campaign: resuming a stopped campaign finishes the same work as one run" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var reference = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 32, .artifacts = artifacts(tmp.dir, "reference", false) });
+    defer reference.deinit();
+
+    var stopped = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 32, .time_budget_ns = 1, .artifacts = artifacts(tmp.dir, "resumed", false) });
+    stopped.deinit();
+
+    // A kill between writing a failure and checkpointing it leaves evidence the
+    // journal does not list. Complete evidence is kept; partial is replaced.
+    var dir = try tmp.dir.openDir(std.testing.io, "resumed", .{});
+    defer dir.close(std.testing.io);
+    const complete_name = reference.failures[0].artifact_name.?;
+    {
+        var config = buggyConfig(std.testing.allocator);
+        config.seed = reference.failures[0].first_seed;
+        var report = try mar.runSimCase(config);
+        defer report.deinit();
+        try mar.writeRunArtifacts(std.testing.allocator, &report, .{ .io = std.testing.io, .parent = dir, .name = complete_name, .identity = identity });
+    }
+    const partial_name = reference.failures[1].artifact_name.?;
+    try dir.createDir(std.testing.io, partial_name, .default_dir);
+    for ([_][]const u8{ complete_name, partial_name }) |name| {
+        var failure_dir = try dir.openDir(std.testing.io, name, .{});
+        defer failure_dir.close(std.testing.io);
+        try failure_dir.writeFile(std.testing.io, .{ .sub_path = "marker", .data = "" });
+    }
+
+    var resumed = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 32, .artifacts = artifacts(tmp.dir, "resumed", true) });
+    defer resumed.deinit();
+    try std.testing.expectEqual(@as(u64, 1), resumed.start_case);
+    try std.testing.expectEqual(mar.CampaignStopReason.completed, resumed.stop_reason);
+    try expectSameWork(reference, resumed);
+    {
+        var kept = try dir.openDir(std.testing.io, complete_name, .{});
+        defer kept.close(std.testing.io);
+        try kept.access(std.testing.io, "marker", .{});
+        var replaced = try dir.openDir(std.testing.io, partial_name, .{});
+        defer replaced.close(std.testing.io);
+        try std.testing.expectError(error.FileNotFound, replaced.access(std.testing.io, "marker", .{}));
+        try replaced.access(std.testing.io, "manifest.json", .{});
+    }
+
+    try std.testing.expectError(error.CampaignFinished, mar.runCampaign(buggyConfig(std.testing.allocator), .{
+        .io = std.testing.io,
+        .cases = 32,
+        .artifacts = artifacts(tmp.dir, "resumed", true),
+    }));
+}
+
+test "campaign: resumed limits apply before running more cases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 32, .max_failures = 1, .artifacts = artifacts(tmp.dir, "limited", false) });
+    defer first.deinit();
+    try std.testing.expectEqual(mar.CampaignStopReason.failure_limit, first.stop_reason);
+
+    var again = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 32, .max_failures = 1, .artifacts = artifacts(tmp.dir, "limited", true) });
+    defer again.deinit();
+    try std.testing.expectEqual(mar.CampaignStopReason.failure_limit, again.stop_reason);
+    try std.testing.expectEqual(first.executed_cases, again.executed_cases);
+
+    var raised = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 32, .max_failures = 2, .artifacts = artifacts(tmp.dir, "limited", true) });
+    defer raised.deinit();
+    try std.testing.expectEqual(@as(u64, 2), raised.failed_cases);
+    try std.testing.expectEqual(first.executed_cases, raised.start_case);
+}
+
+test "campaign: resume rejects a different or missing campaign" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stopped = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 8, .time_budget_ns = 1, .artifacts = artifacts(tmp.dir, "campaign", false) });
+    stopped.deinit();
+
+    var other_seed = buggyConfig(std.testing.allocator);
+    other_seed.seed += 1;
+    try std.testing.expectError(error.IncompatibleCampaign, mar.runCampaign(other_seed, .{ .io = std.testing.io, .cases = 8, .artifacts = artifacts(tmp.dir, "campaign", true) }));
+    try std.testing.expectError(error.IncompatibleCampaign, mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 9, .artifacts = artifacts(tmp.dir, "campaign", true) }));
+    var other_build = artifacts(tmp.dir, "campaign", true);
+    other_build.identity.build = "other-build";
+    try std.testing.expectError(error.IncompatibleCampaign, mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 8, .artifacts = other_build }));
+    try std.testing.expectError(error.InvalidCampaignJournal, mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 8, .artifacts = artifacts(tmp.dir, "missing", true) }));
+
+    var dir = try tmp.dir.openDir(std.testing.io, "campaign", .{});
+    defer dir.close(std.testing.io);
+    try dir.writeFile(std.testing.io, .{ .sub_path = "campaign.json", .data = "{\"format\":\"marionette.campaign\"" });
+    try std.testing.expectError(error.InvalidCampaignJournal, mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 8, .artifacts = artifacts(tmp.dir, "campaign", true) }));
+}
+
 fn allocationCase(allocator: std.mem.Allocator) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var summary = try mar.runCampaign(buggyConfig(allocator), .{
+    var stopped = try mar.runCampaign(buggyConfig(allocator), .{
         .io = std.testing.io,
-        .cases = 6,
-        .artifacts = .{ .parent = tmp.dir, .name = "campaign", .identity = identity },
+        .cases = 12,
+        .time_budget_ns = 1,
+        .artifacts = artifacts(tmp.dir, "campaign", false),
     });
-    summary.deinit();
+    stopped.deinit();
+    var resumed = try mar.runCampaign(buggyConfig(allocator), .{
+        .io = std.testing.io,
+        .cases = 12,
+        .artifacts = artifacts(tmp.dir, "campaign", true),
+    });
+    resumed.deinit();
 }
 
-test "campaign: allocation failure releases retained failures and artifacts" {
+test "campaign: allocation failure releases retained and resumed state" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCase, .{});
 }
