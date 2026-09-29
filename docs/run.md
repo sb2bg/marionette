@@ -195,8 +195,9 @@ Omitted constraints accept any value. A mismatch returns
 the full failure or trace.
 
 `expectSimFuzz` requires a nonzero `seeds` field. Each derived seed is replayed
-twice. Long campaigns belong in the nightly seed sweep; focused unit tests
-should use small counts.
+twice. It stops at the first failure; use [`runCampaign`](campaigns.md) to keep
+going, group failures, and retain evidence. Focused unit tests should use small
+counts.
 
 ## Liveness Watchdog
 

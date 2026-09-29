@@ -152,9 +152,8 @@ a partial I/O failure may leave an unfinished directory. Incomplete or divergent
 failures still produce diagnostic artifacts and explain why no capsule exists.
 Host I/O errors return `ArtifactIoFailed`; encoding errors return
 `ArtifactEncodingFailed`. Artifact I/O is not part of deterministic trace replay.
-For fuzz campaigns, choose a separate directory per run and call
-`writeRunArtifacts` on retained reports; automatic campaign directory naming is
-part of the later Guided Exploration roadmap.
+[Campaigns](campaigns.md) name and write these directories automatically, one
+per distinct failure.
 
 Save a minimized result with `mar.writeRunArtifacts(allocator, reduced.report(),
 artifact_options)`. The `ReductionResult` owns both the original report and the

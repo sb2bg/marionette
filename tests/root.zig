@@ -18,3 +18,7 @@ test {
 test {
     _ = @import("compatibility_072.zig");
 }
+
+test {
+    _ = @import("campaign.zig");
+}

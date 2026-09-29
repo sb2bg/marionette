@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.0 - Unreleased
+
+- Adds `runCampaign` for bounded unattended seed campaigns over an ordinary
+  `runSimCase` config. Campaigns stop on a case count, failure limit, or host
+  time budget; survive watchdog-contained hangs and crashes; group failures by
+  full failure identity; and record case-level runner errors without stopping.
+- Campaign evidence directories hold the first occurrence of each distinct
+  failure in the existing artifact layout, plus a `campaign.json` summary
+  written last.
+
 ## v0.7.2 - 2026-09-29
 
 - Isolates process supervision and managed app ownership from `World` while

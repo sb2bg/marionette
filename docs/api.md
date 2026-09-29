@@ -20,7 +20,7 @@ An exported type is not necessarily an application capability.
 | --- | --- | --- |
 | Application | Host or simulated `std.Io`, `Recorder`, `Operation`, `TraceField`, `TraceValue`, `Env`, `Production` | Pass narrow capabilities to application code; use `Env` and `Production` at the composition root. `Disk` / `RealDisk` remain available for explicit disk-capability integrations. |
 | Harness | `SimCase`, `Sim`, `World.init` / `simulate`, `runSimCase`, `expectSim*`, `StateCheck`, `Control`, process lifecycle helpers, fault/profile options | Construct and drive simulations, inject faults, check properties, and own cleanup. These powers belong in tests. |
-| Evidence | `RunReport`, `DecisionTape`, `ReplayCapsule`, `ReplayIdentity`, `reduceSimCase`, artifact writers, trace summaries | Retain failures, exact-replay complete executions, and reduce them within a budget. Call each owned result's `deinit`. |
+| Evidence | `RunReport`, `DecisionTape`, `ReplayCapsule`, `ReplayIdentity`, `reduceSimCase`, `runCampaign`, artifact writers, trace summaries | Retain failures, exact-replay complete executions, run bounded campaigns, and reduce failures within a budget. Call each owned result's `deinit`. |
 | Experimental and model | `Endpoint(Message)`, `SimDisk`, `SimClock`, direct model operations and `World` engine fields | Explore protocol models or test simulator contracts. Typed endpoints do not promise production transport parity; prefer `std.Io` for application behavior. |
 | Implementation | Source-module `internal` namespaces, supervisor wiring, I/O backend, scheduler and fiber internals | Used by simulator components and white-box tests; not a downstream integration contract. |
 
@@ -240,3 +240,11 @@ and `writeRunArtifacts` persist reports through caller-supplied host I/O.
 `Operation` span. `sim.manageProcess(App, node, initialize)` returns world-owned
 `*ManagedProcess(App)` state with automatic restart/reopen and runner cleanup.
 See the [complete contracts and examples](reduction-and-explanation.md).
+
+## Campaigns
+
+`runCampaign(config, CampaignOptions)` runs a bounded range of `runSimCase`
+seeds and returns an owned `CampaignSummary` with counts, `CampaignStopReason`,
+one `CampaignFailure` per distinct failure identity, and `CampaignCaseError`
+entries for runner errors. `CampaignArtifacts` selects a new evidence directory.
+See [Campaigns](campaigns.md).

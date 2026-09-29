@@ -314,4 +314,13 @@ pub const reduceSimCase = @import("reduce.zig").reduceSimCase;
 pub const ArtifactOptions = @import("artifact.zig").Options;
 pub const writeRunArtifacts = @import("artifact.zig").write;
 
+/// Bounded unattended seed campaigns with deduplicated failure evidence.
+pub const runCampaign = @import("campaign.zig").runCampaign;
+pub const CampaignOptions = @import("campaign.zig").Options;
+pub const CampaignArtifacts = @import("campaign.zig").Artifacts;
+pub const CampaignSummary = @import("campaign.zig").Summary;
+pub const CampaignStopReason = @import("campaign.zig").StopReason;
+pub const CampaignFailure = @import("campaign.zig").DistinctFailure;
+pub const CampaignCaseError = @import("campaign.zig").CaseError;
+
 pub const ManagedProcess = @import("world.zig").ManagedProcess;
