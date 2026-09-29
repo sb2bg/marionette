@@ -119,20 +119,23 @@ same-build exploration controls; recorded decisions are the replay authority.
 Versioned [replay capsules](docs/decision-tapes.md) persist those decisions,
 including application random bytes, for a pinned build and workload.
 
-## New In 0.7.1
+## New In 0.7.2
 
-[Reduction and Explanation](docs/reduction-and-explanation.md) adds explicit
-property checkpoints, reducible action/decision groups, causal operation spans,
-CI artifact directories, and managed process restart/reopen. Try the complete
-example with `zig build run-example -- reduce-idempotency --seed 1234 --trace
---expect-failure`.
+The bounded cleanup release separates process supervision and managed state from
+`World` and shares runner preparation across runs, replay, and reduction. Existing
+APIs and artifact formats are preserved, with compatibility fixtures captured
+from 0.7.1 and pinned-build replay identity checks.
+
+See the [API roles and compatibility policy](docs/api.md#api-roles-and-compatibility),
+[local verification commands](docs/development.md), and
+[measured performance baseline](docs/performance.md).
 
 ## Install
 
 Marionette requires Zig 0.16.x.
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.7.1.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.7.2.tar.gz
 ```
 
 Add the module to your test build:

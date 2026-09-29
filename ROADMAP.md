@@ -10,24 +10,7 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.7.2 — Release Gate
-
-The bounded cleanup implementation is recorded in `CHANGELOG.md`. Before tagging:
-
-- Require green release-blocking CI on the candidate commit, including Linux
-  x86_64, macOS, all three optimization modes where configured, the seven pinned
-  external validations, and Pages. Local aarch64 macOS/Linux checks supplement
-  these jobs rather than replacing them.
-- Keep the v0.7.1 trace, decision, capsule, and manifest fixtures unchanged and
-  continue enforcing every pinned-build identity dimension.
-- Complete the candidate, tag, and clean package-install steps in
-  `docs/releasing.md`; install examples stay on the published 0.7.1 tag until
-  release preparation.
-
-Avoid model expansion and unrelated module churn. Findings that require semantic
-changes must be identified separately rather than hidden in this cleanup.
-
-## 0.8 — Dependable Campaigns
+## Next: 0.8 — Dependable Campaigns
 
 - Run bounded seed ranges with per-run watchdogs and a total campaign budget.
   Add deterministic execution-step budgets for yielding workloads; preserve
