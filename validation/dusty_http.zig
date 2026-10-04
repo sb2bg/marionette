@@ -6,24 +6,23 @@
 //! Marionette owns the harness side: world, seed, simulated network, latency,
 //! trace, and the response oracle.
 //!
-//! The harness runs dusty's real `Server.listen` accept loop as a simulated
+//! The harness runs dusty's real `Server.run` accept loop as a simulated
 //! task and shuts it down through cooperative cancellation in two shapes:
 //!
 //! - Clean shutdown: all clients have disconnected, so canceling the listen
 //!   task delivers `error.Canceled` inside `accept`, the connection drain
-//!   sees nothing active, and `listen` returns `error.Canceled`.
+//!   sees nothing active, and `run` returns `error.Canceled`.
 //! - Hung-connection shutdown: a keep-alive handler is still parked in a
-//!   stream read. The drain times out (`listen` returns `error.Timeout`,
-//!   dusty's contract for shutdown with connections that never drained) and
-//!   dusty's deferred `Group.cancel` unparks the handler with
-//!   `error.Canceled` on its way out.
+//!   stream read. Dusty cancels idle connections during shutdown and returns
+//!   `error.Canceled` after joining the remaining handlers.
 //!
 //! The pool scenarios cover 16d: keep-alive reuse across virtual-time idle
 //! gaps and concurrent pool growth (dials counted via `io.net.connect`),
 //! and pool recovery across a server crash and registered restart, which
 //! preserve regressions for two fixed dusty bugs (FOUND_BUGS DUSTY-001/002). The
-//! before-response partition scenario additionally pins `netShutdown`
-//! under partition (`io.net.shutdown` between partition and heal).
+//! before-response partition scenario additionally pins the failure chain
+//! under partition: the server's response send is dropped by the severed link
+//! and surfaces as the client's read failure.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -56,7 +55,7 @@ fn handleHello(req: *http.Request, res: *http.Response) !void {
 }
 
 fn handleEcho(req: *http.Request, res: *http.Response) !void {
-    var reader = req.reader();
+    var reader = try req.reader(&.{});
     const payload = try reader.interface.allocRemaining(req.arena, .limited(4096));
     res.body = try std.fmt.allocPrint(req.arena, "echo:{s}", .{payload});
 }
@@ -117,7 +116,6 @@ const Scenario = struct {
     echo_body_copy: []u8 = &.{},
     second_hello_status: u32 = 0,
     graceful_shutdown: bool = false,
-    timeout_shutdown: bool = false,
     /// Client deliberately left open across shutdown so its keep-alive
     /// handler stays parked in a read. Owned by the scenario runner.
     hung_client: ?http.Client = null,
@@ -131,18 +129,11 @@ const Scenario = struct {
         const address: http.Address = .{
             .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
         };
-        self.server.listen(address) catch |err| switch (err) {
+        self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
+        self.server.run() catch |err| switch (err) {
             error.Canceled => {
                 self.graceful_shutdown = true;
                 self.record("dusty_http.server.graceful_shutdown", .{});
-                return;
-            },
-            error.Timeout => {
-                // dusty's contract for shutdown while a connection never
-                // drained: the drain wait times out and the deferred group
-                // cancel sweeps the remaining handlers on the way out.
-                self.timeout_shutdown = true;
-                self.record("dusty_http.server.timeout_shutdown", .{});
                 return;
             },
             else => std.debug.panic("dusty_http listen failed: {}", .{err}),
@@ -166,7 +157,7 @@ const Scenario = struct {
                     std.debug.panic("dusty_http GET /hello failed: {}", .{err});
                 };
                 defer response.deinit();
-                self.hello_status = @intFromEnum(response.status());
+                self.hello_status = @backingInt(response.status());
                 const payload = (response.body() catch @panic("hello body read failed")) orelse "";
                 self.hello_body_copy = self.allocator.dupe(u8, payload) catch @panic("dusty_http oom");
                 self.record(
@@ -183,7 +174,7 @@ const Scenario = struct {
                     std.debug.panic("dusty_http POST /echo failed: {}", .{err});
                 };
                 defer response.deinit();
-                self.echo_status = @intFromEnum(response.status());
+                self.echo_status = @backingInt(response.status());
                 const payload = (response.body() catch @panic("echo body read failed")) orelse "";
                 self.echo_body_copy = self.allocator.dupe(u8, payload) catch @panic("dusty_http oom");
                 self.record(
@@ -203,7 +194,7 @@ const Scenario = struct {
                 std.debug.panic("dusty_http second GET /hello failed: {}", .{err});
             };
             defer response.deinit();
-            self.second_hello_status = @intFromEnum(response.status());
+            self.second_hello_status = @backingInt(response.status());
             self.record(
                 "dusty_http.client.second_hello status={}",
                 .{self.second_hello_status},
@@ -223,25 +214,28 @@ const Scenario = struct {
             std.debug.panic("dusty_http hung GET /hello failed: {}", .{err});
         };
         defer response.deinit();
-        self.hello_status = @intFromEnum(response.status());
+        self.hello_status = @backingInt(response.status());
         self.record("dusty_http.client.hello status={}", .{self.hello_status});
     }
 };
 
 fn handleLargeDownload(req: *http.Request, res: *http.Response) !void {
     _ = req;
+    var body = try res.stream(&.{});
+    errdefer body.end() catch {};
     var chunk: [large_chunk_len]u8 = undefined;
     for (0..large_total_chunks) |chunk_index| {
         const base = chunk_index * large_chunk_len;
         for (&chunk, 0..) |*byte, offset| {
             byte.* = transferPatternByte(base + offset);
         }
-        try res.chunk(&chunk);
+        try body.interface.writeAll(&chunk);
     }
+    try body.end();
 }
 
 fn handleLargeUpload(req: *http.Request, res: *http.Response) !void {
-    var reader = req.reader();
+    var reader = try req.reader(&.{});
     const payload = try reader.interface.allocRemaining(
         req.arena,
         .limited(large_upload_len + 1024),
@@ -278,7 +272,6 @@ const LargeTransferScenario = struct {
     download_len: usize = 0,
     download_pattern_ok: bool = false,
     graceful_shutdown: bool = false,
-    timeout_shutdown: bool = false,
 
     fn record(self: *LargeTransferScenario, comptime fmt: []const u8, args: anytype) void {
         self.world.record(fmt, args) catch @panic("dusty_large trace record failed");
@@ -289,15 +282,11 @@ const LargeTransferScenario = struct {
         const address: http.Address = .{
             .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
         };
-        self.server.listen(address) catch |err| switch (err) {
+        self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
+        self.server.run() catch |err| switch (err) {
             error.Canceled => {
                 self.graceful_shutdown = true;
                 self.record("dusty_large.server.graceful_shutdown", .{});
-                return;
-            },
-            error.Timeout => {
-                self.timeout_shutdown = true;
-                self.record("dusty_large.server.timeout_shutdown", .{});
                 return;
             },
             else => std.debug.panic("dusty_large listen failed: {}", .{err}),
@@ -330,7 +319,7 @@ const LargeTransferScenario = struct {
                 std.debug.panic("dusty_large upload failed: {}", .{err});
             };
             defer response.deinit();
-            self.upload_status = @intFromEnum(response.status());
+            self.upload_status = @backingInt(response.status());
             const reply = (response.body() catch @panic("dusty_large upload reply failed")) orelse "";
             self.upload_reply_copy = self.allocator.dupe(u8, reply) catch @panic("dusty_large oom");
             self.record("dusty_large.client.upload status={} reply={s}", .{
@@ -347,7 +336,7 @@ const LargeTransferScenario = struct {
                 std.debug.panic("dusty_large download failed: {}", .{err});
             };
             defer response.deinit();
-            self.download_status = @intFromEnum(response.status());
+            self.download_status = @backingInt(response.status());
             const payload = (response.body() catch @panic("dusty_large download body failed")) orelse "";
             self.download_len = payload.len;
             self.download_pattern_ok = payload.len == large_download_len;
@@ -478,7 +467,6 @@ const PoolScenario = struct {
     client: ?http.Client = null,
     statuses: [6]u32 = @splat(0),
     graceful_shutdown: bool = false,
-    timeout_shutdown: bool = false,
 
     fn record(self: *PoolScenario, comptime fmt: []const u8, args: anytype) void {
         self.world.record(fmt, args) catch @panic("dusty_pool trace record failed");
@@ -489,15 +477,11 @@ const PoolScenario = struct {
         const address: http.Address = .{
             .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
         };
-        self.server.listen(address) catch |err| switch (err) {
+        self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
+        self.server.run() catch |err| switch (err) {
             error.Canceled => {
                 self.graceful_shutdown = true;
                 self.record("dusty_pool.server.graceful_shutdown", .{});
-                return;
-            },
-            error.Timeout => {
-                self.timeout_shutdown = true;
-                self.record("dusty_pool.server.timeout_shutdown", .{});
                 return;
             },
             else => std.debug.panic("dusty_pool listen failed: {}", .{err}),
@@ -510,7 +494,7 @@ const PoolScenario = struct {
             std.debug.panic("dusty_pool fetch {} failed: {}", .{ slot, err });
         };
         defer response.deinit();
-        self.statuses[slot] = @intFromEnum(response.status());
+        self.statuses[slot] = @backingInt(response.status());
         const payload = (response.body() catch @panic("dusty_pool body read failed")) orelse "";
         self.record("dusty_pool.client.fetch slot={} status={} bytes={}", .{
             slot, self.statuses[slot], payload.len,
@@ -591,7 +575,8 @@ const PoolCrashScenario = struct {
         const address: http.Address = .{
             .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
         };
-        self.server.listen(address) catch |err| {
+        self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
+        self.server.run() catch |err| {
             std.debug.panic("dusty_pool_crash listen failed: {}", .{err});
         };
         @panic("dusty_pool_crash listen returned");
@@ -602,7 +587,8 @@ const PoolCrashScenario = struct {
         const address: http.Address = .{
             .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
         };
-        self.restarted_server.?.listen(address) catch |err| {
+        self.restarted_server.?.config.listen = &.{.{ .address = address, .acceptors = 1 }};
+        self.restarted_server.?.run() catch |err| {
             std.debug.panic("dusty_pool_crash restarted listen failed: {}", .{err});
         };
         @panic("dusty_pool_crash restarted listen returned");
@@ -619,7 +605,7 @@ const PoolCrashScenario = struct {
             std.debug.panic("dusty_pool_crash healthy fetch failed: {}", .{err});
         };
         defer response.deinit();
-        self.first_status = @intFromEnum(response.status());
+        self.first_status = @backingInt(response.status());
         _ = (response.body() catch @panic("dusty_pool_crash body read failed")) orelse "";
         self.record("dusty_pool_crash.client.first_fetch status={}", .{self.first_status});
     }
@@ -666,7 +652,7 @@ const PoolCrashScenario = struct {
         if (fresh.fetch(base_url ++ "/hello", .{})) |response| {
             var owned = response;
             defer owned.deinit();
-            self.fresh_status = @intFromEnum(owned.status());
+            self.fresh_status = @backingInt(owned.status());
             _ = (owned.body() catch @panic("dusty_pool_crash fresh body failed")) orelse "";
             self.record("dusty_pool_crash.client.fresh_fetch status={}", .{self.fresh_status});
         } else |err| {
@@ -712,14 +698,13 @@ const FaultScenario = struct {
     final_status: u32 = 0,
     final_body_copy: []u8 = &.{},
     graceful_shutdown: bool = false,
-    timeout_shutdown: bool = false,
     fetch_succeeded_before_cut: bool = false,
     short_success: bool = false,
     retry_failed: bool = false,
     retry_body_mismatch: bool = false,
 
     fn shutdownOk(self: *const FaultScenario) bool {
-        return self.graceful_shutdown or self.timeout_shutdown;
+        return self.graceful_shutdown;
     }
 
     fn signal(self: *FaultScenario, flag: *u32) void {
@@ -754,15 +739,11 @@ const FaultScenario = struct {
         const address: http.Address = .{
             .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
         };
-        self.server.listen(address) catch |err| switch (err) {
+        self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
+        self.server.run() catch |err| switch (err) {
             error.Canceled => {
                 self.graceful_shutdown = true;
                 self.record("dusty_fault.server.graceful_shutdown", .{});
-                return;
-            },
-            error.Timeout => {
-                self.timeout_shutdown = true;
-                self.record("dusty_fault.server.timeout_shutdown", .{});
                 return;
             },
             else => std.debug.panic("dusty_fault listen failed: {}", .{err}),
@@ -868,7 +849,7 @@ const FaultScenario = struct {
                 continue;
             } orelse "";
 
-            const status: u32 = @intFromEnum(response.status());
+            const status: u32 = @backingInt(response.status());
             const body_ok = switch (self.mode) {
                 .before_response => std.mem.eql(u8, payload, hello_body),
                 .mid_response => payloadIsFullChunkOracle(payload),
@@ -905,14 +886,17 @@ fn handleHeld(scenario: *FaultScenario, req: *http.Request, res: *http.Response)
 fn handleLarge(scenario: *FaultScenario, req: *http.Request, res: *http.Response) !void {
     _ = req;
     res.keepalive = false;
+    var body = try res.stream(&.{});
+    errdefer body.end() catch {};
     for (0..total_chunks) |i| {
-        try res.chunk(&chunk_pattern);
+        try body.interface.writeAll(&chunk_pattern);
         if (i + 1 == scenario.pre_chunks) {
             scenario.record("dusty_fault.server.mid_response chunks_sent={}", .{i + 1});
             scenario.signal(&scenario.mid_response_reached);
             try scenario.waitFor(&scenario.partitioned);
         }
     }
+    try body.end();
 }
 
 fn payloadIsFullChunkOracle(payload: []const u8) bool {
@@ -1188,7 +1172,7 @@ pub const HungOutcome = struct {
     allocator: std.mem.Allocator,
     trace: []u8,
     hello_status: u32,
-    timeout_shutdown: bool,
+    graceful_shutdown: bool,
     cancel_deliveries: usize,
 
     pub fn deinit(self: *HungOutcome) void {
@@ -1240,8 +1224,7 @@ pub fn runHungShutdownScenario(allocator: std.mem.Allocator, seed: u64) !HungOut
 
     client_future.await(client_io);
     // The handler for the hung client is still parked in a keep-alive read.
-    // Cancellation lands in accept, the drain times out, and dusty's
-    // deferred group cancel must sweep the parked handler.
+    // Cancellation stops the accept loop and must sweep the parked handler.
     server_future.cancel(server_io);
     if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
 
@@ -1252,7 +1235,7 @@ pub fn runHungShutdownScenario(allocator: std.mem.Allocator, seed: u64) !HungOut
         .allocator = allocator,
         .trace = trace,
         .hello_status = scenario.hello_status,
-        .timeout_shutdown = scenario.timeout_shutdown,
+        .graceful_shutdown = scenario.graceful_shutdown,
         .cancel_deliveries = std.mem.count(u8, trace, "scheduler.cancel_deliver task="),
     };
 }
@@ -1387,6 +1370,28 @@ fn expectMidResponseNetworkOracle(trace: []const u8) !void {
     }
 }
 
+fn expectBeforeResponseNetworkOracle(trace: []const u8) !void {
+    const partition = std.mem.indexOf(u8, trace, "dusty_fault.partition") orelse return error.PartitionTraceMissing;
+    // Healing waits for the client failure, so bound by the failure itself:
+    // ordering against `dusty_fault.heal` would hold by construction.
+    const failure = std.mem.indexOfPos(u8, trace, partition, "dusty_fault.client.fetch_error") orelse
+        return error.ReadDidNotFailUnderPartition;
+
+    // The held handler writes its response only after the cut, so the server's
+    // send must be dropped by the partition and surface as the client's read
+    // failure. Dusty closes failed connections directly; it no longer calls
+    // shutdown(.both), so there is no `io.net.shutdown` to pin here.
+    if (!traceLineContainsAll(trace, partition, failure, &.{ "network.send", "from=0", "to=1" })) {
+        return error.HeldResponseSendMissing;
+    }
+    if (!traceLineContainsAll(trace, partition, failure, &.{ "network.drop", "from=0", "to=1", "reason=link_disabled" })) {
+        return error.PartitionDropMissing;
+    }
+    if (!traceLineContainsAll(trace, partition, failure, &.{ "io.net.delivery_error", "from=0", "to=1", "error=ConnectionTimedOut" })) {
+        return error.DeliveryErrorMissing;
+    }
+}
+
 fn traceLineContainsAll(
     trace: []const u8,
     start: usize,
@@ -1449,8 +1454,10 @@ test "dusty HTTP shutdown sweeps a handler parked in a keep-alive read" {
     defer outcome.deinit();
 
     try std.testing.expectEqual(@as(u32, 200), outcome.hello_status);
-    try std.testing.expect(!outcome.timeout_shutdown);
-    try std.testing.expectEqual(@as(usize, 1), outcome.cancel_deliveries);
+    try std.testing.expect(outcome.graceful_shutdown);
+    // The server now owns separate accept, connection, and deadline tasks.
+    // Pin the cleanup behavior, not the upstream task count.
+    try std.testing.expect(outcome.cancel_deliveries >= 1);
     try mar.expectTraceContains(outcome.trace, "dusty_http.server.graceful_shutdown");
 }
 
@@ -1473,19 +1480,11 @@ test "dusty HTTP partition before response fails deterministically and retry con
     try std.testing.expect(outcome.retry_attempts >= 1);
     try std.testing.expect(outcome.shutdown_ok);
     // dusty's observed contract under a severed link before response bytes.
-    try std.testing.expectEqualStrings("Timeout", outcome.first_error_name);
+    try std.testing.expectEqualStrings("ConnectionTimedOut", outcome.first_error_name);
     try mar.expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
     try mar.expectTraceContains(outcome.trace, "dusty_fault.heal");
 
-    // netShutdown under partition: the handler's deferred `shutdown(.both)`
-    // runs while the link is severed. Shutdown is local in simulation, so
-    // it succeeds and is trace-visible between the partition and the heal;
-    // peer visibility that respects the partition is a recorded gap.
-    const partition_index = std.mem.indexOf(u8, outcome.trace, "dusty_fault.partition").?;
-    const heal_index = std.mem.indexOfPos(u8, outcome.trace, partition_index, "dusty_fault.heal").?;
-    const shutdown_index = std.mem.indexOfPos(u8, outcome.trace, partition_index, "io.net.shutdown") orelse
-        return error.ShutdownNotUnderPartition;
-    try std.testing.expect(shutdown_index < heal_index);
+    try expectBeforeResponseNetworkOracle(outcome.trace);
 }
 
 test "dusty HTTP partition scenario replays byte-identically from the same seed" {
@@ -1509,7 +1508,7 @@ test "dusty HTTP partition mid-response never yields a short success" {
     try std.testing.expect(outcome.retry_attempts >= 1);
     try std.testing.expect(outcome.shutdown_ok);
     // dusty's observed contract under a severed link.
-    try std.testing.expectEqualStrings("Timeout", outcome.first_error_name);
+    try std.testing.expectEqualStrings("ConnectionTimedOut", outcome.first_error_name);
     try mar.expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
     try expectMidResponseNetworkOracle(outcome.trace);
 }

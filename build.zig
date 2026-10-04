@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
     const release_mod = b.addModule("marionette_release", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
 
     // Everything past this point is development-only build graph: tests,
@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(run_examples_exe);
 
     const run_examples_cmd = b.addRunArtifact(run_examples_exe);
-    if (b.args) |args| run_examples_cmd.addArgs(args);
+    run_examples_cmd.addPassthruArgs();
 
     const run_examples_step = b.step("run-example", "Run a Marionette example by seed");
     run_examples_step.dependOn(&run_examples_cmd.step);
@@ -114,7 +114,7 @@ pub fn build(b: *std.Build) void {
     const release_probe_mod = b.createModule(.{
         .root_source_file = b.path("tests/release_symbol_probe.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
         .strip = true,
     });
     release_probe_mod.addImport("marionette", release_mod);
@@ -166,46 +166,10 @@ pub fn build(b: *std.Build) void {
         _ = addValidation(b, validate_mailbox_mod, "validate-mailbox", "Run Mailbox under Marionette");
     }
 
-    if (b.lazyDependency("ochi", .{
-        .target = target,
-        .optimize = optimize,
-    })) |ochi_dep| {
-        const ochi_root_mod = ochi_dep.artifact("Ochi").root_module;
-        const ochi_store_mod = b.createModule(.{
-            .root_source_file = ochi_dep.path("src/Store.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const ochi_imports = [_][]const u8{
-            "zeit",
-            "zint",
-            "metrics",
-            "logz",
-            "logging",
-            "tracy",
-            "c",
-            "encoding",
-        };
-        for (ochi_imports) |name| {
-            ochi_store_mod.addImport(name, ochi_root_mod.import_table.get(name).?);
-        }
-
-        const validate_ochi_mod = b.createModule(.{
-            .root_source_file = b.path("validation/ochi_store.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        validate_ochi_mod.addImport("marionette", mod);
-        validate_ochi_mod.addImport("ochi_store", ochi_store_mod);
-        validate_ochi_mod.addImport("ochi_logging", ochi_root_mod.import_table.get("logging").?);
-
-        _ = addValidation(
-            b,
-            validate_ochi_mod,
-            "validate-ochi",
-            "Run Ochi's unmodified storage path under Marionette",
-        );
-    }
+    // Ochi's pinned build and transitive dependencies still require Zig 0.16.
+    // Keep an explicit failure instead of silently reporting validation success.
+    const ochi_unavailable = b.addFail("validate-ochi is unavailable on Zig 0.17: the pinned Ochi dependencies require Zig 0.16");
+    b.step("validate-ochi", "Unavailable until Ochi supports Zig 0.17").dependOn(&ochi_unavailable.step);
 
     if (b.lazyDependency("dusty", .{
         .target = target,
@@ -377,10 +341,8 @@ pub fn build(b: *std.Build) void {
         "build",
         "test",
         "--build-file",
-        b.pathFromRoot("tests/tidy_consumer/build.zig"),
-        "--cache-dir",
-        b.pathFromRoot(".zig-cache/tidy-consumer"),
     });
+    run_tidy_consumer_test.addFileArg2(b.path("tests/tidy_consumer/build.zig"), .{});
     test_step.dependOn(&run_tidy_consumer_test.step);
 
     // The fiber overflow diagnostics are POSIX-only and their subprocess

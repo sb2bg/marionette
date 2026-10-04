@@ -10,16 +10,16 @@ const OchiStore = @import("ochi_store");
 const OchiLogging = @import("ochi_logging");
 
 const store_init_info = @typeInfo(@TypeOf(OchiStore.init)).@"fn";
-const Conf = @typeInfo(store_init_info.params[2].type.?).pointer.child;
-const Runtime = @typeInfo(store_init_info.params[3].type.?).pointer.child;
-const Layout = store_init_info.params[4].type.?;
+const Conf = @typeInfo(store_init_info.param_types[2].?).pointer.child;
+const Runtime = @typeInfo(store_init_info.param_types[3].?).pointer.child;
+const Layout = store_init_info.param_types[4].?;
 
 const add_lines_info = @typeInfo(@TypeOf(OchiStore.addLines)).@"fn";
-const Line = @typeInfo(add_lines_info.params[3].type.?).pointer.child;
-const Field = @typeInfo(add_lines_info.params[4].type.?).pointer.child;
-const SID = add_lines_info.params[6].type.?;
+const Line = @typeInfo(add_lines_info.param_types[3].?).pointer.child;
+const Field = @typeInfo(add_lines_info.param_types[4].?).pointer.child;
+const SID = add_lines_info.param_types[6].?;
 const query_lines_info = @typeInfo(@TypeOf(OchiStore.queryLines)).@"fn";
-const Query = query_lines_info.params[5].type.?;
+const Query = query_lines_info.param_types[5].?;
 
 const store_path = "/ochi";
 const day_ns = 24 * 60 * 60 * 1_000_000_000;

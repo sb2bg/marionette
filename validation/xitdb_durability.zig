@@ -62,7 +62,7 @@ const Value = union(enum) {
 };
 
 const Snapshot = struct {
-    values: [KeyCount]Value = [_]Value{.{ .absent = {} }} ** KeyCount,
+    values: [KeyCount]Value = @splat(.{ .absent = {} }),
 };
 
 const Operation = union(enum) {
@@ -234,7 +234,7 @@ fn runDataRegionCrashSweep(comptime fault: DataRegionFault) !void {
         var data_faults: usize = 0;
         for (0..DataProbeSweepSeeds) |i| {
             const seed = 0xDA7A_0000 +
-                @as(u64, @intCast(@intFromEnum(fault))) * 0x10000 +
+                @as(u64, @intCast(@backingInt(fault))) * 0x10000 +
                 sector_size * 0x100 +
                 @as(u64, @intCast(i));
             const outcome = runDataRegionCrashCase(
@@ -626,6 +626,11 @@ fn appendTrailingJunkAndVerifyRecovery(
     try std.testing.expect((try db.core.length()) > len_before_junk);
 
     var reopened = try DB.init(.{ .io = io, .file = file });
+    // Opening is read-only in the new xitdb pin: another writer may own the
+    // tail. Recovery truncates it when a write cursor is initialized.
+    try std.testing.expectEqual(len_before_junk + "junk after committed file size".len, try reopened.core.length());
+    try verifyHistory(allocator, &reopened, model);
+    _ = try DB.ArrayList(.read_write).init(reopened.rootCursor());
     try std.testing.expectEqual(len_before_junk, try reopened.core.length());
     try verifyHistory(allocator, &reopened, model);
 }
@@ -938,7 +943,7 @@ test "xitdb crash-fault fuzz holds acknowledged history at realistic sectors" {
             var windows: usize = 0;
             for (0..seeds_per_case) |i| {
                 const seed = 0xF022_0000 +
-                    @as(u64, @intCast(@intFromEnum(fault))) * 0x10000 +
+                    @as(u64, @intCast(@backingInt(fault))) * 0x10000 +
                     sector_size * 0x10 +
                     @as(u64, @intCast(i));
                 var plan = try makeFuzzPlan(allocator, seed, 6);
