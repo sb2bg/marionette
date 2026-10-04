@@ -149,7 +149,7 @@ pub fn Ops(comptime Backend: type) type {
 
                         const read_error: Io.net.Stream.Reader.Error = switch (borrowed.reason) {
                             .destination_down => error.NetworkDown,
-                            .link_disabled => error.Timeout,
+                            .link_disabled => error.ConnectionTimedOut,
                         };
                         const message = network_module.internal.commitReadyStreamEventFromControl(
                             backend.network_control,
@@ -663,7 +663,7 @@ pub fn Ops(comptime Backend: type) type {
                 else
                     true;
                 if (peer_closed and deadline_ns == null) return 0;
-                const wait_set = backend.futex_wait_set orelse return error.Timeout;
+                const wait_set = backend.futex_wait_set orelse return error.ConnectionTimedOut;
                 connection.waiters += 1;
                 const wait_result = wait_set.blockUntilCancelable(backend.connectionWaitKey(src), deadline_ns);
                 connection.waiters -= 1;
@@ -827,7 +827,7 @@ pub fn Ops(comptime Backend: type) type {
                                     offset += segment_len;
                                 },
                                 .dropped => {
-                                    if (live_peer.read_error == null) live_peer.read_error = error.Timeout;
+                                    if (live_peer.read_error == null) live_peer.read_error = error.ConnectionTimedOut;
                                     live_peer.read_failed = true;
                                     peer_ref.backend.wakeConnection(peer_ref.handle, 1);
                                     // The transport accepted this segment but
@@ -852,10 +852,10 @@ pub fn Ops(comptime Backend: type) type {
             return peer.inbox.items.len - start_len;
         }
 
-        pub fn simNetClose(userdata: ?*anyopaque, handles: []const SocketHandle) void {
+        pub fn simNetClose(userdata: ?*anyopaque, sockets: []const Io.net.Socket) void {
             const backend = backendFromUserdata(userdata);
-            for (handles) |handle| {
-                backend.retireNetHandle(handle);
+            for (sockets) |socket| {
+                backend.retireNetHandle(socket.handle);
             }
         }
 

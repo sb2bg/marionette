@@ -2281,7 +2281,7 @@ const NetScenario = struct {
 
         self.reader_started = true;
         var buffers: [1][]u8 = .{&self.read_bytes};
-        self.read_len = self.server_io.vtable.netRead(self.server_io.userdata, stream.socket.handle, &buffers) catch |err| {
+        self.read_len = netRead(self.server_io, stream.socket.handle, &buffers) catch |err| {
             self.read_error = err;
             self.world.record("io.net.read_error error={s}", .{@errorName(err)}) catch @panic("record failed");
             return;
@@ -2310,7 +2310,7 @@ const NetScenario = struct {
         scheduler.yieldUntilBlockedCount(1);
 
         const chunks: [1][]const u8 = .{"ping"};
-        const written = self.client_io.vtable.netWrite(self.client_io.userdata, stream.socket.handle, "", &chunks, 1) catch @panic("write failed");
+        const written = netWrite(self.client_io, stream.socket.handle, "", &chunks, 1) catch @panic("write failed");
         if (written != 4) @panic("short write");
         self.world.record("io.net.wrote len={}", .{written}) catch @panic("record failed");
     }
@@ -2341,8 +2341,8 @@ const NetPartitionScenario = struct {
         self.reader_started = true;
         var first_read_bytes: [4]u8 = undefined;
         var first_buffers: [1][]u8 = .{&first_read_bytes};
-        const first_read_len = self.server_io.vtable.netRead(
-            self.server_io.userdata,
+        const first_read_len = netRead(
+            self.server_io,
             stream.socket.handle,
             &first_buffers,
         ) catch |err| read_error: {
@@ -2358,8 +2358,8 @@ const NetPartitionScenario = struct {
         _ = scheduler.wake(partition_retry_key, 1) catch @panic("retry wake failed");
 
         var second_buffers: [1][]u8 = .{&self.second_read_bytes};
-        self.second_read_len = self.server_io.vtable.netRead(
-            self.server_io.userdata,
+        self.second_read_len = netRead(
+            self.server_io,
             stream.socket.handle,
             &second_buffers,
         ) catch @panic("terminal read after heal failed");
@@ -2381,8 +2381,8 @@ const NetPartitionScenario = struct {
         scheduler.yieldUntilBlockedCount(1);
 
         const first_chunks: [1][]const u8 = .{"ping"};
-        const first_written = self.client_io.vtable.netWrite(
-            self.client_io.userdata,
+        const first_written = netWrite(
+            self.client_io,
             stream.socket.handle,
             "",
             &first_chunks,
@@ -2397,8 +2397,8 @@ const NetPartitionScenario = struct {
 
         self.network_control.heal() catch @panic("heal failed");
         const retry_chunks: [1][]const u8 = .{"pong"};
-        _ = self.client_io.vtable.netWrite(
-            self.client_io.userdata,
+        _ = netWrite(
+            self.client_io,
             stream.socket.handle,
             "",
             &retry_chunks,
@@ -2566,7 +2566,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
             try std.testing.expectEqual(@as(u64, 60), world.now());
         },
         .drop => {
-            try std.testing.expectEqual(error.Timeout, scenario.read_error.?);
+            try std.testing.expectEqual(error.ConnectionTimedOut, scenario.read_error.?);
             try std.testing.expectEqual(@as(usize, 0), scenario.read_len);
         },
         .accept, .exchange => unreachable,
@@ -2632,7 +2632,7 @@ fn runNetworkPartitionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     try scheduler.runUntilIdle();
     try std.testing.expectEqual(@as(usize, 2), scheduler.completedCount());
     try std.testing.expectEqual(@as(usize, 0), scheduler.blockedCount());
-    try std.testing.expectEqual(error.Timeout, scenario.first_read_error.?);
+    try std.testing.expectEqual(error.ConnectionTimedOut, scenario.first_read_error.?);
     try std.testing.expectEqual(error.ConnectionResetByPeer, scenario.second_write_error.?);
     try std.testing.expectEqual(@as(usize, 0), scenario.second_read_len);
     try std.testing.expectEqual(@as(u64, 60), world.now());
@@ -2731,7 +2731,7 @@ test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation fa
     const chunks: [1][]const u8 = .{"ping"};
     try std.testing.expectEqual(
         @as(usize, 4),
-        try client_io.vtable.netWrite(client_io.userdata, client_stream.socket.handle, "", &chunks, 1),
+        try netWrite(client_io, client_stream.socket.handle, "", &chunks, 1),
     );
     try world.runFor(10);
 
@@ -2742,7 +2742,7 @@ test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation fa
     var buffers: [1][]u8 = .{&read_bytes};
     try std.testing.expectError(
         error.SystemResources,
-        server_io.vtable.netRead(server_io.userdata, server_stream.socket.handle, &buffers),
+        netRead(server_io, server_stream.socket.handle, &buffers),
     );
     server_backend.allocator = std.testing.allocator;
 
@@ -2752,7 +2752,7 @@ test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation fa
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "io.net.deliver") == null);
     try std.testing.expectEqual(
         @as(usize, 4),
-        try server_io.vtable.netRead(server_io.userdata, server_stream.socket.handle, &buffers),
+        try netRead(server_io, server_stream.socket.handle, &buffers),
     );
     try std.testing.expectEqualStrings("ping", &read_bytes);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, world.traceBytes(), "network.deliver id=1"));
@@ -2784,7 +2784,7 @@ test "TaskScheduler: std.Io.net dropped write replays and surfaces read timeout"
     try std.testing.expectEqualStrings(first, second);
     try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=1 from=1 to=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.deliver") == null);
-    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read_error error=Timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.read_error error=ConnectionTimedOut") != null);
 }
 
 test "TaskScheduler: std.Io.net partition loss terminates the reliable stream" {
@@ -2799,14 +2799,14 @@ test "TaskScheduler: std.Io.net partition loss terminates the reliable stream" {
     try std.testing.expect(std.mem.indexOf(u8, first, "network.partition left_count=1 right_count=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "network.drop id=1 from=1 to=0 reason=link_disabled") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.delivery_error from=1 to=0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.partition.read_error error=Timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "io.net.partition.read_error error=ConnectionTimedOut") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "network.heal disabled_count=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "network.send id=2") == null);
     try std.testing.expect(std.mem.indexOf(u8, first, "io.net.partition.read_after_heal len=0") != null);
     try expectTraceOrder(first, "network.send id=1 from=1 to=0", "network.partition left_count=1 right_count=1");
     try expectTraceOrder(first, "network.partition left_count=1 right_count=1", "network.drop id=1 from=1 to=0 reason=link_disabled");
-    try expectTraceOrder(first, "network.drop id=1 from=1 to=0 reason=link_disabled", "io.net.partition.read_error error=Timeout");
-    try expectTraceOrder(first, "io.net.partition.read_error error=Timeout", "network.heal disabled_count=2");
+    try expectTraceOrder(first, "network.drop id=1 from=1 to=0 reason=link_disabled", "io.net.partition.read_error error=ConnectionTimedOut");
+    try expectTraceOrder(first, "io.net.partition.read_error error=ConnectionTimedOut", "network.heal disabled_count=2");
 }
 
 test "TaskScheduler: compact cycle follows task completion dependencies only" {
@@ -2828,4 +2828,21 @@ test "TaskScheduler: compact cycle follows task completion dependencies only" {
     _ = try scheduler.spawn(.{ .entry = Cycle.wait, .arg = &second });
     try std.testing.expectError(error.Deadlock, scheduler.runUntilIdle());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.deadlock_cycle tasks=0,1,0") != null);
+}
+
+// Exercise the same operation dispatch used by Zig 0.17 stream readers/writers.
+fn netRead(io: std.Io, handle: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+    return (try (try io.operate(.{ .net_read = .{
+        .socket_handle = handle,
+        .data = data,
+    } })).net_read).data_len;
+}
+
+fn netWrite(io: std.Io, handle: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+    return try (try io.operate(.{ .net_write = .{
+        .socket_handle = handle,
+        .header = header,
+        .data = data,
+        .splat = splat,
+    } })).net_write;
 }

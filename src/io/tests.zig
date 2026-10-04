@@ -1590,8 +1590,8 @@ test "io: connect probe removal wakes a reader hidden behind the probe" {
 
         fn read(self: *@This()) void {
             var buffers: [1][]u8 = .{std.mem.asBytes(&self.read_byte)};
-            const read_len = self.server_io.vtable.netRead(
-                self.server_io.userdata,
+            const read_len = netRead(
+                self.server_io,
                 self.accepted.socket.handle,
                 &buffers,
             ) catch |err| std.debug.panic("hidden reader failed: {}", .{err});
@@ -1626,8 +1626,8 @@ test "io: connect probe removal wakes a reader hidden behind the probe" {
     const payload: [1][]const u8 = .{"x"};
     try std.testing.expectEqual(
         @as(usize, 1),
-        try client_io.vtable.netWrite(
-            client_io.userdata,
+        try netWrite(
+            client_io,
             client.socket.handle,
             "",
             &payload,
@@ -1717,8 +1717,8 @@ test "io: connect probe wait keys cannot alias live connection handles" {
     const payload: [1][]const u8 = .{"y"};
     try std.testing.expectEqual(
         @as(usize, 1),
-        try server_io.vtable.netWrite(
-            server_io.userdata,
+        try netWrite(
+            server_io,
             accepted.socket.handle,
             "",
             &payload,
@@ -1781,8 +1781,8 @@ test "io: directional stream shutdown preserves the opposite direction" {
     const server_payload: [1][]const u8 = .{"nope"};
     try std.testing.expectError(
         error.SocketUnconnected,
-        server_io.vtable.netWrite(
-            server_io.userdata,
+        netWrite(
+            server_io,
             accepted.socket.handle,
             "",
             &server_payload,
@@ -1794,14 +1794,14 @@ test "io: directional stream shutdown preserves the opposite direction" {
     var client_buffers: [1][]u8 = .{&client_buffer};
     try std.testing.expectEqual(
         @as(usize, 0),
-        try client_io.vtable.netRead(client_io.userdata, client.socket.handle, &client_buffers),
+        try netRead(client_io, client.socket.handle, &client_buffers),
     );
 
     const client_payload: [1][]const u8 = .{"ok"};
     try std.testing.expectEqual(
         @as(usize, 2),
-        try client_io.vtable.netWrite(
-            client_io.userdata,
+        try netWrite(
+            client_io,
             client.socket.handle,
             "",
             &client_payload,
@@ -1812,7 +1812,7 @@ test "io: directional stream shutdown preserves the opposite direction" {
     var server_buffers: [1][]u8 = .{&server_buffer};
     try std.testing.expectEqual(
         @as(usize, 2),
-        try server_io.vtable.netRead(server_io.userdata, accepted.socket.handle, &server_buffers),
+        try netRead(server_io, accepted.socket.handle, &server_buffers),
     );
     try std.testing.expectEqualStrings("ok", &server_buffer);
     try std.testing.expectEqual(
@@ -2141,8 +2141,8 @@ test "io: disk crash closes live std.Io.net connections and wakes readers" {
             var buffer: [1]u8 = undefined;
             var buffers: [1][]u8 = .{&buffer};
             signal(self.server_io, &self.read_started);
-            _ = self.server_io.vtable.netRead(
-                self.server_io.userdata,
+            _ = netRead(
+                self.server_io,
                 stream.socket.handle,
                 &buffers,
             ) catch |err| {
@@ -2235,8 +2235,8 @@ test "io: process kill cancels owned tasks and resets peers" {
             var buffer: [1]u8 = undefined;
             var buffers: [1][]u8 = .{&buffer};
             signal(self.client_io, &self.read_started);
-            _ = self.client_io.vtable.netRead(
-                self.client_io.userdata,
+            _ = netRead(
+                self.client_io,
                 stream.socket.handle,
                 &buffers,
             ) catch |err| {
@@ -2310,8 +2310,8 @@ test "io: process reset discards delayed outbound frames terminally" {
             const stream = self.listener.accept(self.server_io) catch
                 @panic("reset test accept failed");
             const chunks: [1][]const u8 = .{"late"};
-            const written = self.server_io.vtable.netWrite(
-                self.server_io.userdata,
+            const written = netWrite(
+                self.server_io,
                 stream.socket.handle,
                 "",
                 &chunks,
@@ -2338,8 +2338,8 @@ test "io: process reset discards delayed outbound frames terminally" {
             var byte: [4]u8 = undefined;
             var buffers: [1][]u8 = .{&byte};
             signal(self.client_io, &self.read_started);
-            _ = self.client_io.vtable.netRead(
-                self.client_io.userdata,
+            _ = netRead(
+                self.client_io,
                 stream.socket.handle,
                 &buffers,
             ) catch |err| {
@@ -2347,8 +2347,8 @@ test "io: process reset discards delayed outbound frames terminally" {
             };
             if (self.first_read_error == null) @panic("reset test first read unexpectedly succeeded");
 
-            self.second_read_len = self.client_io.vtable.netRead(
-                self.client_io.userdata,
+            self.second_read_len = netRead(
+                self.client_io,
                 stream.socket.handle,
                 &buffers,
             ) catch @panic("reset test terminal read failed");
@@ -4405,7 +4405,7 @@ test "io: multi-sector setLength extension is one atomic metadata operation" {
     try std.testing.expectEqual(@as(u64, 12), (try sim.env.disk.stat(.{ .path = "extend.bin" })).size);
     var bytes: [12]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 12), try file.readPositionalAll(io, &bytes, 0));
-    try std.testing.expectEqualStrings("data" ++ "\x00" ** 8, &bytes);
+    try std.testing.expectEqualStrings("data" ++ @as([8]u8, @splat(0)), &bytes);
 
     const operation_trace = world.traceBytes()[trace_start..];
     try std.testing.expect(std.mem.indexOf(u8, operation_trace, "disk.set_length") != null);
@@ -5285,22 +5285,22 @@ test "io: simulation tcp stream connects, accepts, reads, and writes" {
 
     var empty_buffer: [1]u8 = undefined;
     var empty_read: [1][]u8 = .{&empty_buffer};
-    try std.testing.expectError(error.Timeout, io.vtable.netRead(io.userdata, accepted.socket.handle, &empty_read));
+    try std.testing.expectError(error.ConnectionTimedOut, netRead(io, accepted.socket.handle, &empty_read));
 
     const client_data: [1][]const u8 = .{"ping"};
-    try std.testing.expectEqual(@as(usize, 4), try io.vtable.netWrite(io.userdata, client.socket.handle, "", &client_data, 1));
+    try std.testing.expectEqual(@as(usize, 4), try netWrite(io, client.socket.handle, "", &client_data, 1));
 
     var server_buffer: [4]u8 = undefined;
     var server_data: [1][]u8 = .{&server_buffer};
-    try std.testing.expectEqual(@as(usize, 4), try io.vtable.netRead(io.userdata, accepted.socket.handle, &server_data));
+    try std.testing.expectEqual(@as(usize, 4), try netRead(io, accepted.socket.handle, &server_data));
     try std.testing.expectEqualStrings("ping", &server_buffer);
 
     const server_reply: [1][]const u8 = .{"pong"};
-    try std.testing.expectEqual(@as(usize, 4), try io.vtable.netWrite(io.userdata, accepted.socket.handle, "", &server_reply, 1));
+    try std.testing.expectEqual(@as(usize, 4), try netWrite(io, accepted.socket.handle, "", &server_reply, 1));
 
     var client_buffer: [4]u8 = undefined;
     var client_read: [1][]u8 = .{&client_buffer};
-    try std.testing.expectEqual(@as(usize, 4), try io.vtable.netRead(io.userdata, client.socket.handle, &client_read));
+    try std.testing.expectEqual(@as(usize, 4), try netRead(io, client.socket.handle, &client_read));
     try std.testing.expectEqualStrings("pong", &client_buffer);
 }
 
@@ -5322,7 +5322,7 @@ test "io: closed sockets retire backend state" {
 
     client.close(io);
     try std.testing.expectEqual(@as(usize, 2), backend.handles.items.len);
-    try std.testing.expectError(error.SocketUnconnected, io.vtable.netWrite(io.userdata, client.socket.handle, "", &.{""}, 1));
+    try std.testing.expectError(error.SocketUnconnected, netWrite(io, client.socket.handle, "", &.{""}, 1));
 
     accepted.close(io);
     try std.testing.expectEqual(@as(usize, 1), backend.handles.items.len);
@@ -5352,14 +5352,14 @@ test "io: closing listener retires pending unaccepted connections" {
     const chunk: [1][]const u8 = .{"ping"};
     try std.testing.expectError(
         error.ConnectionResetByPeer,
-        io.vtable.netWrite(io.userdata, client.socket.handle, "", &chunk, 1),
+        netWrite(io, client.socket.handle, "", &chunk, 1),
     );
 
     var buffer: [4]u8 = undefined;
     var read_buffers: [1][]u8 = .{&buffer};
     try std.testing.expectError(
         error.ConnectionResetByPeer,
-        io.vtable.netRead(io.userdata, client.socket.handle, &read_buffers),
+        netRead(io, client.socket.handle, &read_buffers),
     );
 
     client.close(io);
@@ -5885,8 +5885,8 @@ const QueueBackpressure = struct {
 
         while (self.received_len < self.received.len) {
             var bufs: [1][]u8 = .{self.received[self.received_len..]};
-            const read = self.server_io.vtable.netRead(
-                self.server_io.userdata,
+            const read = netRead(
+                self.server_io,
                 stream.socket.handle,
                 &bufs,
             ) catch |err| {
@@ -5913,8 +5913,8 @@ const QueueBackpressure = struct {
         var written: usize = 0;
         while (written < payload.len) {
             const chunk: [1][]const u8 = .{payload[written..]};
-            written += self.client_io.vtable.netWrite(
-                self.client_io.userdata,
+            written += netWrite(
+                self.client_io,
                 stream.socket.handle,
                 "",
                 &chunk,
@@ -6011,8 +6011,8 @@ const BackpressureTeardown = struct {
         var written: usize = 0;
         while (written < payload.len) {
             const chunk: [1][]const u8 = .{payload[written..]};
-            written += self.client_io.vtable.netWrite(
-                self.client_io.userdata,
+            written += netWrite(
+                self.client_io,
                 stream.socket.handle,
                 "",
                 &chunk,
@@ -6104,8 +6104,8 @@ test "io: closing a connection reclaims its queued stream frames" {
             defer stream.close(self.client_io);
 
             const data: [1][]const u8 = .{"queued"};
-            _ = self.client_io.vtable.netWrite(
-                self.client_io.userdata,
+            _ = netWrite(
+                self.client_io,
                 stream.socket.handle,
                 "",
                 &data,
@@ -6136,4 +6136,59 @@ test "io: closing a connection reclaims its queued stream frames" {
         @as(usize, 0),
         try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
     );
+}
+
+// Exercise the same operation dispatch used by Zig 0.17 stream readers/writers.
+fn netRead(io: std.Io, handle: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+    return (try (try io.operate(.{ .net_read = .{
+        .socket_handle = handle,
+        .data = data,
+    } })).net_read).data_len;
+}
+
+fn netWrite(io: std.Io, handle: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+    return try (try io.operate(.{ .net_write = .{
+        .socket_handle = handle,
+        .header = header,
+        .data = data,
+        .splat = splat,
+    } })).net_write;
+}
+
+test "io: network operations preserve read metadata and reject ancillary writes" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    var backend = testIo(&world);
+    defer backend.deinit();
+    const io = backend.io();
+    const address = try Io.net.IpAddress.parseIp4("127.0.0.1", 1245);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    const client = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    const accepted = try server.accept(io);
+    defer Io.net.Socket.closeMany(io, &.{ client.socket, accepted.socket });
+
+    const rejected = try io.operate(.{ .net_write = .{
+        .socket_handle = client.socket.handle,
+        .data = &.{"discard"},
+        .control = &.{1},
+    } });
+    try std.testing.expectError(error.Unexpected, rejected.net_write);
+    try std.testing.expectEqual(@as(usize, 4), try netWrite(io, client.socket.handle, "", &.{"ping"}, 1));
+
+    var bytes: [16]u8 = undefined;
+    var buffers: [1][]u8 = .{&bytes};
+    var control: [8]u8 = @splat(0xaa);
+    const result = try accepted.readWithControl(io, &buffers, &control);
+    try std.testing.expectEqual(@as(usize, 4), result.data_len);
+    try std.testing.expectEqualStrings("ping", bytes[0..result.data_len]);
+    try std.testing.expectEqual(@as(usize, 0), result.control_len);
+    try std.testing.expect(!result.control_truncated);
+    try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0xaa)), &control);
+
+    try client.shutdown(io, .send);
+    const eof = try accepted.readWithControl(io, &buffers, &control);
+    try std.testing.expectEqual(@as(usize, 0), eof.data_len);
+    try std.testing.expectEqual(@as(usize, 0), eof.control_len);
+    try std.testing.expect(!eof.control_truncated);
 }

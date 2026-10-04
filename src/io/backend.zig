@@ -2227,13 +2227,13 @@ const sim_vtable: Io.VTable = .{
     .processSetCurrentDir = Io.failingProcessSetCurrentDir,
     .processSetCurrentPath = Io.failingProcessSetCurrentPath,
     .processReplace = Io.failingProcessReplace,
-    .processReplacePath = Io.failingProcessReplacePath,
     .processSpawn = Io.failingProcessSpawn,
-    .processSpawnPath = Io.failingProcessSpawnPath,
     .childWait = Io.unreachableChildWait,
     .childKill = Io.unreachableChildKill,
 
     .progressParentFile = Io.failingProgressParentFile,
+    .inheritParentDir = Io.failingInheritParentDir,
+    .inheritParentFile = Io.failingInheritParentFile,
 
     .random = simRandom,
     .randomSecure = simRandomSecure,
@@ -2249,9 +2249,6 @@ const sim_vtable: Io.VTable = .{
     .netListenUnix = Io.failingNetListenUnix,
     .netConnectUnix = Io.failingNetConnectUnix,
     .netSocketCreatePair = Io.failingNetSocketCreatePair,
-    .netSend = Io.failingNetSend,
-    .netRead = net_ops.simNetRead,
-    .netWrite = net_ops.simNetWrite,
     .netWriteFile = Io.failingNetWriteFile,
     .netClose = net_ops.simNetClose,
     .netShutdown = net_ops.simNetShutdown,
@@ -2912,6 +2909,24 @@ fn simOperate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.O
         },
         .device_io_control => unreachable,
         .net_receive => .{ .net_receive = .{ error.NetworkDown, 0 } },
+        .net_send => .{ .net_send = .{ error.NetworkDown, 0 } },
+        .net_read => |read| blk: {
+            const data_len = net_ops.simNetRead(userdata, read.socket_handle, read.data) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => break :blk .{ .net_read = @errorCast(err) },
+            };
+            // Simulated TCP streams carry no ancillary data.
+            break :blk .{ .net_read = .{ .data_len = data_len } };
+        },
+        .net_write => |write| blk: {
+            // Do not silently discard unsupported ancillary data or send its payload.
+            if (write.control.len != 0) break :blk .{ .net_write = error.Unexpected };
+            const written = net_ops.simNetWrite(userdata, write.socket_handle, write.header, write.data, write.splat) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => break :blk .{ .net_write = @errorCast(err) },
+            };
+            break :blk .{ .net_write = written };
+        },
     };
 }
 
