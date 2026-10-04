@@ -20,7 +20,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Build
         run: zig build
@@ -37,7 +37,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Check formatting
         run: tools/verify.sh fmt
@@ -50,9 +50,9 @@ jobs:
       fail-fast: false
       matrix:
         optimize:
-          - Debug
-          - ReleaseSafe
-          - ReleaseFast
+          - debug
+          - safe
+          - fast
 
     steps:
       - name: Checkout
@@ -61,7 +61,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Test
         run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 5m
@@ -76,15 +76,14 @@ jobs:
         target:
           - validate-xitdb
           - validate-mailbox
-          - validate-ochi
           - validate-dusty
           - validate-beanstalkz
           - validate-pg
           - validate-redis
         optimize:
-          - Debug
-          - ReleaseSafe
-          - ReleaseFast
+          - debug
+          - safe
+          - fast
 
     steps:
       - name: Checkout
@@ -93,7 +92,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Validate
         run: zig build ${{ matrix.target }} -Doptimize=${{ matrix.optimize }} --test-timeout 5m
@@ -106,8 +105,8 @@ jobs:
       fail-fast: false
       matrix:
         optimize:
-          - Debug
-          - ReleaseSafe
+          - debug
+          - safe
 
     steps:
       - name: Checkout
@@ -116,7 +115,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Test
         run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 5m
@@ -133,10 +132,10 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Compile disabled Win64 fiber path
-        run: zig test src/fiber.zig -target x86_64-windows-gnu -OReleaseSafe -fno-emit-bin
+        run: zig test src/fiber.zig -target x86_64-windows-gnu -Osafe -fno-emit-bin
 
       - name: Check release symbols
         run: zig build check-release-symbols

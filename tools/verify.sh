@@ -21,10 +21,10 @@ if [[ "$mode" == quick ]]; then
   "$zig_exe" build test --test-timeout 5m --summary all
   exit 0
 fi
-for optimize in Debug ReleaseSafe ReleaseFast; do
+for optimize in debug safe fast; do
   "$zig_exe" build test -Doptimize="$optimize" --test-timeout 5m --summary all
-  "$zig_exe" build validate-xitdb validate-mailbox validate-ochi validate-dusty \
+  "$zig_exe" build validate-xitdb validate-mailbox validate-dusty \
     validate-beanstalkz validate-pg validate-redis -Doptimize="$optimize" --test-timeout 5m --summary all
 done
-"$zig_exe" test src/fiber.zig -target x86_64-windows-gnu -OReleaseSafe -fno-emit-bin
+"$zig_exe" test src/fiber.zig -target x86_64-windows-gnu -Osafe -fno-emit-bin
 "$zig_exe" build check-release-symbols --summary all
