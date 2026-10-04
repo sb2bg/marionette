@@ -356,5 +356,8 @@ fn allocationCase(allocator: std.mem.Allocator) !void {
 }
 
 test "campaign: allocation failure releases retained and resumed state" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCase, .{});
+    // In-place growth depends on SafeAllocator's heap layout. Force allocation
+    // on growth so the exhaustive failure sweep has a stable allocation count.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), allocationCase, .{});
 }

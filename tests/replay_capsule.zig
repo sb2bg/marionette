@@ -58,7 +58,10 @@ test "replay capsule: owned byte decisions survive JSON roundtrip and execute ag
             try std.testing.expectEqual(mar.RunFailureKind.scenario_error, replay.failed.kind);
             try std.testing.expectEqualStrings("PlantedFailure", replay.failed.error_name.?);
         }
-        try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeWithAllocator, .{bytes});
+        // SafeAllocator may remap a growing buffer in place depending on heap
+        // layout. Make growth allocate so every failure pass has the same count.
+        var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), decodeWithAllocator, .{bytes});
     }
 }
 
