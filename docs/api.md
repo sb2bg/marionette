@@ -112,7 +112,7 @@ result channel.
 - `env()`: the node-zero application environment;
 - `control()`: harness-only fault and scheduling controls.
 
-If `App` defines `deinit`, the runner calls it after every replay.
+If `App` defines `pub fn deinit`, the runner calls it after every replay.
 
 `StateCheck(State)` contains a unique, nonempty stable property `name`, a
 function taking `*const State`, and a `phase: CheckPhase` (`after_init`,

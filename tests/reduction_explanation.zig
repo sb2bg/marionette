@@ -239,7 +239,7 @@ test "reduction: zero-byte decisions are captured in the fresh executable tape" 
     try std.testing.expectEqual(@as(usize, 0), reduced.remaining_groups);
     const entries = reduced.report().failed.decision_tape.entries;
     try std.testing.expectEqual(@as(usize, 1), entries.len);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), entries[0].byte_value);
+    try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0))), entries[0].byte_value);
     try std.testing.expectEqual(@as(usize, 0), reduced.report().failed.second_trace.len);
 }
 

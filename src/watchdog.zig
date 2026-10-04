@@ -227,7 +227,7 @@ fn forkWatchdogWorker() RunError!std.posix.pid_t {
 
 fn watchdogWorkerExited(pid: std.posix.pid_t) bool {
     if (comptime builtin.os.tag == .linux and !builtin.link_libc) {
-        var status: u32 = 0;
+        var status: i32 = 0;
         const rc = std.os.linux.waitpid(pid, &status, std.posix.W.NOHANG);
         return switch (std.posix.errno(rc)) {
             .SUCCESS => rc != 0,
@@ -247,7 +247,7 @@ fn watchdogWorkerExited(pid: std.posix.pid_t) bool {
 
 fn waitWatchdogWorker(pid: std.posix.pid_t) void {
     if (comptime builtin.os.tag == .linux and !builtin.link_libc) {
-        var status: u32 = 0;
+        var status: i32 = 0;
         while (true) {
             const rc = std.os.linux.waitpid(pid, &status, 0);
             switch (std.posix.errno(rc)) {

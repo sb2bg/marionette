@@ -1281,7 +1281,7 @@ test "disk: crash staging does not clone unrelated durable media" {
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
 
-    const durable = "D" ** 256;
+    const durable = &@as([256]u8, @splat('D'));
     try disk.disk().write(.{ .path = "large.durable", .offset = 0, .bytes = durable });
     try disk.disk().sync(.{ .path = "large.durable" });
     try disk.disk().syncDir(.{ .path = "." });
@@ -1320,7 +1320,7 @@ test "disk: setLength staging does not clone unrelated durable media" {
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
 
-    const durable = "D" ** 256;
+    const durable = &@as([256]u8, @splat('D'));
     try disk.disk().write(.{ .path = "large.durable", .offset = 0, .bytes = durable });
     try disk.disk().sync(.{ .path = "large.durable" });
     try disk.disk().syncDir(.{ .path = "." });
@@ -1340,7 +1340,7 @@ test "disk: setLength staging does not clone unrelated durable media" {
     try std.testing.expectEqual(@as(u64, 8), (try disk.disk().stat(.{ .path = "small.pending" })).size);
     var small_after: [8]u8 = undefined;
     try disk.disk().read(.{ .path = "small.pending", .offset = 0, .buffer = &small_after });
-    try std.testing.expectEqualStrings("data" ++ "\x00" ** 4, &small_after);
+    try std.testing.expectEqualStrings("data" ++ @as([4]u8, @splat(0)), &small_after);
 }
 
 test "disk: exhaustive tiny crash boundaries preserve unrelated durable truth" {
@@ -1429,7 +1429,7 @@ test "disk: sync metamorphically promotes a lost pending write to durable truth"
     try unsynced.control().restart();
     var absent: [4]u8 = undefined;
     try unsynced.disk().read(.{ .path = "wal.log", .offset = 0, .buffer = &absent });
-    try std.testing.expectEqualStrings("\x00" ** 4, &absent);
+    try std.testing.expectEqualStrings(&@as([4]u8, @splat(0)), &absent);
 
     var synced_world = try World.init(std.testing.allocator, .{ .seed = 7 });
     defer synced_world.deinit();
@@ -1480,7 +1480,7 @@ test "disk: armed crash fires at the operation boundary and disarms" {
         .offset = 0,
         .buffer = &recovered,
     });
-    try std.testing.expectEqualStrings("\x00" ** 8, &recovered);
+    try std.testing.expectEqualStrings(&@as([8]u8, @splat(0)), &recovered);
 
     const trace = world.traceBytes();
     try std.testing.expect(std.mem.indexOf(u8, trace, "disk.fault kind=armed_crash after_ops=1") != null);

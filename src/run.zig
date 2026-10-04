@@ -369,7 +369,7 @@ fn simInitReturnType(comptime init_app: anytype) type {
         .@"fn" => |fn_info| fn_info,
         else => @compileError("runSimCase config.init must be a function"),
     };
-    if (info.params.len != 1 or info.params[0].type != World.Simulation) {
+    if (info.param_types.len != 1 or info.param_types[0] != World.Simulation) {
         @compileError("runSimCase config.init must take `mar.Sim`");
     }
     return info.return_type orelse @compileError("runSimCase config.init must return app state");
@@ -380,7 +380,7 @@ fn validateSimScenario(comptime Case: type, comptime scenario: anytype) void {
         .@"fn" => |fn_info| fn_info,
         else => @compileError("runSimCase config.scenario must be a function"),
     };
-    if (info.params.len != 1 or info.params[0].type != *Case) {
+    if (info.param_types.len != 1 or info.param_types[0] != *Case) {
         @compileError("runSimCase config.scenario must take `*mar.SimCase(App)`");
     }
     const Return = info.return_type orelse @compileError("runSimCase config.scenario must return void or !void");
@@ -830,7 +830,7 @@ test "resource checks: opt in, cleanup boundary, replay and primary errors" {
             const io = sim.env.io();
             return .{ .io = io, .file = try std.Io.Dir.cwd().createFile(io, "leaked file", .{}) };
         }
-        fn deinit(self: *@This()) void {
+        pub fn deinit(self: *@This()) void {
             if (self.close) self.file.close(self.io);
         }
         fn leaveOpen(_: *SimCase(@This())) void {}
@@ -1096,7 +1096,7 @@ const SimCaseApp = struct {
         return .{ .env = sim.env };
     }
 
-    fn deinit(_: *SimCaseApp) void {
+    pub fn deinit(_: *SimCaseApp) void {
         sim_case_deinit_count += 1;
     }
 };
@@ -1180,7 +1180,7 @@ const PointerSimApp = struct {
         return app;
     }
 
-    fn deinit(self: *PointerSimApp) void {
+    pub fn deinit(self: *PointerSimApp) void {
         pointer_sim_app_deinit_count += 1;
         self.allocator.destroy(self);
     }
@@ -1215,7 +1215,7 @@ const TeardownTraceApp = struct {
         return .{ .env = sim.env };
     }
 
-    fn deinit(self: *TeardownTraceApp) void {
+    pub fn deinit(self: *TeardownTraceApp) void {
         teardown_trace_count += 1;
         self.env.record("app.deinit count={}", .{teardown_trace_count}) catch unreachable;
     }

@@ -68,7 +68,7 @@ pub const max_wait_key_payload = std.math.maxInt(usize) >> wait_key_tag_bits;
 
 pub fn waitKeyChecked(comptime tag: WaitKeyTag, id: usize) WaitKeyError!usize {
     if (id > max_wait_key_payload) return error.WaitKeyPayloadOutOfRange;
-    return (id << wait_key_tag_bits) | @intFromEnum(tag);
+    return (id << wait_key_tag_bits) | @backingInt(tag);
 }
 
 pub fn waitKey(comptime tag: WaitKeyTag, id: usize) usize {
@@ -245,6 +245,6 @@ pub fn Ops(comptime Backend: type) type {
 
 /// Decode the one modeled wait dependency with a unique owner: task completion.
 pub fn taskWaitTarget(key: usize) ?u64 {
-    if (key & ((1 << wait_key_tag_bits) - 1) != @intFromEnum(WaitKeyTag.task)) return null;
+    if (key & ((1 << wait_key_tag_bits) - 1) != @backingInt(WaitKeyTag.task)) return null;
     return key >> wait_key_tag_bits;
 }
