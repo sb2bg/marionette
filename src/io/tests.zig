@@ -3806,7 +3806,10 @@ test "io: file metadata stays stable across table growth during disk latency" {
         }
     };
 
-    var world = try World.init(task_world_allocator, .{ .seed = 0xF11E, .tick_ns = 10 });
+    // Force table growth to relocate even when the testing allocator can grow
+    // in place, so the suspended write exercises metadata pointer stability.
+    var no_resize = std.testing.FailingAllocator.init(task_world_allocator, .{ .resize_fail_index = 0 });
+    var world = try World.init(no_resize.allocator(), .{ .seed = 0xF11E, .tick_ns = 10 });
     defer world.deinit();
     const sim = try world.simulate(.{
         .disk = .{ .sector_size = 4, .min_latency_ns = 100 },
