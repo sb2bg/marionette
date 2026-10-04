@@ -2,6 +2,10 @@
 
 ## v0.8.0 - Unreleased
 
+- Requires Zig 0.17.0; updates the source, toolchain pin, and CI checks for the
+  new compiler and standard library. Updates xitdb, dusty, and pg.zig validation
+  pins; Ochi validation awaits upstream Zig 0.17 support.
+
 - Adds `runCampaign` for bounded unattended seed campaigns over an ordinary
   `runSimCase` config. Campaigns stop on a case count, failure limit, or host
   time budget; survive watchdog-contained hangs and crashes; group failures by

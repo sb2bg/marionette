@@ -10,7 +10,7 @@ Deterministic I/O and simulation testing for Zig.
 
 [![Docs](https://img.shields.io/badge/docs-0a7ea4?style=for-the-badge&logo=readthedocs&logoColor=white)](https://sb2bg.github.io/marionette/)
 [![CI](https://img.shields.io/github/actions/workflow/status/sb2bg/marionette/ci.yml?branch=main&style=for-the-badge&logo=github&logoColor=white&label=ci)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
-[![Zig](https://img.shields.io/badge/zig-0.16-%23F7A41D?style=for-the-badge&logo=zig&logoColor=white)](https://ziglang.org/download)
+[![Zig](https://img.shields.io/badge/zig-0.17-%23F7A41D?style=for-the-badge&logo=zig&logoColor=white)](https://ziglang.org/download)
 [![Status](https://img.shields.io/badge/status-alpha-ff7a00?style=for-the-badge)](#status)
 [![License](https://img.shields.io/badge/license-MIT-3fb950?style=for-the-badge)](#license)
 
@@ -132,7 +132,16 @@ See the [API roles and compatibility policy](docs/api.md#api-roles-and-compatibi
 
 ## Install
 
-Marionette requires Zig 0.16.x.
+This development checkout requires Zig 0.17.x. Until the next release, use it
+as a local dependency in your `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .marionette = .{ .path = "../marionette" },
+},
+```
+
+The latest released tag, v0.7.2, requires Zig 0.16.x and can be installed with:
 
 ```sh
 zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.7.2.tar.gz
@@ -178,7 +187,7 @@ not only simulator-native examples:
 
 | Boundary                           | Validation target     |
 | ---------------------------------- | --------------------- |
-| Storage and crash recovery         | `xit-vcs/xitdb`, Ochi |
+| Storage and crash recovery         | `xit-vcs/xitdb` (Ochi awaits upstream Zig 0.17 support) |
 | Cooperative concurrency            | `g41797/mailbox`      |
 | HTTP over `std.Io.net`             | `lalinsky/dusty`      |
 | Queue protocol and process restart | `g41797/beanstalkz`   |

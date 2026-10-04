@@ -11,7 +11,7 @@ to the same tree.
    user-visible change since the previous tag.
 3. Point README and documentation install commands at `vX.Y.Z`.
 4. Run formatting and `git diff --check`.
-5. Run the Debug, ReleaseSafe, and ReleaseFast test and validation matrix.
+5. Run the debug, safe, and fast test and validation matrix.
 6. Push the release commit and require green CI and Pages builds.
 
 Do not create the tag while any advertised validation or supported-platform

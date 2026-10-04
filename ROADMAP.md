@@ -47,8 +47,10 @@ A 0.9 or release-candidate phase should close the following evidence gates.
   replay is not required; artifact versioning and retention rules are explicit.
 - **Operational reliability:** campaigns enforce budgets, retain partial failures,
   deduplicate and resume correctly, and leave no leaked workers or owned resources.
-  Keep the seven pinned external validations release-blocking and require a
+  Keep the pinned external validations release-blocking and require a
   consecutive 30-day nightly run with no unexplained simulator failures or hangs.
+  Ochi is suspended until upstream supports Zig 0.17; restore it to the
+  release-blocking set once it builds again.
 - **Independent usability:** at least two independently maintained real projects
   can integrate, diagnose, replay, and preserve regressions using published APIs
   and documentation without editing Marionette internals.
@@ -88,7 +90,7 @@ measurement.
 
 ## Contribution Gate
 
-Changes must pass Debug, ReleaseSafe, and ReleaseFast tests, formatting, tidy,
+Changes must pass debug, safe, and fast tests, formatting, tidy,
 relevant target checks, and applicable external validations. Model changes need
 contract/state-machine coverage; ownership-changing fallible paths need
 targeted failure coverage. Public or semantic changes update the relevant

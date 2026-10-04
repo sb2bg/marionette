@@ -3,7 +3,7 @@
 Run the fixed workloads without changing simulator semantics:
 
 ```sh
-zig build baseline -Doptimize=ReleaseFast
+zig build baseline -Doptimize=fast
 ```
 
 The command emits one JSON line. It warms each path once, then measures 10,000
