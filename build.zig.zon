@@ -25,8 +25,8 @@
             .lazy = true,
         },
         .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig#1ca2d58d412af038254da5a67882c5b68977c34a",
-            .hash = "pg-0.0.0-Wp_7gY0XBwAT4SpnVT7CjXE5IbUUWMpUy10L_BkyPeg9",
+            .url = "git+https://github.com/karlseguin/pg.zig#d7832be453d4d34f6824c32eda6a256d0d50b79d",
+            .hash = "pg-0.0.0-Wp_7gbsXBwDeqybo2lMmbQTSzsice624Lew3SUYIK7lA",
             .lazy = true,
         },
         .beanstalkz = .{
