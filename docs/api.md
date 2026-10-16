@@ -90,8 +90,10 @@ error/check names, owned decision tape, partial first trace, and a second trace
 when replay diverged. `takeDecisionTape` transfers tape ownership.
 
 `RunFailureKind` includes scenario and check errors, structured scheduler
-deadlocks/errors, watchdog-classified `non_yielding`/`livelock`/`worker_crashed` failures,
-`replay_diverged`, and the three trace/outcome replay-mismatch kinds.
+deadlocks/errors, deterministic `step_budget_exceeded` failures,
+watchdog-classified `non_yielding`/`livelock`/`worker_crashed` failures,
+`replay_diverged`, `resource_leak`, and the three trace/outcome
+replay-mismatch kinds.
 
 `WatchdogOptions` enables optional worker-process containment with
 `stall_timeout_ns`, `run_timeout_ns`, `trace_capacity`, and `result_capacity` bounds. It is
@@ -158,8 +160,9 @@ Traced harness/model randomness uses `World.randomU64`, `World.randomBool`,
   the simulation value.
 
 `World.SimulateOptions` configures allocation faults, disk geometry/latency,
-optional network topology, task stacks, start jitter, and fiber overflow
-diagnostics.
+optional network topology, task stacks, start jitter, fiber overflow
+diagnostics, and an optional deterministic `step_budget` (see
+[Step Budget](run.md#step-budget)).
 
 `World.Options.decisions` selects decision recording (the default) or exact
 replay from a borrowed `[]const Decision`. `chooseU64`, `chooseBool`, and
@@ -234,6 +237,9 @@ the active runtime through `World.SimulateOptions.network` instead.
 ## Reduction and Explanation
 
 `reduceSimCase(config, ReductionOptions)` returns an owned `ReductionResult`.
+`reduceCapsule(config, &capsule, identity, ReductionOptions)` first replays a
+retained capsule exactly, then reduces it under the capsule's own options, so a
+fresh process needs only the pinned harness and the artifact.
 `FailureFingerprint` compares full stable failure identities. `ArtifactOptions`
 and `writeRunArtifacts` persist reports through caller-supplied host I/O.
 `Recorder.event` returns `?EventId`; `Recorder.beginOperation` returns an
@@ -246,5 +252,9 @@ See the [complete contracts and examples](reduction-and-explanation.md).
 `runCampaign(config, CampaignOptions)` runs a bounded range of `runSimCase`
 seeds and returns an owned `CampaignSummary` with counts, `CampaignStopReason`,
 one `CampaignFailure` per distinct failure identity, and `CampaignCaseError`
-entries for runner errors. `CampaignArtifacts` selects a new evidence directory.
-See [Campaigns](campaigns.md).
+entries (with a `CampaignCasePhase`) for runner errors. `CampaignArtifacts`
+selects a new or resumed evidence directory. Set `CampaignOptions.reduction` to
+reduce each new reproducible failure; its `CampaignReduction` records the cost
+and outcome. `CampaignSummary.metrics()` returns `CampaignMetrics`.
+`loadCampaignSummary(allocator, io, dir)` reads a campaign journal without
+running anything. See [Campaigns](campaigns.md).

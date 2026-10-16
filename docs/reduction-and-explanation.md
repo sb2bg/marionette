@@ -81,6 +81,25 @@ The minimized capsule contains the actual decisions, including disabled actions.
 Replay it with the original harness and checks: no external removal mask or
 modified workload is needed. Retain the pinned executable and build/SUT identity.
 
+To reduce a retained capsule in a fresh process, pass the original harness and
+the capsule's identity:
+
+```zig
+var reduced = try mar.reduceCapsule(.{
+    .allocator = allocator,
+    .init = App.init,
+    .scenario = scenario,
+    .checks = &checks,
+}, &capsule, identity, .{ .max_attempts = 256 });
+defer reduced.deinit();
+```
+
+`reduceCapsule` rejects an incompatible identity, replays the capsule exactly as
+the baseline, and runs candidates under the capsule's runtime and simulation
+options, including its seed and watchdog. The result is the same as reducing
+the original config at that seed. [Campaigns](campaigns.md#reduction) reduce new
+failures this way automatically.
+
 Run the complete example:
 
 ```sh

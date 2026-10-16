@@ -9,8 +9,10 @@ tools/verify.sh        # full native optimization and external validation matrix
 ```
 
 Set `ZIG=/path/to/zig` to select a toolchain. The full command runs debug,
-safe, and fast tests plus all six pinned external validations,
-then compiles the disabled Win64 fiber path and checks release symbols.
+safe, and fast tests plus all six pinned external validations and the
+campaign-to-regression validation, then compiles the disabled Win64 fiber path
+and an SVE AArch64 Linux build (`zig build check-sve`) and checks release
+symbols.
 The ordinary test step includes tidy, the package consumer, supported host fiber
 checks, and the bounded queue, network KV, and storage compatibility validations.
 External validations may fetch their pinned lazy dependencies on the first run.
@@ -32,6 +34,11 @@ The [release checklist](releasing.md) also requires Pages and clean installation
 `tests/compatibility_072.zig` compares lifecycle and reduction traces, tapes,
 capsules, and manifests byte for byte with fixtures captured from v0.7.1. Keep
 pinned-build identity rejection tests enabled even when these bytes match.
+
+`zig build validate-campaigns` runs, kills, resumes, replays, and reduces
+campaigns on pinned xitdb and redis.zig in separate processes; see
+[Campaigns](campaigns.md#validation-on-real-systems). Its evidence lands in
+`zig-out/campaigns` unless `-Dcampaign-dir` says otherwise.
 
 For repeatable measurements before performance work, see
 [Performance Baseline](performance.md).

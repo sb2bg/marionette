@@ -160,6 +160,8 @@ Failure kinds are:
 - `scheduler_error`;
 - `non_yielding`;
 - `livelock`;
+- `worker_crashed`;
+- `step_budget_exceeded`;
 - `replay_diverged`;
 - `determinism_mismatch`;
 - `first_run_failed`;
@@ -198,6 +200,31 @@ the full failure or trace.
 twice. It stops at the first failure; use [`runCampaign`](campaigns.md) to keep
 going, group failures, and retain evidence. Focused unit tests should use small
 counts.
+
+## Step Budget
+
+A task that keeps sleeping, waking a peer, or retrying never deadlocks, so
+without a bound it simply runs forever. Set a deterministic budget on the
+simulation to turn that into an ordinary failure:
+
+```zig
+.simulate = mar.World.SimulateOptions{ .step_budget = 100_000 },
+```
+
+One step is a task dispatch or a scheduler-driven clock advance, so loops that
+only sleep, and tasks that only wake each other, both count. When the budget
+runs out the scheduler records
+`scheduler.step_budget_exceeded budget=<u64> ready=<u64> blocked=<u64>` and the
+run fails as `step_budget_exceeded` with error name `StepBudgetExceeded`. No
+task runs past the budget, including during application cleanup.
+
+The count depends only on the decisions, so both executions stop at the same
+step. Unlike a watchdog `livelock`, the decision tape is complete: the failure
+encodes as a replay capsule, replays exactly, and can be reduced. Choose a
+budget well above what passing runs use; a passing run's trace does not depend
+on the budget. Code that never yields takes no steps, so it still needs the
+watchdog below. An unset budget (the default) is omitted from serialized
+options, so earlier artifacts keep their bytes.
 
 ## Liveness Watchdog
 

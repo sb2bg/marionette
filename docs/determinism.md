@@ -74,6 +74,12 @@ failures after different event counts, the completed event stream from one run
 must be a byte prefix of the other. A divergence inside their shared prefix
 remains a determinism mismatch.
 
+A `SimulateOptions.step_budget` bounds yielding work without host time. Steps
+are task dispatches and scheduler-driven clock advances, counted from the
+decisions alone, so an exceeded budget is an ordinary deterministic failure
+with a complete tape. Prefer it to the watchdog for code that yields; keep the
+watchdog for code that may never yield.
+
 ## Trace Stability
 
 Traces use global event indexes and stable scalar fields. They must not contain

@@ -106,6 +106,10 @@ Rules:
 - A proven scheduler deadlock records
   `scheduler.wait_state waits=<task>:<key>[@<deadline>],...` in task order,
   followed by `scheduler.deadlock tasks=<u64> completed=<u64> blocked=<u64>`.
+- A run whose `SimulateOptions.step_budget` runs out records
+  `scheduler.step_budget_exceeded budget=<u64> ready=<u64> blocked=<u64>` once,
+  at the refused step. This failure-only event appears only when a budget is
+  set.
 - Watchdog-enabled runs record `run.watchdog` with the configured stall,
   total-run, and trace-capacity bounds. If the host worker must be terminated,
   the preserved trace ends with `watchdog.non_yielding task=<u64-or-main>` or
