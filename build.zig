@@ -136,6 +136,21 @@ pub fn build(b: *std.Build) void {
     );
     check_release_symbols_step.dependOn(&check_release_symbols_cmd.step);
 
+    // SVE makes LLVM reserve registers that the fiber switch could otherwise
+    // name as clobbers, and the warning only appears during code generation.
+    // Request the binary so the compile step cannot skip LLVM.
+    const sve_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = b.resolveTargetQuery(.{
+            .cpu_arch = .aarch64,
+            .os_tag = .linux,
+            .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.neoverse_v1 },
+        }),
+        .optimize = .safe,
+    }) });
+    _ = sve_tests.getEmittedBin();
+    b.step("check-sve", "Compile the simulator for an SVE AArch64 Linux target").dependOn(&sve_tests.step);
+
     if (b.lazyDependency("xitdb", .{
         .target = target,
         .optimize = optimize,

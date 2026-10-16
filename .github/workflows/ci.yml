@@ -137,5 +137,8 @@ jobs:
       - name: Compile disabled Win64 fiber path
         run: zig test src/fiber.zig -target x86_64-windows-gnu -Osafe -fno-emit-bin
 
+      - name: Compile for SVE AArch64 Linux
+        run: zig build check-sve
+
       - name: Check release symbols
         run: zig build check-release-symbols
