@@ -10,25 +10,12 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.8 — Dependable Campaigns
+## Next: Stabilization And 1.0 Acceptance
 
-- Run bounded seed ranges with per-run watchdogs and a total campaign budget.
-  Add deterministic execution-step budgets for yielding workloads; preserve
-  external containment for code that never yields.
-- Save failure identities, traces, and complete replay capsules automatically;
-  retain explicit partial diagnostics for killed or crashed workers.
-- Deduplicate by full failure identity, resume interrupted campaigns, and upload
-  artifacts from CI. Apply bounded reduction only to eligible complete failures.
-- Exercise the complete campaign-to-regression workflow on existing real storage
-  and network/concurrency workloads with independent correctness oracles.
-- Track throughput, distinct failures, reproduction success, and reduction cost.
-
-Exit when an unattended campaign can survive a bad case, retain its evidence,
-resume its remaining work, and replay/reduce eligible failures from a fresh
-process using the pinned harness. Demonstrate this on at least two external
-workloads, including storage and network/concurrency behavior.
-
-## Stabilization And 1.0 Acceptance
+0.8 delivered dependable campaigns: bounded runs that survive bad cases,
+deterministic step budgets, deduplicated and reduced evidence, resume after a
+kill, fresh-process replay and reduction, and an end-to-end validation on
+pinned storage and network workloads (`zig build validate-campaigns`).
 
 A 0.9 or release-candidate phase should close the following evidence gates.
 1.0 commits to the documented deterministic `std.Io` subset and testing workflow.

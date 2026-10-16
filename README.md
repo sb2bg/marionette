@@ -121,20 +121,13 @@ including application random bytes, for a pinned build and workload.
 
 ## Install
 
-This development checkout requires Zig 0.17.x. Until the next release, use it
-as a local dependency in your `build.zig.zon`:
-
-```zig
-.dependencies = .{
-    .marionette = .{ .path = "../marionette" },
-},
-```
-
-The latest released tag, v0.7.2, requires Zig 0.16.x and can be installed with:
+Marionette v0.8.0 requires Zig 0.17.x:
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.7.2.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.8.0.tar.gz
 ```
+
+For Zig 0.16.x, use v0.7.2 instead.
 
 Add the module to your test build:
 
@@ -163,7 +156,11 @@ const mar = @import("marionette");
 - Cooperative `std.Io` tasks, groups, cancellation, and futex waits used by
   `Mutex` / `Condition` code.
 - Structured deadlock and scheduler failures with compact wait-state traces,
-  plus an opt-in worker watchdog for non-yielding loops and livelocks.
+  deterministic step budgets that make yielding livelocks replayable, and an
+  opt-in worker watchdog for code that never yields.
+- Unattended campaigns that deduplicate failures, retain replay capsules,
+  reduce each new failure, report throughput, and resume after a kill. Retained
+  failures replay and reduce from a fresh process.
 - Deterministic allocation faults and an explicit transition from fault
   exploration to liveness checking.
 - Experimental typed endpoints for testing protocol and state-machine behavior
@@ -183,13 +180,19 @@ not only simulator-native examples:
 | PostgreSQL client protocol and error recovery | `karlseguin/pg.zig` |
 | Redis retries, pipelining, and pool recovery | `lalinsky/redis.zig` |
 
-These campaigns have validated robust behavior and uncovered confirmed bugs in real third-party code. The [findings ledger](FOUND_BUGS.md) distinguishes confirmed system-under-test bugs from simulator boundaries and harness/model mistakes.
+These validations have shown robust behavior and uncovered confirmed bugs in real third-party code. The [findings ledger](FOUND_BUGS.md) distinguishes confirmed system-under-test bugs from simulator boundaries and harness/model mistakes.
 
 `zig build validate-pg` and `zig build validate-redis`
 exercise unmodified clients against scripted protocol peers, including fragmented
 and truncated replies. These cover selected client behavior rather than complete
 database servers or TLS. The Redis lost-reply case characterizes automatic
 reexecution of `INCR`; it does not assert an exactly-once guarantee.
+
+`zig build validate-campaigns` runs the full campaign workflow on xitdb and
+redis.zig: a campaign kills itself partway, a fresh process resumes it, and
+another replays and reduces every retained failure from its capsule alone. A
+5,000-case run of that workflow caught a false positive in Marionette's own
+xitdb oracle (XITDB-003), which is now fixed.
 
 ## Status
 
@@ -210,7 +213,7 @@ For exact contracts and unsupported behavior, see the
 
 - **Start -** [examples](docs/examples.md) and the [simulation runner](docs/run.md)
 - **Understand the design -** [architecture](docs/architecture.md) and [determinism contract](docs/determinism.md)
-- **Use the library -** [API reference](docs/api.md), [determinism contract](docs/determinism.md), and [trace format](docs/trace-format.md)
+- **Use the library -** [API reference](docs/api.md), [campaigns](docs/campaigns.md), [determinism contract](docs/determinism.md), and [trace format](docs/trace-format.md)
 - **Follow the project -** [roadmap](ROADMAP.md), [findings](FOUND_BUGS.md), and the [technical blog](docs/blog/index.md)
 - **Contribute -** [local verification](docs/development.md) and [performance baseline](docs/performance.md)
 
