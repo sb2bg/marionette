@@ -337,6 +337,194 @@ test "campaign: resume rejects a different or missing campaign" {
     try std.testing.expectError(error.InvalidCampaignJournal, mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 8, .artifacts = artifacts(tmp.dir, "campaign", true) }));
 }
 
+/// Removable noise around a seed-chosen bug, so reduction has work to do.
+const Noisy = struct {
+    noise: u32 = 0,
+    broken: bool = false,
+
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+    fn addNoise(case: *mar.SimCase(@This())) !void {
+        case.app.noise += 1;
+        try case.env().record("app.noise count={}", .{case.app.noise});
+    }
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        try case.action("noise.before", addNoise);
+        if (try case.control().world.chooseIntLessThan("workload.bug", u8, 4) == 3) case.app.broken = true;
+        try case.action("noise.after", addNoise);
+    }
+    fn invariant(case: *const mar.SimCase(@This())) !void {
+        if (case.app.broken) return error.InvariantBroken;
+    }
+    const checks = [_]mar.StateCheck(mar.SimCase(@This())){
+        .{ .name = "noisy.safe", .check = invariant },
+    };
+};
+
+const NoisyConfig = struct {
+    allocator: std.mem.Allocator,
+    seed: u64 = 0x2015E,
+    simulate: mar.World.SimulateOptions = .{},
+    comptime init: @TypeOf(Noisy.init) = Noisy.init,
+    comptime scenario: @TypeOf(Noisy.scenario) = Noisy.scenario,
+    comptime checks: []const mar.StateCheck(mar.SimCase(Noisy)) = &Noisy.checks,
+};
+
+test "campaign: reduces new reproducible failures and keeps minimized evidence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var summary = try mar.runCampaign(NoisyConfig{ .allocator = std.testing.allocator }, .{
+        .io = std.testing.io,
+        .cases = 16,
+        .reduction = .{},
+        .artifacts = artifacts(tmp.dir, "noisy", false),
+    });
+    defer summary.deinit();
+    try std.testing.expectEqual(@as(usize, 1), summary.failures.len);
+    const failure = summary.failures[0];
+    const reduction = failure.reduction.?;
+    try std.testing.expect(reduction.minimized and reduction.one_minimal);
+    try std.testing.expectEqual(@as(usize, 3), reduction.original_groups);
+    try std.testing.expectEqual(@as(usize, 1), reduction.remaining_groups);
+
+    const metrics = summary.metrics();
+    try std.testing.expectEqual(@as(u64, 1), metrics.distinct_failures);
+    try std.testing.expectEqual(@as(u64, 1), metrics.reproducible_failures);
+    try std.testing.expectEqual(@as(u64, 1), metrics.reduced_failures);
+    try std.testing.expectEqual(@as(u64, reduction.attempts), metrics.reduction_attempts);
+
+    // The minimized capsule replays alone, without the noise actions.
+    var campaign_dir = try tmp.dir.openDir(std.testing.io, "noisy", .{});
+    defer campaign_dir.close(std.testing.io);
+    var reduced_dir = try openReduced(campaign_dir, failure.artifact_name.?);
+    defer reduced_dir.close(std.testing.io);
+    const bytes = try readFile(reduced_dir, "replay.json");
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    var replayed = try mar.replaySimCase(NoisyConfig{ .allocator = std.testing.allocator }, &capsule, identity);
+    defer replayed.deinit();
+    try std.testing.expect(failure.fingerprint.eql(mar.FailureFingerprint.from(replayed.failed)));
+    try std.testing.expect(std.mem.indexOf(u8, replayed.failed.first_trace, "app.noise") == null);
+
+    // The journal alone reproduces the summary, as a fresh process sees it.
+    var loaded = try mar.loadCampaignSummary(std.testing.allocator, std.testing.io, campaign_dir);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(?mar.CampaignStopReason, .completed), loaded.stop_reason);
+    try expectSameWork(summary, loaded);
+    try std.testing.expectEqual(reduction, loaded.failures[0].reduction.?);
+    try std.testing.expectEqual(metrics.reduction_attempts, loaded.metrics().reduction_attempts);
+}
+
+fn openReduced(campaign_dir: std.Io.Dir, failure_name: []const u8) !std.Io.Dir {
+    var failure_dir = try campaign_dir.openDir(std.testing.io, failure_name, .{});
+    defer failure_dir.close(std.testing.io);
+    return failure_dir.openDir(std.testing.io, "reduced", .{});
+}
+
+test "campaign: a retained capsule reduces in a fresh run to the same minimized failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var summary = try mar.runCampaign(NoisyConfig{ .allocator = std.testing.allocator }, .{
+        .io = std.testing.io,
+        .cases = 16,
+        .reduction = .{},
+        .artifacts = artifacts(tmp.dir, "noisy", false),
+    });
+    defer summary.deinit();
+    var campaign_dir = try tmp.dir.openDir(std.testing.io, "noisy", .{});
+    defer campaign_dir.close(std.testing.io);
+    var failure_dir = try campaign_dir.openDir(std.testing.io, summary.failures[0].artifact_name.?, .{});
+    defer failure_dir.close(std.testing.io);
+
+    const original = try readFile(failure_dir, "replay.json");
+    defer std.testing.allocator.free(original);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, original);
+    defer capsule.deinit();
+    var reduced = try mar.reduceCapsule(NoisyConfig{ .allocator = std.testing.allocator }, &capsule, identity, .{});
+    defer reduced.deinit();
+    try std.testing.expect(reduced.one_minimal);
+    try std.testing.expectEqual(summary.failures[0].reduction.?.attempts, reduced.attempts);
+
+    const retained = try readFile(failure_dir, "reduced/trace.txt");
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualStrings(retained, reduced.report().failed.first_trace);
+
+    var wrong_build = identity;
+    wrong_build.build = "other-build";
+    try std.testing.expectError(error.IncompatibleReplay, mar.reduceCapsule(NoisyConfig{ .allocator = std.testing.allocator }, &capsule, wrong_build, .{}));
+}
+
+/// Some seeds start a task that sleeps forever.
+const Sleepy = struct {
+    io: std.Io,
+
+    fn init(sim: mar.Sim) @This() {
+        return .{ .io = sim.env.io() };
+    }
+    fn sleeper(io: std.Io) void {
+        while (true) std.Io.sleep(io, .fromNanoseconds(10), .awake) catch return;
+    }
+    fn noise(case: *mar.SimCase(@This())) !void {
+        try case.env().record("app.noise", .{});
+    }
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        try case.action("noise", noise);
+        if (try case.control().world.chooseIntLessThan("workload.hang", u8, 3) != 2) return;
+        var future = try std.Io.concurrent(case.app.io, sleeper, .{case.app.io});
+        future.await(case.app.io);
+    }
+};
+
+test "campaign: step-budget livelocks are retained as reproducible, reduced failures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var summary = try mar.runCampaign(.{
+        .allocator = std.testing.allocator,
+        .seed = 0x51EE9,
+        .tick_ns = 10,
+        .simulate = mar.World.SimulateOptions{ .step_budget = 256 },
+        .init = Sleepy.init,
+        .scenario = Sleepy.scenario,
+    }, .{
+        .io = std.testing.io,
+        .cases = 12,
+        .reduction = .{},
+        .artifacts = artifacts(tmp.dir, "sleepy", false),
+    });
+    defer summary.deinit();
+    try std.testing.expect(summary.passed_cases > 0);
+    try std.testing.expectEqual(@as(usize, 1), summary.failures.len);
+    const failure = summary.failures[0];
+    try std.testing.expectEqual(mar.RunFailureKind.step_budget_exceeded, failure.fingerprint.kind);
+    try std.testing.expect(failure.reproducible);
+    try std.testing.expect(failure.reduction.?.minimized);
+}
+
+test "campaign: a killed campaign's journal loads with no stop reason" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stopped = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 8, .time_budget_ns = 1, .artifacts = artifacts(tmp.dir, "campaign", false) });
+    defer stopped.deinit();
+    var dir = try tmp.dir.openDir(std.testing.io, "campaign", .{});
+    defer dir.close(std.testing.io);
+
+    // A kill leaves the last running checkpoint, whose stop reason is null.
+    const bytes = try readFile(dir, "campaign.json");
+    defer std.testing.allocator.free(bytes);
+    const running = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"stop_reason\": \"time_budget\"", "\"stop_reason\": null");
+    defer std.testing.allocator.free(running);
+    try std.testing.expect(!std.mem.eql(u8, bytes, running));
+    try dir.writeFile(std.testing.io, .{ .sub_path = "campaign.json", .data = running });
+
+    var loaded = try mar.loadCampaignSummary(std.testing.allocator, std.testing.io, dir);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(?mar.CampaignStopReason, null), loaded.stop_reason);
+    try std.testing.expectEqual(stopped.executed_cases, loaded.start_case);
+    try std.testing.expectEqual(stopped.planned_cases, loaded.planned_cases);
+}
+
 fn allocationCase(allocator: std.mem.Allocator) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -350,9 +538,14 @@ fn allocationCase(allocator: std.mem.Allocator) !void {
     var resumed = try mar.runCampaign(buggyConfig(allocator), .{
         .io = std.testing.io,
         .cases = 12,
+        .reduction = .{},
         .artifacts = artifacts(tmp.dir, "campaign", true),
     });
     resumed.deinit();
+    var dir = try tmp.dir.openDir(std.testing.io, "campaign", .{});
+    defer dir.close(std.testing.io);
+    var loaded = try mar.loadCampaignSummary(allocator, std.testing.io, dir);
+    loaded.deinit();
 }
 
 test "campaign: allocation failure releases retained and resumed state" {

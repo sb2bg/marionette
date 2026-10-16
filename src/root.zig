@@ -310,6 +310,7 @@ pub const FailureFingerprint = @import("reduce.zig").FailureFingerprint;
 pub const ReductionOptions = @import("reduce.zig").Options;
 pub const ReductionResult = @import("reduce.zig").Result;
 pub const reduceSimCase = @import("reduce.zig").reduceSimCase;
+pub const reduceCapsule = @import("reduce.zig").reduceCapsule;
 
 pub const ArtifactOptions = @import("artifact.zig").Options;
 pub const writeRunArtifacts = @import("artifact.zig").write;
@@ -322,5 +323,9 @@ pub const CampaignSummary = @import("campaign.zig").Summary;
 pub const CampaignStopReason = @import("campaign.zig").StopReason;
 pub const CampaignFailure = @import("campaign.zig").DistinctFailure;
 pub const CampaignCaseError = @import("campaign.zig").CaseError;
+pub const CampaignCasePhase = @import("campaign.zig").CasePhase;
+pub const CampaignReduction = @import("campaign.zig").Reduction;
+pub const CampaignMetrics = @import("campaign.zig").Metrics;
+pub const loadCampaignSummary = @import("campaign.zig").loadSummary;
 
 pub const ManagedProcess = @import("world.zig").ManagedProcess;

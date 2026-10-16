@@ -285,8 +285,32 @@ pub fn caseSeed(config: anytype, index: u64) u64 {
 }
 
 /// Internal candidate execution: generate a fresh tape, then verify exact replay.
-pub fn runReductionCandidate(config: anytype, source: []const decision_module.Decision, omitted_sites: []const []const u8) RunError!RunReport {
-    return runConfiguredCase(config, null, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
+/// A null seed uses the config's own seed.
+pub fn runReductionCandidate(config: anytype, seed: ?u64, source: []const decision_module.Decision, omitted_sites: []const []const u8) RunError!RunReport {
+    return runConfiguredCase(config, seed, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
+}
+
+/// Internal candidate execution under a capsule's runtime and simulation
+/// options instead of the config's. The config supplies only callbacks.
+pub fn runCapsuleCandidate(
+    config: anytype,
+    options: RunOptions,
+    simulate_options: World.SimulateOptions,
+    source: []const decision_module.Decision,
+    omitted_sites: []const []const u8,
+) RunError!RunReport {
+    const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
+    try Harness.validate();
+    return runTwiceWithSimCase(
+        config.allocator,
+        options,
+        simulate_options,
+        Harness.App,
+        Harness.initialize,
+        Harness.scenario,
+        Harness.checks,
+        .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } },
+    );
 }
 
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.Error!RunOptions {

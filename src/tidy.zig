@@ -91,6 +91,8 @@ pub const default_allowed = [_]Allow{
     // Deliberately terminate the isolated child to test watchdog crash reporting.
     .{ .path = "tests/replay_capsule.zig", .needle = "std.process.exit" },
     .{ .path = "tests/campaign.zig", .needle = "std.process.exit" },
+    // Deliberately kill a campaign process to validate resume.
+    .{ .path = "validation/campaign/main.zig", .needle = "std.process.exit" },
     .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.debug.print" },
     .{ .path = "validation/dusty_http.zig", .needle = "std.debug.print" },
     .{ .path = "validation/nightly_seed_sweep.zig", .needle = "std.debug.print" },
