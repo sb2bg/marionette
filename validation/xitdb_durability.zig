@@ -715,6 +715,9 @@ const FuzzOutcome = enum {
     /// The crash interrupted the victim mid-commit and acknowledged history
     /// survived.
     passed_with_window,
+    /// The crash interrupted the victim after its commit point, so it
+    /// survived whole without being acknowledged.
+    passed_victim_survived,
     /// Acknowledged history failed to verify after crash recovery.
     failed,
 };
@@ -828,16 +831,27 @@ fn runFuzzCase(
 
     // Any failure from reopen onward means acknowledged history did not
     // recover; the classification does not distinguish how it failed.
+    var victim_survived = false;
     const recovered_ok = blk: {
         var recovered_file = std.Io.Dir.cwd().openFile(io, "xit-fuzz.db", .{ .mode = .read_write }) catch
             break :blk false;
         defer recovered_file.close(io);
         var recovered = DB.init(.{ .io = io, .file = recovered_file }) catch break :blk false;
+        // A crash after the victim's commit point but before it returned
+        // leaves it durable yet unacknowledged: it may survive, but whole.
+        if (window_opened) {
+            const history = DB.ArrayList(.read_only).init(recovered.rootCursor().readOnly()) catch break :blk false;
+            if ((history.count() catch break :blk false) == model.items.len + 1) {
+                appendModelTransaction(allocator, &model, victim.slice()) catch break :blk false;
+                victim_survived = true;
+            }
+        }
         verifyHistory(allocator, &recovered, model.items) catch break :blk false;
         break :blk true;
     };
 
     if (!recovered_ok) return .failed;
+    if (victim_survived) return .passed_victim_survived;
     return if (window_opened) .passed_with_window else .passed_no_window;
 }
 
@@ -969,13 +983,40 @@ test "xitdb crash-fault fuzz holds acknowledged history at realistic sectors" {
                     std.debug.print("{s}", .{writer.buffered()});
                     return error.AcknowledgedHistoryLost;
                 }
-                if (outcome == .passed_with_window) windows += 1;
+                if (outcome != .passed_no_window) windows += 1;
             }
             // The sweep must actually exercise unacknowledged windows, not
             // just clean shutdowns.
             try std.testing.expect(windows > 0);
         }
     }
+}
+
+test "xitdb unacknowledged victim survives whole when the crash follows its commit point" {
+    // Found by the xitdb-acknowledged-history campaign (XITDB-003): a crash
+    // after the victim's committed-size header write lands, but before the
+    // transaction returns, leaves it durable yet unacknowledged. The oracle
+    // must accept that whole transaction and still reject any partial one.
+    const allocator = std.testing.allocator;
+    var survived: usize = 0;
+    for (0..4) |i| {
+        const seed = 0x5C0F_0000 + @as(u64, @intCast(i));
+        var plan = try makeFuzzPlan(allocator, seed, 2);
+        defer plan.deinit(allocator);
+        var crash_after: u64 = 0;
+        while (true) : (crash_after += 1) {
+            const outcome = try runFuzzCase(allocator, .{
+                .seed = seed,
+                .sector_size = 512,
+                .fault = .reordered,
+                .crash_after_ops = crash_after,
+            }, plan.items);
+            if (outcome == .passed_no_window) break;
+            try std.testing.expect(outcome != .failed);
+            if (outcome == .passed_victim_survived) survived += 1;
+        }
+    }
+    try std.testing.expect(survived > 0);
 }
 
 test "xitdb fuzzer rejects the former sub-field torn header artifact" {

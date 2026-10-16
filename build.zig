@@ -241,6 +241,52 @@ pub fn build(b: *std.Build) void {
         _ = addValidation(b, validate_redis_mod, "validate-redis", "Run the unmodified Redis client under Marionette");
     }
 
+    // Campaign-to-regression validation on pinned storage and network SUTs.
+    // Each workload runs as three processes: a campaign that kills itself
+    // partway, a fresh process that resumes it, and a fresh process that
+    // replays and reduces every retained failure from its capsule.
+    const campaign_cases = b.option(u64, "campaign-cases", "Cases per external campaign workload") orelse 48;
+    const campaign_dir = b.option([]const u8, "campaign-dir", "Directory for external campaign evidence, relative to the build root") orelse "zig-out/campaigns";
+    if (b.lazyDependency("xitdb", .{ .target = target, .optimize = optimize })) |xitdb_dep| {
+        if (b.lazyDependency("redis", .{ .target = target, .optimize = optimize })) |redis_dep| {
+            const campaign_mod = b.createModule(.{
+                .root_source_file = b.path("validation/campaign/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            campaign_mod.addImport("marionette", mod);
+            campaign_mod.addImport("xitdb", xitdb_dep.module("xitdb"));
+            campaign_mod.addImport("redis", redis_dep.module("redis"));
+            const campaign_exe = b.addExecutable(.{ .name = "marionette-campaigns", .root_module = campaign_mod });
+
+            const validate_campaigns = b.step("validate-campaigns", "Run, kill, resume, replay, and reduce campaigns on pinned xitdb and redis.zig");
+            const cases = b.fmt("{d}", .{campaign_cases});
+            const kill_after = b.fmt("{d}", .{@max(campaign_cases / 3, 1)});
+            const workloads = [_][]const u8{
+                "xitdb-acknowledged-history",
+                "xitdb-victim-durable-mutant",
+                "redis-at-least-once",
+                "redis-exactly-once-mutant",
+            };
+            for (workloads) |workload| {
+                const killed = b.addRunArtifact(campaign_exe);
+                killed.addArgs(&.{ campaign_dir, workload, "run", "--cases", cases, "--kill-after-cases", kill_after });
+                killed.expectExitCode(75);
+                const resumed = b.addRunArtifact(campaign_exe);
+                resumed.addArgs(&.{ campaign_dir, workload, "resume", "--cases", cases });
+                resumed.step.dependOn(&killed.step);
+                const verified = b.addRunArtifact(campaign_exe);
+                verified.addArgs(&.{ campaign_dir, workload, "verify" });
+                verified.step.dependOn(&resumed.step);
+                for ([_]*std.Build.Step.Run{ killed, resumed, verified }) |run| {
+                    run.setCwd(b.path("."));
+                    run.has_side_effects = true;
+                }
+                validate_campaigns.dependOn(&verified.step);
+            }
+        }
+    }
+
     if (b.lazyDependency("pg", .{
         .target = target,
         .optimize = optimize,

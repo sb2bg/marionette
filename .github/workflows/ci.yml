@@ -80,6 +80,7 @@ jobs:
           - validate-beanstalkz
           - validate-pg
           - validate-redis
+          - validate-campaigns
         optimize:
           - debug
           - safe
@@ -96,6 +97,15 @@ jobs:
 
       - name: Validate
         run: zig build ${{ matrix.target }} -Doptimize=${{ matrix.optimize }} --test-timeout 5m
+
+      - name: Upload campaign evidence
+        if: ${{ always() && matrix.target == 'validate-campaigns' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: campaigns-${{ matrix.optimize }}
+          path: zig-out/campaigns
+          if-no-files-found: ignore
+          retention-days: 14
 
   macos-test:
     name: macOS test (${{ matrix.optimize }})

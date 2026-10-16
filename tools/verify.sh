@@ -24,7 +24,7 @@ fi
 for optimize in debug safe fast; do
   "$zig_exe" build test -Doptimize="$optimize" --test-timeout 5m --summary all
   "$zig_exe" build validate-xitdb validate-mailbox validate-dusty \
-    validate-beanstalkz validate-pg validate-redis -Doptimize="$optimize" --test-timeout 5m --summary all
+    validate-beanstalkz validate-pg validate-redis validate-campaigns -Doptimize="$optimize" --test-timeout 5m --summary all
 done
 "$zig_exe" test src/fiber.zig -target x86_64-windows-gnu -Osafe -fno-emit-bin
 "$zig_exe" build check-sve --summary all
