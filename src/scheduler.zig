@@ -37,6 +37,7 @@ pub const TaskSchedulerError = error{
     TaskNotReady,
     TaskNotRunning,
     TaskSuspendedWithoutYield,
+    StepBudgetExceeded,
 } || fiber.Error || std.mem.Allocator.Error || world_module.TraceError || world_module.DecisionError;
 
 /// Opaque wait-set key. Futexes will key this by address; timers and I/O can
@@ -93,6 +94,11 @@ pub const TaskScheduler = struct {
     /// Current timestamp when the scheduler last evolved the installed fault
     /// participants, avoiding duplicate boundary events across partial jumps.
     fault_evolution_boundary_ns: ?u64 = null,
+    /// Maximum task dispatches plus scheduler-driven clock advances; see
+    /// `SimulateOptions.step_budget`. Null leaves scheduling unbounded.
+    step_budget: ?u64 = null,
+    /// Scheduler steps counted against `step_budget`.
+    steps: u64 = 0,
     /// Terminal failure observed while the main context drove a wait through
     /// an ABI that cannot return scheduler errors directly. The scenario
     /// runner reads this latch before accepting the scenario or its checks.
@@ -652,6 +658,7 @@ pub const TaskScheduler = struct {
     noinline fn stepOnce(self: *Self) TaskSchedulerError!StepOutcome {
         var scheduler = self;
         if (scheduler.ready.items.len == 0) return .idle;
+        try scheduler.consumeStep();
 
         sortTaskIds(scheduler.ready.items);
 
@@ -912,6 +919,8 @@ pub const TaskScheduler = struct {
     fn advanceClockToward(self: *Self, target_ns: u64) !bool {
         const now = self.world.now();
         std.debug.assert(target_ns > now);
+        // Sleeping loops advance time without dispatching any task.
+        try self.consumeStep();
         const duration_ns = target_ns - now;
         if (self.fault_evolution) |control| {
             const reached_end = try control.advanceOneBoundaryToward(
@@ -1156,6 +1165,26 @@ pub const TaskScheduler = struct {
     fn latchSchedulerError(self: *Self, err: anyerror) void {
         if (self.failure != null) return;
         self.failure = .{ .scheduler_error = @errorName(err) };
+    }
+
+    /// Count one task dispatch or clock advance against the optional budget.
+    /// The first refused step latches a terminal failure and records it; later
+    /// steps keep failing, so no task runs past the budget, even in cleanup.
+    fn consumeStep(self: *Self) TaskSchedulerError!void {
+        const budget = self.step_budget orelse return;
+        if (self.steps < budget) {
+            self.steps += 1;
+            return;
+        }
+        if (self.failure == null) {
+            self.failure = .step_budget_exceeded;
+            try self.world.recordFields("scheduler.step_budget_exceeded", &.{
+                traceField("budget", .{ .uint = budget }),
+                traceField("ready", .{ .uint = @intCast(self.ready.items.len) }),
+                traceField("blocked", .{ .uint = @intCast(self.blockedCount()) }),
+            });
+        }
+        return error.StepBudgetExceeded;
     }
 };
 

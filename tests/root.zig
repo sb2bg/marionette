@@ -22,3 +22,7 @@ test {
 test {
     _ = @import("campaign.zig");
 }
+
+test {
+    _ = @import("step_budget.zig");
+}

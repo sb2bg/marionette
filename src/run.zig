@@ -743,6 +743,14 @@ fn schedulerFailureFromWorld(
             "Deadlock",
             null,
         ),
+        .step_budget_exceeded => failureFromWorldName(
+            allocator,
+            options,
+            .step_budget_exceeded,
+            world,
+            "StepBudgetExceeded",
+            null,
+        ),
         .scheduler_error => |error_name| failureFromWorldName(
             allocator,
             options,

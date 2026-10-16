@@ -325,6 +325,26 @@ pub const World = struct {
         /// own their signal dispositions should disable this. POSIX
         /// guard-page targets only; elsewhere it is inert.
         fiber_overflow_diagnostics: bool = true,
+        /// Deterministic bound on scheduler work: task dispatches plus
+        /// scheduler-driven clock advances. Exceeding it fails the run as
+        /// `step_budget_exceeded` at the same step on every replay, so a
+        /// yielding livelock keeps a complete, reducible decision tape.
+        /// Code that never yields still needs the watchdog. Null (the
+        /// default) leaves scheduling unbounded.
+        step_budget: ?u64 = null,
+
+        /// Omit an unset step budget so artifacts without one keep the
+        /// 0.7 byte format. Parsing restores the null default.
+        pub fn jsonStringify(self: SimulateOptions, writer: anytype) !void {
+            try writer.beginObject();
+            inline for (@typeInfo(SimulateOptions).@"struct".field_names) |name| {
+                if (!std.mem.eql(u8, name, "step_budget") or self.step_budget != null) {
+                    try writer.objectField(name);
+                    try writer.write(@field(self, name));
+                }
+            }
+            try writer.endObject();
+        }
     };
 
     /// The two views over one simulation: the app-facing `env` and the
@@ -524,6 +544,7 @@ pub const World = struct {
         scheduler.task_stack_size = options.task_stack_size;
         scheduler.task_start_jitter_ns = options.task_start_jitter_ns;
         scheduler.overflow_diagnostics = options.fiber_overflow_diagnostics;
+        scheduler.step_budget = options.step_budget;
         errdefer if (!scheduler_registered) scheduler.deinit();
 
         try self.registerTeardown(scheduler, scheduler_module.deinitTaskSchedulerOpaque);
