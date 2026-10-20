@@ -47,6 +47,13 @@
   deadlock. Unset budgets are omitted from serialized options, so 0.7 trace,
   capsule, and manifest bytes are unchanged.
 
+- The simulated allocator no longer depends on the host allocator's in-place
+  support. A `remap` shrink falls back to allocate, copy, and free, so it always
+  succeeds without consuming fault budget; `resize` always declines in place
+  (`reason=in_place_unsupported`). Previously, a shrink could fail with an armed
+  allocation fault on one backing allocator and succeed on another, and in-place
+  resizes recorded host-dependent outcomes.
+
 - Artifact manifests are written to a temporary file and renamed into place, so
   an interrupted write leaves no manifest instead of a truncated one. Campaign
   resume keeps existing failure evidence only when its manifest parses as

@@ -18,9 +18,9 @@ test "fault coverage: counts effects, not injections" {
         "event=6 network.drop id=1 from=1 to=0 reason=link_disabled\n" ++
         "event=7 process.kill node=1 reason=auto_crash\n" ++
         "event=8 allocation.alloc op=0 len=1 align=1 status=fail reason=quota roll=none live_bytes=0 successful_allocations=0\n" ++
-        // Overflow and an unsupported in-place resize are not injected faults.
+        // Overflow and a declined in-place resize are not injected faults.
         "event=9 allocation.alloc op=1 len=1 align=1 status=fail reason=overflow roll=none live_bytes=0 successful_allocations=0\n" ++
-        "event=10 allocation.resize op=2 old_len=1 new_len=2 align=1 status=fail reason=backing_unsupported roll=none live_bytes=1 successful_allocations=1\n";
+        "event=10 allocation.resize op=2 old_len=1 new_len=2 align=1 status=fail reason=in_place_unsupported roll=none live_bytes=1 successful_allocations=1\n";
     const coverage = try mar.faultCoverage(trace);
     try std.testing.expectEqual(mar.FaultCoverage{
         .disk_crashes = 1,

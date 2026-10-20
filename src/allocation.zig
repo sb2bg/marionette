@@ -179,6 +179,11 @@ fn alloc(
     }
 }
 
+/// Always decline in-place resizing. Whether the backing allocator could
+/// resize in place depends on its heap layout, which is not part of the
+/// simulation, so the same run would record different outcomes and leave
+/// callers on different fallback paths on different hosts. Declining is
+/// always allowed; callers fall back to `remap` or a fresh allocation.
 fn resize(
     ctx: *anyopaque,
     memory: []u8,
@@ -186,36 +191,11 @@ fn resize(
     new_len: usize,
     ret_addr: usize,
 ) bool {
+    _ = ret_addr;
     const self = authority(ctx);
     const op = nextOperation(self);
-
-    if (new_len <= memory.len) {
-        if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) {
-            _ = recordResize(self, op, memory.len, new_len, alignment, "fail", "backing_unsupported", null);
-            return false;
-        }
-        noteShrink(self, memory.len - new_len);
-        _ = recordResize(self, op, memory.len, new_len, alignment, "ok", "none", null);
-        return true;
-    }
-
-    const growth = new_len - memory.len;
-    const decision = decideGrowth(self, growth);
-    switch (decision) {
-        .allow => |allowed| {
-            if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) {
-                _ = recordResize(self, op, memory.len, new_len, alignment, "fail", "backing_unsupported", allowed.roll);
-                return false;
-            }
-            noteGrowthSuccess(self, growth);
-            _ = recordResize(self, op, memory.len, new_len, alignment, "ok", "none", allowed.roll);
-            return true;
-        },
-        .fail => |failed| {
-            _ = recordResize(self, op, memory.len, new_len, alignment, "fail", failed.reason, failed.roll);
-            return false;
-        },
-    }
+    _ = recordResize(self, op, memory.len, new_len, alignment, "fail", "in_place_unsupported", null);
+    return false;
 }
 
 fn remap(
@@ -239,8 +219,17 @@ fn remap(
             _ = recordRemap(self, op, memory.len, new_len, alignment, "ok", "none", null);
             return memory.ptr;
         }
-        _ = recordRemap(self, op, memory.len, new_len, alignment, "fail", "backing_unsupported", null);
-        return null;
+        // A shrink needs no new modeled memory, so it never consumes fault
+        // budget and succeeds whether or not the backing can shrink in place.
+        const new_ptr = self.backing.rawAlloc(new_len, alignment, ret_addr) orelse {
+            _ = recordRemap(self, op, memory.len, new_len, alignment, "fail", "backing_oom", null);
+            return null;
+        };
+        @memcpy(new_ptr[0..new_len], memory[0..new_len]);
+        self.backing.rawFree(memory, alignment, ret_addr);
+        noteShrink(self, memory.len - new_len);
+        _ = recordRemap(self, op, memory.len, new_len, alignment, "ok", "none", null);
+        return new_ptr;
     }
 
     const growth = new_len - memory.len;
@@ -485,6 +474,38 @@ test "allocation: quota tracks live bytes" {
     const stats_snapshot = authority_state.control().stats();
     try std.testing.expectEqual(@as(usize, 0), stats_snapshot.live_bytes);
     try std.testing.expectEqual(@as(usize, 2), stats_snapshot.successful_allocations);
+}
+
+/// Shrink, resize in place, and free under an exhausted allocation budget.
+fn recordBackingSequence(backing: std.mem.Allocator, log: *std.ArrayList(u8)) !void {
+    var trace = TestTrace{ .log = log };
+    var authority_state = Authority.init(backing, .{
+        .faults = .{ .fail_after = 1 },
+        .trace = trace.sink(),
+    });
+    const allocator = authority_state.allocator();
+
+    var buffer = try allocator.alloc(u8, 64);
+    @memset(buffer, 7);
+    // Shrinking needs no new memory, so it succeeds with the budget spent.
+    buffer = try allocator.realloc(buffer, 8);
+    try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(7)), buffer);
+    if (allocator.resize(buffer, 4)) buffer = buffer.ptr[0..4];
+    if (allocator.resize(buffer, 16)) buffer = buffer.ptr[0..16];
+    allocator.free(buffer);
+}
+
+test "allocation: outcomes do not depend on the backing allocator's in-place support" {
+    var flexible: std.ArrayList(u8) = .empty;
+    defer flexible.deinit(std.testing.allocator);
+    try recordBackingSequence(std.testing.allocator, &flexible);
+
+    var no_in_place = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    var rigid: std.ArrayList(u8) = .empty;
+    defer rigid.deinit(std.testing.allocator);
+    try recordBackingSequence(no_in_place.allocator(), &rigid);
+
+    try std.testing.expectEqualStrings(flexible.items, rigid.items);
 }
 
 const TestTrace = struct {

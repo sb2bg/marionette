@@ -99,7 +99,10 @@ Rules:
 - Allocation authority events use `allocation.alloc`, `allocation.resize`,
   `allocation.remap`, and `allocation.free` with `op`, length, `align`,
   `status`, `reason`, `roll`, `live_bytes`, and `successful_allocations`
-  fields. They never contain addresses.
+  fields. They never contain addresses. Outcomes never depend on the host
+  allocator: `allocation.resize` always declines in place
+  (`status=fail reason=in_place_unsupported`), and an `allocation.remap`
+  shrink always succeeds without consuming fault budget.
 - Cooperative cancellation records `scheduler.cancel_request task=<u64>` when
   a request is armed and `scheduler.cancel_deliver task=<u64>` when
   `error.Canceled` is delivered at a cancellation point.
