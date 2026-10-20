@@ -424,9 +424,7 @@ const Campaign = struct {
         const artifact_options: artifact.Options = .{ .io = self.io, .parent = parent, .name = name, .identity = self.identity };
         artifact.write(self.allocator, report, artifact_options) catch |err| switch (err) {
             error.ArtifactAlreadyExists => {
-                const manifest = try std.fmt.allocPrint(self.allocator, "{s}/manifest.json", .{name});
-                defer self.allocator.free(manifest);
-                if (parent.access(self.io, manifest, .{})) |_| return else |_| {}
+                if (try artifact.isComplete(self.allocator, self.io, parent, name)) return;
                 parent.deleteTree(self.io, name) catch return error.ArtifactIoFailed;
                 try artifact.write(self.allocator, report, artifact_options);
             },

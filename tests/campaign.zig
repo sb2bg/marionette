@@ -257,7 +257,8 @@ test "campaign: resuming a stopped campaign finishes the same work as one run" {
     stopped.deinit();
 
     // A kill between writing a failure and checkpointing it leaves evidence the
-    // journal does not list. Complete evidence is kept; partial is replaced.
+    // journal does not list. Complete evidence is kept; partial evidence,
+    // including a manifest cut off mid-write, is replaced.
     var dir = try tmp.dir.openDir(std.testing.io, "resumed", .{});
     defer dir.close(std.testing.io);
     const complete_name = reference.failures[0].artifact_name.?;
@@ -275,6 +276,11 @@ test "campaign: resuming a stopped campaign finishes the same work as one run" {
         defer failure_dir.close(std.testing.io);
         try failure_dir.writeFile(std.testing.io, .{ .sub_path = "marker", .data = "" });
     }
+    {
+        var partial_dir = try dir.openDir(std.testing.io, partial_name, .{});
+        defer partial_dir.close(std.testing.io);
+        try partial_dir.writeFile(std.testing.io, .{ .sub_path = "manifest.json", .data = "{\"format\":\"marionette.artif" });
+    }
 
     var resumed = try mar.runCampaign(buggyConfig(std.testing.allocator), .{ .io = std.testing.io, .cases = 32, .artifacts = artifacts(tmp.dir, "resumed", true) });
     defer resumed.deinit();
@@ -288,7 +294,12 @@ test "campaign: resuming a stopped campaign finishes the same work as one run" {
         var replaced = try dir.openDir(std.testing.io, partial_name, .{});
         defer replaced.close(std.testing.io);
         try std.testing.expectError(error.FileNotFound, replaced.access(std.testing.io, "marker", .{}));
-        try replaced.access(std.testing.io, "manifest.json", .{});
+        const manifest = try readFile(replaced, "manifest.json");
+        defer std.testing.allocator.free(manifest);
+        const Manifest = struct { format: []const u8, complete: bool };
+        const parsed = try std.json.parseFromSlice(Manifest, std.testing.allocator, manifest, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.complete);
     }
 
     try std.testing.expectError(error.CampaignFinished, mar.runCampaign(buggyConfig(std.testing.allocator), .{

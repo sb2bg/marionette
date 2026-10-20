@@ -125,8 +125,9 @@ is the first case this invocation ran; all counts are campaign totals.
 Cases after the last checkpoint run again, and counts come from the same
 checkpoint, so none are counted twice. If a kill landed after a failure
 directory, or its `reduced` subdirectory, was written but before the checkpoint
-that lists it, resume keeps the directory when its manifest is complete and
-rewrites it otherwise. A kill during reduction reruns that case and its
+that lists it, resume keeps the directory when its manifest parses as a
+complete artifact manifest and rewrites it otherwise, including when the
+manifest was cut off mid-write. A kill during reduction reruns that case and its
 reduction.
 
 ## Replay and reduce from a fresh process

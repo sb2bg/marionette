@@ -166,8 +166,9 @@ Directories contain:
   options, failure identity, fingerprint, divergence diagnostics, and capsule
   availability. Runtime fault/process configuration remains visible in the trace.
 
-The manifest is written last. Consumers should require a valid complete manifest;
-a partial I/O failure may leave an unfinished directory. Incomplete or divergent
+The manifest is written last, to a temporary file renamed into place, so a
+directory with `manifest.json` finished writing; an interrupted write leaves no
+manifest. Consumers should still require a valid complete manifest. Incomplete or divergent
 failures still produce diagnostic artifacts and explain why no capsule exists.
 Host I/O errors return `ArtifactIoFailed`; encoding errors return
 `ArtifactEncodingFailed`. Artifact I/O is not part of deterministic trace replay.
