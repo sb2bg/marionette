@@ -234,3 +234,34 @@ test "fault coverage: a corrupt read that transfers nothing is not an effect" {
     try std.testing.expectEqual(@as(u64, 0), coverage.disk_corrupt_reads);
     try std.testing.expect(!coverage.fired());
 }
+
+const CorruptReadSome = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const disk = case.env().disk;
+        try disk.write(.{ .path = "data", .offset = 0, .bytes = "abcd" });
+        try case.control().disk.setFaults(.{ .corrupt_read_rate = .always() });
+        var buffer: [8]u8 = undefined;
+        _ = try disk.readSome(.{ .path = "data", .offset = 0, .buffer = &buffer });
+    }
+};
+
+test "fault coverage: a corrupt partial read counts by the bytes it returned" {
+    const config = .{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+        .init = CorruptReadSome.init,
+        .scenario = CorruptReadSome.scenario,
+    };
+    var report = try mar.runSimCase(config);
+    defer report.deinit();
+    try std.testing.expect(report == .passed);
+    try mar.expectTraceContains(report.passed.trace, "read_len=4 status=corrupt");
+    try std.testing.expectEqual(@as(u64, 1), (try mar.faultCoverage(report.passed.trace)).disk_corrupt_reads);
+
+    var summary = try mar.runCampaign(config, .{ .io = std.testing.io, .cases = 2 });
+    defer summary.deinit();
+    try std.testing.expectEqual(@as(u64, 0), summary.cases_without_faults);
+}

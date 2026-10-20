@@ -99,7 +99,8 @@ pub const FaultCoverage = struct {
             // Scripted and probabilistic corruption both surface here. A read
             // that transferred no bytes returned nothing the corruption changed.
             if (!std.mem.eql(u8, event.field("status") orelse return error.InvalidTraceEvent, "corrupt")) return;
-            if (try requiredU64(event, "len") != 0) self.disk_corrupt_reads += 1;
+            const transferred = if (std.mem.eql(u8, name, "disk.read_some")) "read_len" else "len";
+            if (try requiredU64(event, transferred) != 0) self.disk_corrupt_reads += 1;
         } else if (std.mem.eql(u8, name, "network.partition") or std.mem.eql(u8, name, "network.auto_partition")) {
             self.network_partitions += 1;
         } else if (std.mem.eql(u8, name, "network.drop")) {
