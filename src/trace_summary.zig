@@ -29,10 +29,13 @@ const LinkCounter = struct {
 const ParsedEvent = struct {
     index: u64,
     name: []const u8,
-    fields: []const []const u8,
+    /// Space-separated `key=value` fields after the name, already validated.
+    /// Kept as text so events of any width parse without parser state.
+    fields: []const u8,
 
     fn field(self: ParsedEvent, key: []const u8) ?[]const u8 {
-        for (self.fields) |item| {
+        var items = std.mem.splitScalar(u8, self.fields, ' ');
+        while (items.next()) |item| {
             const equals_index = std.mem.indexOfScalar(u8, item, '=') orelse continue;
             if (std.mem.eql(u8, item[0..equals_index], key)) return item[equals_index + 1 ..];
         }
@@ -93,8 +96,10 @@ pub const FaultCoverage = struct {
             if (std.mem.eql(u8, kind, "read_error")) self.disk_read_errors += 1;
             if (std.mem.eql(u8, kind, "write_error")) self.disk_write_errors += 1;
         } else if (std.mem.eql(u8, name, "disk.read") or std.mem.eql(u8, name, "disk.read_some")) {
-            // Scripted and probabilistic corruption both surface here.
-            if (std.mem.eql(u8, event.field("status") orelse return error.InvalidTraceEvent, "corrupt")) self.disk_corrupt_reads += 1;
+            // Scripted and probabilistic corruption both surface here. A read
+            // that transferred no bytes returned nothing the corruption changed.
+            if (!std.mem.eql(u8, event.field("status") orelse return error.InvalidTraceEvent, "corrupt")) return;
+            if (try requiredU64(event, "len") != 0) self.disk_corrupt_reads += 1;
         } else if (std.mem.eql(u8, name, "network.partition") or std.mem.eql(u8, name, "network.auto_partition")) {
             self.network_partitions += 1;
         } else if (std.mem.eql(u8, name, "network.drop")) {
@@ -122,8 +127,7 @@ pub fn faultCoverage(trace_bytes: []const u8) TraceSummaryError!FaultCoverage {
     var lines = std.mem.splitScalar(u8, trace_bytes, '\n');
     while (lines.next()) |line| {
         if (line.len == 0 or std.mem.startsWith(u8, line, "marionette.trace ")) continue;
-        var fields_buffer: [32][]const u8 = undefined;
-        try coverage.record(try parseEventLine(line, &fields_buffer));
+        try coverage.record(try parseEventLine(line));
     }
     return coverage;
 }
@@ -221,10 +225,7 @@ pub fn summarize(allocator: std.mem.Allocator, trace_bytes: []const u8) !Summary
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "marionette.trace ")) continue;
 
-        // Current events have <=8 fields; keep a generous fixed cap so malformed
-        // traces fail loudly instead of allocating unbounded parser state.
-        var fields_buffer: [32][]const u8 = undefined;
-        const event = try parseEventLine(line, &fields_buffer);
+        const event = try parseEventLine(line);
         if (event.index != summary.total_events) return error.InvalidTraceEvent;
 
         summary.total_events += 1;
@@ -243,7 +244,9 @@ pub fn summarize(allocator: std.mem.Allocator, trace_bytes: []const u8) !Summary
     return summary;
 }
 
-fn parseEventLine(line: []const u8, buffer: *[32][]const u8) TraceSummaryError!ParsedEvent {
+/// Parse an event line, rejecting fields that are not `key=value`. Events may
+/// carry any number of fields, since applications record their own.
+fn parseEventLine(line: []const u8) TraceSummaryError!ParsedEvent {
     var iterator = std.mem.splitScalar(u8, line, ' ');
     const event_field = iterator.next() orelse return error.InvalidTraceLine;
     if (!std.mem.startsWith(u8, event_field, "event=")) return error.InvalidTraceLine;
@@ -251,20 +254,15 @@ fn parseEventLine(line: []const u8, buffer: *[32][]const u8) TraceSummaryError!P
         return error.InvalidTraceLine;
     };
     const name = iterator.next() orelse return error.InvalidTraceLine;
-
-    var field_count: usize = 0;
-    while (iterator.next()) |field| {
-        if (field_count == buffer.len) return error.InvalidTraceLine;
-        if (std.mem.indexOfScalar(u8, field, '=') == null) return error.InvalidTraceLine;
-        buffer[field_count] = field;
-        field_count += 1;
+    const fields = iterator.rest();
+    if (fields.len != 0) {
+        var items = std.mem.splitScalar(u8, fields, ' ');
+        while (items.next()) |item| {
+            if (std.mem.indexOfScalar(u8, item, '=') == null) return error.InvalidTraceLine;
+        }
     }
 
-    return .{
-        .index = index,
-        .name = name,
-        .fields = buffer[0..field_count],
-    };
+    return .{ .index = index, .name = name, .fields = fields };
 }
 
 fn subsystemName(name: []const u8) []const u8 {

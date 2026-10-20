@@ -34,7 +34,8 @@
   disk read and write errors, corrupt reads, network drops, process kills, and
   allocation failures) read from a trace, so a test can assert its faults
   fired. `summarize` and `--summary` include the same counts, and campaigns
-  total them with `cases_without_faults`.
+  total them with `cases_without_faults`. Trace parsing no longer limits events
+  to 32 fields.
 
 - Adds `SimulateOptions.step_budget`, a deterministic bound on task dispatches
   and scheduler-driven clock advances. Exceeding it fails the run as

@@ -177,3 +177,60 @@ test "fault coverage: campaigns total coverage and count fault-free cases" {
     try std.testing.expectEqual(summary.faults, loaded.faults);
     try std.testing.expectEqual(summary.cases_without_faults, loaded.cases_without_faults);
 }
+
+const Wide = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+    /// One application event with more fields than any simulator event.
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const field_count = 33;
+        comptime var format: []const u8 = "app.wide";
+        inline for (0..field_count) |index| format = format ++ std.fmt.comptimePrint(" k{}=1", .{index});
+        try case.env().record(format, .{});
+    }
+};
+
+test "fault coverage: wide application events do not stop a campaign" {
+    const config = .{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{},
+        .init = Wide.init,
+        .scenario = Wide.scenario,
+    };
+    var report = try mar.runSimCase(config);
+    defer report.deinit();
+    try std.testing.expect(report == .passed);
+    try std.testing.expect(!(try mar.faultCoverage(report.passed.trace)).fired());
+
+    var summary = try mar.runCampaign(config, .{ .io = std.testing.io, .cases = 2 });
+    defer summary.deinit();
+    try std.testing.expectEqual(@as(u64, 2), summary.passed_cases);
+}
+
+const EmptyRead = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const disk = case.env().disk;
+        try disk.write(.{ .path = "data", .offset = 0, .bytes = "abcd" });
+        try case.control().disk.setFaults(.{ .corrupt_read_rate = .always() });
+        try disk.read(.{ .path = "data", .offset = 0, .buffer = &.{} });
+    }
+};
+
+test "fault coverage: a corrupt read that transfers nothing is not an effect" {
+    var report = try mar.runSimCase(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+        .init = EmptyRead.init,
+        .scenario = EmptyRead.scenario,
+    });
+    defer report.deinit();
+    try std.testing.expect(report == .passed);
+    try mar.expectTraceContains(report.passed.trace, "len=0 status=corrupt");
+    const coverage = try mar.faultCoverage(report.passed.trace);
+    try std.testing.expectEqual(@as(u64, 0), coverage.disk_corrupt_reads);
+    try std.testing.expect(!coverage.fired());
+}
