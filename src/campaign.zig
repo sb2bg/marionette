@@ -10,8 +10,9 @@ const reduce = @import("reduce.zig");
 const replay = @import("replay.zig");
 const run = @import("run.zig");
 const types = @import("run_types.zig");
+const trace_summary = @import("trace_summary.zig");
 
-pub const Error = std.mem.Allocator.Error || artifact.Error || error{
+pub const Error = std.mem.Allocator.Error || artifact.Error || trace_summary.TraceSummaryError || error{
     InvalidCampaignOptions,
     InvalidCampaignJournal,
     IncompatibleCampaign,
@@ -130,6 +131,12 @@ pub const Summary = struct {
     /// journal of a campaign that is still running or was killed.
     stop_reason: ?StopReason = .completed,
     elapsed_ns: u64 = 0,
+    /// Injected faults summed over every case that produced a report.
+    faults: trace_summary.FaultCoverage = .{},
+    /// Cases whose trace shows no injected fault with an observable effect.
+    /// A campaign that passes with this equal to `executed_cases` never
+    /// exercised its fault model.
+    cases_without_faults: u64 = 0,
     failures: []DistinctFailure = &.{},
     errors: []CaseError = &.{},
 
@@ -163,6 +170,8 @@ const Journal = struct {
     failed_cases: u64,
     stop_reason: ?StopReason,
     elapsed_ns: u64,
+    faults: trace_summary.FaultCoverage = .{},
+    cases_without_faults: u64 = 0,
     /// Derived from the fields above when written; ignored when read.
     metrics: ?Metrics = null,
     failures: []const DistinctFailure,
@@ -317,6 +326,8 @@ const Campaign = struct {
         self.summary.passed_cases = journal.passed_cases;
         self.summary.failed_cases = journal.failed_cases;
         self.summary.elapsed_ns = journal.elapsed_ns;
+        self.summary.faults = journal.faults;
+        self.summary.cases_without_faults = journal.cases_without_faults;
         try self.failures.ensureTotalCapacity(self.allocator, journal.failures.len);
         for (journal.failures) |failure| {
             var owned = failure;
@@ -351,6 +362,12 @@ const Campaign = struct {
         var owned = true;
         defer if (owned) report.deinit();
         self.summary.executed_cases += 1;
+        const coverage = try trace_summary.faultCoverage(switch (report) {
+            .passed => |passed| passed.trace,
+            .failed => |failed| failed.first_trace,
+        });
+        self.summary.faults.add(coverage);
+        if (!coverage.fired()) self.summary.cases_without_faults += 1;
         if (report == .passed) {
             self.summary.passed_cases += 1;
             return false;
@@ -445,6 +462,8 @@ const Campaign = struct {
             .failed_cases = self.summary.failed_cases,
             .stop_reason = stop_reason,
             .elapsed_ns = self.summary.elapsed_ns,
+            .faults = self.summary.faults,
+            .cases_without_faults = self.summary.cases_without_faults,
             .metrics = computeMetrics(self.summary.executed_cases, self.summary.elapsed_ns, self.failures.items),
             .failures = self.failures.items,
             .errors = self.errors.items,

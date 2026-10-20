@@ -26,3 +26,7 @@ test {
 test {
     _ = @import("step_budget.zig");
 }
+
+test {
+    _ = @import("fault_coverage.zig");
+}

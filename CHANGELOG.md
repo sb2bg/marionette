@@ -29,13 +29,27 @@
   and simulation options; with the same budget it repeats the original
   reduction step for step.
 
+- Adds `faultCoverage` and `FaultCoverage`: counts of injected faults and their
+  observable effects (lost, torn, and reordered crash writes, lost metadata,
+  disk read and write errors, corrupt reads, network drops, process kills, and
+  allocation failures) read from a trace, so a test can assert its faults
+  fired. `summarize` and `--summary` include the same counts, and campaigns
+  total them with `cases_without_faults`.
+
 - Adds `SimulateOptions.step_budget`, a deterministic bound on task dispatches
   and scheduler-driven clock advances. Exceeding it fails the run as
   `step_budget_exceeded` at the same step on every execution, records
   `scheduler.step_budget_exceeded`, and keeps a complete decision tape, so
-  yielding livelocks replay from capsules and reduce. Unset budgets are omitted
-  from serialized options, so 0.7 trace, capsule, and manifest bytes are
-  unchanged.
+  yielding livelocks replay from capsules and reduce. Budgets exhausted during
+  initialization or application cleanup fail the run the same way, and awaiting
+  parked work afterwards keeps the budget failure rather than reporting a
+  deadlock. Unset budgets are omitted from serialized options, so 0.7 trace,
+  capsule, and manifest bytes are unchanged.
+
+- Artifact manifests are written to a temporary file and renamed into place, so
+  an interrupted write leaves no manifest instead of a truncated one. Campaign
+  resume keeps existing failure evidence only when its manifest parses as
+  complete.
 
 - Adds `zig build validate-campaigns`: run, kill, resume, replay, and reduce
   campaigns on pinned, unmodified xitdb and redis.zig, each step in its own

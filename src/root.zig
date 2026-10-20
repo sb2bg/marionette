@@ -265,6 +265,12 @@ pub const TraceSummaryError = trace_summary_module.TraceSummaryError;
 /// Build an owned summary from line-oriented trace bytes.
 pub const summarize = trace_summary_module.summarize;
 
+/// Injected faults counted from one trace, and whether any had an effect.
+pub const FaultCoverage = trace_summary_module.FaultCoverage;
+
+/// Count injected faults in trace bytes without allocating.
+pub const faultCoverage = trace_summary_module.faultCoverage;
+
 test "public roots hide internal wiring" {
     const public_api = @This();
 

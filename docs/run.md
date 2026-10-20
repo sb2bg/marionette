@@ -201,6 +201,30 @@ twice. It stops at the first failure; use [`runCampaign`](campaigns.md) to keep
 going, group failures, and retain evidence. Focused unit tests should use small
 counts.
 
+## Fault Coverage
+
+A passing run only shows fault tolerance if the faults actually did something.
+A crash with no pending writes, or a partition that carried no traffic, passes
+the same invariants as a run with no faults at all. `faultCoverage(trace)`
+counts the injected faults in a trace without allocating:
+
+```zig
+var report = try mar.runSimCase(config);
+defer report.deinit();
+const coverage = try mar.faultCoverage(report.passed.trace);
+try std.testing.expect(coverage.crash_lost_writes + coverage.crash_torn_writes > 0);
+```
+
+`FaultCoverage` counts disk crashes and partitions as injections, and the
+effects an application could observe: writes a crash lost, tore, or reordered;
+lost metadata; disk read and write errors; corrupt reads; network drops;
+process kills; and injected allocation failures. `fired()` is true when any
+effect was counted. A disk crash restarts every process, so its own kills are
+not counted separately: a crash with nothing pending is a clean restart and
+does not make `fired()` true. `summarize` reports the same counts, and the
+`--summary` output ends with a `trace.faults` line. Campaigns total coverage
+across cases; see [Campaigns](campaigns.md#fault-coverage).
+
 ## Step Budget
 
 A task that keeps sleeping, waking a peer, or retrying never deadlocks, so

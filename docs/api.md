@@ -197,7 +197,9 @@ be passed through structured fields or encoded so spaces and control bytes do
 not invalidate the trace grammar. See [Trace Format](trace-format.md).
 
 `summarize(allocator, trace)` builds an owned `Summary` with event, subsystem,
-run metadata, and network counts. Call `Summary.deinit`.
+run metadata, network, and fault counts. Call `Summary.deinit`.
+`faultCoverage(trace)` returns a `FaultCoverage` without allocating; see
+[Fault Coverage](run.md#fault-coverage).
 
 ## Seeds And Schedules
 

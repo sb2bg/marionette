@@ -40,6 +40,99 @@ const ParsedEvent = struct {
     }
 };
 
+/// Injected faults counted from one execution's trace. Crashes and partitions
+/// are injections; every other count is an effect the application could
+/// observe, such as a write lost by a crash or a read that returned an error.
+pub const FaultCoverage = struct {
+    disk_crashes: u64 = 0,
+    crash_lost_writes: u64 = 0,
+    crash_torn_writes: u64 = 0,
+    crash_reordered_writes: u64 = 0,
+    crash_lost_metadata: u64 = 0,
+    disk_read_errors: u64 = 0,
+    disk_write_errors: u64 = 0,
+    disk_corrupt_reads: u64 = 0,
+    network_partitions: u64 = 0,
+    network_drops: u64 = 0,
+    process_kills: u64 = 0,
+    allocation_failures: u64 = 0,
+
+    /// Whether any injected fault had an observable effect. A crash with no
+    /// pending writes or a partition that dropped nothing does not count, so
+    /// a passing run where nothing fired is not evidence of fault tolerance.
+    pub fn fired(self: FaultCoverage) bool {
+        inline for (@typeInfo(FaultCoverage).@"struct".field_names) |name| {
+            if (comptime isInjection(name)) continue;
+            if (@field(self, name) != 0) return true;
+        }
+        return false;
+    }
+
+    pub fn add(self: *FaultCoverage, other: FaultCoverage) void {
+        inline for (@typeInfo(FaultCoverage).@"struct".field_names) |name| {
+            @field(self, name) += @field(other, name);
+        }
+    }
+
+    fn isInjection(comptime name: []const u8) bool {
+        return std.mem.eql(u8, name, "disk_crashes") or std.mem.eql(u8, name, "network_partitions");
+    }
+
+    fn record(self: *FaultCoverage, event: ParsedEvent) TraceSummaryError!void {
+        const name = event.name;
+        if (std.mem.eql(u8, name, "disk.crash")) {
+            self.disk_crashes += 1;
+            self.crash_lost_writes += try requiredU64(event, "lost");
+            self.crash_torn_writes += try requiredU64(event, "torn");
+            self.crash_reordered_writes += try requiredU64(event, "reordered");
+            self.crash_lost_metadata += try requiredU64(event, "metadata_lost");
+        } else if (std.mem.eql(u8, name, "disk.fault")) {
+            // Crash-time rolls are totalled by the `disk.crash` event.
+            if (!std.mem.eql(u8, event.field("fired") orelse return, "true")) return;
+            const kind = event.field("kind") orelse return error.InvalidTraceEvent;
+            if (std.mem.eql(u8, kind, "read_error")) self.disk_read_errors += 1;
+            if (std.mem.eql(u8, kind, "write_error")) self.disk_write_errors += 1;
+        } else if (std.mem.eql(u8, name, "disk.read") or std.mem.eql(u8, name, "disk.read_some")) {
+            // Scripted and probabilistic corruption both surface here.
+            if (std.mem.eql(u8, event.field("status") orelse return error.InvalidTraceEvent, "corrupt")) self.disk_corrupt_reads += 1;
+        } else if (std.mem.eql(u8, name, "network.partition") or std.mem.eql(u8, name, "network.auto_partition")) {
+            self.network_partitions += 1;
+        } else if (std.mem.eql(u8, name, "network.drop")) {
+            self.network_drops += 1;
+        } else if (std.mem.eql(u8, name, "process.kill")) {
+            // A disk crash restarts every process; those kills are part of
+            // the crash, so a crash with nothing pending is a clean restart.
+            const reason = event.field("reason") orelse return error.InvalidTraceEvent;
+            if (!std.mem.eql(u8, reason, "disk_crash")) self.process_kills += 1;
+        } else if (std.mem.startsWith(u8, name, "allocation.")) {
+            if (!std.mem.eql(u8, event.field("status") orelse return, "fail")) return;
+            // Overflow and unsupported in-place resizes are not injected.
+            const reason = event.field("reason") orelse return error.InvalidTraceEvent;
+            for ([_][]const u8{ "fail_after", "quota", "buggify" }) |injected| {
+                if (std.mem.eql(u8, reason, injected)) self.allocation_failures += 1;
+            }
+        }
+    }
+};
+
+/// Count injected faults in trace bytes without allocating. Accepts the
+/// partial trace of a watchdog-terminated run.
+pub fn faultCoverage(trace_bytes: []const u8) TraceSummaryError!FaultCoverage {
+    var coverage: FaultCoverage = .{};
+    var lines = std.mem.splitScalar(u8, trace_bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or std.mem.startsWith(u8, line, "marionette.trace ")) continue;
+        var fields_buffer: [32][]const u8 = undefined;
+        try coverage.record(try parseEventLine(line, &fields_buffer));
+    }
+    return coverage;
+}
+
+fn requiredU64(event: ParsedEvent, key: []const u8) TraceSummaryError!u64 {
+    const value = event.field(key) orelse return error.InvalidTraceEvent;
+    return std.fmt.parseInt(u64, value, 10) catch error.InvalidTraceLine;
+}
+
 /// Owned summary of one Marionette trace.
 pub const Summary = struct {
     allocator: std.mem.Allocator,
@@ -55,6 +148,7 @@ pub const Summary = struct {
     network_drops: u64 = 0,
     network_drop_reasons: std.ArrayList(Counter) = .empty,
     network_links: std.ArrayList(LinkCounter) = .empty,
+    faults: FaultCoverage = .{},
 
     /// Release summary-owned memory.
     pub fn deinit(self: *Summary) void {
@@ -109,6 +203,11 @@ pub const Summary = struct {
                 .{ link.from, link.to, link.sends, link.deliveries, link.drops },
             );
         }
+        try writer.print("trace.faults fired={}", .{self.faults.fired()});
+        inline for (@typeInfo(FaultCoverage).@"struct".field_names) |name| {
+            try writer.print(" {s}={}", .{ name, @field(self.faults, name) });
+        }
+        try writer.writeByte('\n');
     }
 };
 
@@ -134,6 +233,7 @@ pub fn summarize(allocator: std.mem.Allocator, trace_bytes: []const u8) !Summary
         try recordRunContext(&summary, event);
         try recordTime(&summary, event);
         try recordNetwork(&summary, event);
+        try summary.faults.record(event);
     }
 
     sortCounters(summary.subsystem_counts.items);
@@ -381,6 +481,7 @@ test "trace summary: summarizes run context and network events" {
         \\trace.network.drop_reason name=link_disabled count=1
         \\trace.network.link from=3 to=0 sends=1 deliveries=1 drops=0
         \\trace.network.link from=3 to=1 sends=0 deliveries=0 drops=1
+        \\trace.faults fired=true disk_crashes=0 crash_lost_writes=0 crash_torn_writes=0 crash_reordered_writes=0 crash_lost_metadata=0 disk_read_errors=0 disk_write_errors=0 disk_corrupt_reads=0 network_partitions=0 network_drops=1 process_kills=0 allocation_failures=0
         \\
     , output);
 }

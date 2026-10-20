@@ -104,6 +104,15 @@ subdirectory. A reduction that hits a runner error is listed in
 The journal stores the same numbers under `metrics` at every checkpoint. They
 are derived from the journal's other fields and ignored when it is read back.
 
+## Fault coverage
+
+`Summary.faults` adds up the [fault coverage](run.md#fault-coverage) of every
+case that produced a report, and `Summary.cases_without_faults` counts cases
+where no injected fault had an observable effect. A campaign that passes with
+`cases_without_faults` equal to `executed_cases` never exercised its fault
+model, which usually means a fault rate or schedule is not reaching the
+workload. Both are stored in the journal and restored on resume.
+
 ## Journal and resume
 
 `campaign.json` is the campaign's journal: identity, base seed, planned and
