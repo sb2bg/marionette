@@ -152,3 +152,99 @@ test "step budget: reduction removes work that does not cause the livelock" {
     try expectBudgetFailure(reduced.report().*);
     try std.testing.expect(std.mem.indexOf(u8, reduced.report().failed.first_trace, "app.noise") == null);
 }
+
+/// Work that outlives the scenario: cleanup and initialization run past the
+/// budget instead of the scenario body.
+const Lingering = struct {
+    io: std.Io,
+    parked: ?std.Io.Future(void) = null,
+    gate: u32 = 0,
+
+    fn sleepUntilRefused(io: std.Io) void {
+        while (true) std.Io.sleep(io, .fromNanoseconds(10), .awake) catch return;
+    }
+
+    /// Parks with no deadline and is never woken.
+    fn parkForever(io: std.Io, gate: *u32) void {
+        while (gate.* == 0) io.futexWait(u32, gate, 0) catch return;
+    }
+
+    fn init(sim: mar.Sim) @This() {
+        return .{ .io = sim.env.io() };
+    }
+
+    fn initSleepsPastBudget(sim: mar.Sim) !@This() {
+        sleepUntilRefused(sim.env.io());
+        return error.InitGaveUp;
+    }
+
+    fn passes(_: *mar.SimCase(@This())) !void {}
+
+    /// Spend the budget, then await a task that can never finish.
+    fn awaitParkedAfterBudget(case: *mar.SimCase(@This())) !void {
+        var parked = try std.Io.concurrent(case.app.io, parkForever, .{ case.app.io, &case.app.gate });
+        sleepUntilRefused(case.app.io);
+        parked.await(case.app.io);
+    }
+
+    pub fn deinit(self: *@This()) void {
+        sleepUntilRefused(self.io);
+        if (self.parked) |*parked| parked.await(self.io);
+    }
+};
+
+const LingeringWithParkedTask = struct {
+    inner: Lingering,
+    // App state moves out of `init`, so the parked task's gate needs storage
+    // that outlives the initializer's frame.
+    var gate: u32 = 0;
+
+    fn init(sim: mar.Sim) !@This() {
+        var self: @This() = .{ .inner = Lingering.init(sim) };
+        self.inner.parked = try std.Io.concurrent(self.inner.io, Lingering.parkForever, .{ self.inner.io, &gate });
+        return self;
+    }
+    fn passes(_: *mar.SimCase(@This())) !void {}
+    pub fn deinit(self: *@This()) void {
+        self.inner.deinit();
+    }
+};
+
+fn lingeringConfig(comptime init_fn: anytype, comptime scenario_fn: anytype) LingeringConfig(init_fn, scenario_fn) {
+    return .{ .allocator = std.testing.allocator };
+}
+
+fn LingeringConfig(comptime init_fn: anytype, comptime scenario_fn: anytype) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        seed: u64 = 0x57E9,
+        tick_ns: u64 = 10,
+        simulate: mar.World.SimulateOptions = budgeted,
+        comptime init: @TypeOf(init_fn) = init_fn,
+        comptime scenario: @TypeOf(scenario_fn) = scenario_fn,
+    };
+}
+
+test "step budget: exhaustion during cleanup fails the run" {
+    var report = try mar.runSimCase(lingeringConfig(Lingering.init, Lingering.passes));
+    defer report.deinit();
+    try expectBudgetFailure(report);
+}
+
+test "step budget: exhaustion during initialization is not a scenario error" {
+    var report = try mar.runSimCase(lingeringConfig(Lingering.initSleepsPastBudget, Lingering.passes));
+    defer report.deinit();
+    try expectBudgetFailure(report);
+}
+
+test "step budget: awaiting a parked task afterwards keeps the budget failure" {
+    var report = try mar.runSimCase(lingeringConfig(Lingering.init, Lingering.awaitParkedAfterBudget));
+    defer report.deinit();
+    try expectBudgetFailure(report);
+}
+
+test "step budget: cleanup that awaits a parked task keeps the budget failure" {
+    var report = try mar.runSimCase(lingeringConfig(LingeringWithParkedTask.init, LingeringWithParkedTask.passes));
+    defer report.deinit();
+    try expectBudgetFailure(report);
+}

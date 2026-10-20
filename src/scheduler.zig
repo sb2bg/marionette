@@ -845,8 +845,12 @@ pub const TaskScheduler = struct {
                         self.latchSchedulerError(err);
                         return err;
                     }) continue;
-                    try self.recordDeadlock();
-                    self.failure = .deadlock;
+                    // The first terminal failure wins: awaiting parked work
+                    // after the step budget ran out is not a new deadlock.
+                    if (self.failure == null) {
+                        try self.recordDeadlock();
+                        self.failure = .deadlock;
+                    }
                     return error.Deadlock;
                 },
             }

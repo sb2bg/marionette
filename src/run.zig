@@ -685,6 +685,9 @@ fn runOnceWithSimCase(
         .state_checks = state_checks,
         .app = init_app(sim) catch |err| {
             try sim.finishManagedProcesses();
+            // An initializer that ran out of steps reports the budget, not
+            // the error its interrupted wait surfaced.
+            if (sim.control.tasks.failure()) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
             return try failureFromWorld(
                 allocator,
                 options,
@@ -724,6 +727,9 @@ fn runOnceWithSimCase(
     state.deinit();
     state_live = false;
     try sim.finishManagedProcesses();
+    // Application cleanup still schedules work: a budget or deadlock reached
+    // there fails the run instead of passing with the failure in its trace.
+    if (sim.control.tasks.failure()) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
     if (options.check_resources) {
         sim.control.checkResources() catch |err| switch (err) {
             error.ResourceLeak => return try failureFromWorld(
