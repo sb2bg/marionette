@@ -796,8 +796,10 @@ fn runOnceWithSimCase(
             scenario(&state) catch |err| {
                 scenario_error = err;
             };
-            if (scenario_error == null) _ = state.finishCrashPoint() catch |err| {
-                scenario_error = err;
+            // Disarm before checks and cleanup even when the scenario failed,
+            // keeping the scenario's error over any disarm failure.
+            _ = state.finishCrashPoint() catch |err| {
+                if (scenario_error == null) scenario_error = err;
             };
         }
         // A caught checkpoint failure must win over later execution failures.

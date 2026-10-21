@@ -120,3 +120,33 @@ test "crash points: a scenario that never arms is reported" {
         .scenario = Unarmed.scenario,
     }, .{}));
 }
+
+/// Arms a crash point, then fails; cleanup still writes to the disk.
+const FailsBeforeCleanup = struct {
+    disk: mar.Disk,
+
+    fn init(sim: mar.Sim) @This() {
+        return .{ .disk = sim.env.disk };
+    }
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        try case.armCrashPoint();
+        return error.PlantedFailure;
+    }
+    pub fn deinit(self: *@This()) void {
+        self.disk.write(.{ .path = "cleanup", .offset = 0, .bytes = "DONE" }) catch {};
+    }
+};
+
+test "crash points: a failed scenario's cleanup runs with the crash disarmed" {
+    var result = try mar.sweepCrashPoints(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+        .init = FailsBeforeCleanup.init,
+        .scenario = FailsBeforeCleanup.scenario,
+    }, .{});
+    defer result.deinit();
+    const failure = result.failure.?.failed;
+    try std.testing.expectEqualStrings("PlantedFailure", failure.error_name.?);
+    try mar.expectTraceContains(failure.first_trace, "disk.fault kind=armed_crash disarmed=true");
+    try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "armed_crash fired=true") == null);
+}

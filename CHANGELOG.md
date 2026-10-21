@@ -24,7 +24,9 @@
   scenario once per disk operation, crashing before it, until the work under
   test completes. Scenarios mark that work with `SimCase.armCrashPoint` and
   `finishCrashPoint`; each point is an ordinary exact-replayed run whose point
-  is a run attribute, so a failing point replays from its capsule. Adds
+  is a run attribute, so a failing point replays from its capsule. The armed
+  crash is cancelled when the scenario returns or fails, before checks and
+  cleanup. Adds
   `DiskControl.disarmCrash`, and a firing armed crash now records
   `disk.fault kind=armed_crash fired=true`.
 - Documents and tests directory durability through `std.Io`: syncing a

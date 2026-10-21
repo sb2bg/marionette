@@ -247,8 +247,8 @@ try mar.expectCrashPointsPass(config, .{});
 `armCrashPoint` arms `crashAfterOps(k)` for the sweep's current point `k`, and
 does nothing in an ordinary run, so the same scenario works in both.
 `finishCrashPoint` cancels a crash that has not fired, so recovery code after it
-runs normally; the runner also cancels it when the scenario returns, so checks
-never run with a crash armed. `sweepCrashPoints(config, CrashSweepOptions)`
+runs normally; the runner also cancels it when the scenario returns or fails,
+so checks and cleanup never run with a crash armed. `sweepCrashPoints(config, CrashSweepOptions)`
 tries points 0, 1, 2, and so on until one where the armed crash never fired,
 and returns the first failing report instead of stopping at an error. Each point
 is an ordinary recorded and exact-replayed run whose point is the
