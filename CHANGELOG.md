@@ -27,6 +27,9 @@
   is a run attribute, so a failing point replays from its capsule. Adds
   `DiskControl.disarmCrash`, and a firing armed crash now records
   `disk.fault kind=armed_crash fired=true`.
+- Documents and tests directory durability through `std.Io`: syncing a
+  directory opened with `allow_directory` commits its entries, so durable code
+  does not need the `Disk` capability for `syncDir`.
 
 ## v0.8.0 - 2026-10-20
 

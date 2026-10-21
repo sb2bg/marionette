@@ -68,6 +68,17 @@ pending bytes. `syncDir` commits creates, deletes, and renames for that logical
 directory. A newly created file becomes durable by syncing the file and then
 its parent directory. A cross-directory rename requires syncing both parents.
 
+Code that uses `std.Io` syncs a directory the way it would on POSIX: open the
+directory as a file and sync it.
+
+```zig
+var directory = try std.Io.Dir.cwd().openFile(io, ".", .{ .allow_directory = true });
+defer directory.close(io);
+try directory.sync(io); // the simulated backend runs `syncDir` for it
+```
+
+So durable application code needs only `std.Io`, not the `Disk` capability.
+
 `setLength` extension is zero-filled by the disk authority. It is one
 lifecycle operation, not a series of independently fallible sector writes.
 

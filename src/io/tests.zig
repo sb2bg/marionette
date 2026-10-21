@@ -4585,6 +4585,38 @@ test "io: simulated directories support Ochi layout operations" {
     ) != null);
 }
 
+test "io: a directory synced through std.Io keeps its entries across a crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    for ([_][]const u8{ "durable", "fragile" }) |name| {
+        const file = try cwd.createFile(io, name, .{});
+        try file.writePositionalAll(io, "DATA", 0);
+        try file.sync(io);
+        file.close(io);
+        if (std.mem.eql(u8, name, "fragile")) break;
+        // Durable code needs no `Disk` capability to sync a directory.
+        var directory = try cwd.openFile(io, ".", .{ .allow_directory = true });
+        defer directory.close(io);
+        try directory.sync(io);
+    }
+
+    try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    try sim.control.process.restart(0);
+
+    const durable = try cwd.openFile(io, "durable", .{});
+    defer durable.close(io);
+    var bytes: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try durable.readPositionalAll(io, &bytes, 0));
+    try std.testing.expectEqualStrings("DATA", &bytes);
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(io, "fragile", .{}));
+}
+
 test "io: simulated directory iteration returns direct children only" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
