@@ -71,12 +71,14 @@ pub fn reproducible(report: types.RunReport) bool {
 /// replay and preserve the original full fingerprint before acceptance.
 /// The config is the ordinary runSimCase config, including its watchdog budget.
 pub fn reduceSimCase(config: anytype, options: Options) !Result {
+    comptime run.requireKnownConfigFields(@TypeOf(config), "reduceSimCase", &.{});
     return reduceWith(config.allocator, try run.runSimCase(config), SeededCandidates(@TypeOf(config)){ .config = config, .seed = null }, options);
 }
 
 /// Reduce a failure that a campaign already recorded at `seed`, taking
 /// ownership of its report instead of executing it again.
 pub fn reduceSeededReport(config: anytype, seed: u64, original: types.RunReport, options: Options) !Result {
+    comptime run.requireKnownConfigFields(@TypeOf(config), "reduceSeededReport", &.{});
     return reduceWith(config.allocator, original, SeededCandidates(@TypeOf(config)){ .config = config, .seed = seed }, options);
 }
 
@@ -85,6 +87,7 @@ pub fn reduceSeededReport(config: anytype, seed: u64, original: types.RunReport,
 /// the capsule's own runtime and simulation options. The config supplies only
 /// the allocator, callbacks, and checks, as for `replaySimCase`.
 pub fn reduceCapsule(config: anytype, capsule: *const replay.Capsule, identity: replay.Identity, options: Options) !Result {
+    comptime run.requireKnownConfigFields(@TypeOf(config), "reduceCapsule", &.{});
     const original = try run.replaySimCase(config, capsule, identity);
     return reduceWith(config.allocator, original, CapsuleCandidates(@TypeOf(config)){
         .config = config,

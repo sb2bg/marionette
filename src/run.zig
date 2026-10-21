@@ -128,8 +128,13 @@ pub fn SimCase(comptime App: type) type {
 ///
 /// Optional fields are `seed`, `seed_schedule`, `start_ns`, `tick_ns`,
 /// `name`, `tags`, `attributes`, `checks`, `watchdog`, `check_resources`,
-/// and host-owned `artifacts`.
+/// and host-owned `artifacts`. Any other field is a compile error.
 pub fn runSimCase(config: anytype) RunError!RunReport {
+    comptime requireKnownConfigFields(@TypeOf(config), "runSimCase", &.{});
+    return runSimCaseUnchecked(config);
+}
+
+fn runSimCaseUnchecked(config: anytype) RunError!RunReport {
     var report = try runConfiguredCase(config, null, .record);
     errdefer report.deinit();
     if (@hasField(@TypeOf(config), "artifacts")) try @import("artifact.zig").write(config.allocator, &report, config.artifacts);
@@ -138,8 +143,10 @@ pub fn runSimCase(config: anytype) RunError!RunReport {
 
 /// Execute a saved capsule against the exact harness build/input identity.
 /// Config supplies allocator, init, scenario, and optional compile-time checks.
-/// Runtime options and simulation configuration come exclusively from the capsule.
+/// Runtime options and simulation configuration come exclusively from the
+/// capsule, so the original run config may be passed unchanged.
 pub fn replaySimCase(config: anytype, capsule: *const @import("replay.zig").Capsule, identity: @import("replay.zig").Identity) !RunReport {
+    comptime requireKnownConfigFields(@TypeOf(config), "replaySimCase", &.{});
     try capsule.validateIdentity(identity);
     const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
     try Harness.validate();
@@ -154,7 +161,8 @@ pub fn replaySimCase(config: anytype, capsule: *const @import("replay.zig").Caps
 
 /// Expect a simulation case to pass. Prints the failure summary otherwise.
 pub fn expectSimPass(config: anytype) ExpectRunError!void {
-    var report = try runSimCase(config);
+    comptime requireKnownConfigFields(@TypeOf(config), "expectSimPass", &.{});
+    var report = try runSimCaseUnchecked(config);
     defer report.deinit();
 
     switch (report) {
@@ -170,7 +178,8 @@ pub fn expectSimPass(config: anytype) ExpectRunError!void {
 /// the accepted kind, error name, and/or check name. Use `runSimCase` directly
 /// when the test needs to inspect the full failure details.
 pub fn expectSimFailure(config: anytype) ExpectRunError!void {
-    var report = try runSimCase(config);
+    comptime requireKnownConfigFields(@TypeOf(config), "expectSimFailure", &.{"failure"});
+    var report = try runSimCaseUnchecked(config);
     defer report.deinit();
 
     switch (report) {
@@ -193,6 +202,7 @@ pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
     if (!@hasField(@TypeOf(config), "seeds")) {
         @compileError("expectSimFuzz config requires a `seeds` field");
     }
+    comptime requireKnownConfigFields(@TypeOf(config), "expectSimFuzz", &.{"seeds"});
     if (config.seeds == 0) return error.InvalidSeedCount;
 
     for (0..config.seeds) |iteration| {
@@ -271,6 +281,32 @@ fn validateStateChecks(comptime State: type, checks: []const StateCheck(State)) 
         for (checks[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, check.name)) return error.InvalidStateChecks;
         }
+    }
+}
+
+/// Fields a run config may carry. Entry points add their own extras.
+const run_config_fields = [_][]const u8{
+    "allocator",     "simulate", "init",     "scenario",        "seed",
+    "seed_schedule", "start_ns", "tick_ns",  "name",            "tags",
+    "attributes",    "checks",   "watchdog", "check_resources", "artifacts",
+};
+
+/// The first field of `Config` that no runner reads, if any.
+pub fn unknownConfigField(comptime Config: type, comptime extra: []const []const u8) ?[]const u8 {
+    outer: for (@typeInfo(Config).@"struct".field_names) |name| {
+        for (run_config_fields ++ extra) |known| {
+            if (std.mem.eql(u8, name, known)) continue :outer;
+        }
+        return name;
+    }
+    return null;
+}
+
+/// Optional config fields are read by name, so a misspelled one would be
+/// ignored and a test could pass without its checks. Reject it instead.
+pub fn requireKnownConfigFields(comptime Config: type, comptime entry_point: []const u8, comptime extra: []const []const u8) void {
+    if (unknownConfigField(Config, extra)) |name| {
+        @compileError(entry_point ++ " config has no field `" ++ name ++ "`; check its spelling");
     }
 }
 
@@ -1897,4 +1933,13 @@ test "properties: successful check cannot hide a scheduler deadlock" {
             .failure = FailureExpectation{ .kind = .scheduler_deadlock, .error_name = "Deadlock" },
         });
     }
+}
+
+test "runner configs: a misspelled field is reported by name" {
+    // Entry points turn a non-null result into a compile error naming it.
+    const Misspelled = @TypeOf(.{ .allocator = std.testing.allocator, .chekcs = {} });
+    try std.testing.expectEqualStrings("chekcs", comptime unknownConfigField(Misspelled, &.{}).?);
+    const Fuzz = @TypeOf(.{ .allocator = std.testing.allocator, .checks = {}, .seeds = 1 });
+    try std.testing.expectEqualStrings("seeds", comptime unknownConfigField(Fuzz, &.{}).?);
+    try std.testing.expect(comptime unknownConfigField(Fuzz, &.{"seeds"}) == null);
 }

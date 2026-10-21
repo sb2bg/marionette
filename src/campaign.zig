@@ -186,6 +186,7 @@ pub fn runCampaign(config: anytype, options: Options) Error!Summary {
     if (comptime @hasField(@TypeOf(config), "artifacts")) {
         @compileError("runCampaign writes artifacts itself; set Options.artifacts instead of config.artifacts");
     }
+    comptime run.requireKnownConfigFields(@TypeOf(config), "runCampaign", &.{});
     if (options.cases == 0) return error.InvalidCampaignOptions;
     if (options.max_failures) |limit| if (limit == 0) return error.InvalidCampaignOptions;
     if (@hasField(@TypeOf(config), "watchdog")) {

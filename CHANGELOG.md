@@ -10,6 +10,11 @@
   strips them. `BuggifyRate.fires(roll)` states the rule. The same seed now
   produces different fault outcomes, so capsules recorded before 0.8.1 that
   contain fault rolls no longer replay; give the harness a new build identity.
+- Runner configs reject unknown fields at compile time. Optional fields are read
+  by name, so a misspelled one such as `.chekcs` was ignored and a test passed
+  without running its checks. `runSimCase`, the `expectSim*` helpers,
+  `replaySimCase`, the reduction entry points, and `runCampaign` now name the
+  unknown field in a compile error.
 
 ## v0.8.0 - 2026-10-20
 
