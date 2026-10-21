@@ -89,11 +89,15 @@ path-and-sector-scoped fault.
 or metadata operations complete, the next operation crashes the disk before
 doing work and fails like any post-crash operation. Re-arming replaces the
 budget; any crash disarms it. If the workload never reaches the boundary, the
-crash never fires.
+crash never fires; `control.disk.disarmCrash()` cancels it and reports whether
+one was pending. A firing armed crash records
+`disk.fault kind=armed_crash fired=true` before its `disk.crash`, and a
+cancelled one records `disk.fault kind=armed_crash disarmed=true`.
 
 Crash marks the disk down and stops live logical processes. Disk restart only
-restores the disk authority; applications restart explicitly through their
-registered process lifecycle.
+restores the disk authority; applications restart explicitly through
+`control.process.restart`, which reruns a registered lifecycle or, without one,
+revives the node's I/O.
 
 ## Recovery windows
 

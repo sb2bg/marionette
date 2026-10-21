@@ -225,6 +225,37 @@ does not make `fired()` true. `summarize` reports the same counts, and the
 `--summary` output ends with a `trace.faults` line. Campaigns total coverage
 across cases; see [Campaigns](campaigns.md#fault-coverage).
 
+## Crash-Point Sweeps
+
+Durable code is usually correct or wrong at a specific crash point: after the
+data is synced but before the directory entry is, for example. A sweep runs the
+scenario once per disk operation, crashing before that operation:
+
+```zig
+fn scenario(case: *Case) !void {
+    // ...setup...
+    try case.armCrashPoint();
+    const committed = commit(case.env());
+    _ = try case.finishCrashPoint(); // true when the armed crash fired
+    committed catch |err| if (err != error.DiskCrashed) return err;
+    // ...restart if crashed, recover, and check...
+}
+
+try mar.expectCrashPointsPass(config, .{});
+```
+
+`armCrashPoint` arms `crashAfterOps(k)` for the sweep's current point `k`, and
+does nothing in an ordinary run, so the same scenario works in both.
+`finishCrashPoint` cancels a crash that has not fired, so recovery code after it
+runs normally; the runner also cancels it when the scenario returns, so checks
+never run with a crash armed. `sweepCrashPoints(config, CrashSweepOptions)`
+tries points 0, 1, 2, and so on until one where the armed crash never fired,
+and returns the first failing report instead of stopping at an error. Each point
+is an ordinary recorded and exact-replayed run whose point is the
+`marionette.crash_point` run attribute, so a failing point's capsule replays
+that point. A scenario that never arms returns `CrashPointNotArmed`, and
+`max_points` (1024 by default) bounds a workload that never finishes.
+
 ## Step Budget
 
 A task that keeps sleeping, waking a peer, or retrying never deadlocks, so

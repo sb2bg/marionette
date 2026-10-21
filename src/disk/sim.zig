@@ -1437,6 +1437,11 @@ pub const SimDisk = struct {
         try self.ensureRunning();
         if (self.armed_crash_budget) |budget| {
             if (budget == 0) {
+                // Distinguishes an armed crash from one the harness requested.
+                try self.world.recordFields("disk.fault", &.{
+                    traceField("kind", .{ .literal = "armed_crash" }),
+                    traceField("fired", .{ .literal = "true" }),
+                });
                 try self.crash(.{});
                 return error.DiskCrashed;
             }
@@ -1451,6 +1456,16 @@ pub const SimDisk = struct {
             traceField("kind", .{ .literal = "armed_crash" }),
             traceField("after_ops", .{ .uint = ops }),
         });
+    }
+
+    fn disarmCrash(self: *Self) DiskError!bool {
+        if (self.armed_crash_budget == null) return false;
+        try self.world.recordFields("disk.fault", &.{
+            traceField("kind", .{ .literal = "armed_crash" }),
+            traceField("disarmed", .{ .literal = "true" }),
+        });
+        self.armed_crash_budget = null;
+        return true;
     }
 
     fn validateRange(self: *const Self, offset: u64, len: usize) DiskError!void {
@@ -2173,6 +2188,7 @@ pub const SimDisk = struct {
         .corrupt_sector = controlCorruptSector,
         .crash = controlCrash,
         .crash_after_ops = controlCrashAfterOps,
+        .disarm_crash = controlDisarmCrash,
         .restart = controlRestart,
         .disk = controlDisk,
     };
@@ -2262,6 +2278,10 @@ pub const SimDisk = struct {
 
     fn controlCrashAfterOps(ptr: *anyopaque, ops: u64) DiskError!void {
         try fromOpaque(ptr).crashAfterOps(ops);
+    }
+
+    fn controlDisarmCrash(ptr: *anyopaque) DiskError!bool {
+        return fromOpaque(ptr).disarmCrash();
     }
 
     fn controlRestart(ptr: *anyopaque) DiskError!void {

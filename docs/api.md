@@ -249,6 +249,14 @@ and `writeRunArtifacts` persist reports through caller-supplied host I/O.
 `*ManagedProcess(App)` state with automatic restart/reopen and runner cleanup.
 See the [complete contracts and examples](reduction-and-explanation.md).
 
+## Crash-Point Sweeps
+
+`sweepCrashPoints(config, CrashSweepOptions)` runs a `runSimCase` config once
+per disk crash point and returns an owned `CrashSweepResult` with the number of
+points and the first failing report; `expectCrashPointsPass` fails the test
+instead. Scenarios mark the work under test with `SimCase.armCrashPoint` and
+`SimCase.finishCrashPoint`. See [Crash-Point Sweeps](run.md#crash-point-sweeps).
+
 ## Campaigns
 
 `runCampaign(config, CampaignOptions)` runs a bounded range of `runSimCase`

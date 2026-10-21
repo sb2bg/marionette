@@ -61,12 +61,35 @@ pub fn SimCase(comptime App: type) type {
         sim: World.Simulation,
         app: App,
         state_checks: []const StateCheck(Self) = &.{},
+        /// Disk operations before this run's armed crash, in a crash-point
+        /// sweep. Null otherwise.
+        crash_point: ?u64 = null,
+        crash_point_armed: bool = false,
         property_failure: ?struct { err: anyerror, name: []const u8 } = null,
 
         /// Execute an optional action group. Keep dependencies and required
         /// setup outside actions; disabled groups are visible in the tape.
         pub fn action(self: *Self, comptime id: []const u8, comptime callback: fn (*Self) anyerror!void) !void {
             if (try self.control().world.actionEnabled(id)) try callback(self);
+        }
+
+        /// Arm this run's crash point: in a crash-point sweep, the disk crashes
+        /// before the operation that would exceed it. Does nothing outside a
+        /// sweep, so the same scenario runs normally too.
+        pub fn armCrashPoint(self: *Self) !void {
+            const point = self.crash_point orelse return;
+            try self.control().disk.crashAfterOps(point);
+            self.crash_point_armed = true;
+        }
+
+        /// End the work under test: an armed crash that has not fired is
+        /// disarmed, so recovery and checks run without it. Returns whether
+        /// the armed crash fired; false outside a sweep. The runner also
+        /// disarms when the scenario returns, before checks run.
+        pub fn finishCrashPoint(self: *Self) !bool {
+            if (!self.crash_point_armed) return false;
+            self.crash_point_armed = false;
+            return !(try self.control().disk.disarmCrash());
         }
 
         /// Evaluate explicitly selected properties at a named harness safe point.
@@ -256,12 +279,16 @@ fn PreparedHarness(
 }
 
 fn runConfiguredCase(config: anytype, seed_override: ?u64, mode: decision_module.Mode) RunError!RunReport {
+    return runConfiguredCaseWith(config, seed_override, mode, &.{});
+}
+
+fn runConfiguredCaseWith(config: anytype, seed_override: ?u64, mode: decision_module.Mode, extra_attributes: []const RunAttribute) RunError!RunReport {
     if (!@hasField(@TypeOf(config), "simulate")) {
         @compileError("runSimCase config requires a `simulate` field");
     }
     const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
     try Harness.validate();
-    var options = try runOptionsFromConfig(config, seed_override);
+    var options = try runOptionsFromConfig(config, seed_override, extra_attributes);
     defer deinitRunOptions(config.allocator, &options);
     return runTwiceWithSimCase(
         config.allocator,
@@ -349,12 +376,37 @@ pub fn runCapsuleCandidate(
     );
 }
 
-fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.Error!RunOptions {
+/// Run attribute carrying a crash-point sweep's current point, so capsules
+/// replay the same point.
+pub const crash_point_attribute = "marionette.crash_point";
+
+fn crashPointFromOptions(options: RunOptions) ?u64 {
+    for (options.attributes) |attribute| {
+        if (!std.mem.eql(u8, attribute.key, crash_point_attribute)) continue;
+        return switch (attribute.value) {
+            .uint => |point| point,
+            else => null,
+        };
+    }
+    return null;
+}
+
+/// Internal crash-point sweep execution: one recorded case at `point`.
+pub fn runCrashPoint(config: anytype, point: u64) RunError!RunReport {
+    return runConfiguredCaseWith(config, null, .record, &.{runAttribute(crash_point_attribute, point)});
+}
+
+fn runOptionsFromConfig(config: anytype, seed_override: ?u64, extra_attributes: []const RunAttribute) std.mem.Allocator.Error!RunOptions {
     const schedule = if (@hasField(@TypeOf(config), "seed_schedule"))
         try normalizeSchedule(config.allocator, config.seed_schedule)
     else
         try config.allocator.alloc(seed_module.SeedCutover, 0);
     defer config.allocator.free(schedule);
+    const config_attributes: []const RunAttribute = if (@hasField(@TypeOf(config), "attributes")) config.attributes else &.{};
+    const attributes = try config.allocator.alloc(RunAttribute, config_attributes.len + extra_attributes.len);
+    defer config.allocator.free(attributes);
+    @memcpy(attributes[0..config_attributes.len], config_attributes);
+    @memcpy(attributes[config_attributes.len..], extra_attributes);
     // Coerce collection literals here and clone while their backing storage is live.
     const borrowed: RunOptions = .{
         .seed = seed_override orelse configSeed(config),
@@ -363,7 +415,7 @@ fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.
         .tick_ns = fieldOrDefault(config, "tick_ns", @import("clock.zig").default_tick_ns),
         .name = if (@hasField(@TypeOf(config), "name")) config.name else null,
         .tags = if (@hasField(@TypeOf(config), "tags")) config.tags else &.{},
-        .attributes = if (@hasField(@TypeOf(config), "attributes")) config.attributes else &.{},
+        .attributes = attributes,
         .watchdog = fieldOrDefault(config, "watchdog", @as(?WatchdogOptions, null)),
         .check_resources = fieldOrDefault(config, "check_resources", false),
     };
@@ -719,6 +771,7 @@ fn runOnceWithSimCase(
     var state: SimCase(App) = .{
         .sim = sim,
         .state_checks = state_checks,
+        .crash_point = crashPointFromOptions(options),
         .app = init_app(sim) catch |err| {
             try sim.finishManagedProcesses();
             // An initializer that ran out of steps reports the budget, not
@@ -739,9 +792,14 @@ fn runOnceWithSimCase(
 
     for ([_]CheckPhase{ .after_init, .after_scenario }) |phase| {
         var scenario_error: ?anyerror = null;
-        if (phase == .after_scenario) scenario(&state) catch |err| {
-            scenario_error = err;
-        };
+        if (phase == .after_scenario) {
+            scenario(&state) catch |err| {
+                scenario_error = err;
+            };
+            if (scenario_error == null) _ = state.finishCrashPoint() catch |err| {
+                scenario_error = err;
+            };
+        }
         // A caught checkpoint failure must win over later execution failures.
         if (scenario_error == null and state.property_failure == null and state.control().tasks.failure() == null) {
             state.evaluateChecks(phase) catch |err| {

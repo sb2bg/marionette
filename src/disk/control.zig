@@ -18,6 +18,7 @@ pub const DiskControl = struct {
         corrupt_sector: *const fn (*anyopaque, []const u8, u64) DiskError!void,
         crash: *const fn (*anyopaque) DiskError!void,
         crash_after_ops: *const fn (*anyopaque, u64) DiskError!void,
+        disarm_crash: *const fn (*anyopaque) DiskError!bool,
         restart: *const fn (*anyopaque) DiskError!void,
         disk: *const fn (*anyopaque) Disk,
     };
@@ -53,6 +54,13 @@ pub const DiskControl = struct {
     /// offset. Re-arming replaces the previous budget; any crash disarms.
     pub fn crashAfterOps(self: DiskControl, ops: u64) DiskError!void {
         try self.vtable.crash_after_ops(self.ptr, ops);
+    }
+
+    /// Cancel a `crashAfterOps` crash that has not fired yet. Returns whether
+    /// one was pending; false means it fired or none was armed. Traced as
+    /// `disk.fault kind=armed_crash disarmed=true` when one is cancelled.
+    pub fn disarmCrash(self: DiskControl) DiskError!bool {
+        return self.vtable.disarm_crash(self.ptr);
     }
 
     /// Bring a crashed disk back up. Only the disk recovers; killed

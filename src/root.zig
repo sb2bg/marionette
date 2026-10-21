@@ -334,4 +334,12 @@ pub const CampaignReduction = @import("campaign.zig").Reduction;
 pub const CampaignMetrics = @import("campaign.zig").Metrics;
 pub const loadCampaignSummary = @import("campaign.zig").loadSummary;
 
+/// Crash-point sweeps: one run per disk operation, crashing before it.
+pub const sweepCrashPoints = @import("crash_points.zig").sweepCrashPoints;
+pub const expectCrashPointsPass = @import("crash_points.zig").expectCrashPointsPass;
+pub const CrashSweepOptions = @import("crash_points.zig").Options;
+pub const CrashSweepResult = @import("crash_points.zig").Result;
+/// Run attribute that records a sweep's crash point.
+pub const crash_point_attribute = @import("run.zig").crash_point_attribute;
+
 pub const ManagedProcess = @import("world.zig").ManagedProcess;

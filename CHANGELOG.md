@@ -20,6 +20,13 @@
   placeholder `ProcessLifecycle`. `transitionToLiveness` no longer requires
   lifecycles for killed core nodes, and automatic restarts revive unregistered
   nodes instead of failing with `ProcessNotRegistered`.
+- Adds crash-point sweeps. `sweepCrashPoints` and `expectCrashPointsPass` run a
+  scenario once per disk operation, crashing before it, until the work under
+  test completes. Scenarios mark that work with `SimCase.armCrashPoint` and
+  `finishCrashPoint`; each point is an ordinary exact-replayed run whose point
+  is a run attribute, so a failing point replays from its capsule. Adds
+  `DiskControl.disarmCrash`, and a firing armed crash now records
+  `disk.fault kind=armed_crash fired=true`.
 
 ## v0.8.0 - 2026-10-20
 
