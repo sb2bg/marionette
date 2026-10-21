@@ -1403,6 +1403,11 @@ fn taskRuntimeTakeCancelRequest(ptr: *anyopaque) bool {
     return scheduler.takeCancelRequest();
 }
 
+fn taskRuntimeCancelAcknowledged(ptr: *anyopaque) bool {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    return if (scheduler.current) |task| task.cancel_delivered else false;
+}
+
 fn taskRuntimeRecancel(ptr: *anyopaque) void {
     const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
     scheduler.recancelCurrent();
@@ -1423,6 +1428,7 @@ const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .run_until_done = taskRuntimeRunUntilDone,
     .request_cancel = taskRuntimeRequestCancel,
     .take_cancel_request = taskRuntimeTakeCancelRequest,
+    .cancel_acknowledged = taskRuntimeCancelAcknowledged,
     .recancel = taskRuntimeRecancel,
     .swap_cancel_protection = taskRuntimeSwapCancelProtection,
 };

@@ -2392,6 +2392,7 @@ const AsyncFuture = struct {
     task_id: u64 = 0,
     done: bool = false,
     result: AlignedStorage,
+    cancel_acknowledged: bool = false,
 
     fn create(
         backend: *Backend,
@@ -2478,8 +2479,9 @@ const AsyncClosure = struct {
         const future = closure.future;
         const backend = closure.backend;
         closure.start(closure.context.bytes.ptr, future.result.bytes.ptr);
-        future.done = true;
         const runtime = backend.task_runtime orelse unreachable;
+        future.cancel_acknowledged = runtime.cancelAcknowledged();
+        future.done = true;
         _ = runtime.wake(future.completionKey(), std.math.maxInt(usize));
         releaseAsyncClosure(closure);
     }
@@ -2749,6 +2751,10 @@ fn simAwait(
 ) void {
     _ = result_alignment;
     _ = backendFromUserdata(userdata);
+    awaitFuture(any_future, result, true);
+}
+
+fn awaitFuture(any_future: *Io.AnyFuture, result: []u8, cancelable: bool) void {
     const future: *AsyncFuture = @ptrCast(@alignCast(any_future));
     // `await` is only called when `async` returned non-null, so a runtime
     // was attached at spawn time.
@@ -2756,7 +2762,26 @@ fn simAwait(
 
     if (!future.done) {
         if (runtime.inTask()) {
-            while (!future.done) runtime.block(future.completionKey());
+            var forwarded = false;
+            while (!future.done) {
+                if (!cancelable or forwarded) {
+                    runtime.block(future.completionKey());
+                    continue;
+                }
+                runtime.blockCancelable(future.completionKey()) catch |err| switch (err) {
+                    error.Canceled => {
+                        forwarded = true;
+                        runtime.requestCancel(future.task_id);
+                    },
+                    error.SchedulerFailed => {
+                        @memset(result, 0);
+                        return;
+                    },
+                };
+            }
+            // Await transfers cancellation responsibility to the child only
+            // when it acknowledges the request, matching std.Io.Threaded.
+            if (forwarded and !future.cancel_acknowledged) runtime.recancel();
         } else {
             runtime.runUntilDone(&future.done) catch {
                 @memset(result, 0);
@@ -2783,7 +2808,10 @@ fn simCancel(
         const runtime = future.backend.task_runtime orelse unreachable;
         runtime.requestCancel(future.task_id);
     }
-    simAwait(userdata, any_future, result, result_alignment);
+    _ = userdata;
+    _ = result_alignment;
+    // Explicit cancel joins without consuming the caller's cancellation.
+    awaitFuture(any_future, result, false);
 }
 
 fn releaseFuture(future: *AsyncFuture) void {
