@@ -421,12 +421,11 @@ pub const World = struct {
         /// makes progress.
         ///
         /// A crashed disk restarts before core processes revive. Killed
-        /// core processes need a registered lifecycle
-        /// (`error.ProcessNotRegistered` otherwise); alive core processes
-        /// keep their current incarnation. Core validity and lifecycles
-        /// are checked before any state changes, so a failed call leaves
-        /// the transition unconsumed and retryable after the harness
-        /// corrects it. Harness-owned deterministic
+        /// core processes rerun their registered lifecycle, or only revive
+        /// their I/O without one; alive core processes keep their current
+        /// incarnation. Core node ids are checked before any state changes,
+        /// so a failed call leaves the transition unconsumed and retryable
+        /// after the harness corrects it. Harness-owned deterministic
         /// faults stay in place: an armed `crashAfterOps` budget is not
         /// disarmed, and app-level `Env.buggify` rates are the app
         /// harness's own to zero.

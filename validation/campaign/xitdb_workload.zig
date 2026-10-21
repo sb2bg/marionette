@@ -60,7 +60,6 @@ pub const App = struct {
     recovered: ?DB = null,
 
     pub fn init(sim: mar.Sim) !App {
-        try sim.registerProcess(0, .{ .ptr = sim.control.world, .restart = noopRestart });
         const io = sim.env.io();
         const file = try std.Io.Dir.cwd().createFile(io, db_path, .{ .read = true, .truncate = true });
         errdefer file.close(io);
@@ -100,8 +99,6 @@ pub const App = struct {
 };
 
 const Case = mar.SimCase(App);
-
-fn noopRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
 
 fn drawTransaction(case: *Case, index: usize) !Transaction {
     const world = case.control().world;

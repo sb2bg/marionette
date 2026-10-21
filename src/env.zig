@@ -252,8 +252,8 @@ pub const ProcessControl = struct {
 
     /// Restart one logical process by rerunning its registered lifecycle;
     /// an alive process is killed first so restart always creates a fresh
-    /// incarnation. Returns `error.ProcessNotRegistered` without a
-    /// registered lifecycle. Traced as `process.restart`.
+    /// incarnation. Without a registered lifecycle, only the node's I/O is
+    /// revived. Traced as `process.restart`.
     pub fn restart(self: ProcessControl, node: network_module.NodeId) !void {
         try self.vtable.restart(self.ptr, node);
     }

@@ -35,14 +35,8 @@ pub fn simulateOptions() mar.World.SimulateOptions {
 }
 
 pub fn init(sim: mar.Sim) !KVStore {
-    try sim.registerProcess(0, .{
-        .ptr = sim.control.world,
-        .restart = noopProcessRestart,
-    });
     return try KVStore.init(sim.env.io(), std.Io.Dir.cwd(), sim.env.recorder());
 }
-
-fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
 
 fn restartAfterDiskCrash(case: *Case) !void {
     try case.control().disk.restart();

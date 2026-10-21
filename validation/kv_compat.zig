@@ -38,14 +38,8 @@ fn simulateOptions(sector_size: u64) mar.World.SimulateOptions {
 }
 
 fn initStore(sim: mar.Sim) !CompatStore {
-    try sim.registerProcess(0, .{
-        .ptr = sim.control.world,
-        .restart = noopProcessRestart,
-    });
     return try CompatStore.init(sim.env.io(), sim.env.recorder());
 }
-
-fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
 
 fn restartAfterDiskCrash(case: *Case) !void {
     try case.control().disk.restart();

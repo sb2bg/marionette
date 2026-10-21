@@ -15,6 +15,11 @@
   without running its checks. `runSimCase`, the `expectSim*` helpers,
   `replaySimCase`, the reduction entry points, and `runCampaign` now name the
   unknown field in a compile error.
+- Restarting a node with no registered lifecycle revives its I/O and runs no
+  callback, so a disk crash, which kills every process, no longer forces a
+  placeholder `ProcessLifecycle`. `transitionToLiveness` no longer requires
+  lifecycles for killed core nodes, and automatic restarts revive unregistered
+  nodes instead of failing with `ProcessNotRegistered`.
 
 ## v0.8.0 - 2026-10-20
 

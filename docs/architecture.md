@@ -72,7 +72,8 @@ sizes, never addresses.
 Network and I/O handles are process-scoped. Killing a process cancels its
 tasks, closes its resources, and invokes its registered lifecycle callback.
 Restart reruns the initializer against surviving durable state. Harness-owned
-application memory must be explicitly reset in the lifecycle callback.
+application memory must be explicitly reset in the lifecycle callback. A node
+with no registered lifecycle restarts with only its I/O revived.
 
 `process.zig` owns supervision, automatic transition schedules, and managed
 volatile state. `World` constructs it and exposes it through the `Sim` lifecycle

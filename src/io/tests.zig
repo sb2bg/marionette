@@ -2659,7 +2659,7 @@ test "io: failed restart rolls back partial process resources" {
     try std.testing.expectEqual(@as(u32, 1), state.starts);
 }
 
-test "io: restarting an unregistered process does not kill it" {
+test "io: restarting an unregistered process revives only its I/O" {
     if (!fiber_supported) return error.SkipZigTest;
 
     const State = struct {
@@ -2681,7 +2681,10 @@ test "io: restarting an unregistered process does not kill it" {
     defer world.deinit();
 
     const sim = try world.simulate(.{});
-    try std.testing.expectError(error.ProcessNotRegistered, sim.restartProcess(0));
+    // No lifecycle: a fresh incarnation with nothing to rerun.
+    try sim.restartProcess(0);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "process.kill node=0 reason=restart"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "process.restart node=0 automatic=false"));
 
     var state: State = .{};
     try sim.registerProcess(0, .{
@@ -2988,7 +2991,7 @@ test "io: scheduler timer jumps evolve process and network faults" {
     try std.testing.expect(run_to_partition < partition);
 }
 
-test "io: automatic process restart reports missing lifecycle" {
+test "io: automatic process restart revives an unregistered node" {
     if (!fiber_supported) return error.SkipZigTest;
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA69, .tick_ns = 10 });
@@ -2998,9 +3001,9 @@ test "io: automatic process restart reports missing lifecycle" {
     try sim.control.process.setDynamics(0, .{ .restart_rate = .always() });
     try sim.control.process.kill(0);
 
-    try std.testing.expectError(error.ProcessNotRegistered, sim.control.runFor(10));
+    try sim.control.runFor(10);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.kill node=0 reason=manual") != null);
-    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.restart node=0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "process.restart node=0 automatic=true") != null);
 }
 
 test "io: unawaited async tasks are reclaimed at world teardown" {
@@ -5702,8 +5705,7 @@ test "io: transitionToLiveness preflight failures leave the transition retryable
     try sim.killProcess(1);
 
     try std.testing.expectError(error.InvalidNode, sim.transitionToLiveness(&.{ 0, 7 }));
-    try std.testing.expectError(error.ProcessNotRegistered, sim.transitionToLiveness(&.{ 0, 1 }));
-    // The failed calls consumed nothing and mutated no fault state.
+    // The failed call consumed nothing and mutated no fault state.
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(world.traceBytes(), "liveness.transition"));
     try std.testing.expectEqual(@as(u32, 0), state.starts);
 
