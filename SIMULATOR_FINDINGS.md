@@ -16,7 +16,7 @@ Zig 0.17.
 
 | Severity | Target | Finding | Primary location |
 | --- | --- | --- | --- |
-| Medium | 0.8.1 | One world-global pool of 64 stream buffers couples connections: a reader that never reads makes an unrelated connect fail with `SystemResources` (probe G). | `src/message_pool.zig`, `src/io/net.zig` |
+| Medium | 0.9 | One world-global pool of 64 stream buffers couples connections: once a reader that never reads fills it, unrelated connections cannot send data (probe G). Connects no longer need a buffer since 0.8.1. | `src/message_pool.zig`, `src/io/net.zig` |
 | High | 0.9 | Network faults become immediate errors, and close and kill reach peers through shared state even across a partition: connect into a partition fails in 0 ms despite a 10 s timeout, a reply sent during a partition becomes `Timeout` 1 ms later, and 1% loss kills a stream (probes A to E). | `src/io/net.zig` (`simNetConnectIp`, `drainNetworkReady`), `src/io/backend.zig` (`closeConnectionState`) |
 | Medium | 0.9 | One port namespace for the whole world: only one node can bind `0.0.0.0:7000`, any node can bind any IP, and accepted peers report the destination IP (probe F). | `src/io/backend.zig` (`ProcessRegistry`), `src/io/net.zig` (`simNetLookup`) |
 

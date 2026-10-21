@@ -44,6 +44,7 @@ pub const internal = struct {
     pub const discardStreamPacketFromControl = sim.discardStreamPacketFromControl;
     pub const streamProbeReadyAtFromControl = sim.streamProbeReadyAtFromControl;
     pub const streamLiveBuffersFromControl = sim.streamLiveBuffersFromControl;
+    pub const streamQueuedPacketsFromControl = sim.streamQueuedPacketsFromControl;
 };
 
 test {

@@ -30,6 +30,11 @@
 - Documents and tests directory durability through `std.Io`: syncing a
   directory opened with `allow_directory` commits its entries, so durable code
   does not need the `Disk` capability for `syncDir`.
+- Connect probes no longer take a stream buffer. Empty messages hold no pooled
+  buffer, so a connection whose reader never reads can no longer exhaust the
+  world's 64 stream buffers and make an unrelated connect fail with
+  `SystemResources`. Unrelated connections still share those buffers for data
+  until 0.9.
 
 ## v0.8.0 - 2026-10-20
 

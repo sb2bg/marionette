@@ -974,6 +974,15 @@ pub fn streamLiveBuffersFromControl(control: AnyNetworkControl) !usize {
     return runtime.pool.liveBuffers();
 }
 
+/// Stream packets queued on every path, including empty connect probes.
+pub fn streamQueuedPacketsFromControl(control: AnyNetworkControl) !usize {
+    const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    var count: usize = 0;
+    for (runtime.queues) |queue| count += queue.items.len;
+    return count;
+}
+
 pub fn nextStreamDeliveryAtForControl(control: AnyNetworkControl, node: NodeId) !?clock_module.Timestamp {
     const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
     const runtime = try SimByteRuntime.getOrInit(shared);

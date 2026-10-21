@@ -990,7 +990,7 @@ test "io: connect timeout rolls back its queued probe" {
     try std.testing.expectEqual(@as(u64, 30), world.now());
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 
     try std.testing.expectError(
@@ -1007,7 +1007,7 @@ test "io: connect timeout rolls back its queued probe" {
     try std.testing.expectEqual(@as(u64, 50), world.now());
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 
     try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
@@ -1040,7 +1040,7 @@ test "io: connect probe registration failure rolls back network ownership" {
 
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 }
 
@@ -1075,7 +1075,7 @@ test "io: canceling an in-flight connect reclaims its probe" {
 
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "scheduler.cancel_deliver") != null);
 }
@@ -1162,7 +1162,7 @@ test "io: process kill reclaims an in-flight connect probe without running task 
     try Io.sleep(server_io, .fromNanoseconds(10), .awake);
     try std.testing.expectEqual(
         @as(usize, 1),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 
     try sim.killProcess(1);
@@ -1171,7 +1171,7 @@ test "io: process kill reclaims an in-flight connect probe without running task 
     try std.testing.expectEqual(@as(usize, 0), client_backend.connect_probes.items.len);
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
 
@@ -1209,7 +1209,7 @@ test "io: world teardown owns queued probes after abandoning a connect task" {
     try Io.sleep(server_io, .fromNanoseconds(10), .awake);
     try std.testing.expectEqual(
         @as(usize, 1),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
     // Function exit intentionally leaves the task suspended. The byte runtime
     // releases its packet before process backends release their ownership
@@ -1259,7 +1259,7 @@ test "io: partitioning an in-flight connect prevents publication" {
     try std.testing.expectEqual(@as(u64, 30), world.now());
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 
     try sim.control.network.heal();
@@ -1312,7 +1312,7 @@ test "io: source node loss aborts in-flight connect publication and permits reco
     try std.testing.expectEqual(@as(anyerror, error.NetworkDown), state.connect_error.?);
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
     const runtime = world_module.internal.ioRuntime(sim);
     const client_backend = try runtime.backendForNode(1);
@@ -1390,7 +1390,7 @@ test "io: transient source node loss before probe readiness is not latched" {
     try std.testing.expectEqual(@as(u64, 30), world.now());
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 }
 
@@ -1467,7 +1467,7 @@ test "io: competing connect probes publish in delivery order independent of task
     try std.testing.expect(earlier_delivery < later_delivery);
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 }
 
@@ -1560,7 +1560,7 @@ test "io: ordered probe follower preserves delivery at an equal timeout deadline
     try std.testing.expect(earlier_delivery < later_delivery);
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 }
 
@@ -1817,7 +1817,7 @@ test "io: directional stream shutdown preserves the opposite direction" {
     try std.testing.expectEqualStrings("ok", &server_buffer);
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 }
 
@@ -2391,7 +2391,7 @@ test "io: process reset discards delayed outbound frames terminally" {
     try std.testing.expectEqual(@as(?usize, 0), scenario.second_read_len);
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
 }
@@ -6171,7 +6171,7 @@ test "io: closing a connection reclaims its queued stream frames" {
 
     try std.testing.expectEqual(
         @as(usize, 0),
-        try network_module.internal.streamLiveBuffersFromControl(sim.control.network),
+        try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 }
 
@@ -6228,4 +6228,60 @@ test "io: network operations preserve read metadata and reject ancillary writes"
     try std.testing.expectEqual(@as(usize, 0), eof.data_len);
     try std.testing.expectEqual(@as(usize, 0), eof.control_len);
     try std.testing.expect(!eof.control_truncated);
+}
+
+/// A connection whose reader never reads fills the world's stream buffers.
+/// Connect probes carry no bytes, so an unrelated connect must not need one.
+const StalledReaderFlood = struct {
+    io: Io,
+    stream: Io.net.Stream,
+    write_error: ?anyerror = null,
+
+    fn flood(self: *StalledReaderFlood) void {
+        const chunk: [64 * 1024]u8 = @splat('x');
+        var written: usize = 0;
+        while (written < 8 * 1024 * 1024) {
+            const data: [1][]const u8 = .{&chunk};
+            written += netWrite(self.io, self.stream.socket.handle, "", &data, 1) catch |err| {
+                self.write_error = err;
+                return;
+            };
+        }
+    }
+};
+
+test "io: a stalled reader does not starve an unrelated connect" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x9001, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .path_capacity = 1024 } });
+    const node_io = [_]Io{
+        (try sim.envForNode(0)).io(), (try sim.envForNode(1)).io(),
+        (try sim.envForNode(2)).io(), (try sim.envForNode(3)).io(),
+    };
+
+    const stalled_address = Io.net.IpAddress.parseIp4("127.0.0.1", 4731) catch unreachable;
+    var stalled_listener = try stalled_address.listen(node_io[1], .{});
+    defer stalled_listener.deinit(node_io[1]);
+    const flooding = try stalled_address.connect(node_io[0], .{ .mode = .stream, .protocol = .tcp });
+    const stalled = try stalled_listener.accept(node_io[1]);
+
+    var flood: StalledReaderFlood = .{ .io = node_io[0], .stream = flooding };
+    var flood_future = try Io.concurrent(node_io[0], StalledReaderFlood.flood, .{&flood});
+    while (try network_module.internal.streamLiveBuffersFromControl(sim.control.network) < 64) {
+        try Io.sleep(node_io[2], .fromNanoseconds(10), .awake);
+    }
+
+    const unrelated_address = Io.net.IpAddress.parseIp4("127.0.0.1", 4732) catch unreachable;
+    var unrelated_listener = try unrelated_address.listen(node_io[3], .{});
+    defer unrelated_listener.deinit(node_io[3]);
+    const client = try unrelated_address.connect(node_io[2], .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(node_io[2]);
+    const accepted = try unrelated_listener.accept(node_io[3]);
+    defer accepted.close(node_io[3]);
+
+    stalled.close(node_io[1]);
+    flood_future.await(node_io[0]);
+    flooding.close(node_io[0]);
 }

@@ -76,11 +76,13 @@ pub const Pool = struct {
 
     /// Take one zeroed buffer of length `len` with reference count one.
     /// Returns `error.MessageTooLarge` beyond `buffer_size` and
-    /// `error.PoolExhausted` when no buffer is free.
+    /// `error.PoolExhausted` when no buffer is free. An empty message has no
+    /// bytes to store, so it takes no buffer and never exhausts the pool.
     pub fn acquire(self: *Pool, len: usize) PoolError!Message {
         // Each message occupies one fixed-size slot, so buffer_size is this
         // pool's maximum storable message length.
         if (len > self.buffer_size) return error.MessageTooLarge;
+        if (len == 0) return .{ .pool = self, .index = null };
         if (self.free_count == 0) return error.PoolExhausted;
 
         self.free_count -= 1;
@@ -130,27 +132,42 @@ pub const Pool = struct {
     }
 };
 
-/// Reference-counted view of one pooled buffer.
+/// Reference-counted view of one pooled buffer, or an empty message that
+/// holds none.
 pub const Message = struct {
     pool: *Pool,
-    index: usize,
+    index: ?usize,
 
     /// The message payload, valid until the last `release`.
     pub fn bytes(self: Message) []u8 {
-        return self.pool.bytesFor(self.index);
+        const index = self.index orelse return &.{};
+        return self.pool.bytesFor(index);
     }
 
     /// Add one reference and return the same message.
     pub fn retain(self: Message) Message {
-        self.pool.retainIndex(self.index);
+        if (self.index) |index| self.pool.retainIndex(index);
         return self;
     }
 
     /// Drop one reference; the buffer returns to the pool at zero.
     pub fn release(self: Message) void {
-        self.pool.releaseIndex(self.index);
+        if (self.index) |index| self.pool.releaseIndex(index);
     }
 };
+
+test "message pool: empty messages take no buffer" {
+    var pool = try Pool.init(std.testing.allocator, .{ .buffers = 1, .buffer_size = 4 });
+    defer pool.deinit();
+
+    const full = try pool.acquire(4);
+    defer full.release();
+    const empty = try pool.acquire(0);
+    defer empty.release();
+    try std.testing.expectEqual(@as(usize, 0), empty.retain().bytes().len);
+    empty.release();
+    try std.testing.expectEqual(@as(usize, 0), pool.freeBuffers());
+}
 
 test "message pool: acquire and release buffer" {
     var pool = try Pool.init(std.testing.allocator, .{ .buffers = 2, .buffer_size = 8 });
