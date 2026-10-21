@@ -8,7 +8,7 @@
 const std = @import("std");
 const mar = @import("marionette");
 
-pub const failing_seed: u64 = 13;
+pub const failing_seed: u64 = 12;
 
 const deposit_cents = 100;
 pub const Case = mar.SimCase(PaymentService);

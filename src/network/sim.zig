@@ -1071,7 +1071,7 @@ fn TypedRuntime(comptime Payload: type) type {
                 u32,
                 shared.faults.drop_rate.denominator,
             );
-            if (drop_roll < shared.faults.drop_rate.numerator) {
+            if (shared.faults.drop_rate.fires(drop_roll)) {
                 try shared.world.record(
                     "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
                     .{ packet_id, from, to, shared.faults.drop_rate.numerator, shared.faults.drop_rate.denominator, drop_roll },
@@ -1327,7 +1327,7 @@ const SimByteRuntime = struct {
             u32,
             shared.faults.drop_rate.denominator,
         );
-        if (drop_roll < shared.faults.drop_rate.numerator) {
+        if (shared.faults.drop_rate.fires(drop_roll)) {
             try shared.world.record(
                 "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
                 .{ packet_id, from, to, shared.faults.drop_rate.numerator, shared.faults.drop_rate.denominator, drop_roll },

@@ -161,7 +161,7 @@ pub const Env = struct {
             0,
             rate.denominator,
         ));
-        const fired = roll < rate.numerator;
+        const fired = rate.fires(roll);
         try self.record(
             "buggify hook={s} rate={}/{} roll={} fired={}",
             .{ hookName(hook), rate.numerator, rate.denominator, roll, fired },

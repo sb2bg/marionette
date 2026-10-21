@@ -312,7 +312,7 @@ fn decideGrowth(self: *Authority, len: usize) GrowthDecision {
     const roll = random.int_less_than(random.ptr, rate.denominator) catch {
         return .{ .fail = .{ .reason = "random_error" } };
     };
-    if (roll < rate.numerator) {
+    if (rate.fires(roll)) {
         return .{ .fail = .{ .reason = "buggify", .roll = roll } };
     }
     return .{ .allow = .{ .roll = roll } };

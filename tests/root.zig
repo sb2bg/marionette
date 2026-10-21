@@ -30,3 +30,7 @@ test {
 test {
     _ = @import("fault_coverage.zig");
 }
+
+test {
+    _ = @import("regressions_081.zig");
+}

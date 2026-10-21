@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.1 - Unreleased
+
+- **Decision-model change.** Every probabilistic fault roll (network drops,
+  disk faults, allocation and application BUGGIFY) now fires on the top
+  `numerator` rolls of `0..denominator` instead of the bottom ones, so a zero
+  roll never fires. Reduction replaces removed decisions with zero, so it
+  previously injected faults and could never remove one that had fired; it now
+  strips them. `BuggifyRate.fires(roll)` states the rule. The same seed now
+  produces different fault outcomes, so capsules recorded before 0.8.1 that
+  contain fault rolls no longer replay; give the harness a new build identity.
+
 ## v0.8.0 - 2026-10-20
 
 - Requires Zig 0.17.0; updates the source, toolchain pin, and CI checks for the

@@ -1517,7 +1517,7 @@ pub const SimDisk = struct {
             u32,
             rate.denominator,
         );
-        const fired = roll < rate.numerator;
+        const fired = rate.fires(roll);
 
         var rate_buffer: [32]u8 = undefined;
         const rate_literal = std.fmt.bufPrint(
