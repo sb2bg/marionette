@@ -112,7 +112,7 @@ const Scenario = struct {
             },
             .retry_safe, .retry_buggy => {
                 _ = client.put(7, 11, 41) catch |err| switch (err) {
-                    error.Timeout => {
+                    error.ConnectionTimedOut => {
                         self.first_response_timed_out = true;
                         self.record("std_io_net_kv.client.timeout request_id=7", .{});
                         self.signal(&self.client_timed_out);

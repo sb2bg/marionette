@@ -18,3 +18,15 @@ test {
 test {
     _ = @import("compatibility_072.zig");
 }
+
+test {
+    _ = @import("campaign.zig");
+}
+
+test {
+    _ = @import("step_budget.zig");
+}
+
+test {
+    _ = @import("fault_coverage.zig");
+}

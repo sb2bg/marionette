@@ -1,5 +1,7 @@
 //! Bounded delta debugging over semantic decision/action site groups.
 const std = @import("std");
+const decision = @import("decision.zig");
+const replay = @import("replay.zig");
 const run = @import("run.zig");
 const types = @import("run_types.zig");
 
@@ -56,7 +58,9 @@ pub const Result = struct {
     }
 };
 
-fn reproducible(report: types.RunReport) bool {
+/// A complete failure that reproduced exactly, so it has an executable capsule
+/// and is eligible for reduction.
+pub fn reproducible(report: types.RunReport) bool {
     return report == .failed and report.failed.tape_complete and
         report.failed.second_trace.len == 0 and report.failed.replay_divergence == null and
         report.failed.kind != .determinism_mismatch and report.failed.kind != .replay_diverged;
@@ -67,8 +71,55 @@ fn reproducible(report: types.RunReport) bool {
 /// replay and preserve the original full fingerprint before acceptance.
 /// The config is the ordinary runSimCase config, including its watchdog budget.
 pub fn reduceSimCase(config: anytype, options: Options) !Result {
-    const allocator = config.allocator;
-    var result: Result = .{ .original = try run.runSimCase(config) };
+    return reduceWith(config.allocator, try run.runSimCase(config), SeededCandidates(@TypeOf(config)){ .config = config, .seed = null }, options);
+}
+
+/// Reduce a failure that a campaign already recorded at `seed`, taking
+/// ownership of its report instead of executing it again.
+pub fn reduceSeededReport(config: anytype, seed: u64, original: types.RunReport, options: Options) !Result {
+    return reduceWith(config.allocator, original, SeededCandidates(@TypeOf(config)){ .config = config, .seed = seed }, options);
+}
+
+/// Reduce a retained capsule in a fresh process. The capsule is first replayed
+/// exactly against the matching harness identity; candidates then run under
+/// the capsule's own runtime and simulation options. The config supplies only
+/// the allocator, callbacks, and checks, as for `replaySimCase`.
+pub fn reduceCapsule(config: anytype, capsule: *const replay.Capsule, identity: replay.Identity, options: Options) !Result {
+    const original = try run.replaySimCase(config, capsule, identity);
+    return reduceWith(config.allocator, original, CapsuleCandidates(@TypeOf(config)){
+        .config = config,
+        .options = capsule.options(),
+        .simulate_options = capsule.simulateOptions(),
+    }, options);
+}
+
+fn SeededCandidates(comptime Config: type) type {
+    return struct {
+        config: Config,
+        seed: ?u64,
+
+        fn execute(self: @This(), source: []const decision.Decision, omitted: []const []const u8) !types.RunReport {
+            return run.runReductionCandidate(self.config, self.seed, source, omitted);
+        }
+    };
+}
+
+fn CapsuleCandidates(comptime Config: type) type {
+    return struct {
+        config: Config,
+        options: types.RunOptions,
+        simulate_options: @import("world.zig").World.SimulateOptions,
+
+        fn execute(self: @This(), source: []const decision.Decision, omitted: []const []const u8) !types.RunReport {
+            return run.runCapsuleCandidate(self.config, self.options, self.simulate_options, source, omitted);
+        }
+    };
+}
+
+/// Shared delta-debugging loop. Takes ownership of `original`, which must be a
+/// reproducible failure; `candidates.execute` runs one candidate omission set.
+fn reduceWith(allocator: std.mem.Allocator, original: types.RunReport, candidates: anytype, options: Options) !Result {
+    var result: Result = .{ .original = original };
     errdefer result.deinit();
     if (!reproducible(result.original)) return error.ExpectedReproducibleFailure;
     const fingerprint = FailureFingerprint.from(result.original.failed);
@@ -119,7 +170,7 @@ pub fn reduceSimCase(config: anytype, options: Options) !Result {
                 try omitted.append(allocator, sites.items[index]);
             };
             for (active.items[start..end]) |index| try omitted.append(allocator, sites.items[index]);
-            var candidate = try run.runReductionCandidate(config, tape, omitted.items);
+            var candidate = try candidates.execute(tape, omitted.items);
             result.attempts += 1;
             if (reproducible(candidate) and fingerprint.eql(FailureFingerprint.from(candidate.failed))) {
                 if (result.minimized) |*previous| previous.deinit();

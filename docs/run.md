@@ -160,6 +160,8 @@ Failure kinds are:
 - `scheduler_error`;
 - `non_yielding`;
 - `livelock`;
+- `worker_crashed`;
+- `step_budget_exceeded`;
 - `replay_diverged`;
 - `determinism_mismatch`;
 - `first_run_failed`;
@@ -195,8 +197,58 @@ Omitted constraints accept any value. A mismatch returns
 the full failure or trace.
 
 `expectSimFuzz` requires a nonzero `seeds` field. Each derived seed is replayed
-twice. Long campaigns belong in the nightly seed sweep; focused unit tests
-should use small counts.
+twice. It stops at the first failure; use [`runCampaign`](campaigns.md) to keep
+going, group failures, and retain evidence. Focused unit tests should use small
+counts.
+
+## Fault Coverage
+
+A passing run only shows fault tolerance if the faults actually did something.
+A crash with no pending writes, or a partition that carried no traffic, passes
+the same invariants as a run with no faults at all. `faultCoverage(trace)`
+counts the injected faults in a trace without allocating:
+
+```zig
+var report = try mar.runSimCase(config);
+defer report.deinit();
+const coverage = try mar.faultCoverage(report.passed.trace);
+try std.testing.expect(coverage.crash_lost_writes + coverage.crash_torn_writes > 0);
+```
+
+`FaultCoverage` counts disk crashes and partitions as injections, and the
+effects an application could observe: writes a crash lost, tore, or reordered;
+lost metadata; disk read and write errors; corrupt reads; network drops;
+process kills; and injected allocation failures. `fired()` is true when any
+effect was counted. A disk crash restarts every process, so its own kills are
+not counted separately: a crash with nothing pending is a clean restart and
+does not make `fired()` true. `summarize` reports the same counts, and the
+`--summary` output ends with a `trace.faults` line. Campaigns total coverage
+across cases; see [Campaigns](campaigns.md#fault-coverage).
+
+## Step Budget
+
+A task that keeps sleeping, waking a peer, or retrying never deadlocks, so
+without a bound it simply runs forever. Set a deterministic budget on the
+simulation to turn that into an ordinary failure:
+
+```zig
+.simulate = mar.World.SimulateOptions{ .step_budget = 100_000 },
+```
+
+One step is a task dispatch or a scheduler-driven clock advance, so loops that
+only sleep, and tasks that only wake each other, both count. When the budget
+runs out the scheduler records
+`scheduler.step_budget_exceeded budget=<u64> ready=<u64> blocked=<u64>` and the
+run fails as `step_budget_exceeded` with error name `StepBudgetExceeded`. No
+task runs past the budget, including during application cleanup.
+
+The count depends only on the decisions, so both executions stop at the same
+step. Unlike a watchdog `livelock`, the decision tape is complete: the failure
+encodes as a replay capsule, replays exactly, and can be reduced. Choose a
+budget well above what passing runs use; a passing run's trace does not depend
+on the budget. Code that never yields takes no steps, so it still needs the
+watchdog below. An unset budget (the default) is omitted from serialized
+options, so earlier artifacts keep their bytes.
 
 ## Liveness Watchdog
 

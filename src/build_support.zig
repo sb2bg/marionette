@@ -8,7 +8,7 @@ pub const TidyAllow = tidy.Allow;
 
 pub const TidyExecutableOptions = struct {
     target: ?std.Build.ResolvedTarget = null,
-    optimize: ?std.builtin.OptimizeMode = null,
+    optimize: ?std.lang.Optimize = null,
 };
 
 pub const TidyStepOptions = struct {
@@ -17,7 +17,7 @@ pub const TidyStepOptions = struct {
     extra_allowed: []const TidyAllow = &.{},
     tidy_exe: ?*std.Build.Step.Compile = null,
     target: ?std.Build.ResolvedTarget = null,
-    optimize: ?std.builtin.OptimizeMode = null,
+    optimize: ?std.lang.Optimize = null,
 };
 
 /// Add the `marionette-tidy` executable to a build.
@@ -29,7 +29,7 @@ pub fn addTidyExecutable(
     const tidy_mod = b.createModule(.{
         .root_source_file = root_source_file,
         .target = options.target orelse b.graph.host,
-        .optimize = options.optimize orelse .Debug,
+        .optimize = options.optimize orelse .debug,
     });
 
     return b.addExecutable(.{

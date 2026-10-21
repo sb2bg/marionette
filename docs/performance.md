@@ -3,7 +3,7 @@
 Run the fixed workloads without changing simulator semantics:
 
 ```sh
-zig build baseline -Doptimize=ReleaseFast
+zig build baseline -Doptimize=fast
 ```
 
 The command emits one JSON line. It warms each path once, then measures 10,000
@@ -59,3 +59,23 @@ Disabling telemetry retains an explicit disabled-action decision, so this
 reduction shortens the trace while retaining the same tape allocation size.
 Larger storage, network/concurrency, and campaign workloads need their own
 measurements before setting regression budgets.
+
+## Campaign Throughput
+
+Every campaign reports `CampaignMetrics`, and `zig build validate-campaigns`
+prints them as one JSON line per process. One 5,000-case run per workload on
+2026-10-15, Zig 0.17.0, ReleaseSafe, aarch64-macos, Apple M1 Pro:
+
+| Workload | Cases/second | Failing cases | Distinct | Reduction attempts | Reduction time | Groups kept |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `xitdb-acknowledged-history` | 1,074 | 0 | 0 | 0 | 0 ms | n/a |
+| `xitdb-victim-durable-mutant` | 979 | 4,034 | 1 | 4 | 0.5 ms | 0 of 9 |
+| `redis-at-least-once` | 582 | 0 | 0 | 0 | 0 ms | n/a |
+| `redis-exactly-once-mutant` | 596 | 3,428 | 1 | 7 | 7.5 ms | 3 of 6 |
+
+Each case is two executions (record and exact replay). The validation
+checkpoints the journal before every case so a kill loses at most one case,
+which costs throughput; the default one-second checkpoint interval is cheaper.
+Rates include the killed and resumed processes. This is a single sample, not a
+regression budget. The nightly workflow uploads the same metrics with its
+evidence, so the numbers can be tracked over time.

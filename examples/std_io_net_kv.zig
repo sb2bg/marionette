@@ -208,7 +208,7 @@ fn writeAll(io: Io, stream: Io.net.Stream, bytes: []const u8) !void {
 fn encodeRequest(dest: *[request_size]u8, request: Request) void {
     @memset(dest, 0);
     std.mem.writeInt(u32, dest[0..4], request_magic, .little);
-    dest[4] = @intFromEnum(request.kind);
+    dest[4] = @backingInt(request.kind);
     std.mem.writeInt(u64, dest[8..16], request.request_id, .little);
     std.mem.writeInt(u64, dest[16..24], request.key, .little);
     std.mem.writeInt(i64, dest[24..32], request.value, .little);
@@ -219,8 +219,8 @@ fn decodeRequest(bytes: *const [request_size]u8) !Request {
         return error.InvalidRequestMagic;
     }
     const kind: RequestKind = switch (bytes[4]) {
-        @intFromEnum(RequestKind.put) => .put,
-        @intFromEnum(RequestKind.get) => .get,
+        @backingInt(RequestKind.put) => .put,
+        @backingInt(RequestKind.get) => .get,
         else => return error.InvalidRequestKind,
     };
     return .{

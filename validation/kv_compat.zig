@@ -187,7 +187,7 @@ pub fn recoveryWindowCrashPointSweep(case: *Case) !void {
         .crash_lost_write_rate = .percent(25),
     });
 
-    const phase_count = @typeInfo(CompactPhase).@"enum".fields.len;
+    const phase_count = @typeInfo(CompactPhase).@"enum".field_names.len;
     var random_source: std.Random.IoSource = .{ .io = case.env().io() };
     const choice: u8 = @intCast(random_source.interface().intRangeLessThan(
         u64,
@@ -197,7 +197,7 @@ pub fn recoveryWindowCrashPointSweep(case: *Case) !void {
     if (choice == 0) {
         try store.recorder.record("kv_compat.sweep crash_point=no_compaction", .{});
     } else {
-        const phase: CompactPhase = @enumFromInt(choice - 1);
+        const phase: CompactPhase = @fromBackingInt(@intCast(choice - 1));
         try store.recorder.record("kv_compat.sweep crash_point={s}", .{@tagName(phase)});
         try store.compactUntil(phase);
     }
@@ -427,7 +427,7 @@ fn deleteIfExists(io: Io, path: []const u8) !bool {
 }
 
 fn emptyTable() [max_keys]?u32 {
-    return [_]?u32{null} ** max_keys;
+    return @splat(null);
 }
 
 fn encodeRecord(bytes: *[record_size]u8, entry: Entry) void {

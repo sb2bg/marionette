@@ -325,6 +325,26 @@ pub const World = struct {
         /// own their signal dispositions should disable this. POSIX
         /// guard-page targets only; elsewhere it is inert.
         fiber_overflow_diagnostics: bool = true,
+        /// Deterministic bound on scheduler work: task dispatches plus
+        /// scheduler-driven clock advances. Exceeding it fails the run as
+        /// `step_budget_exceeded` at the same step on every replay, so a
+        /// yielding livelock keeps a complete, reducible decision tape.
+        /// Code that never yields still needs the watchdog. Null (the
+        /// default) leaves scheduling unbounded.
+        step_budget: ?u64 = null,
+
+        /// Omit an unset step budget so artifacts without one keep the
+        /// 0.7 byte format. Parsing restores the null default.
+        pub fn jsonStringify(self: SimulateOptions, writer: anytype) !void {
+            try writer.beginObject();
+            inline for (@typeInfo(SimulateOptions).@"struct".field_names) |name| {
+                if (!std.mem.eql(u8, name, "step_budget") or self.step_budget != null) {
+                    try writer.objectField(name);
+                    try writer.write(@field(self, name));
+                }
+            }
+            try writer.endObject();
+        }
     };
 
     /// The two views over one simulation: the app-facing `env` and the
@@ -524,6 +544,7 @@ pub const World = struct {
         scheduler.task_stack_size = options.task_stack_size;
         scheduler.task_start_jitter_ns = options.task_start_jitter_ns;
         scheduler.overflow_diagnostics = options.fiber_overflow_diagnostics;
+        scheduler.step_budget = options.step_budget;
         errdefer if (!scheduler_registered) scheduler.deinit();
 
         try self.registerTeardown(scheduler, scheduler_module.deinitTaskSchedulerOpaque);
@@ -1305,7 +1326,8 @@ test "world: trace allocation failure rolls back random draws and cutovers" {
         defer world.deinit();
         try fillTraceCapacity(&world);
 
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        // Buffer growth may resize in place with Zig 0.17's testing allocator.
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
         world.allocator = failing.allocator();
         try std.testing.expectError(error.OutOfMemory, drawTracedChoice(&world, choice));
         world.allocator = std.testing.allocator;
@@ -1332,11 +1354,11 @@ test "world: recordPair rolls back both records when the second allocation fails
     defer std.testing.allocator.free(trace_before);
     const event_before = world.nextEventIndex();
 
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     world.allocator = failing.allocator();
     try std.testing.expectError(
         error.OutOfMemory,
-        world.recordPair("first", .{}, "second payload={s}", .{"x" ** 1024}),
+        world.recordPair("first", .{}, "second payload={s}", .{@as([1024]u8, @splat('x'))}),
     );
     world.allocator = std.testing.allocator;
 
@@ -1351,14 +1373,14 @@ test "world: trace allocation failure rolls back clock movement" {
     defer world.deinit();
     try fillTraceCapacity(&world);
 
-    var tick_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var tick_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     world.allocator = tick_failing.allocator();
     try std.testing.expectError(error.OutOfMemory, world.tick());
     try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
 
     world.allocator = std.testing.allocator;
     try fillTraceCapacity(&world);
-    var run_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var run_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     world.allocator = run_failing.allocator();
     try std.testing.expectError(error.OutOfMemory, world.runFor(20));
     try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());

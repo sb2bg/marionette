@@ -37,6 +37,7 @@ nav:
       - Determinism: determinism.md
       - Decision Tapes: decision-tapes.md
       - Reduction and Explanation: reduction-and-explanation.md
+      - Campaigns: campaigns.md
       - Trace Format: trace-format.md
       - BUGGIFY: buggify.md
       - Network Model: network.md

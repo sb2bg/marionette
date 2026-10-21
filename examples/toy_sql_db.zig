@@ -72,7 +72,7 @@ const Response = union(ResponseTag) {
 
 fn encodeRequest(request: Request) WireMessage {
     var message = WireMessage.init(if (request == .insert) 9 else 1);
-    message.data[0] = @intFromEnum(std.meta.activeTag(request));
+    message.data[0] = @backingInt(std.meta.activeTag(request));
     if (request == .insert) {
         std.mem.writeInt(i64, message.data[1..][0..8], request.insert, .little);
     }
@@ -90,7 +90,7 @@ fn decodeRequest(bytes: []const u8) !Request {
 
 fn encodeResponse(response: Response) WireMessage {
     var message = WireMessage.init(if (response == .row) 9 else 1);
-    message.data[0] = @intFromEnum(std.meta.activeTag(response));
+    message.data[0] = @backingInt(std.meta.activeTag(response));
     if (response == .row) {
         std.mem.writeInt(i64, message.data[1..][0..8], response.row, .little);
     }
@@ -152,8 +152,8 @@ fn roundTrip(server: *Server, client: mar.Endpoint(WireMessage), request: Reques
 }
 
 fn decodeTag(comptime Tag: type, value: u8) !Tag {
-    inline for (std.meta.fields(Tag)) |field| {
-        if (field.value == value) return @enumFromInt(value);
+    inline for (@typeInfo(Tag).@"enum".field_values) |field_value| {
+        if (field_value == value) return @fromBackingInt(@intCast(value));
     }
     return error.InvalidTag;
 }

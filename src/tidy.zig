@@ -90,6 +90,9 @@ pub const default_allowed = [_]Allow{
     .{ .path = "src/run.zig", .needle = "std.posix" },
     // Deliberately terminate the isolated child to test watchdog crash reporting.
     .{ .path = "tests/replay_capsule.zig", .needle = "std.process.exit" },
+    .{ .path = "tests/campaign.zig", .needle = "std.process.exit" },
+    // Deliberately kill a campaign process to validate resume.
+    .{ .path = "validation/campaign/main.zig", .needle = "std.process.exit" },
     .{ .path = "tests/fiber_overflow_check.zig", .needle = "std.debug.print" },
     .{ .path = "validation/dusty_http.zig", .needle = "std.debug.print" },
     .{ .path = "validation/nightly_seed_sweep.zig", .needle = "std.debug.print" },
@@ -123,16 +126,16 @@ pub fn scanSourceForPath(
     source: []const u8,
     options: Options,
 ) !void {
-    const sentinel_source = try allocator.dupeZ(u8, source);
+    const sentinel_source = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(sentinel_source);
 
-    var tree = try std.zig.Ast.parse(allocator, sentinel_source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, sentinel_source, .{ .mode = .zig });
     defer tree.deinit(allocator);
 
     if (tree.errors.len > 0) return error.ParseError;
 
     for (0..tree.nodes.len) |node_index| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(node_index));
         if (tree.nodeTag(node) != .field_access) continue;
 
         for (options.patterns) |pattern| {

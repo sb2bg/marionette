@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
     const release_mod = b.addModule("marionette_release", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
 
     // Everything past this point is development-only build graph: tests,
@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(run_examples_exe);
 
     const run_examples_cmd = b.addRunArtifact(run_examples_exe);
-    if (b.args) |args| run_examples_cmd.addArgs(args);
+    run_examples_cmd.addPassthruArgs();
 
     const run_examples_step = b.step("run-example", "Run a Marionette example by seed");
     run_examples_step.dependOn(&run_examples_cmd.step);
@@ -114,7 +114,7 @@ pub fn build(b: *std.Build) void {
     const release_probe_mod = b.createModule(.{
         .root_source_file = b.path("tests/release_symbol_probe.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
         .strip = true,
     });
     release_probe_mod.addImport("marionette", release_mod);
@@ -135,6 +135,21 @@ pub fn build(b: *std.Build) void {
         "Verify production release binary does not contain simulation-only symbols",
     );
     check_release_symbols_step.dependOn(&check_release_symbols_cmd.step);
+
+    // SVE makes LLVM reserve registers that the fiber switch could otherwise
+    // name as clobbers, and the warning only appears during code generation.
+    // Request the binary so the compile step cannot skip LLVM.
+    const sve_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = b.resolveTargetQuery(.{
+            .cpu_arch = .aarch64,
+            .os_tag = .linux,
+            .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.neoverse_v1 },
+        }),
+        .optimize = .safe,
+    }) });
+    _ = sve_tests.getEmittedBin();
+    b.step("check-sve", "Compile the simulator for an SVE AArch64 Linux target").dependOn(&sve_tests.step);
 
     if (b.lazyDependency("xitdb", .{
         .target = target,
@@ -166,46 +181,10 @@ pub fn build(b: *std.Build) void {
         _ = addValidation(b, validate_mailbox_mod, "validate-mailbox", "Run Mailbox under Marionette");
     }
 
-    if (b.lazyDependency("ochi", .{
-        .target = target,
-        .optimize = optimize,
-    })) |ochi_dep| {
-        const ochi_root_mod = ochi_dep.artifact("Ochi").root_module;
-        const ochi_store_mod = b.createModule(.{
-            .root_source_file = ochi_dep.path("src/Store.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const ochi_imports = [_][]const u8{
-            "zeit",
-            "zint",
-            "metrics",
-            "logz",
-            "logging",
-            "tracy",
-            "c",
-            "encoding",
-        };
-        for (ochi_imports) |name| {
-            ochi_store_mod.addImport(name, ochi_root_mod.import_table.get(name).?);
-        }
-
-        const validate_ochi_mod = b.createModule(.{
-            .root_source_file = b.path("validation/ochi_store.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        validate_ochi_mod.addImport("marionette", mod);
-        validate_ochi_mod.addImport("ochi_store", ochi_store_mod);
-        validate_ochi_mod.addImport("ochi_logging", ochi_root_mod.import_table.get("logging").?);
-
-        _ = addValidation(
-            b,
-            validate_ochi_mod,
-            "validate-ochi",
-            "Run Ochi's unmodified storage path under Marionette",
-        );
-    }
+    // Ochi's pinned build and transitive dependencies still require Zig 0.16.
+    // Keep an explicit failure instead of silently reporting validation success.
+    const ochi_unavailable = b.addFail("validate-ochi is unavailable on Zig 0.17: the pinned Ochi dependencies require Zig 0.16");
+    b.step("validate-ochi", "Unavailable until Ochi supports Zig 0.17").dependOn(&ochi_unavailable.step);
 
     if (b.lazyDependency("dusty", .{
         .target = target,
@@ -260,6 +239,52 @@ pub fn build(b: *std.Build) void {
         validate_redis_mod.addImport("marionette", mod);
         validate_redis_mod.addImport("redis", redis_dep.module("redis"));
         _ = addValidation(b, validate_redis_mod, "validate-redis", "Run the unmodified Redis client under Marionette");
+    }
+
+    // Campaign-to-regression validation on pinned storage and network SUTs.
+    // Each workload runs as three processes: a campaign that kills itself
+    // partway, a fresh process that resumes it, and a fresh process that
+    // replays and reduces every retained failure from its capsule.
+    const campaign_cases = b.option(u64, "campaign-cases", "Cases per external campaign workload") orelse 48;
+    const campaign_dir = b.option([]const u8, "campaign-dir", "Directory for external campaign evidence, relative to the build root") orelse "zig-out/campaigns";
+    if (b.lazyDependency("xitdb", .{ .target = target, .optimize = optimize })) |xitdb_dep| {
+        if (b.lazyDependency("redis", .{ .target = target, .optimize = optimize })) |redis_dep| {
+            const campaign_mod = b.createModule(.{
+                .root_source_file = b.path("validation/campaign/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            campaign_mod.addImport("marionette", mod);
+            campaign_mod.addImport("xitdb", xitdb_dep.module("xitdb"));
+            campaign_mod.addImport("redis", redis_dep.module("redis"));
+            const campaign_exe = b.addExecutable(.{ .name = "marionette-campaigns", .root_module = campaign_mod });
+
+            const validate_campaigns = b.step("validate-campaigns", "Run, kill, resume, replay, and reduce campaigns on pinned xitdb and redis.zig");
+            const cases = b.fmt("{d}", .{campaign_cases});
+            const kill_after = b.fmt("{d}", .{@max(campaign_cases / 3, 1)});
+            const workloads = [_][]const u8{
+                "xitdb-acknowledged-history",
+                "xitdb-victim-durable-mutant",
+                "redis-at-least-once",
+                "redis-exactly-once-mutant",
+            };
+            for (workloads) |workload| {
+                const killed = b.addRunArtifact(campaign_exe);
+                killed.addArgs(&.{ campaign_dir, workload, "run", "--cases", cases, "--kill-after-cases", kill_after });
+                killed.expectExitCode(75);
+                const resumed = b.addRunArtifact(campaign_exe);
+                resumed.addArgs(&.{ campaign_dir, workload, "resume", "--cases", cases });
+                resumed.step.dependOn(&killed.step);
+                const verified = b.addRunArtifact(campaign_exe);
+                verified.addArgs(&.{ campaign_dir, workload, "verify" });
+                verified.step.dependOn(&resumed.step);
+                for ([_]*std.Build.Step.Run{ killed, resumed, verified }) |run| {
+                    run.setCwd(b.path("."));
+                    run.has_side_effects = true;
+                }
+                validate_campaigns.dependOn(&verified.step);
+            }
+        }
     }
 
     if (b.lazyDependency("pg", .{
@@ -377,10 +402,8 @@ pub fn build(b: *std.Build) void {
         "build",
         "test",
         "--build-file",
-        b.pathFromRoot("tests/tidy_consumer/build.zig"),
-        "--cache-dir",
-        b.pathFromRoot(".zig-cache/tidy-consumer"),
     });
+    run_tidy_consumer_test.addFileArg2(b.path("tests/tidy_consumer/build.zig"), .{});
     test_step.dependOn(&run_tidy_consumer_test.step);
 
     // The fiber overflow diagnostics are POSIX-only and their subprocess

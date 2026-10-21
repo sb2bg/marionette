@@ -9,6 +9,10 @@ on:
         description: Deterministic seeds to run per scenario
         required: false
         default: "1000"
+      campaign_cases:
+        description: Cases per external campaign workload
+        required: false
+        default: "5000"
 
 permissions:
   contents: read
@@ -26,13 +30,49 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Run seed sweep
         env:
           SEED_SWEEP_COUNT: ${{ inputs.seed_count || '1000' }}
         run: >-
           zig build seed-sweep
-          -Doptimize=ReleaseSafe
+          -Doptimize=safe
           -Dseed-sweep-count="$SEED_SWEEP_COUNT"
           --test-timeout 40m
+
+  campaigns:
+    name: External campaigns
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Run, kill, resume, and verify campaigns
+        env:
+          CAMPAIGN_CASES: ${{ inputs.campaign_cases || '5000' }}
+        # bash -eo pipefail, so tee cannot hide a failed build.
+        shell: bash
+        run: >-
+          zig build validate-campaigns
+          -Doptimize=safe
+          -Dcampaign-cases="$CAMPAIGN_CASES"
+          | tee zig-out-campaign-metrics.jsonl
+
+      - name: Upload campaign evidence and metrics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-campaigns
+          path: |
+            zig-out/campaigns
+            zig-out-campaign-metrics.jsonl
+          if-no-files-found: warn
+          retention-days: 30

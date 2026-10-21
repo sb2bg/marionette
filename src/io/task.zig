@@ -139,6 +139,8 @@ pub const TaskControl = struct {
 
     pub const Failure = union(enum) {
         deadlock,
+        /// The simulation's deterministic step budget ran out.
+        step_budget_exceeded,
         scheduler_error: []const u8,
     };
 

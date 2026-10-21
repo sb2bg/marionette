@@ -10,25 +10,12 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.8 — Dependable Campaigns
+## Next: Stabilization And 1.0 Acceptance
 
-- Run bounded seed ranges with per-run watchdogs and a total campaign budget.
-  Add deterministic execution-step budgets for yielding workloads; preserve
-  external containment for code that never yields.
-- Save failure identities, traces, and complete replay capsules automatically;
-  retain explicit partial diagnostics for killed or crashed workers.
-- Deduplicate by full failure identity, resume interrupted campaigns, and upload
-  artifacts from CI. Apply bounded reduction only to eligible complete failures.
-- Exercise the complete campaign-to-regression workflow on existing real storage
-  and network/concurrency workloads with independent correctness oracles.
-- Track throughput, distinct failures, reproduction success, and reduction cost.
-
-Exit when an unattended campaign can survive a bad case, retain its evidence,
-resume its remaining work, and replay/reduce eligible failures from a fresh
-process using the pinned harness. Demonstrate this on at least two external
-workloads, including storage and network/concurrency behavior.
-
-## Stabilization And 1.0 Acceptance
+0.8 delivered dependable campaigns: bounded runs that survive bad cases,
+deterministic step budgets, deduplicated and reduced evidence, resume after a
+kill, fresh-process replay and reduction, and an end-to-end validation on
+pinned storage and network workloads (`zig build validate-campaigns`).
 
 A 0.9 or release-candidate phase should close the following evidence gates.
 1.0 commits to the documented deterministic `std.Io` subset and testing workflow.
@@ -47,8 +34,10 @@ A 0.9 or release-candidate phase should close the following evidence gates.
   replay is not required; artifact versioning and retention rules are explicit.
 - **Operational reliability:** campaigns enforce budgets, retain partial failures,
   deduplicate and resume correctly, and leave no leaked workers or owned resources.
-  Keep the seven pinned external validations release-blocking and require a
+  Keep the pinned external validations release-blocking and require a
   consecutive 30-day nightly run with no unexplained simulator failures or hangs.
+  Ochi is suspended until upstream supports Zig 0.17; restore it to the
+  release-blocking set once it builds again.
 - **Independent usability:** at least two independently maintained real projects
   can integrate, diagnose, replay, and preserve regressions using published APIs
   and documentation without editing Marionette internals.
@@ -88,7 +77,7 @@ measurement.
 
 ## Contribution Gate
 
-Changes must pass Debug, ReleaseSafe, and ReleaseFast tests, formatting, tidy,
+Changes must pass debug, safe, and fast tests, formatting, tidy,
 relevant target checks, and applicable external validations. Model changes need
 contract/state-machine coverage; ownership-changing fallible paths need
 targeted failure coverage. Public or semantic changes update the relevant

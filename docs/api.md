@@ -20,7 +20,7 @@ An exported type is not necessarily an application capability.
 | --- | --- | --- |
 | Application | Host or simulated `std.Io`, `Recorder`, `Operation`, `TraceField`, `TraceValue`, `Env`, `Production` | Pass narrow capabilities to application code; use `Env` and `Production` at the composition root. `Disk` / `RealDisk` remain available for explicit disk-capability integrations. |
 | Harness | `SimCase`, `Sim`, `World.init` / `simulate`, `runSimCase`, `expectSim*`, `StateCheck`, `Control`, process lifecycle helpers, fault/profile options | Construct and drive simulations, inject faults, check properties, and own cleanup. These powers belong in tests. |
-| Evidence | `RunReport`, `DecisionTape`, `ReplayCapsule`, `ReplayIdentity`, `reduceSimCase`, artifact writers, trace summaries | Retain failures, exact-replay complete executions, and reduce them within a budget. Call each owned result's `deinit`. |
+| Evidence | `RunReport`, `DecisionTape`, `ReplayCapsule`, `ReplayIdentity`, `reduceSimCase`, `runCampaign`, artifact writers, trace summaries | Retain failures, exact-replay complete executions, run bounded campaigns, and reduce failures within a budget. Call each owned result's `deinit`. |
 | Experimental and model | `Endpoint(Message)`, `SimDisk`, `SimClock`, direct model operations and `World` engine fields | Explore protocol models or test simulator contracts. Typed endpoints do not promise production transport parity; prefer `std.Io` for application behavior. |
 | Implementation | Source-module `internal` namespaces, supervisor wiring, I/O backend, scheduler and fiber internals | Used by simulator components and white-box tests; not a downstream integration contract. |
 
@@ -90,8 +90,10 @@ error/check names, owned decision tape, partial first trace, and a second trace
 when replay diverged. `takeDecisionTape` transfers tape ownership.
 
 `RunFailureKind` includes scenario and check errors, structured scheduler
-deadlocks/errors, watchdog-classified `non_yielding`/`livelock`/`worker_crashed` failures,
-`replay_diverged`, and the three trace/outcome replay-mismatch kinds.
+deadlocks/errors, deterministic `step_budget_exceeded` failures,
+watchdog-classified `non_yielding`/`livelock`/`worker_crashed` failures,
+`replay_diverged`, `resource_leak`, and the three trace/outcome
+replay-mismatch kinds.
 
 `WatchdogOptions` enables optional worker-process containment with
 `stall_timeout_ns`, `run_timeout_ns`, `trace_capacity`, and `result_capacity` bounds. It is
@@ -112,7 +114,7 @@ result channel.
 - `env()`: the node-zero application environment;
 - `control()`: harness-only fault and scheduling controls.
 
-If `App` defines `deinit`, the runner calls it after every replay.
+If `App` defines `pub fn deinit`, the runner calls it after every replay.
 
 `StateCheck(State)` contains a unique, nonempty stable property `name`, a
 function taking `*const State`, and a `phase: CheckPhase` (`after_init`,
@@ -158,8 +160,9 @@ Traced harness/model randomness uses `World.randomU64`, `World.randomBool`,
   the simulation value.
 
 `World.SimulateOptions` configures allocation faults, disk geometry/latency,
-optional network topology, task stacks, start jitter, and fiber overflow
-diagnostics.
+optional network topology, task stacks, start jitter, fiber overflow
+diagnostics, and an optional deterministic `step_budget` (see
+[Step Budget](run.md#step-budget)).
 
 `World.Options.decisions` selects decision recording (the default) or exact
 replay from a borrowed `[]const Decision`. `chooseU64`, `chooseBool`, and
@@ -194,7 +197,9 @@ be passed through structured fields or encoded so spaces and control bytes do
 not invalidate the trace grammar. See [Trace Format](trace-format.md).
 
 `summarize(allocator, trace)` builds an owned `Summary` with event, subsystem,
-run metadata, and network counts. Call `Summary.deinit`.
+run metadata, network, and fault counts. Call `Summary.deinit`.
+`faultCoverage(trace)` returns a `FaultCoverage` without allocating; see
+[Fault Coverage](run.md#fault-coverage).
 
 ## Seeds And Schedules
 
@@ -234,9 +239,24 @@ the active runtime through `World.SimulateOptions.network` instead.
 ## Reduction and Explanation
 
 `reduceSimCase(config, ReductionOptions)` returns an owned `ReductionResult`.
+`reduceCapsule(config, &capsule, identity, ReductionOptions)` first replays a
+retained capsule exactly, then reduces it under the capsule's own options, so a
+fresh process needs only the pinned harness and the artifact.
 `FailureFingerprint` compares full stable failure identities. `ArtifactOptions`
 and `writeRunArtifacts` persist reports through caller-supplied host I/O.
 `Recorder.event` returns `?EventId`; `Recorder.beginOperation` returns an
 `Operation` span. `sim.manageProcess(App, node, initialize)` returns world-owned
 `*ManagedProcess(App)` state with automatic restart/reopen and runner cleanup.
 See the [complete contracts and examples](reduction-and-explanation.md).
+
+## Campaigns
+
+`runCampaign(config, CampaignOptions)` runs a bounded range of `runSimCase`
+seeds and returns an owned `CampaignSummary` with counts, `CampaignStopReason`,
+one `CampaignFailure` per distinct failure identity, and `CampaignCaseError`
+entries (with a `CampaignCasePhase`) for runner errors. `CampaignArtifacts`
+selects a new or resumed evidence directory. Set `CampaignOptions.reduction` to
+reduce each new reproducible failure; its `CampaignReduction` records the cost
+and outcome. `CampaignSummary.metrics()` returns `CampaignMetrics`.
+`loadCampaignSummary(allocator, io, dir)` reads a campaign journal without
+running anything. See [Campaigns](campaigns.md).

@@ -15,10 +15,7 @@ pub const Options = struct {
 
 pub fn write(allocator: std.mem.Allocator, report: *const types.RunReport, options: Options) Error!void {
     if (report.* == .passed and !options.include_passes) return;
-    if (options.name.len == 0 or std.mem.eql(u8, options.name, ".") or std.mem.eql(u8, options.name, "..")) return error.InvalidArtifactPath;
-    for (options.name) |byte| {
-        if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '-' and byte != '_') return error.InvalidArtifactPath;
-    }
+    try validateName(options.name);
     if (options.identity.build.len == 0 or options.identity.sut.len == 0) return error.InvalidReplayIdentity;
     const capsule: ?[]u8 = replay.Capsule.encode(allocator, report, options.identity) catch |err| switch (err) {
         error.IncompleteDecisionTape, error.UnreproducibleRun => null,
@@ -55,10 +52,42 @@ pub fn write(allocator: std.mem.Allocator, report: *const types.RunReport, optio
     try writeFile(dir, options.io, "trace.txt", trace);
     if (failed and report.failed.second_trace.len != 0) try writeFile(dir, options.io, "second-trace.txt", report.failed.second_trace);
     if (capsule) |bytes| try writeFile(dir, options.io, "replay.json", bytes);
-    // Manifest publication marks a completed directory; partial I/O leaves no
-    // complete manifest and never overwrites a previous run's artifacts.
-    try writeFile(dir, options.io, "manifest.json", metadata);
+    // Manifest publication marks a completed directory. It is renamed into
+    // place, so an interrupted write leaves no manifest rather than a
+    // truncated one, and never overwrites a previous run's artifacts.
+    try writeFile(dir, options.io, manifest_name ++ ".tmp", metadata);
+    std.Io.Dir.rename(dir, manifest_name ++ ".tmp", dir, manifest_name, options.io) catch return error.ArtifactIoFailed;
 }
+
+const manifest_name = "manifest.json";
+
+/// Whether `name` under `parent` holds a published, parseable manifest.
+/// Directories without one, including those written by an interrupted
+/// writer, are incomplete.
+pub fn isComplete(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, name: []const u8) std.mem.Allocator.Error!bool {
+    var dir = parent.openDir(io, name, .{}) catch return false;
+    defer dir.close(io);
+    const bytes = dir.readFileAlloc(io, manifest_name, allocator, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer allocator.free(bytes);
+    const Manifest = struct { format: []const u8, version: u32, complete: bool };
+    const parsed = std.json.parseFromSlice(Manifest, allocator, bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer parsed.deinit();
+    return std.mem.eql(u8, parsed.value.format, "marionette.artifacts") and parsed.value.version == 1 and parsed.value.complete;
+}
+/// Accept one relative ASCII component of letters, digits, `.`, `-`, and `_`.
+pub fn validateName(name: []const u8) error{InvalidArtifactPath}!void {
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidArtifactPath;
+    for (name) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '-' and byte != '_') return error.InvalidArtifactPath;
+    }
+}
+
 fn writeFile(dir: std.Io.Dir, io: std.Io, path: []const u8, bytes: []const u8) Error!void {
     dir.writeFile(io, .{ .sub_path = path, .data = bytes, .flags = .{ .exclusive = true } }) catch return error.ArtifactIoFailed;
 }

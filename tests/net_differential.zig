@@ -32,15 +32,15 @@ const ServerTask = struct {
             std.meta.activeTag(stream.socket.address) == std.meta.activeTag(self.connect_address);
 
         var read_buffers: [1][]u8 = .{&self.outcome.server_read};
-        self.outcome.server_read_len = self.io.vtable.netRead(
-            self.io.userdata,
+        self.outcome.server_read_len = netRead(
+            self.io,
             stream.socket.handle,
             &read_buffers,
         ) catch @panic("differential server read failed");
 
         const write_buffers: [1][]const u8 = .{"pong"};
-        const written = self.io.vtable.netWrite(
-            self.io.userdata,
+        const written = netWrite(
+            self.io,
             stream.socket.handle,
             "",
             &write_buffers,
@@ -75,8 +75,8 @@ fn runExchange(
     const write_buffers: [1][]const u8 = .{"ping"};
     try std.testing.expectEqual(
         @as(usize, 4),
-        try client_io.vtable.netWrite(
-            client_io.userdata,
+        try netWrite(
+            client_io,
             client.socket.handle,
             "",
             &write_buffers,
@@ -85,15 +85,15 @@ fn runExchange(
     );
 
     var read_buffers: [1][]u8 = .{&outcome.client_read};
-    outcome.client_read_len = try client_io.vtable.netRead(
-        client_io.userdata,
+    outcome.client_read_len = try netRead(
+        client_io,
         client.socket.handle,
         &read_buffers,
     );
     var eof_byte: [1]u8 = undefined;
     var eof_buffers: [1][]u8 = .{&eof_byte};
-    outcome.client_saw_eof = try client_io.vtable.netRead(
-        client_io.userdata,
+    outcome.client_saw_eof = try netRead(
+        client_io,
         client.socket.handle,
         &eof_buffers,
     ) == 0;
@@ -191,4 +191,21 @@ test "std.Io.net wildcard stream and accepted peer port/family scope match the h
     try std.testing.expectEqual(host.client_read_len, simulated.client_read_len);
     try std.testing.expectEqualStrings(host.client_read[0..host.client_read_len], simulated.client_read[0..simulated.client_read_len]);
     try std.testing.expectEqual(host.client_saw_eof, simulated.client_saw_eof);
+}
+
+// Exercise the same operation dispatch used by Zig 0.17 stream readers/writers.
+fn netRead(io: std.Io, handle: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+    return (try (try io.operate(.{ .net_read = .{
+        .socket_handle = handle,
+        .data = data,
+    } })).net_read).data_len;
+}
+
+fn netWrite(io: std.Io, handle: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+    return try (try io.operate(.{ .net_write = .{
+        .socket_handle = handle,
+        .header = header,
+        .data = data,
+        .splat = splat,
+    } })).net_write;
 }

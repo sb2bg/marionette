@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.8.0 - Unreleased
+
+- Requires Zig 0.17.0; updates the source, toolchain pin, and CI checks for the
+  new compiler and standard library. Updates xitdb, dusty, and pg.zig validation
+  pins; Ochi validation awaits upstream Zig 0.17 support.
+
+- Adds `runCampaign` for bounded unattended seed campaigns over an ordinary
+  `runSimCase` config. Campaigns stop on a case count, failure limit, or host
+  time budget; survive watchdog-contained hangs and crashes; group failures by
+  full failure identity; and record case-level runner errors without stopping.
+- Campaign evidence directories hold the first occurrence of each distinct
+  failure in the existing artifact layout and an atomically checkpointed
+  `campaign.json` journal. Killed or limit-stopped campaigns resume from their
+  last checkpoint without double counting or losing written evidence.
+- Campaigns can reduce the first occurrence of each new reproducible failure
+  within a bounded budget (`CampaignOptions.reduction`), reusing the recorded
+  report. Minimized evidence is kept in the failure directory's `reduced`
+  subdirectory, and each failure records its reduction cost and outcome.
+  Reduction runner errors are recorded against the case with a
+  `CampaignCasePhase`.
+- `CampaignSummary.metrics()` and the journal report throughput, distinct and
+  reproducible failures, reduced failures, and reduction cost.
+  `loadCampaignSummary` reads a journal, including a killed campaign's,
+  without running anything.
+- Adds `reduceCapsule` to reduce a retained replay capsule in a fresh process.
+  It replays the capsule exactly, then reduces under the capsule's own runtime
+  and simulation options; with the same budget it repeats the original
+  reduction step for step.
+
+- Adds `faultCoverage` and `FaultCoverage`: counts of injected faults and their
+  observable effects (lost, torn, and reordered crash writes, lost metadata,
+  disk read and write errors, corrupt reads, network drops, process kills, and
+  allocation failures) read from a trace, so a test can assert its faults
+  fired. `summarize` and `--summary` include the same counts, and campaigns
+  total them with `cases_without_faults`. Trace parsing no longer limits events
+  to 32 fields.
+
+- Adds `SimulateOptions.step_budget`, a deterministic bound on task dispatches
+  and scheduler-driven clock advances. Exceeding it fails the run as
+  `step_budget_exceeded` at the same step on every execution, records
+  `scheduler.step_budget_exceeded`, and keeps a complete decision tape, so
+  yielding livelocks replay from capsules and reduce. Budgets exhausted during
+  initialization or application cleanup fail the run the same way, and awaiting
+  parked work afterwards keeps the budget failure rather than reporting a
+  deadlock. Unset budgets are omitted from serialized options, so 0.7 trace,
+  capsule, and manifest bytes are unchanged.
+
+- The simulated allocator no longer depends on the host allocator's in-place
+  support. A `remap` shrink falls back to allocate, copy, and free, so it always
+  succeeds without consuming fault budget; `resize` always declines in place
+  (`reason=in_place_unsupported`). Previously, a shrink could fail with an armed
+  allocation fault on one backing allocator and succeed on another, and in-place
+  resizes recorded host-dependent outcomes.
+
+- Artifact manifests are written to a temporary file and renamed into place, so
+  an interrupted write leaves no manifest instead of a truncated one. Campaign
+  resume keeps existing failure evidence only when its manifest parses as
+  complete.
+
+- Adds `zig build validate-campaigns`: run, kill, resume, replay, and reduce
+  campaigns on pinned, unmodified xitdb and redis.zig, each step in its own
+  process. Real contracts must hold; deliberate oracle mutants must yield one
+  reproducible, reduced failure. CI runs it in every optimization mode and
+  uploads the evidence; the nightly workflow runs 5,000 cases per workload.
+- Fixes the xitdb crash oracles, which rejected a durable transaction whose
+  crash landed after its commit point but before it was acknowledged
+  (XITDB-003, a harness bug found by a 5,000-case campaign). A crash-point scan
+  now keeps that window covered.
+
+- Fixes compilation on AArch64 CPUs with SVE, such as AWS Graviton3 and
+  Neoverse N2/V1 hosts: the fiber switch no longer names the reserved FFR
+  register as a clobber. `zig build check-sve` compiles for a Neoverse V1
+  target in CI.
+
 ## v0.7.2 - 2026-09-29
 
 - Isolates process supervision and managed app ownership from `World` while

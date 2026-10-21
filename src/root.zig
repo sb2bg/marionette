@@ -265,6 +265,12 @@ pub const TraceSummaryError = trace_summary_module.TraceSummaryError;
 /// Build an owned summary from line-oriented trace bytes.
 pub const summarize = trace_summary_module.summarize;
 
+/// Injected faults counted from one trace, and whether any had an effect.
+pub const FaultCoverage = trace_summary_module.FaultCoverage;
+
+/// Count injected faults in trace bytes without allocating.
+pub const faultCoverage = trace_summary_module.faultCoverage;
+
 test "public roots hide internal wiring" {
     const public_api = @This();
 
@@ -310,8 +316,22 @@ pub const FailureFingerprint = @import("reduce.zig").FailureFingerprint;
 pub const ReductionOptions = @import("reduce.zig").Options;
 pub const ReductionResult = @import("reduce.zig").Result;
 pub const reduceSimCase = @import("reduce.zig").reduceSimCase;
+pub const reduceCapsule = @import("reduce.zig").reduceCapsule;
 
 pub const ArtifactOptions = @import("artifact.zig").Options;
 pub const writeRunArtifacts = @import("artifact.zig").write;
+
+/// Bounded unattended seed campaigns with deduplicated failure evidence.
+pub const runCampaign = @import("campaign.zig").runCampaign;
+pub const CampaignOptions = @import("campaign.zig").Options;
+pub const CampaignArtifacts = @import("campaign.zig").Artifacts;
+pub const CampaignSummary = @import("campaign.zig").Summary;
+pub const CampaignStopReason = @import("campaign.zig").StopReason;
+pub const CampaignFailure = @import("campaign.zig").DistinctFailure;
+pub const CampaignCaseError = @import("campaign.zig").CaseError;
+pub const CampaignCasePhase = @import("campaign.zig").CasePhase;
+pub const CampaignReduction = @import("campaign.zig").Reduction;
+pub const CampaignMetrics = @import("campaign.zig").Metrics;
+pub const loadCampaignSummary = @import("campaign.zig").loadSummary;
 
 pub const ManagedProcess = @import("world.zig").ManagedProcess;

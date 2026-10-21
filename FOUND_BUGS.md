@@ -41,6 +41,7 @@ result before making a claim about it.
 | KVDB-003  | kvdb    | Confirmed SUT bug  | No-fault delete-heavy model workload         | Leaf delete rebalancing broke B+tree separator/order invariants, making unrelated keys unreachable | Not fixed upstream                |
 | XITDB-001 | xitdb   | Harness/model bug  | 7-byte-sector torn committed-size header     | Rejected: the old byte-prefix tear violated Marionette's sector-atomic contract                     | Fixed in Marionette               |
 | XITDB-002 | xitdb   | Positive result    | 512/4096-byte data-region torn/reorder sweep | Acknowledged modeled history survived the tested realistic data-region crash faults                | No SUT bug found in this profile  |
+| XITDB-003 | xitdb   | Harness/model bug  | Crash after the victim's commit point        | Rejected: the oracle demanded that an unacknowledged but durable transaction be absent             | Fixed in Marionette's harnesses   |
 | DUSTY-001 | dusty   | Confirmed SUT bug  | Server crash with a pooled keep-alive conn   | Client connection pool never evicts a dead connection; the client can never recover                | Fixed upstream                    |
 | DUSTY-002 | dusty   | Confirmed SUT bug  | Graceful shutdown with an active handler     | `listen` drain busy-spins forever: the drain event latches set and is never reset                  | Fixed upstream                    |
 
@@ -230,6 +231,36 @@ recovery bug in this sweep.
 evidence. It says the initial header-boundary counterexample should not be
 overclaimed, and it gives future sweeps a known baseline.
 
+### XITDB-003: Durable Unacknowledged Transaction Treated as Corruption
+
+**Project:** xitdb
+
+**Classification:** Harness/model bug
+
+**Trigger:** The 0.8 `xitdb-acknowledged-history` campaign, at 5,000 cases with
+512-byte sectors. 25 cases (0.5%) failed `xitdb.acknowledged_history` with
+`UnexpectedTransactionRecovered`: recovery returned one more history moment
+than the model held. The campaign's first 48-case runs never reached it.
+
+**What happened:** The victim transaction's data sync completed, and the crash
+landed after its committed-size header write, xitdb's commit point, but before
+the transaction returned. The victim task saw the crash and never acknowledged
+the transaction, yet it was durable. The reduced capsule kept 10 of 11 decision
+groups, so the window is narrow.
+
+**Why it was rejected:** An unacknowledged transaction may be absent or present
+after a crash; it must only never be partial. The oracle required it to be
+absent. xitdb behaved correctly. The same over-strict check was latent in the
+`validate-xitdb` crash fuzzer, whose fixed seeds had never reached the window.
+
+**Fix:** Both oracles now accept the victim when it survives whole and reject
+any partial survival. A crash-point scan in `validation/xitdb_durability.zig`
+must observe at least one durable unacknowledged victim, so the window stays
+covered.
+
+**Lesson:** A long campaign tests the oracle as much as the SUT. A false
+positive at a 0.5% rate is invisible to small fixed sweeps.
+
 ## dusty Findings
 
 The dusty harness is pinned to dusty 0.1.0 and runs the unmodified HTTP/1.1
@@ -367,6 +398,13 @@ an acknowledgment leaves execution ambiguous; disabling retries does not undo
 an already-applied command. The harness preserves this behavior as an explicit
 characterization assertion, not an expected-failure marker. No upstream report
 has been sent.
+
+The `redis-exactly-once-mutant` workload in `zig build validate-campaigns`
+asserts exactly-once INCR on purpose. Campaigns rediscover this lost-reply
+reexecution unaided, retain it as one distinct reproducible failure, and reduce
+it to a trace in which one INCR's replies are lost and retried. The
+`redis-at-least-once` workload states the client's actual retry contract and
+holds.
 
 ### Pool And Framing Recovery Held
 

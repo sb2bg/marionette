@@ -344,6 +344,10 @@ pub const RunFailureKind = enum(u8) {
     first_run_failed,
     /// Application cleanup left simulated file, directory, or socket handles.
     resource_leak,
+    /// The simulation's deterministic `step_budget` ran out while work was
+    /// still runnable or pending. Unlike a watchdog `livelock`, the decision
+    /// tape is complete, so the failure replays exactly and can be reduced.
+    step_budget_exceeded,
 };
 
 /// Optional identity constraints for `expectSimFailure`.

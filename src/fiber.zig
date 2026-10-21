@@ -329,7 +329,8 @@ noinline fn correctedContextSwitch(s: *const Switch) *const Switch {
               .p15 = true,
               .fpcr = true,
               .fpsr = true,
-              .ffr = true,
+              // No `.ffr`: LLVM reserves FFR on SVE targets and rejects it
+              // in clobber lists, and never keeps a value live in it here.
               .nzcv = true,
               .memory = true,
             }),

@@ -196,7 +196,7 @@ pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
     if (config.seeds == 0) return error.InvalidSeedCount;
 
     for (0..config.seeds) |iteration| {
-        const seed = fuzzSeed(configSeed(config), iteration);
+        const seed = caseSeed(config, iteration);
         var report = try runConfiguredCase(config, seed, .record);
         defer report.deinit();
 
@@ -274,9 +274,43 @@ fn validateStateChecks(comptime State: type, checks: []const StateCheck(State)) 
     }
 }
 
+/// Internal campaign execution: record one case with an explicit seed.
+pub fn runSeededCase(config: anytype, seed: u64) RunError!RunReport {
+    return runConfiguredCase(config, seed, .record);
+}
+
+/// Seed for fuzz iteration or campaign case `index`, keyed by the config seed.
+pub fn caseSeed(config: anytype, index: u64) u64 {
+    return fuzzSeed(configSeed(config), index);
+}
+
 /// Internal candidate execution: generate a fresh tape, then verify exact replay.
-pub fn runReductionCandidate(config: anytype, source: []const decision_module.Decision, omitted_sites: []const []const u8) RunError!RunReport {
-    return runConfiguredCase(config, null, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
+/// A null seed uses the config's own seed.
+pub fn runReductionCandidate(config: anytype, seed: ?u64, source: []const decision_module.Decision, omitted_sites: []const []const u8) RunError!RunReport {
+    return runConfiguredCase(config, seed, .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } });
+}
+
+/// Internal candidate execution under a capsule's runtime and simulation
+/// options instead of the config's. The config supplies only callbacks.
+pub fn runCapsuleCandidate(
+    config: anytype,
+    options: RunOptions,
+    simulate_options: World.SimulateOptions,
+    source: []const decision_module.Decision,
+    omitted_sites: []const []const u8,
+) RunError!RunReport {
+    const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
+    try Harness.validate();
+    return runTwiceWithSimCase(
+        config.allocator,
+        options,
+        simulate_options,
+        Harness.App,
+        Harness.initialize,
+        Harness.scenario,
+        Harness.checks,
+        .{ .reduce = .{ .source = source, .omitted_sites = omitted_sites } },
+    );
 }
 
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.Error!RunOptions {
@@ -319,7 +353,7 @@ fn coerceCutover(value: anytype) seed_module.SeedCutover {
     } };
 }
 
-fn configSeed(config: anytype) u64 {
+pub fn configSeed(config: anytype) u64 {
     return fieldOrDefault(config, "seed", @as(u64, 0));
 }
 
@@ -334,8 +368,8 @@ fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) 
 /// bits cover identical seed sets, and `splitmix64(base + iteration)` makes
 /// adjacent bases overlap by all but one seed. Hashing the iteration before
 /// mixing makes cross-base collisions birthday-bound instead of structural.
-fn fuzzSeed(base_seed: u64, iteration: usize) u64 {
-    return splitmix64(base_seed ^ splitmix64(@intCast(iteration)));
+fn fuzzSeed(base_seed: u64, iteration: u64) u64 {
+    return splitmix64(base_seed ^ splitmix64(iteration));
 }
 
 fn splitmix64(input: u64) u64 {
@@ -359,7 +393,7 @@ fn simInitReturnType(comptime init_app: anytype) type {
         .@"fn" => |fn_info| fn_info,
         else => @compileError("runSimCase config.init must be a function"),
     };
-    if (info.params.len != 1 or info.params[0].type != World.Simulation) {
+    if (info.param_types.len != 1 or info.param_types[0] != World.Simulation) {
         @compileError("runSimCase config.init must take `mar.Sim`");
     }
     return info.return_type orelse @compileError("runSimCase config.init must return app state");
@@ -370,7 +404,7 @@ fn validateSimScenario(comptime Case: type, comptime scenario: anytype) void {
         .@"fn" => |fn_info| fn_info,
         else => @compileError("runSimCase config.scenario must be a function"),
     };
-    if (info.params.len != 1 or info.params[0].type != *Case) {
+    if (info.param_types.len != 1 or info.param_types[0] != *Case) {
         @compileError("runSimCase config.scenario must take `*mar.SimCase(App)`");
     }
     const Return = info.return_type orelse @compileError("runSimCase config.scenario must return void or !void");
@@ -651,6 +685,9 @@ fn runOnceWithSimCase(
         .state_checks = state_checks,
         .app = init_app(sim) catch |err| {
             try sim.finishManagedProcesses();
+            // An initializer that ran out of steps reports the budget, not
+            // the error its interrupted wait surfaced.
+            if (sim.control.tasks.failure()) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
             return try failureFromWorld(
                 allocator,
                 options,
@@ -690,6 +727,9 @@ fn runOnceWithSimCase(
     state.deinit();
     state_live = false;
     try sim.finishManagedProcesses();
+    // Application cleanup still schedules work: a budget or deadlock reached
+    // there fails the run instead of passing with the failure in its trace.
+    if (sim.control.tasks.failure()) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
     if (options.check_resources) {
         sim.control.checkResources() catch |err| switch (err) {
             error.ResourceLeak => return try failureFromWorld(
@@ -731,6 +771,14 @@ fn schedulerFailureFromWorld(
             .scheduler_deadlock,
             world,
             "Deadlock",
+            null,
+        ),
+        .step_budget_exceeded => failureFromWorldName(
+            allocator,
+            options,
+            .step_budget_exceeded,
+            world,
+            "StepBudgetExceeded",
             null,
         ),
         .scheduler_error => |error_name| failureFromWorldName(
@@ -820,7 +868,7 @@ test "resource checks: opt in, cleanup boundary, replay and primary errors" {
             const io = sim.env.io();
             return .{ .io = io, .file = try std.Io.Dir.cwd().createFile(io, "leaked file", .{}) };
         }
-        fn deinit(self: *@This()) void {
+        pub fn deinit(self: *@This()) void {
             if (self.close) self.file.close(self.io);
         }
         fn leaveOpen(_: *SimCase(@This())) void {}
@@ -1086,7 +1134,7 @@ const SimCaseApp = struct {
         return .{ .env = sim.env };
     }
 
-    fn deinit(_: *SimCaseApp) void {
+    pub fn deinit(_: *SimCaseApp) void {
         sim_case_deinit_count += 1;
     }
 };
@@ -1170,7 +1218,7 @@ const PointerSimApp = struct {
         return app;
     }
 
-    fn deinit(self: *PointerSimApp) void {
+    pub fn deinit(self: *PointerSimApp) void {
         pointer_sim_app_deinit_count += 1;
         self.allocator.destroy(self);
     }
@@ -1205,7 +1253,7 @@ const TeardownTraceApp = struct {
         return .{ .env = sim.env };
     }
 
-    fn deinit(self: *TeardownTraceApp) void {
+    pub fn deinit(self: *TeardownTraceApp) void {
         teardown_trace_count += 1;
         self.env.record("app.deinit count={}", .{teardown_trace_count}) catch unreachable;
     }

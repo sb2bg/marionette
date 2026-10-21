@@ -1,7 +1,7 @@
 # `std.Io.net` Conformance
 
 This ledger classifies Marionette's simulated `std.Io.net` surface against Zig
-0.16.0. It is the source of truth for supported operations and options.
+0.17.0. It is the source of truth for supported operations and options.
 
 - **Exact:** portable observable behavior is intended to match host
   `std.Io.net`.
@@ -30,6 +30,9 @@ This ledger classifies Marionette's simulated `std.Io.net` surface against Zig
 | `accept` | Abstracted | Blocks cancelably and returns deterministic peer metadata. The port comes from a rotating simulated client ephemeral-port cursor and may be reused after the modeled range wraps; active peer-tuple uniqueness is not modeled. The family matches the connect destination. Nodes do not model source interfaces, so the peer IP is copied from the connect destination rather than representing a genuine client source address. |
 | Stream read/write ordering | Abstracted | Writes are segmented into ordered frames. Readers receive only a contiguous prefix. Loss terminally fails that receive stream; later frames are discarded. |
 | Partial write progress | Exact | Once a write prefix is accepted, a later cancellation, reset, or resource failure returns the accepted byte count. |
+| Stream read metadata | Exact | Reads report byte count, zero ancillary bytes, and no control truncation. |
+| Ancillary writes | Unsupported | Nonempty control data returns `error.Unexpected` before sending payload bytes. |
+| Stream timeout errors | Abstracted | A partition or unavailable synchronous read reports `error.ConnectionTimedOut`; connect deadlines still report `error.Timeout`. |
 | Read/write cancellation | Exact | Armed cancellation is delivered at entry and at blocking waits. |
 | `shutdown(.recv)` | Abstracted | Discards inbound bytes and makes later reads return EOF. The opposite direction remains usable. |
 | `shutdown(.send)` | Abstracted | Makes local writes fail and makes the peer observe EOF after accepted bytes. The opposite direction remains usable. |

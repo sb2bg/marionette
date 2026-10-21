@@ -81,6 +81,25 @@ The minimized capsule contains the actual decisions, including disabled actions.
 Replay it with the original harness and checks: no external removal mask or
 modified workload is needed. Retain the pinned executable and build/SUT identity.
 
+To reduce a retained capsule in a fresh process, pass the original harness and
+the capsule's identity:
+
+```zig
+var reduced = try mar.reduceCapsule(.{
+    .allocator = allocator,
+    .init = App.init,
+    .scenario = scenario,
+    .checks = &checks,
+}, &capsule, identity, .{ .max_attempts = 256 });
+defer reduced.deinit();
+```
+
+`reduceCapsule` rejects an incompatible identity, replays the capsule exactly as
+the baseline, and runs candidates under the capsule's runtime and simulation
+options, including its seed and watchdog. The result is the same as reducing
+the original config at that seed. [Campaigns](campaigns.md#reduction) reduce new
+failures this way automatically.
+
 Run the complete example:
 
 ```sh
@@ -147,14 +166,14 @@ Directories contain:
   options, failure identity, fingerprint, divergence diagnostics, and capsule
   availability. Runtime fault/process configuration remains visible in the trace.
 
-The manifest is written last. Consumers should require a valid complete manifest;
-a partial I/O failure may leave an unfinished directory. Incomplete or divergent
+The manifest is written last, to a temporary file renamed into place, so a
+directory with `manifest.json` finished writing; an interrupted write leaves no
+manifest. Consumers should still require a valid complete manifest. Incomplete or divergent
 failures still produce diagnostic artifacts and explain why no capsule exists.
 Host I/O errors return `ArtifactIoFailed`; encoding errors return
 `ArtifactEncodingFailed`. Artifact I/O is not part of deterministic trace replay.
-For fuzz campaigns, choose a separate directory per run and call
-`writeRunArtifacts` on retained reports; automatic campaign directory naming is
-part of the later Guided Exploration roadmap.
+[Campaigns](campaigns.md) name and write these directories automatically, one
+per distinct failure.
 
 Save a minimized result with `mar.writeRunArtifacts(allocator, reduced.report(),
 artifact_options)`. The `ReductionResult` owns both the original report and the

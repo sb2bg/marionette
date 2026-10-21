@@ -592,10 +592,10 @@ fn reductionBytesAllocationCase(allocator: std.mem.Allocator) !void {
     var engine = Engine.init(allocator, .{ .reduce = .{ .source = &.{}, .omitted_sites = &.{"app.bytes"} } });
     defer engine.deinit();
     const before = engine.checkpoint();
-    var bytes = [_]u8{9} ** 16;
+    var bytes = @as([16]u8, @splat(9));
     const request_value = try engine.request("app.bytes", 10, 0, .{ .bytes = bytes.len });
     try engine.chooseBytes(request_value, &bytes);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &bytes);
+    try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0))), &bytes);
     engine.rollback(before);
     try std.testing.expectEqual(@as(usize, 0), engine.entries().len);
     try std.testing.expectEqual(@as(?u64, null), engine.last_time_ns);

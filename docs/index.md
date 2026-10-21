@@ -10,6 +10,7 @@ and installation instructions.
 - [Run scenarios](run.md)
 - [API reference](api.md)
 - [Examples](examples.md)
+- [Campaigns](campaigns.md)
 
 ## Models And Contracts
 
