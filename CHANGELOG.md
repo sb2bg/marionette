@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.0 - Unreleased
+## v0.8.0 - 2026-10-20
 
 - Requires Zig 0.17.0; updates the source, toolchain pin, and CI checks for the
   new compiler and standard library. Updates xitdb, dusty, and pg.zig validation
