@@ -190,11 +190,15 @@ pub const FailureExpectation = run_module.FailureExpectation;
 /// Failure kind captured by the runner.
 pub const RunFailureKind = run_module.RunFailureKind;
 
-/// Result of `runSimCase`: either a verified replay or a failure report.
+/// Versioned, owned replay artifact for one complete, reproducible run.
 pub const ReplayCapsule = @import("replay.zig").Capsule;
+/// Pinned build, workload, toolchain, target, and disk-model identity that a
+/// capsule replays against.
 pub const ReplayIdentity = @import("replay.zig").Identity;
+/// Re-execute a capsule's recorded decisions against a matching identity.
 pub const replaySimCase = run_module.replaySimCase;
 
+/// Result of `runSimCase`: either a verified replay or a failure report.
 pub const RunReport = run_module.RunReport;
 /// Optional out-of-process liveness watchdog configuration.
 pub const WatchdogOptions = run_module.WatchdogOptions;
@@ -312,13 +316,20 @@ test {
 }
 
 /// Stable failure identity and bounded semantic-group reduction.
+/// Full failure identity: kind, error name, and check name.
 pub const FailureFingerprint = @import("reduce.zig").FailureFingerprint;
+/// Bounded reduction budget.
 pub const ReductionOptions = @import("reduce.zig").Options;
+/// Owned original and best reduced report.
 pub const ReductionResult = @import("reduce.zig").Result;
+/// Reduce a failing run's semantic decisions within a budget.
 pub const reduceSimCase = @import("reduce.zig").reduceSimCase;
+/// Reduce a retained capsule in a fresh process.
 pub const reduceCapsule = @import("reduce.zig").reduceCapsule;
 
+/// Where and under which identity `writeRunArtifacts` stores a report.
 pub const ArtifactOptions = @import("artifact.zig").Options;
+/// Write a report's trace, capsule, and manifest to a new directory.
 pub const writeRunArtifacts = @import("artifact.zig").write;
 
 /// Bounded unattended seed campaigns with deduplicated failure evidence.
@@ -342,4 +353,5 @@ pub const CrashSweepResult = @import("crash_points.zig").Result;
 /// Run attribute that records a sweep's crash point.
 pub const crash_point_attribute = @import("run.zig").crash_point_attribute;
 
+/// World-owned volatile state for one logical process, reopened on restart.
 pub const ManagedProcess = @import("world.zig").ManagedProcess;
