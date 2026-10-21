@@ -38,3 +38,7 @@ test {
 test {
     _ = @import("crash_points.zig");
 }
+
+test {
+    _ = @import("network_characterization.zig");
+}

@@ -35,6 +35,10 @@
   world's 64 stream buffers and make an unrelated connect fail with
   `SystemResources`. Unrelated connections still share those buffers for data
   until 0.9.
+- Adds network characterization tests (`tests/network_characterization.zig`)
+  that record how today's stream model reacts to partitions, closes, kills,
+  loss, and binds, next to what Linux TCP does instead, so the 0.9 network
+  model changes each expectation deliberately.
 
 ## v0.8.0 - 2026-10-20
 
