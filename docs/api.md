@@ -74,7 +74,9 @@ test "scenario" {
 Required runner fields are `allocator`, `simulate`, `init`, and `scenario`.
 `simulate` must be a `mar.World.SimulateOptions` value. Optional fields are
 `seed`, `seed_schedule`, `start_ns`, `tick_ns`, `name`, `tags`, `attributes`,
-`checks`, `watchdog`, and `check_resources`.
+`checks`, `watchdog`, `check_resources`, and `artifacts`. Any other field is a
+compile error that names it, so a misspelled `checks` cannot silently skip the
+checks.
 
 - `runSimCase` returns an owned `RunReport`.
 - `expectSimPass` accepts only a passing replay.
