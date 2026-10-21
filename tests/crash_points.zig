@@ -150,3 +150,45 @@ test "crash points: a failed scenario's cleanup runs with the crash disarmed" {
     try mar.expectTraceContains(failure.first_trace, "disk.fault kind=armed_crash disarmed=true");
     try std.testing.expect(std.mem.indexOf(u8, failure.first_trace, "armed_crash fired=true") == null);
 }
+
+fn reversedWithArtifacts(dir: std.Io.Dir, include_passes: bool) ReversedArtifactsConfig {
+    return .{ .allocator = std.testing.allocator, .artifacts = .{
+        .io = std.testing.io,
+        .parent = dir,
+        .name = "failing-point",
+        .identity = identity,
+        .include_passes = include_passes,
+    } };
+}
+const ReversedArtifactsConfig = struct {
+    allocator: std.mem.Allocator,
+    seed: u64 = 0x081,
+    simulate: mar.World.SimulateOptions = .{ .disk = .{ .sector_size = 4 } },
+    comptime init: @TypeOf(Reversed.init) = Reversed.init,
+    comptime scenario: @TypeOf(Reversed.scenario) = Reversed.scenario,
+    comptime checks: []const mar.StateCheck(mar.SimCase(Reversed)) = &Reversed.checks,
+    artifacts: mar.ArtifactOptions,
+};
+
+test "crash points: the failing point is written to the configured artifacts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.ExpectedRunPass, mar.expectCrashPointsPass(reversedWithArtifacts(tmp.dir, false), .{}));
+
+    var dir = try tmp.dir.openDir(std.testing.io, "failing-point", .{});
+    defer dir.close(std.testing.io);
+    const bytes = try dir.readFileAlloc(std.testing.io, "replay.json", std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    var replayed = try mar.replaySimCase(Reversed.config(), &capsule, identity);
+    defer replayed.deinit();
+    try std.testing.expectEqualStrings("SecondWithoutFirst", replayed.failed.error_name.?);
+    try mar.expectTraceContains(replayed.failed.first_trace, "key=marionette.crash_point value=uint:3");
+}
+
+test "crash points: artifacts for every passing point are rejected" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.InvalidCrashSweepArtifacts, mar.sweepCrashPoints(reversedWithArtifacts(tmp.dir, true), .{}));
+}

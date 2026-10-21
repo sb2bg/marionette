@@ -6,6 +6,7 @@
 //! through the ordinary runner, so it is recorded, exact-replayed, and
 //! reproducible from its capsule: the point is a run attribute.
 const std = @import("std");
+const artifact = @import("artifact.zig");
 const run = @import("run.zig");
 const types = @import("run_types.zig");
 
@@ -20,6 +21,9 @@ pub const Error = run.RunError || error{
     CrashPointNotArmed,
     /// The armed crash still fired at `max_points`.
     CrashPointLimitReached,
+    /// `config.artifacts.include_passes` asks for every passing point, but a
+    /// sweep writes only its failing point to the one named directory.
+    InvalidCrashSweepArtifacts,
 };
 
 /// Outcome of a sweep. Owns the first failing report, if any.
@@ -38,15 +42,21 @@ pub const Result = struct {
 
 /// Sweep crash points 0, 1, 2, ... for an ordinary `runSimCase` config,
 /// stopping at the first failure or at the first point where the armed crash
-/// never fired because the work under test finished first.
+/// never fired because the work under test finished first. With
+/// `config.artifacts`, the first failing point is written there.
 pub fn sweepCrashPoints(config: anytype, options: Options) Error!Result {
     comptime run.requireKnownConfigFields(@TypeOf(config), "sweepCrashPoints", &.{});
+    if (@hasField(@TypeOf(config), "artifacts")) {
+        if (config.artifacts.include_passes) return error.InvalidCrashSweepArtifacts;
+    }
     var result: Result = .{};
     while (result.points < options.max_points) {
         const point = result.points;
         var report = try run.runCrashPoint(config, point);
         result.points += 1;
         if (report == .failed) {
+            errdefer report.deinit();
+            if (@hasField(@TypeOf(config), "artifacts")) try artifact.write(config.allocator, &report, config.artifacts);
             result.failure = report;
             return result;
         }

@@ -253,8 +253,11 @@ tries points 0, 1, 2, and so on until one where the armed crash never fired,
 and returns the first failing report instead of stopping at an error. Each point
 is an ordinary recorded and exact-replayed run whose point is the
 `marionette.crash_point` run attribute, so a failing point's capsule replays
-that point. A scenario that never arms returns `CrashPointNotArmed`, and
-`max_points` (1024 by default) bounds a workload that never finishes.
+that point. With `artifacts` in the config, the first failing point is written
+there; `include_passes` returns `InvalidCrashSweepArtifacts`, because every
+point cannot share one directory. A scenario that never arms returns
+`CrashPointNotArmed`, and `max_points` (1024 by default) bounds a workload that
+never finishes.
 
 ## Step Budget
 
