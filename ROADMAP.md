@@ -10,42 +10,15 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.8.1
+## Next: 0.9: Honest Network
 
 0.8 delivered dependable campaigns: bounded runs that survive bad cases,
 deterministic step budgets, deduplicated and reduced evidence, resume after a
 kill, fresh-process replay and reduction, fault coverage, and an end-to-end
 validation on pinned storage and network workloads
-(`zig build validate-campaigns`). 0.8.1 fixes what keeps that evidence from
-being trustworthy and removes the friction the first public adopter hit.
-
-- **Zero means no fault.** Every probabilistic fault roll (network drops, disk
-  faults, allocation and application BUGGIFY) fires when the roll is below the
-  numerator, so a zero roll injects the fault. Reduction replaces removed
-  decisions with zero and skips sites already at zero, so it adds faults and can
-  never remove one that fired. Fire only when the roll is at least
-  `denominator - numerator`, record the change as a decision-model version, and
-  prove that reduction strips a planted fault.
-- **Network characterization tests.** Check in the network probes (connect into
-  a partition, a reply sent during a partition, close and kill during a
-  partition, loss on an established stream, the same port bound on several
-  nodes, a stalled reader starving an unrelated connect) as tests that record
-  today's behavior, so 0.9 changes each expectation deliberately. The original
-  probes ran on 0.7.2 with Zig 0.16; rerun them on Zig 0.17 first.
-- **No shared-pool starvation on connect.** Take connection probes off the
-  world-global stream buffer pool, so one stalled reader cannot fail an
-  unrelated connect with `SystemResources`.
-- **Crash-point sweeps.** Run a scenario once per disk crash point
-  (`crashAfterOps(k)`) until the operation completes, through `runSimCase`, so
-  each point gets exact replay and retained evidence. raftz writes this loop by
-  hand four times over raw `World.init`.
-- **Restart without a placeholder lifecycle.** Revive a node's I/O after a disk
-  crash without registering a do-nothing `ProcessLifecycle`.
-- **Directory sync through `std.Io`.** Document opening a directory as a `File`
-  and calling `sync`, which the simulated backend already routes to directory
-  durability, so durable code does not need the `Disk` capability for it.
-
-## 0.9: Honest Network
+(`zig build validate-campaigns`). 0.8.1 made reduction strip faults instead of
+injecting them, added crash-point sweeps, and recorded today's network behavior
+as characterization tests; see `CHANGELOG.md`.
 
 The network turns faults into immediate, invented errors and lets endpoints read
 each other's state, so the bugs partitions really cause (hangs, half-open
@@ -53,7 +26,8 @@ connections, late replies, ambiguous retries) cannot happen in simulation.
 Connecting into a partition fails at once even with a 10 s timeout, a peer's
 close or kill reaches it across a partition with no delay, and 1% loss kills a
 stream. Two pinned validations (`std_io_net_kv` and dusty's partition scenarios)
-pass only because the simulator invents a `Timeout` for clients that set none.
+pass only because the simulator invents a timeout error for clients that set
+none.
 That is a trustworthy-models defect, and fixing it changes network semantics and
 API, so it lands before the stabilization candidates start.
 
@@ -88,10 +62,48 @@ Exit when the characterization probes behave as Linux TCP would under `tcp_v1`,
 every pinned validation passes without invented errors, a missing application
 timeout surfaces as a reported deadlock, and the performance baseline holds.
 
+## 0.10: Harness API
+
+The runner works, but the pinned real-world workloads do not use it: 9 of the 11
+files in `validation/` call `World.init` directly and compare traces by hand, so
+the best evidence gets no capsules, reduction, campaigns, or crash-point sweeps.
+They also fail from task bodies by panicking (91 panic sites). This milestone
+settles the harness API before the freeze, with those workloads as its
+acceptance test.
+
+- **Run the validations through the runner.** Port beanstalkz and dusty first;
+  what they cannot express (multi-node setup, outcome assertions, failing a run
+  from a task) is the gap to close.
+- **Fail a run from a task.** Make a task error a scenario failure with a report
+  instead of a panic, through error-returning `std.Io` futures or a case helper.
+- **One typed harness.** Replace `config: anytype` with a harness type built once
+  from the app, scenario, and checks, driving run, fuzz, replay, reduction,
+  campaigns, and sweeps. Replay then cannot be handed different checks, and
+  simulation options can default.
+- **Infallible recording.** Recording errors land in every caller's signature
+  although production recording cannot fail. Record the first failure on the
+  world and fail the run at the next boundary; give `Recorder` a sink so
+  production code can send events somewhere.
+- **One process-control surface.** Choose between `sim.killProcess`,
+  `control.process.kill`, and `ManagedProcess`.
+- **Keep `World` an engine detail.** Move the choices harnesses need
+  (`chooseBool`, `chooseIntLessThan`, `randomBytes`) onto `Control`, stop
+  exposing mutable `World` fields, and return precise error sets where a control
+  interface has one implementation.
+- **Group the root exports** into namespaces such as `mar.disk`, `mar.net`, and
+  `mar.replay`.
+- **Reproduce without editing code.** Rerun a failing fuzz or campaign seed
+  through a build option, fill `ReplayIdentity` from the build, and replay a
+  downstream capsule from the command line.
+
+Exit when the ported validations need no `World.init`, no task panics, and no
+hand-compared traces, and the public API is ready for the first stabilization
+candidate.
+
 ## Stabilization And 1.0 Acceptance
 
-After 0.9 flips the network defaults, a release-candidate phase should close the
-following evidence gates. 1.0 commits to the documented deterministic `std.Io`
+After 0.9 flips the network defaults and 0.10 settles the harness API, a
+release-candidate phase should close the following evidence gates. 1.0 commits to the documented deterministic `std.Io`
 subset and testing workflow.
 
 - **Stable public contract:** identify supported application/harness APIs and
