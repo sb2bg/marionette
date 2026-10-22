@@ -54,6 +54,8 @@ pub const TaskRuntime = struct {
         /// Consume a deliverable cancellation request on the calling task.
         /// Returns true when the caller must surface `error.Canceled`.
         take_cancel_request: *const fn (ptr: *anyopaque) bool,
+        /// Whether the calling task acknowledged cancellation without re-arming it.
+        cancel_acknowledged: *const fn (ptr: *anyopaque) bool,
         /// Re-arm the cancellation request after a delivered cancellation.
         recancel: *const fn (ptr: *anyopaque) void,
         /// Swap the calling context's cancel-protection state.
@@ -94,6 +96,10 @@ pub const TaskRuntime = struct {
 
     pub fn takeCancelRequest(self: TaskRuntime) bool {
         return self.vtable.take_cancel_request(self.ptr);
+    }
+
+    pub fn cancelAcknowledged(self: TaskRuntime) bool {
+        return self.vtable.cancel_acknowledged(self.ptr);
     }
 
     pub fn recancel(self: TaskRuntime) void {
