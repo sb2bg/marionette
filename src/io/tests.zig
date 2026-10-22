@@ -3681,6 +3681,129 @@ test "io: canceling Group.await cancels members and resurfaces Canceled" {
     try std.testing.expect(state.cancel_result_canceled);
 }
 
+const FutureAwaitCancelState = struct {
+    child_futex: u32 = 0,
+    child_canceled: bool = false,
+    parent_joined: bool = false,
+};
+
+fn futureAwaitCancelChild(io: Io, state: *FutureAwaitCancelState) Io.Cancelable!void {
+    io.futexWait(u32, &state.child_futex, 0) catch |err| {
+        state.child_canceled = true;
+        return err;
+    };
+}
+
+fn futureAwaitCancelParent(io: Io, state: *FutureAwaitCancelState) Io.Cancelable!void {
+    var child = Io.concurrent(io, futureAwaitCancelChild, .{ io, state }) catch
+        @panic("child spawn failed");
+    const result = child.await(io);
+    state.parent_joined = true;
+    return result;
+}
+
+test "io: canceling Future.await forwards cancellation and joins the child" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    var world = try World.init(task_world_allocator, .{ .seed = 571, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+
+    var state: FutureAwaitCancelState = .{};
+    var parent = try Io.concurrent(io, futureAwaitCancelParent, .{ io, &state });
+    // Drive both tasks until the parent awaits its parked child.
+    try Io.sleep(io, .fromNanoseconds(1000), .awake);
+    const result = parent.cancel(io);
+    try std.testing.expect(state.child_canceled);
+    try std.testing.expect(state.parent_joined);
+    try std.testing.expectError(error.Canceled, result);
+}
+
+const FutureAwaitMode = enum { acknowledge, ignore, rearm, protected, explicit_cancel, nested };
+
+const FutureAwaitState = struct {
+    started: Io.Event = .unset,
+    child_canceled: bool = false,
+    parent_canceled_after_join: bool = false,
+    child_joined: bool = false,
+    result: u32 = 0,
+};
+
+fn futureAwaitChild(io: Io, state: *FutureAwaitState, mode: FutureAwaitMode) u32 {
+    state.started.set(io);
+    if (mode == .ignore or mode == .protected) {
+        const old = Io.swapCancelProtection(io, .blocked);
+        defer _ = Io.swapCancelProtection(io, old);
+        Io.sleep(io, .fromMilliseconds(10), .awake) catch unreachable;
+    } else {
+        Io.sleep(io, .fromSeconds(1), .awake) catch {
+            state.child_canceled = true;
+            if (mode == .rearm) Io.recancel(io);
+            if (mode == .explicit_cancel) {
+                const old = Io.swapCancelProtection(io, .blocked);
+                defer _ = Io.swapCancelProtection(io, old);
+                Io.sleep(io, .fromMilliseconds(10), .awake) catch unreachable;
+            }
+        };
+    }
+    return 42;
+}
+
+fn futureAwaitMiddle(io: Io, state: *FutureAwaitState) u32 {
+    var child = Io.concurrent(io, futureAwaitChild, .{ io, state, .acknowledge }) catch
+        @panic("child spawn failed");
+    return child.await(io);
+}
+
+fn futureAwaitParent(io: Io, state: *FutureAwaitState, mode: FutureAwaitMode) void {
+    const old = if (mode == .protected) Io.swapCancelProtection(io, .blocked) else null;
+    var child = if (mode == .nested)
+        Io.concurrent(io, futureAwaitMiddle, .{ io, state }) catch @panic("middle spawn failed")
+    else
+        Io.concurrent(io, futureAwaitChild, .{ io, state, mode }) catch @panic("child spawn failed");
+    state.result = if (mode == .explicit_cancel) child.cancel(io) else child.await(io);
+    state.child_joined = true;
+    if (old) |protection| _ = Io.swapCancelProtection(io, protection);
+    Io.checkCancel(io) catch {
+        state.parent_canceled_after_join = true;
+    };
+}
+
+fn exerciseFutureAwait(io: Io, mode: FutureAwaitMode) !void {
+    var state: FutureAwaitState = .{};
+    var parent = try Io.concurrent(io, futureAwaitParent, .{ io, &state, mode });
+    try state.started.wait(io);
+    parent.cancel(io);
+    try std.testing.expect(state.child_joined);
+    try std.testing.expectEqual(@as(u32, 42), state.result);
+    try std.testing.expectEqual(mode != .ignore and mode != .protected, state.child_canceled);
+    try std.testing.expectEqual(mode != .acknowledge and mode != .nested, state.parent_canceled_after_join);
+}
+
+test "io: Future.await cancellation responsibility matches Threaded and repeats deterministically" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    inline for (std.meta.tags(FutureAwaitMode)) |mode| {
+        try exerciseFutureAwait(std.testing.io, mode);
+        for (571..579) |seed| {
+            var previous: ?[]u8 = null;
+            defer if (previous) |bytes| std.testing.allocator.free(bytes);
+            for (0..2) |_| {
+                var world = try World.init(task_world_allocator, .{ .seed = seed, .tick_ns = 10 });
+                defer world.deinit();
+                const sim = try world.simulate(.{});
+                try exerciseFutureAwait(sim.env.io(), mode);
+                if (previous) |bytes| {
+                    try std.testing.expectEqualStrings(bytes, world.traceBytes());
+                } else {
+                    previous = try std.testing.allocator.dupe(u8, world.traceBytes());
+                }
+            }
+        }
+    }
+}
+
 const GroupAwaitKillState = struct {
     member_futex: u32 = 0,
 };
