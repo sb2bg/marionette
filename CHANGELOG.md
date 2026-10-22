@@ -15,6 +15,12 @@
   without running its checks. `runSimCase`, the `expectSim*` helpers,
   `replaySimCase`, the reduction entry points, and `runCampaign` now name the
   unknown field in a compile error.
+- Canceling a task blocked in `Future.await` now forwards cancellation to the
+  awaited child and joins it, fixing hangs when the child is waiting at a
+  cancellation point. Cancellation responsibility follows Zig 0.17's
+  `std.Io.Threaded`: the parent re-arms its request if the child does not
+  acknowledge it or calls `recancel`. Explicit `Future.cancel` joins preserve
+  the caller's own pending cancellation.
 - Restarting a node with no registered lifecycle revives its I/O and runs no
   callback, so a disk crash, which kills every process, no longer forces a
   placeholder `ProcessLifecycle`. `transitionToLiveness` no longer requires
