@@ -5,7 +5,6 @@
 //! `SimCase.armCrashPoint` just before the work under test. Each point runs
 //! through the ordinary runner, so it is recorded, exact-replayed, and
 //! reproducible from its capsule: the point is a run attribute.
-const std = @import("std");
 const artifact = @import("artifact.zig");
 const run = @import("run.zig");
 const types = @import("run_types.zig");
@@ -61,9 +60,8 @@ pub fn sweepCrashPoints(config: anytype, options: Options) Error!Result {
             return result;
         }
         defer report.deinit();
-        const trace = report.passed.trace;
-        if (std.mem.indexOf(u8, trace, "disk.fault kind=armed_crash after_ops=") == null) return error.CrashPointNotArmed;
-        if (std.mem.indexOf(u8, trace, "disk.fault kind=armed_crash fired=true") == null) return result;
+        const fired = report.passed.crash_point_fired orelse return error.CrashPointNotArmed;
+        if (!fired) return result;
     }
     return error.CrashPointLimitReached;
 }

@@ -35,6 +35,10 @@
   when the scenario returns or fails, before checks and cleanup. Adds
   `DiskControl.disarmCrash`, and a firing armed crash now records
   `disk.fault kind=armed_crash fired=true`.
+  Sweep completion tracks the scenario's own armed region, so ordinary armed
+  crashes during setup or recovery neither satisfy sweep arming nor keep a
+  completed sweep running. Passing sweep outcomes survive watchdog execution
+  and capsule replay.
 - Documents and tests directory durability through `std.Io`: syncing a
   directory opened with `allow_directory` commits its entries, so durable code
   does not need the `Disk` capability for `syncDir`.

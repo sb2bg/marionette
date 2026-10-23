@@ -259,6 +259,10 @@ point cannot share one directory. A scenario that never arms returns
 `CrashPointNotArmed`, and `max_points` (1024 by default) bounds a workload that
 never finishes.
 
+Sweep arming and completion are tracked separately from ordinary disk faults:
+`DiskControl.crashAfterOps` in setup does not replace `armCrashPoint`, and
+crashes before arming or after finishing do not extend the sweep.
+
 ## Step Budget
 
 A task that keeps sleeping, waking a peer, or retrying never deadlocks, so

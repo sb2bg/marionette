@@ -65,6 +65,8 @@ pub fn SimCase(comptime App: type) type {
         /// sweep. Null otherwise.
         crash_point: ?u64 = null,
         crash_point_armed: bool = false,
+        /// Null until this scenario arms a sweep point; retained after finish.
+        crash_point_fired: ?bool = null,
         property_failure: ?struct { err: anyerror, name: []const u8 } = null,
 
         /// Execute an optional action group. Keep dependencies and required
@@ -80,6 +82,7 @@ pub fn SimCase(comptime App: type) type {
             const point = self.crash_point orelse return;
             try self.control().disk.crashAfterOps(point);
             self.crash_point_armed = true;
+            if (self.crash_point_fired == null) self.crash_point_fired = false;
         }
 
         /// End the work under test: an armed crash that has not fired is
@@ -88,8 +91,10 @@ pub fn SimCase(comptime App: type) type {
         /// disarms when the scenario returns, before checks run.
         pub fn finishCrashPoint(self: *Self) !bool {
             if (!self.crash_point_armed) return false;
+            const fired = !(try self.control().disk.disarmCrash());
             self.crash_point_armed = false;
-            return !(try self.control().disk.disarmCrash());
+            self.crash_point_fired = (self.crash_point_fired orelse false) or fired;
+            return fired;
         }
 
         /// Evaluate explicitly selected properties at a named harness safe point.
@@ -651,7 +656,7 @@ fn compareRunOnceResults(
         a.kind == b.kind and optionalTextEqual(a.error_name, b.error_name) and optionalTextEqual(a.check_name, b.check_name) and
             (equal_trace or (isWatchdogFailure(a.kind) and watchdogTracePrefixesCompatible(first.trace, second.trace)))
     else
-        false else second_failure == null and equal_trace;
+        false else second_failure == null and equal_trace and first.crash_point_fired == second.crash_point_fired;
     const owned_options = try cloneRunOptions(allocator, options);
     const trace = first.trace;
     first.trace = &.{};
@@ -666,6 +671,7 @@ fn compareRunOnceResults(
         .event_count = first.event_count,
         .decision_tape = tape,
         .tape_complete = first.tape_complete,
+        .crash_point_fired = first.crash_point_fired,
     } };
     const kind: RunFailureKind = if (second_failure != null and second_failure.?.kind == .replay_diverged) .replay_diverged else if (reproduced) first_failure.?.kind else if (first_failure == null and second_failure != null) .second_run_failed else if (first_failure != null and second_failure == null) .first_run_failed else .determinism_mismatch;
     var report: RunFailure = .{
@@ -820,6 +826,7 @@ fn runOnceWithSimCase(
         }
     }
 
+    const crash_point_fired = state.crash_point_fired;
     state.deinit();
     state_live = false;
     try sim.finishManagedProcesses();
@@ -851,7 +858,9 @@ fn runOnceWithSimCase(
             null,
         );
     };
-    return execution.Result.capture(allocator, &world, null);
+    var result = try execution.Result.capture(allocator, &world, null);
+    result.crash_point_fired = crash_point_fired;
+    return result;
 }
 
 fn schedulerFailureFromWorld(

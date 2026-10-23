@@ -36,6 +36,8 @@ pub const Result = struct {
     event_count: u64,
     decision_tape: decision.Tape = .{},
     tape_complete: bool = true,
+    /// Explicit sweep outcome, independent of unrelated disk trace events.
+    crash_point_fired: ?bool = null,
     outcome: union(enum) { passed, failed: Failure } = .passed,
 
     pub fn capture(allocator: std.mem.Allocator, world: *World, failure: ?Failure) !Result {

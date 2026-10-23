@@ -11,6 +11,19 @@ pub const Wire = struct {
     decisions: []const decision.Decision,
     tape_complete: bool,
     failure: ?execution.Failure,
+    crash_point_fired: ?bool = null,
+
+    /// Keep ordinary execution and capsule bytes unchanged.
+    pub fn jsonStringify(self: Wire, writer: anytype) !void {
+        try writer.beginObject();
+        inline for (@typeInfo(Wire).@"struct".field_names) |name| {
+            if (!std.mem.eql(u8, name, "crash_point_fired") or self.crash_point_fired != null) {
+                try writer.objectField(name);
+                try writer.write(@field(self, name));
+            }
+        }
+        try writer.endObject();
+    }
 
     pub fn fromResult(result: *const execution.Result) Wire {
         return .{
@@ -19,6 +32,7 @@ pub const Wire = struct {
             .decisions = result.decision_tape.entries,
             .tape_complete = result.tape_complete,
             .failure = if (result.outcome == .failed) result.outcome.failed else null,
+            .crash_point_fired = result.crash_point_fired,
         };
     }
 
@@ -59,6 +73,7 @@ pub const Wire = struct {
             .trace = try allocator.dupe(u8, self.trace),
             .event_count = self.event_count,
             .tape_complete = self.tape_complete,
+            .crash_point_fired = self.crash_point_fired,
         };
         errdefer result.deinit();
         result.decision_tape = try decision.Tape.clone(allocator, self.decisions);

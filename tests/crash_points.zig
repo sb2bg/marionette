@@ -1,9 +1,18 @@
 //! Crash-point sweeps run a scenario once per disk operation, crashing
 //! before it, so ordering bugs in durable code fail at an exact point.
 const std = @import("std");
+const builtin = @import("builtin");
 const mar = @import("marionette");
 
 const identity: mar.ReplayIdentity = .{ .build = "test-build-081", .sut = "crash-points-v1" };
+const watchdog_supported = switch (builtin.os.tag) {
+    .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => true,
+    else => false,
+};
+const watchdog_modes = .{
+    @as(?mar.WatchdogOptions, null),
+    if (watchdog_supported) @as(?mar.WatchdogOptions, .{}) else null,
+};
 
 /// Two durable files with the invariant: if `second` exists, `first` does.
 fn TwoFileCommit(comptime first: []const u8, comptime second: []const u8) type {
@@ -119,6 +128,127 @@ test "crash points: a scenario that never arms is reported" {
         .init = Unarmed.init,
         .scenario = Unarmed.scenario,
     }, .{}));
+}
+
+const UnrelatedCrash = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        // An existing harness fault does not arm the sweep's current point.
+        try case.control().disk.crashAfterOps(100);
+        try case.env().disk.write(.{ .path = "data", .offset = 0, .bytes = "DATA" });
+        _ = try case.control().disk.disarmCrash();
+    }
+};
+
+test "crash points: ordinary disk arming does not satisfy sweep arming" {
+    inline for (watchdog_modes) |watchdog| {
+        try std.testing.expectError(error.CrashPointNotArmed, mar.sweepCrashPoints(.{
+            .allocator = std.testing.allocator,
+            .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+            .init = UnrelatedCrash.init,
+            .scenario = UnrelatedCrash.scenario,
+            .watchdog = watchdog,
+        }, .{}));
+    }
+}
+
+const ScopedCrash = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn crashAndRecover(case: *mar.SimCase(@This())) !void {
+        const control = case.control();
+        try control.disk.crashAfterOps(0);
+        try std.testing.expectError(error.DiskCrashed, case.env().disk.write(.{ .path = "other", .offset = 0, .bytes = "DATA" }));
+        try control.disk.restart();
+        try control.process.restart(0);
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        try crashAndRecover(case);
+        try case.armCrashPoint();
+        const committed = case.env().disk.write(.{ .path = "commit", .offset = 0, .bytes = "DATA" });
+        const fired = try case.finishCrashPoint();
+        committed catch |err| {
+            if (err != error.DiskCrashed) return err;
+            try std.testing.expect(fired);
+            try case.control().disk.restart();
+            try case.control().process.restart(0);
+        };
+        try crashAndRecover(case);
+    }
+
+    fn finishOnReturn(case: *mar.SimCase(@This())) !void {
+        try case.armCrashPoint();
+        case.env().disk.write(.{ .path = "commit", .offset = 0, .bytes = "DATA" }) catch |err| {
+            if (err != error.DiskCrashed) return err;
+            try case.control().disk.restart();
+            try case.control().process.restart(0);
+        };
+        // The runner finishes the armed region when this scenario returns.
+    }
+};
+
+test "crash points: setup and recovery crashes do not extend the sweep" {
+    inline for (watchdog_modes) |watchdog| {
+        var result = try mar.sweepCrashPoints(.{
+            .allocator = std.testing.allocator,
+            .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+            .init = ScopedCrash.init,
+            .scenario = ScopedCrash.scenario,
+            .watchdog = watchdog,
+        }, .{ .max_points = 4 });
+        defer result.deinit();
+        try std.testing.expect(result.failure == null);
+        try std.testing.expectEqual(@as(u64, 2), result.points);
+    }
+}
+
+test "crash points: passing sweep outcomes survive capsule replay" {
+    inline for (watchdog_modes) |watchdog| {
+        for (0..2) |point| {
+            var report = try mar.runSimCase(.{
+                .allocator = std.testing.allocator,
+                .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+                .init = ScopedCrash.init,
+                .scenario = ScopedCrash.scenario,
+                .attributes = &.{mar.runAttribute(mar.crash_point_attribute, point)},
+                .watchdog = watchdog,
+            });
+            defer report.deinit();
+            try std.testing.expect(report == .passed);
+            try std.testing.expectEqual(@as(?bool, point == 0), report.passed.crash_point_fired);
+
+            const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+            defer std.testing.allocator.free(bytes);
+            var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+            defer capsule.deinit();
+            var replayed = try mar.replaySimCase(.{
+                .allocator = std.testing.allocator,
+                .init = ScopedCrash.init,
+                .scenario = ScopedCrash.scenario,
+            }, &capsule, identity);
+            defer replayed.deinit();
+            try std.testing.expect(replayed == .passed);
+            try std.testing.expectEqual(@as(?bool, point == 0), replayed.passed.crash_point_fired);
+        }
+    }
+}
+
+test "crash points: returning from the scenario retains the sweep outcome" {
+    var result = try mar.sweepCrashPoints(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+        .init = ScopedCrash.init,
+        .scenario = ScopedCrash.finishOnReturn,
+    }, .{ .max_points = 4 });
+    defer result.deinit();
+    try std.testing.expect(result.failure == null);
+    try std.testing.expectEqual(@as(u64, 2), result.points);
 }
 
 /// Arms a crash point, then fails; cleanup still writes to the disk.

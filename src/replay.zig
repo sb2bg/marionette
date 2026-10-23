@@ -52,6 +52,7 @@ pub const Capsule = struct {
                 .decisions = value.decision_tape.entries,
                 .tape_complete = value.tape_complete,
                 .failure = null,
+                .crash_point_fired = value.crash_point_fired,
             } },
             .failed => |value| block: {
                 if (value.second_trace.len != 0 or value.replay_divergence != null) return error.UnreproducibleRun;
