@@ -6582,3 +6582,51 @@ test "io: explicit file locks block, try, downgrade, and release" {
     defer directory.close(io);
     try std.testing.expectError(error.FileLocksUnsupported, directory.lock(io, .shared));
 }
+
+test "io: atomic files replace or link into place and are crash-atomic" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xA70F, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    const original = try cwd.createFile(io, "config", .{});
+    try original.writePositionalAll(io, "OLD!", 0);
+    try original.sync(io);
+    original.close(io);
+    var root = try cwd.openFile(io, ".", .{ .allow_directory = true });
+    defer root.close(io);
+    try root.sync(io);
+
+    var replacement = try cwd.createFileAtomic(io, "config", .{ .replace = true });
+    try replacement.file.writePositionalAll(io, "NEW!", 0);
+    try replacement.file.sync(io);
+    try replacement.replace(io);
+    replacement.deinit(io);
+    var bytes: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("NEW!", try cwd.readFile(io, "config", &bytes));
+
+    var linked = try cwd.createFileAtomic(io, "nested/fresh", .{ .make_path = true });
+    try linked.file.writePositionalAll(io, "LINK", 0);
+    try linked.link(io);
+    linked.deinit(io);
+    var duplicate = try cwd.createFileAtomic(io, "nested/fresh", .{});
+    try std.testing.expectError(error.PathAlreadyExists, duplicate.link(io));
+    duplicate.deinit(io);
+
+    // No temporary files are left behind.
+    var dir = try cwd.openDir(io, ".", .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    var names: usize = 0;
+    while (try iterator.next(io)) |_| names += 1;
+    try std.testing.expectEqual(@as(usize, 2), names); // config, nested
+
+    // The replace was never made durable with a directory sync, so a crash
+    // that loses metadata leaves the old contents whole.
+    try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    try sim.control.process.restart(0);
+    try std.testing.expectEqualStrings("OLD!", try cwd.readFile(io, "config", &bytes));
+}

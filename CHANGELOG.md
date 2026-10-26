@@ -24,6 +24,10 @@
   on the same lock table as open-time `.lock` options; they previously failed.
   Changing a held lock releases it first, as `flock` does. Directory handles
   return `FileLocksUnsupported`.
+- `Dir.createFileAtomic` and `Dir.renamePreserve` now work in simulation, so
+  `File.Atomic.replace` and `link` can write a temporary file and move it into
+  place. They previously failed, `createFileAtomic` with a fabricated
+  `NoSpaceLeft`. The temporary name is a recorded random decision.
 
 ## v0.8.1 - 2026-10-26
 

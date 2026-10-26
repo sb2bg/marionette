@@ -441,6 +441,34 @@ pub fn Ops(comptime Backend: type) type {
             new_dir: Io.Dir,
             new_sub_path: []const u8,
         ) Io.Dir.RenameError!void {
+            renamePaths(userdata, old_dir, old_sub_path, new_dir, new_sub_path, false) catch |err| switch (err) {
+                // Only a preserving rename refuses an existing destination.
+                error.PathAlreadyExists, error.OperationUnsupported => unreachable,
+                else => |other| return other,
+            };
+        }
+
+        /// Rename that fails with `PathAlreadyExists` instead of replacing.
+        /// Both paths are reserved before the check, so no task can create the
+        /// destination between the check and the rename.
+        pub fn simDirRenamePreserve(
+            userdata: ?*anyopaque,
+            old_dir: Io.Dir,
+            old_sub_path: []const u8,
+            new_dir: Io.Dir,
+            new_sub_path: []const u8,
+        ) Io.Dir.RenamePreserveError!void {
+            try renamePaths(userdata, old_dir, old_sub_path, new_dir, new_sub_path, true);
+        }
+
+        fn renamePaths(
+            userdata: ?*anyopaque,
+            old_dir: Io.Dir,
+            old_sub_path: []const u8,
+            new_dir: Io.Dir,
+            new_sub_path: []const u8,
+            preserve: bool,
+        ) Io.Dir.RenamePreserveError!void {
             const backend = backendFromUserdata(userdata);
             const old_path = resolvePath(backend, old_dir, old_sub_path, .file) catch |err| return err;
             defer backend.freeOpScratch(old_path);
@@ -471,6 +499,10 @@ pub fn Ops(comptime Backend: type) type {
             const old_index = (findOrDiscoverFileMeta(backend, old_path) catch |err| {
                 return errors.mapDiskRenameError(err);
             }) orelse return error.FileNotFound;
+            if (preserve) {
+                const existing = findOrDiscoverFileMeta(backend, new_path) catch |err| return errors.mapDiskRenameError(err);
+                if (existing != null) return error.PathAlreadyExists;
+            }
             if (std.mem.eql(u8, old_path, new_path)) return;
 
             const destination_identity = backend.reserveFileLockPath(new_path) catch |err| switch (err) {
@@ -490,6 +522,70 @@ pub fn Ops(comptime Backend: type) type {
             };
 
             backend.commitFileMetaRename(new_path, &prepared_meta);
+        }
+
+        /// The named-temporary-file form of `std`'s own implementation: a
+        /// randomly named file beside the destination, which `File.Atomic`
+        /// renames into place. The name is a recorded random decision.
+        pub fn simDirCreateFileAtomic(
+            userdata: ?*anyopaque,
+            dir: Io.Dir,
+            dest_path: []const u8,
+            options: Io.Dir.CreateFileAtomicOptions,
+        ) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
+            const io = backendFromUserdata(userdata).io();
+            if (Io.Dir.path.dirname(dest_path)) |dirname| {
+                const new_dir = if (options.make_path)
+                    dir.createDirPathOpen(io, dirname, .{}) catch |err| switch (err) {
+                        error.IsDir,
+                        error.Streaming,
+                        error.DiskQuota,
+                        error.PathAlreadyExists,
+                        error.LinkQuotaExceeded,
+                        error.PipeBusy,
+                        error.FileTooBig,
+                        error.FileLocksUnsupported,
+                        error.DeviceBusy,
+                        => return error.Unexpected,
+                        else => |e| return e,
+                    }
+                else
+                    try dir.openDir(io, dirname, .{});
+                return atomicFileInit(io, Io.Dir.path.basename(dest_path), options.permissions, new_dir, true);
+            }
+            return atomicFileInit(io, dest_path, options.permissions, dir, false);
+        }
+
+        fn atomicFileInit(
+            io: Io,
+            dest_basename: []const u8,
+            permissions: Io.File.Permissions,
+            dir: Io.Dir,
+            close_dir_on_deinit: bool,
+        ) Io.Dir.CreateFileAtomicError!Io.File.Atomic {
+            errdefer if (close_dir_on_deinit) dir.close(io);
+            while (true) {
+                var random_integer: u64 = undefined;
+                io.random(@ptrCast(&random_integer));
+                const tmp_sub_path = std.fmt.hex(random_integer);
+                const file = dir.createFile(io, &tmp_sub_path, .{
+                    .permissions = permissions,
+                    .exclusive = true,
+                }) catch |err| switch (err) {
+                    error.PathAlreadyExists, error.DeviceBusy, error.FileBusy => continue,
+                    error.IsDir, error.FileTooBig, error.FileLocksUnsupported, error.PipeBusy => return error.Unexpected,
+                    else => |e| return e,
+                };
+                return .{
+                    .file = file,
+                    .file_basename_hex = random_integer,
+                    .dest_sub_path = dest_basename,
+                    .file_open = true,
+                    .file_exists = true,
+                    .close_dir_on_deinit = close_dir_on_deinit,
+                    .dir = dir,
+                };
+            }
         }
 
         pub fn simFileStat(userdata: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
