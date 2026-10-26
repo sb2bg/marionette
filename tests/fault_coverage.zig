@@ -14,13 +14,14 @@ test "fault coverage: counts effects, not injections" {
         // Crash-time rolls are already totalled by `disk.crash`.
         "event=3 disk.fault op=3 path=wal kind=crash_lost_write rate=1/1 roll=0 fired=true\n" ++
         "event=4 disk.read op=4 path=wal offset=0 len=4 status=corrupt latency_ns=0\n" ++
-        "event=5 network.auto_partition node=1 isolated_count=1 connected_count=1\n" ++
-        "event=6 network.drop id=1 from=1 to=0 reason=link_disabled\n" ++
-        "event=7 process.kill node=1 reason=auto_crash\n" ++
-        "event=8 allocation.alloc op=0 len=1 align=1 status=fail reason=quota roll=none live_bytes=0 successful_allocations=0\n" ++
+        "event=5 disk.write op=5 path=wal offset=4 len=4 status=no_space latency_ns=0\n" ++
+        "event=6 network.auto_partition node=1 isolated_count=1 connected_count=1\n" ++
+        "event=7 network.drop id=1 from=1 to=0 reason=link_disabled\n" ++
+        "event=8 process.kill node=1 reason=auto_crash\n" ++
+        "event=9 allocation.alloc op=0 len=1 align=1 status=fail reason=quota roll=none live_bytes=0 successful_allocations=0\n" ++
         // Overflow and a declined in-place resize are not injected faults.
-        "event=9 allocation.alloc op=1 len=1 align=1 status=fail reason=overflow roll=none live_bytes=0 successful_allocations=0\n" ++
-        "event=10 allocation.resize op=2 old_len=1 new_len=2 align=1 status=fail reason=in_place_unsupported roll=none live_bytes=1 successful_allocations=1\n";
+        "event=10 allocation.alloc op=1 len=1 align=1 status=fail reason=overflow roll=none live_bytes=0 successful_allocations=0\n" ++
+        "event=11 allocation.resize op=2 old_len=1 new_len=2 align=1 status=fail reason=in_place_unsupported roll=none live_bytes=1 successful_allocations=1\n";
     const coverage = try mar.faultCoverage(trace);
     try std.testing.expectEqual(mar.FaultCoverage{
         .disk_crashes = 1,
@@ -30,6 +31,7 @@ test "fault coverage: counts effects, not injections" {
         .crash_lost_metadata = 1,
         .disk_read_errors = 1,
         .disk_corrupt_reads = 1,
+        .disk_no_space_errors = 1,
         .network_partitions = 1,
         .network_drops = 1,
         .process_kills = 1,

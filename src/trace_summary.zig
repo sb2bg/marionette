@@ -55,6 +55,7 @@ pub const FaultCoverage = struct {
     disk_read_errors: u64 = 0,
     disk_write_errors: u64 = 0,
     disk_corrupt_reads: u64 = 0,
+    disk_no_space_errors: u64 = 0,
     network_partitions: u64 = 0,
     network_drops: u64 = 0,
     process_kills: u64 = 0,
@@ -101,6 +102,8 @@ pub const FaultCoverage = struct {
             if (!std.mem.eql(u8, event.field("status") orelse return error.InvalidTraceEvent, "corrupt")) return;
             const transferred = if (std.mem.eql(u8, name, "disk.read_some")) "read_len" else "len";
             if (try requiredU64(event, transferred) != 0) self.disk_corrupt_reads += 1;
+        } else if (std.mem.eql(u8, name, "disk.write")) {
+            if (std.mem.eql(u8, event.field("status") orelse return error.InvalidTraceEvent, "no_space")) self.disk_no_space_errors += 1;
         } else if (std.mem.eql(u8, name, "network.partition") or std.mem.eql(u8, name, "network.auto_partition")) {
             self.network_partitions += 1;
         } else if (std.mem.eql(u8, name, "network.drop")) {
@@ -480,7 +483,7 @@ test "trace summary: summarizes run context and network events" {
         \\trace.network.drop_reason name=link_disabled count=1
         \\trace.network.link from=3 to=0 sends=1 deliveries=1 drops=0
         \\trace.network.link from=3 to=1 sends=0 deliveries=0 drops=1
-        \\trace.faults fired=true disk_crashes=0 crash_lost_writes=0 crash_torn_writes=0 crash_reordered_writes=0 crash_lost_metadata=0 disk_read_errors=0 disk_write_errors=0 disk_corrupt_reads=0 network_partitions=0 network_drops=1 process_kills=0 allocation_failures=0
+        \\trace.faults fired=true disk_crashes=0 crash_lost_writes=0 crash_torn_writes=0 crash_reordered_writes=0 crash_lost_metadata=0 disk_read_errors=0 disk_write_errors=0 disk_corrupt_reads=0 disk_no_space_errors=0 network_partitions=0 network_drops=1 process_kills=0 allocation_failures=0
         \\
     , output);
 }

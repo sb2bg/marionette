@@ -862,6 +862,20 @@ pub const SimDisk = struct {
             );
             return error.IsDir;
         }
+        // Before the error roll, so a full disk consumes no decision.
+        const written_end = options.logical_len orelse (endOffset(options.offset, options.bytes.len) catch std.math.maxInt(u64));
+        if (!self.hasSpaceFor(options.path, written_end)) {
+            try self.recordRangeOp(
+                "disk.write",
+                op_id,
+                options.path,
+                options.offset,
+                options.bytes.len,
+                "no_space",
+                latency_ns,
+            );
+            return error.NoSpaceLeft;
+        }
         if (try self.rollFault(op_id, options.path, "write_error", self.faults.write_error_rate)) {
             try self.recordRangeOp(
                 "disk.write",
@@ -2144,6 +2158,37 @@ pub const SimDisk = struct {
         }
 
         return false;
+    }
+
+    /// Whether growing `path` to `new_len` fits the capacity limit.
+    fn hasSpaceFor(self: *Self, path: []const u8, new_len: u64) bool {
+        const capacity = self.faults.capacity_bytes orelse return true;
+        const old_len = self.visibleLength(path) orelse 0;
+        if (new_len <= old_len) return true;
+        const growth = self.allocatedSize(new_len) - self.allocatedSize(old_len);
+        return self.usedBytes() +| growth <= capacity;
+    }
+
+    fn usedBytes(self: *Self) u64 {
+        var used: u64 = 0;
+        for (self.files.items) |file| {
+            used +|= self.allocatedSize(self.visibleLength(file.path) orelse 0);
+        }
+        // Files that exist only as pending writes, counted once per path.
+        for (self.pending_writes.items, 0..) |pending, index| {
+            if (self.findFile(pending.path) != null) continue;
+            const counted = for (self.pending_writes.items[0..index]) |earlier| {
+                if (std.mem.eql(u8, earlier.path, pending.path)) break true;
+            } else false;
+            if (!counted) used +|= self.allocatedSize(self.visibleLength(pending.path) orelse 0);
+        }
+        return used;
+    }
+
+    fn allocatedSize(self: *const Self, len: u64) u64 {
+        const sector_size = self.options.sector_size;
+        const sectors = std.math.divCeil(u64, len, sector_size) catch unreachable;
+        return sectors *| sector_size;
     }
 
     fn visibleLength(self: *Self, path: []const u8) ?u64 {

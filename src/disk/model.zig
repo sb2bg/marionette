@@ -26,6 +26,7 @@ pub const DiskError = error{
     NotDir,
     IsDir,
     DirNotEmpty,
+    NoSpaceLeft,
     InvalidAlignment,
     InvalidDuration,
     InvalidPath,
@@ -70,7 +71,7 @@ pub const DiskOptions = struct {
     latency_jitter_ns: clock_module.Duration = 0,
 };
 
-/// Probabilistic disk fault rates, set through `control.disk.setFaults`.
+/// Disk fault rates and limits, set through `control.disk.setFaults`.
 /// The `crash_*` classes apply only to writes and metadata still pending at
 /// a crash; they never damage durable truth (see the disk fault model doc).
 pub const DiskFaultOptions = struct {
@@ -88,6 +89,11 @@ pub const DiskFaultOptions = struct {
     crash_reordered_write_rate: env_module.BuggifyRate = .never(),
     /// Per-pending-metadata chance a directory operation rolls back at a crash.
     crash_lost_metadata_rate: env_module.BuggifyRate = .never(),
+    /// Space for file data, or null for unlimited. Usage is every visible
+    /// file's logical size rounded up to whole sectors, unsynced data
+    /// included, so a sparse `setLength` extension counts as used. A write
+    /// that would grow usage past this fails with `error.NoSpaceLeft`.
+    capacity_bytes: ?u64 = null,
 };
 
 /// App-facing disk capability handle. Apps receive it as `Env.disk`;

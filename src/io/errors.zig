@@ -52,6 +52,7 @@ pub fn mapDiskWriteError(err: disk_module.DiskError) Io.File.WritePositionalErro
     return switch (err) {
         error.OutOfMemory => error.SystemResources,
         error.Canceled => error.Canceled,
+        error.NoSpaceLeft => error.NoSpaceLeft,
         else => error.InputOutput,
     };
 }

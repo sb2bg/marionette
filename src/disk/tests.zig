@@ -1597,3 +1597,24 @@ test "disk: a pending directory removal that a crash keeps keeps what emptied it
         if (rename_out) _ = try app.stat(.{ .path = "file" });
     }
 }
+
+test "disk: a capacity limit fails growing writes with NoSpaceLeft" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app = disk.disk();
+
+    try disk.control().setFaults(.{ .capacity_bytes = 8 });
+    try app.write(.{ .path = "a", .offset = 0, .bytes = "AAAA" });
+    try app.write(.{ .path = "b", .offset = 0, .bytes = "BBBB" });
+    try std.testing.expectError(error.NoSpaceLeft, app.write(.{ .path = "b", .offset = 4, .bytes = "MORE" }));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=no_space") != null);
+    // Overwriting allocated space needs no more of it.
+    try app.write(.{ .path = "a", .offset = 0, .bytes = "aaaa" });
+
+    try app.delete(.{ .path = "a" });
+    try app.write(.{ .path = "b", .offset = 4, .bytes = "MORE" });
+    try disk.control().setFaults(.{});
+    try app.write(.{ .path = "c", .offset = 0, .bytes = "CCCC" });
+}

@@ -6520,3 +6520,17 @@ test "io: directories can be removed one at a time or as a tree" {
     try cwd.deleteTree(io, "tree");
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "tree", .{}));
 }
+
+test "io: a full simulated disk fails writes with NoSpaceLeft" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xF011, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+    try sim.control.disk.setFaults(.{ .capacity_bytes = 8 });
+
+    const file = try Io.Dir.cwd().createFile(io, "data", .{});
+    defer file.close(io);
+    try file.writePositionalAll(io, "12345678", 0);
+    try std.testing.expectError(error.NoSpaceLeft, file.writePositionalAll(io, "9", 8));
+    try std.testing.expectEqual(@as(u64, 8), (try file.stat(io)).size);
+}

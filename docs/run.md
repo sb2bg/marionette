@@ -217,7 +217,8 @@ try std.testing.expect(coverage.crash_lost_writes + coverage.crash_torn_writes >
 
 `FaultCoverage` counts disk crashes and partitions as injections, and the
 effects an application could observe: writes a crash lost, tore, or reordered;
-lost metadata; disk read and write errors; corrupt reads; network drops;
+lost metadata; disk read and write errors; corrupt reads; writes refused by a
+full disk; network drops;
 process kills; and injected allocation failures. `fired()` is true when any
 effect was counted. A disk crash restarts every process, so its own kills are
 not counted separately: a crash with nothing pending is a clean restart and
