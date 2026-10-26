@@ -716,6 +716,47 @@ pub fn Ops(comptime Backend: type) type {
             state.cursor = absolute_offset;
         }
 
+        pub fn simFileLock(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
+            const backend = backendFromUserdata(userdata);
+            const state = backend.file(file.handle) orelse return error.Unexpected;
+            if (state.closed) return error.Unexpected;
+            backend.setFileLock(state, lock, false) catch |err| return switch (err) {
+                error.OutOfMemory => error.SystemResources,
+                error.Canceled => error.Canceled,
+                error.FileLocksUnsupported => error.FileLocksUnsupported,
+                // Blocking needs a scheduler to wait on.
+                error.WouldBlock => error.Unexpected,
+            };
+        }
+
+        pub fn simFileTryLock(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!bool {
+            const backend = backendFromUserdata(userdata);
+            const state = backend.file(file.handle) orelse return error.Unexpected;
+            if (state.closed) return error.Unexpected;
+            backend.setFileLock(state, lock, true) catch |err| return switch (err) {
+                error.WouldBlock => false,
+                error.OutOfMemory => error.SystemResources,
+                error.Canceled => error.Canceled,
+                error.FileLocksUnsupported => error.FileLocksUnsupported,
+            };
+            return true;
+        }
+
+        pub fn simFileUnlock(userdata: ?*anyopaque, file: Io.File) void {
+            const backend = backendFromUserdata(userdata);
+            const state = backend.file(file.handle) orelse return;
+            if (state.closed) return;
+            // Releasing never waits or allocates.
+            backend.setFileLock(state, .none, true) catch {};
+        }
+
+        pub fn simFileDowngradeLock(userdata: ?*anyopaque, file: Io.File) Io.File.DowngradeLockError!void {
+            const backend = backendFromUserdata(userdata);
+            const state = backend.file(file.handle) orelse return error.Unexpected;
+            if (state.closed) return error.Unexpected;
+            backend.downgradeFileLock(state);
+        }
+
         pub fn simFileSetTimestamps(userdata: ?*anyopaque, file: Io.File, options: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
             const backend = backendFromUserdata(userdata);
             const state = backend.file(file.handle) orelse return error.AccessDenied;

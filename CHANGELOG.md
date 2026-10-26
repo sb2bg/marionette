@@ -20,6 +20,10 @@
   grow usage past it fails with `NoSpaceLeft`, through `std.Io` as well.
   Overwrites need no new space and deletes free it. Fault coverage counts these
   refusals as `disk_no_space_errors`.
+- `File.lock`, `tryLock`, `unlock`, and `downgradeLock` now work in simulation
+  on the same lock table as open-time `.lock` options; they previously failed.
+  Changing a held lock releases it first, as `flock` does. Directory handles
+  return `FileLocksUnsupported`.
 
 ## v0.8.1 - 2026-10-26
 

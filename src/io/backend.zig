@@ -202,6 +202,18 @@ const FileLockRegistry = struct {
         }
     }
 
+    /// Turn a held exclusive lock into a shared one without releasing it.
+    fn downgrade(self: *FileLockRegistry, runtime: ?TaskRuntime, file_index: usize) void {
+        const lock = self.find(file_index) orelse unreachable;
+        std.debug.assert(lock.exclusive);
+        lock.exclusive = false;
+        lock.shared += 1;
+        for (lock.waiters.items) |waiter| waiter.ready = true;
+        if (runtime) |task_runtime| {
+            _ = task_runtime.wake(futex_module.waitKey(.file_lock, lock.key), std.math.maxInt(usize));
+        }
+    }
+
     fn removeWaiter(self: *FileLockRegistry, waiter: *Waiter) void {
         for (self.locks.items, 0..) |*lock, lock_index| {
             for (lock.waiters.items, 0..) |candidate, waiter_index| {
@@ -1674,6 +1686,37 @@ pub const Backend = struct {
         };
     }
 
+    /// Change the lock a file handle holds; `.none` releases it. As with
+    /// flock, a held lock is released before a different one is acquired.
+    pub fn setFileLock(
+        self: *Backend,
+        state: *FileState,
+        lock: Io.File.Lock,
+        nonblocking: bool,
+    ) (std.mem.Allocator.Error || error{ WouldBlock, Canceled, FileLocksUnsupported })!void {
+        const index = switch (state.target) {
+            .file => |index| index,
+            .directory => return error.FileLocksUnsupported,
+        };
+        if (state.lock == lock) return;
+        if (state.lock != .none) {
+            self.fileLockRegistry().release(self.task_runtime, index, state.lock);
+            state.lock = .none;
+        }
+        try self.fileLockRegistry().acquire(self, self.task_runtime, index, lock, nonblocking);
+        state.lock = lock;
+    }
+
+    pub fn downgradeFileLock(self: *Backend, state: *FileState) void {
+        const index = switch (state.target) {
+            .file => |index| index,
+            .directory => return,
+        };
+        if (state.lock != .exclusive) return;
+        self.fileLockRegistry().downgrade(self.task_runtime, index);
+        state.lock = .shared;
+    }
+
     fn releaseFileLock(self: *Backend, state: *const FileState) void {
         switch (state.target) {
             .file => |index| self.fileLockRegistry().release(self.task_runtime, index, state.lock),
@@ -2226,10 +2269,10 @@ const sim_vtable: Io.VTable = .{
     .fileSetOwner = Io.failingFileSetOwner,
     .fileSetPermissions = Io.failingFileSetPermissions,
     .fileSetTimestamps = file_ops.simFileSetTimestamps,
-    .fileLock = Io.failingFileLock,
-    .fileTryLock = Io.failingFileTryLock,
-    .fileUnlock = Io.unreachableFileUnlock,
-    .fileDowngradeLock = Io.failingFileDowngradeLock,
+    .fileLock = file_ops.simFileLock,
+    .fileTryLock = file_ops.simFileTryLock,
+    .fileUnlock = file_ops.simFileUnlock,
+    .fileDowngradeLock = file_ops.simFileDowngradeLock,
     .fileRealPath = Io.failingFileRealPath,
     .fileHardLink = Io.failingFileHardLink,
 

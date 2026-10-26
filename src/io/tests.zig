@@ -6534,3 +6534,51 @@ test "io: a full simulated disk fails writes with NoSpaceLeft" {
     try std.testing.expectError(error.NoSpaceLeft, file.writePositionalAll(io, "9", 8));
     try std.testing.expectEqual(@as(u64, 8), (try file.stat(io)).size);
 }
+
+test "io: explicit file locks block, try, downgrade, and release" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Waiter = struct {
+        io: Io,
+        file: Io.File,
+        acquired: bool = false,
+
+        fn run(self: *@This()) void {
+            self.file.lock(self.io, .exclusive) catch return;
+            self.acquired = true;
+            self.file.unlock(self.io);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x10C, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    const first = try cwd.createFile(io, "locked", .{});
+    defer first.close(io);
+    const second = try cwd.openFile(io, "locked", .{});
+    defer second.close(io);
+
+    try first.lock(io, .exclusive);
+    try std.testing.expect(!try second.tryLock(io, .shared));
+    try first.downgradeLock(io);
+    try std.testing.expect(try second.tryLock(io, .shared));
+    second.unlock(io);
+    first.unlock(io);
+
+    // A blocking lock waits for the holder to unlock.
+    try first.lock(io, .shared);
+    var waiter: Waiter = .{ .io = io, .file = second };
+    var future = try Io.concurrent(io, Waiter.run, .{&waiter});
+    try Io.sleep(io, .fromNanoseconds(50), .awake);
+    try std.testing.expect(!waiter.acquired);
+    first.unlock(io);
+    future.await(io);
+    try std.testing.expect(waiter.acquired);
+
+    var directory = try cwd.openFile(io, ".", .{ .allow_directory = true });
+    defer directory.close(io);
+    try std.testing.expectError(error.FileLocksUnsupported, directory.lock(io, .shared));
+}
