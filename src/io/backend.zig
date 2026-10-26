@@ -2184,6 +2184,21 @@ pub fn onProcessRuntimeDiskCrashOpaque(ptr: *anyopaque) void {
 /// stream writer fall back to reading the file and writing its bytes, which
 /// the simulated stream does model; any other error would reach the caller as
 /// a failed send.
+/// Only TCP streams are modeled. Datagram sockets report an unsupported
+/// protocol and Unix-domain sockets an unsupported address family, instead
+/// of the fabricated `NetworkDown` of the standard stubs.
+fn simNetBindIp(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
+    return error.ProtocolUnsupportedBySystem;
+}
+
+fn simNetListenUnix(_: ?*anyopaque, _: *const Io.net.UnixAddress, _: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
+    return error.AddressFamilyUnsupported;
+}
+
+fn simNetConnectUnix(_: ?*anyopaque, _: *const Io.net.UnixAddress) Io.net.UnixAddress.ConnectError!Io.net.Socket.Handle {
+    return error.AddressFamilyUnsupported;
+}
+
 fn simNetWriteFile(
     userdata: ?*anyopaque,
     handle: Io.net.Socket.Handle,
@@ -2237,20 +2252,20 @@ const sim_vtable: Io.VTable = .{
     .dirOpenFile = file_ops.simDirOpenFile,
     .dirClose = file_ops.simDirClose,
     .dirRead = file_ops.simDirRead,
-    .dirRealPath = Io.failingDirRealPath,
-    .dirRealPathFile = Io.failingDirRealPathFile,
+    .dirRealPath = file_ops.simDirRealPath,
+    .dirRealPathFile = file_ops.simDirRealPathFile,
     .dirDeleteFile = file_ops.simDirDeleteFile,
     .dirDeleteDir = file_ops.simDirDeleteDir,
     .dirRename = file_ops.simDirRename,
     .dirRenamePreserve = file_ops.simDirRenamePreserve,
-    .dirSymLink = Io.failingDirSymLink,
-    .dirReadLink = Io.failingDirReadLink,
-    .dirSetOwner = Io.failingDirSetOwner,
-    .dirSetFileOwner = Io.failingDirSetFileOwner,
+    .dirSymLink = file_ops.simDirSymLink,
+    .dirReadLink = file_ops.simDirReadLink,
+    .dirSetOwner = file_ops.simDirSetOwner,
+    .dirSetFileOwner = file_ops.simDirSetFileOwner,
     .dirSetPermissions = Io.failingDirSetPermissions,
     .dirSetFilePermissions = Io.failingDirSetFilePermissions,
     .dirSetTimestamps = file_ops.simDirSetTimestamps,
-    .dirHardLink = Io.failingDirHardLink,
+    .dirHardLink = file_ops.simDirHardLink,
 
     .fileStat = file_ops.simFileStat,
     .fileLength = file_ops.simFileLength,
@@ -2266,15 +2281,15 @@ const sim_vtable: Io.VTable = .{
     .fileEnableAnsiEscapeCodes = Io.unreachableFileEnableAnsiEscapeCodes,
     .fileSupportsAnsiEscapeCodes = Io.unreachableFileSupportsAnsiEscapeCodes,
     .fileSetLength = file_ops.simFileSetLength,
-    .fileSetOwner = Io.failingFileSetOwner,
+    .fileSetOwner = file_ops.simFileSetOwner,
     .fileSetPermissions = Io.failingFileSetPermissions,
     .fileSetTimestamps = file_ops.simFileSetTimestamps,
     .fileLock = file_ops.simFileLock,
     .fileTryLock = file_ops.simFileTryLock,
     .fileUnlock = file_ops.simFileUnlock,
     .fileDowngradeLock = file_ops.simFileDowngradeLock,
-    .fileRealPath = Io.failingFileRealPath,
-    .fileHardLink = Io.failingFileHardLink,
+    .fileRealPath = file_ops.simFileRealPath,
+    .fileHardLink = file_ops.simFileHardLink,
 
     .fileMemoryMapCreate = Io.failingFileMemoryMapCreate,
     .fileMemoryMapDestroy = Io.unreachableFileMemoryMapDestroy,
@@ -2308,10 +2323,10 @@ const sim_vtable: Io.VTable = .{
 
     .netListenIp = net_ops.simNetListenIp,
     .netAccept = net_ops.simNetAccept,
-    .netBindIp = Io.failingNetBindIp,
+    .netBindIp = simNetBindIp,
     .netConnectIp = net_ops.simNetConnectIp,
-    .netListenUnix = Io.failingNetListenUnix,
-    .netConnectUnix = Io.failingNetConnectUnix,
+    .netListenUnix = simNetListenUnix,
+    .netConnectUnix = simNetConnectUnix,
     .netSocketCreatePair = Io.failingNetSocketCreatePair,
     .netWriteFile = simNetWriteFile,
     .netClose = net_ops.simNetClose,

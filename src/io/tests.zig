@@ -6630,3 +6630,34 @@ test "io: atomic files replace or link into place and are crash-atomic" {
     try sim.control.process.restart(0);
     try std.testing.expectEqualStrings("OLD!", try cwd.readFile(io, "config", &bytes));
 }
+
+test "io: unsupported file and socket operations fail with honest errors" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x40E5, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    const file = try cwd.createFile(io, "plain", .{});
+    defer file.close(io);
+    var buffer: [64]u8 = undefined;
+
+    // An unprivileged process may not give files away.
+    try std.testing.expectError(error.PermissionDenied, file.setOwner(io, 0, 0));
+    try std.testing.expectError(error.PermissionDenied, cwd.setFileOwner(io, "plain", 0, 0, .{}));
+    // As on a filesystem without symlinks; and nothing here is a link.
+    try std.testing.expectError(error.PermissionDenied, cwd.symLink(io, "plain", "link", .{}));
+    try std.testing.expectError(error.NotLink, cwd.readLink(io, "plain", &buffer));
+    try std.testing.expectError(error.FileNotFound, cwd.readLink(io, "missing", &buffer));
+    try std.testing.expectError(error.OperationUnsupported, cwd.hardLink("plain", cwd, "hard", io, .{}));
+    try std.testing.expectError(error.OperationUnsupported, file.hardLink(io, cwd, "hard", .{}));
+    try std.testing.expectError(error.OperationUnsupported, file.realPath(io, &buffer));
+    try std.testing.expectError(error.OperationUnsupported, cwd.realPathFile(io, "plain", &buffer));
+
+    // Only TCP streams are modeled.
+    const udp = Io.net.IpAddress.parseIp4("127.0.0.1", 4800) catch unreachable;
+    try std.testing.expectError(error.ProtocolUnsupportedBySystem, udp.bind(io, .{ .mode = .dgram }));
+    const unix = try Io.net.UnixAddress.init("socket");
+    try std.testing.expectError(error.AddressFamilyUnsupported, unix.listen(io, .{}));
+    try std.testing.expectError(error.AddressFamilyUnsupported, unix.connect(io));
+}

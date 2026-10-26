@@ -28,6 +28,12 @@
   `File.Atomic.replace` and `link` can write a temporary file and move it into
   place. They previously failed, `createFileAtomic` with a fabricated
   `NoSpaceLeft`. The temporary name is a recorded random decision.
+- Operations the simulator does not model now fail with honest errors instead
+  of the standard stubs' `FileNotFound` and `NetworkDown`: hard links and
+  `realPath` report `OperationUnsupported`; ownership changes and symbolic link
+  creation report `PermissionDenied`; `readLink` reports `NotLink` for an
+  existing path; UDP reports `ProtocolUnsupportedBySystem`; and Unix-domain
+  sockets report `AddressFamilyUnsupported`.
 
 ## v0.8.1 - 2026-10-26
 

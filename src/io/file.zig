@@ -812,6 +812,70 @@ pub fn Ops(comptime Backend: type) type {
             state.cursor = absolute_offset;
         }
 
+        // Operations the model does not provide. Each reports what a host
+        // without the feature would, never a missing file or a dead network.
+
+        pub fn simDirReadLink(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, buffer: []u8) Io.Dir.ReadLinkError!usize {
+            _ = buffer;
+            const backend = backendFromUserdata(userdata);
+            const path = resolvePath(backend, dir, sub_path, .directory) catch |err| switch (err) {
+                error.FileNotFound => return error.FileNotFound,
+                error.AccessDenied => return error.AccessDenied,
+                error.SystemResources => return error.SystemResources,
+            };
+            defer backend.freeOpScratch(path);
+            // There are no symbolic links, so an existing path is not one.
+            const is_directory = backend.directoryExists(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileSystem,
+            };
+            if (is_directory) return error.NotLink;
+            const index = findOrDiscoverFileMeta(backend, path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.FileSystem,
+            };
+            return if (index != null) error.NotLink else error.FileNotFound;
+        }
+
+        pub fn simDirSymLink(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []const u8, _: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
+            // What Linux reports on a filesystem without symbolic links.
+            return error.PermissionDenied;
+        }
+
+        pub fn simDirHardLink(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8, _: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
+            return error.OperationUnsupported;
+        }
+
+        pub fn simFileHardLink(_: ?*anyopaque, _: Io.File, _: Io.Dir, _: []const u8, _: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
+            return error.OperationUnsupported;
+        }
+
+        pub fn simDirRealPath(_: ?*anyopaque, _: Io.Dir, _: []u8) Io.Dir.RealPathError!usize {
+            return error.OperationUnsupported;
+        }
+
+        pub fn simDirRealPathFile(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.RealPathFileError!usize {
+            return error.OperationUnsupported;
+        }
+
+        pub fn simFileRealPath(_: ?*anyopaque, _: Io.File, _: []u8) Io.File.RealPathError!usize {
+            return error.OperationUnsupported;
+        }
+
+        // Ownership is not modeled and `stat` reports none; an unprivileged
+        // process may not give files away.
+        pub fn simDirSetOwner(_: ?*anyopaque, _: Io.Dir, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
+            return error.PermissionDenied;
+        }
+
+        pub fn simDirSetFileOwner(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: ?Io.File.Uid, _: ?Io.File.Gid, _: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
+            return error.PermissionDenied;
+        }
+
+        pub fn simFileSetOwner(_: ?*anyopaque, _: Io.File, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.File.SetOwnerError!void {
+            return error.PermissionDenied;
+        }
+
         pub fn simFileLock(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
             const backend = backendFromUserdata(userdata);
             const state = backend.file(file.handle) orelse return error.Unexpected;
