@@ -215,7 +215,7 @@ For exact contracts and unsupported behavior, see the
 - **Understand the design -** [architecture](docs/architecture.md) and [determinism contract](docs/determinism.md)
 - **Use the library -** [API reference](docs/api.md), [campaigns](docs/campaigns.md), [determinism contract](docs/determinism.md), and [trace format](docs/trace-format.md)
 - **Follow the project -** [roadmap](ROADMAP.md), [findings](FOUND_BUGS.md), and the [technical blog](docs/blog/index.md)
-- **Contribute -** [local verification](docs/development.md) and [performance baseline](docs/performance.md)
+- **Contribute -** [local verification](docs/development.md)
 
 The complete documentation is published at [sb2bg.github.io/marionette](https://sb2bg.github.io/marionette/).
 
