@@ -52,6 +52,7 @@ pub const SimDisk = struct {
         path: []u8,
         len: u64 = 0,
         mtime_ns: u64 = 0,
+        atime_ns: u64 = 0,
         metadata_durable: bool = true,
         sectors: std.ArrayList(Sector) = .empty,
 
@@ -78,6 +79,7 @@ pub const SimDisk = struct {
         id: DirId,
         path: []u8,
         mtime_ns: u64,
+        atime_ns: u64 = 0,
         metadata_durable: bool = true,
 
         fn deinit(self: *Directory, allocator: std.mem.Allocator) void {
@@ -94,6 +96,8 @@ pub const SimDisk = struct {
         bytes: []u8,
         logical_len: ?u64,
         written_at_ns: u64 = 0,
+        /// Access time set while this write was pending; applied when it lands.
+        atime_ns: ?u64 = null,
 
         fn deinit(self: *PendingWrite, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
@@ -284,6 +288,7 @@ pub const SimDisk = struct {
                     .id = id,
                     .path = path,
                     .mtime_ns = source.mtime_ns,
+                    .atime_ns = source.atime_ns,
                     .metadata_durable = source.metadata_durable,
                 },
             });
@@ -652,6 +657,8 @@ pub const SimDisk = struct {
     /// the operation boundary, before the first operation past the budget
     /// does any work. Any crash disarms it.
     armed_crash_budget: ?u64 = null,
+    root_mtime_ns: u64 = 0,
+    root_atime_ns: u64 = 0,
     crash_observer: ?CrashObserver = null,
     latency_runtime: ?DiskLatencyRuntime = null,
 
@@ -933,6 +940,45 @@ pub const SimDisk = struct {
         try self.recordPathOp("disk.create_dir", op_id, options.path, "ok", latency_ns);
     }
 
+    fn setTimes(self: *Self, options: Disk.SetTimes) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        try self.beginOp();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        if (std.mem.eql(u8, options.path, ".")) {
+            if (options.access_ns) |time| self.root_atime_ns = time;
+            if (options.modify_ns) |time| self.root_mtime_ns = time;
+        } else if (self.findDirectory(options.path)) |directory| {
+            if (options.access_ns) |time| directory.atime_ns = time;
+            if (options.modify_ns) |time| directory.mtime_ns = time;
+        } else if (self.visibleLength(options.path) != null) {
+            if (self.findFile(options.path)) |file| {
+                if (options.access_ns) |time| file.atime_ns = time;
+                if (options.modify_ns) |time| file.mtime_ns = time;
+            }
+            // Pending writes carry the times they land with, so the set times
+            // win over earlier writes and later writes still move mtime.
+            for (self.pending_writes.items) |*pending| {
+                if (!std.mem.eql(u8, pending.path, options.path)) continue;
+                if (options.access_ns) |time| pending.atime_ns = time;
+                if (options.modify_ns) |time| pending.written_at_ns = time;
+            }
+        } else {
+            try self.recordPathOp("disk.set_times", op_id, options.path, "not_found", latency_ns);
+            return error.FileNotFound;
+        }
+
+        try self.world.recordFields("disk.set_times", &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = options.path }),
+            traceField("access_ns", if (options.access_ns) |time| .{ .uint = time } else .{ .literal = "unchanged" }),
+            traceField("modify_ns", if (options.modify_ns) |time| .{ .uint = time } else .{ .literal = "unchanged" }),
+            traceField("status", .{ .literal = "ok" }),
+            traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+    }
+
     fn statDir(self: *Self, options: Disk.StatDir) DiskError!Disk.StatDirResult {
         try validateLogicalPath(options.path, .directory);
         try self.beginOp();
@@ -941,7 +987,7 @@ pub const SimDisk = struct {
         const latency_ns = try self.advanceLatency();
         if (std.mem.eql(u8, options.path, ".")) {
             try self.recordPathOp("disk.stat_dir", op_id, options.path, "ok", latency_ns);
-            return .{ .inode = 1, .mtime_ns = 0 };
+            return .{ .inode = 1, .mtime_ns = self.root_mtime_ns, .atime_ns = self.root_atime_ns };
         }
         const directory = self.findDirectory(options.path) orelse {
             try self.recordPathOp("disk.stat_dir", op_id, options.path, "not_found", latency_ns);
@@ -951,6 +997,7 @@ pub const SimDisk = struct {
         return .{
             .inode = directoryInode(directory.id),
             .mtime_ns = directory.mtime_ns,
+            .atime_ns = directory.atime_ns,
         };
     }
 
@@ -1380,14 +1427,12 @@ pub const SimDisk = struct {
 
         if (self.crash_observer) |observer| try observer.prepare(observer.ptr);
 
-        // portable_v1 retains the latest observable timestamp across a crash,
-        // even when the corresponding unsynced data is lost.
         for (self.files.items) |*file| {
-            if (inspectFile(self, file.inode)) |snapshot| file.mtime_ns = snapshot.mtime_ns;
+            if (inspectFile(self, file.inode)) |snapshot| retainTimes(file, snapshot);
         }
         for (staged.file_changes.items) |*change| {
             if (change.file) |*file| {
-                if (inspectFile(self, file.inode)) |snapshot| file.mtime_ns = snapshot.mtime_ns;
+                if (inspectFile(self, file.inode)) |snapshot| retainTimes(file, snapshot);
             }
         }
         staged.commit();
@@ -1787,6 +1832,7 @@ pub const SimDisk = struct {
             .path = path,
             .len = source.len,
             .mtime_ns = source.mtime_ns,
+            .atime_ns = source.atime_ns,
             .metadata_durable = source.metadata_durable,
         };
         errdefer cloned.deinit(self.world.allocator);
@@ -1868,6 +1914,7 @@ pub const SimDisk = struct {
         const physical_end = try endOffset(pending.offset, write_len);
         file.len = @max(file.len, pending.logical_len orelse physical_end);
         if (pending.bytes.len != 0) file.mtime_ns = pending.written_at_ns;
+        if (pending.atime_ns) |atime_ns| file.atime_ns = atime_ns;
     }
 
     fn findSector(_: *Self, file: *File, index: u64) ?*Sector {
@@ -2181,6 +2228,7 @@ pub const SimDisk = struct {
         .create_dir = diskCreateDir,
         .stat_dir = diskStatDir,
         .read_dir = diskReadDir,
+        .set_times = diskSetTimes,
     };
 
     const control_vtable: DiskControl.VTable = .{
@@ -2203,7 +2251,7 @@ pub const SimDisk = struct {
         var result: ?Disk.Snapshot = null;
         for (self.files.items) |file| {
             if (file.inode == inode) {
-                result = .{ .path = file.path, .inode = inode, .size = file.len, .mtime_ns = file.mtime_ns };
+                result = .{ .path = file.path, .inode = inode, .size = file.len, .mtime_ns = file.mtime_ns, .atime_ns = file.atime_ns };
                 break;
             }
         }
@@ -2212,8 +2260,16 @@ pub const SimDisk = struct {
             if (result == null) result = .{ .path = pending.path, .inode = inode, .size = 0, .mtime_ns = 0 };
             result.?.size = @max(result.?.size, pending.logical_len orelse (pending.offset + pending.bytes.len));
             if (pending.bytes.len != 0) result.?.mtime_ns = pending.written_at_ns;
+            if (pending.atime_ns) |atime_ns| result.?.atime_ns = atime_ns;
         }
         return result;
+    }
+
+    /// portable_v1 keeps the latest observable timestamps across a crash,
+    /// even when the corresponding unsynced data is lost.
+    fn retainTimes(file: *File, snapshot: Disk.Snapshot) void {
+        file.mtime_ns = snapshot.mtime_ns;
+        file.atime_ns = snapshot.atime_ns;
     }
 
     fn diskRead(ptr: *anyopaque, options: Disk.Read) DiskError!void {
@@ -2230,6 +2286,10 @@ pub const SimDisk = struct {
 
     fn diskSyncDir(ptr: *anyopaque, options: Disk.SyncDir) DiskError!void {
         try fromOpaque(ptr).syncDir(options);
+    }
+
+    fn diskSetTimes(ptr: *anyopaque, options: Disk.SetTimes) DiskError!void {
+        try fromOpaque(ptr).setTimes(options);
     }
 
     fn diskStat(ptr: *anyopaque, options: Disk.Stat) DiskError!Disk.StatResult {

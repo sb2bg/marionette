@@ -41,9 +41,14 @@ const PostCreateStatFailDisk = struct {
         .create_dir = createDir,
         .stat_dir = statDir,
         .read_dir = readDir,
+        .set_times = setTimes,
     };
 
     fn read(_: *anyopaque, _: disk_module.Disk.Read) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn setTimes(_: *anyopaque, _: disk_module.Disk.SetTimes) disk_module.DiskError!void {
         return error.FileNotFound;
     }
 
@@ -6440,4 +6445,53 @@ test "io: sending a file to a stream falls back to reading it" {
     var reader = accepted.reader(server_io, &.{});
     try reader.interface.readSliceAll(&received);
     try std.testing.expectEqualStrings(contents, &received);
+}
+
+test "io: file and directory timestamps can be set and survive sync and crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x7135, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+    const modified: Io.Timestamp = .fromNanoseconds(1_700_000_000_000_000_000);
+    const accessed: Io.Timestamp = .fromNanoseconds(1_600_000_000_000_000_000);
+
+    // An unsynced file reports the times that were set.
+    const file = try cwd.createFile(io, "synced", .{});
+    try file.writePositionalAll(io, "DATA", 0);
+    try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = modified }, .access_timestamp = .{ .new = accessed } });
+    var stat = try file.stat(io);
+    try std.testing.expectEqual(modified, stat.mtime);
+    try std.testing.expectEqual(accessed, stat.atime);
+
+    // Syncing keeps them; a later write moves only the modification time.
+    try file.sync(io);
+    stat = try cwd.statFile(io, "synced", .{});
+    try std.testing.expectEqual(modified, stat.mtime);
+    try file.writePositionalAll(io, "MORE", 4);
+    stat = try file.stat(io);
+    try std.testing.expect(!std.meta.eql(modified, stat.mtime));
+    try std.testing.expectEqual(accessed, stat.atime);
+    try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = modified } });
+    try file.sync(io);
+    file.close(io);
+
+    try cwd.createDir(io, "folder", .default_dir);
+    try cwd.setTimestamps(io, "folder", .{ .modify_timestamp = .{ .new = modified }, .access_timestamp = .{ .new = accessed } });
+    stat = try cwd.statFile(io, "folder", .{});
+    try std.testing.expectEqual(modified, stat.mtime);
+    try std.testing.expectEqual(accessed, stat.atime);
+
+    // Timestamps survive a crash, as they do on a real machine.
+    var root = try cwd.openFile(io, ".", .{ .allow_directory = true });
+    try root.sync(io);
+    root.close(io);
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    try sim.control.process.restart(0);
+    stat = try cwd.statFile(io, "synced", .{});
+    try std.testing.expectEqual(modified, stat.mtime);
+    try std.testing.expectEqual(accessed, stat.atime);
+    stat = try cwd.statFile(io, "folder", .{});
+    try std.testing.expectEqual(modified, stat.mtime);
 }

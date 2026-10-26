@@ -89,6 +89,14 @@ pub fn mapDiskSetLengthError(err: disk_module.DiskError) Io.File.SetLengthError 
     };
 }
 
+pub fn mapDiskSetTimesError(err: disk_module.DiskError) Io.File.SetTimestampsError {
+    return switch (err) {
+        error.Canceled => error.Canceled,
+        error.DiskCrashed => error.ReadOnlyFileSystem,
+        else => error.Unexpected,
+    };
+}
+
 pub fn mapDiskDeleteError(err: disk_module.DiskError) Io.Dir.DeleteFileError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,

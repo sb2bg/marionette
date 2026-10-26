@@ -41,7 +41,7 @@ pub fn Ops(comptime Backend: type) type {
                 .size = 0,
                 .permissions = .default_dir,
                 .kind = .directory,
-                .atime = .zero,
+                .atime = Io.Timestamp.fromNanoseconds(@intCast(stat.atime_ns)),
                 .mtime = Io.Timestamp.fromNanoseconds(@intCast(stat.mtime_ns)),
                 .ctime = .zero,
                 .block_size = @intCast(@min(backend.sector_size, std.math.maxInt(Io.File.BlockSize))),
@@ -502,7 +502,7 @@ pub fn Ops(comptime Backend: type) type {
                 .size = meta.len,
                 .permissions = .default_file,
                 .kind = .file,
-                .atime = .zero,
+                .atime = meta.atime,
                 .mtime = meta.mtime,
                 .ctime = .zero,
                 .block_size = @intCast(@min(backend.sector_size, std.math.maxInt(Io.File.BlockSize))),
@@ -697,6 +697,65 @@ pub fn Ops(comptime Backend: type) type {
             if (Backend.fileDirectoryPath(state) != null) return error.Unseekable;
             if (backend.fileMeta(state).deleted) return error.AccessDenied;
             state.cursor = absolute_offset;
+        }
+
+        pub fn simFileSetTimestamps(userdata: ?*anyopaque, file: Io.File, options: Io.File.SetTimestampsOptions) Io.File.SetTimestampsError!void {
+            const backend = backendFromUserdata(userdata);
+            const state = backend.file(file.handle) orelse return error.AccessDenied;
+            if (state.closed) return error.AccessDenied;
+            const times = try diskTimes(backend, options.access_timestamp, options.modify_timestamp);
+            if (Backend.fileDirectoryPath(state)) |path| {
+                backend.disk.setTimes(.{ .path = path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return errors.mapDiskSetTimesError(err);
+                return;
+            }
+            if (backend.fileMeta(state).deleted) return error.AccessDenied;
+            var lease = acquireFilePathLease(backend, backend.fileMeta(state)) catch |err| switch (err) {
+                error.OutOfMemory => return error.Unexpected,
+                error.FileDeleted => return error.AccessDenied,
+                error.Canceled => return error.Canceled,
+            };
+            defer lease.deinit();
+            backend.disk.setTimes(.{ .path = lease.path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return errors.mapDiskSetTimesError(err);
+        }
+
+        pub fn simDirSetTimestamps(
+            userdata: ?*anyopaque,
+            dir: Io.Dir,
+            sub_path: []const u8,
+            options: Io.Dir.SetTimestampsOptions,
+        ) Io.Dir.SetTimestampsError!void {
+            const backend = backendFromUserdata(userdata);
+            const times = try diskTimes(backend, options.access_timestamp, options.modify_timestamp);
+            const path = resolvePath(backend, dir, sub_path, .directory) catch |err| switch (err) {
+                error.AccessDenied => return error.AccessDenied,
+                // Like the host backend, an invalid or missing path is
+                // unexpected here: the error set has no FileNotFound.
+                error.FileNotFound, error.SystemResources => return error.Unexpected,
+            };
+            defer backend.freeOpScratch(path);
+            backend.acquireFilePathLease(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.Unexpected,
+            };
+            defer backend.releaseFilePathLease(path);
+            backend.disk.setTimes(.{ .path = path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return errors.mapDiskSetTimesError(err);
+        }
+
+        const DiskTimes = struct { access_ns: ?u64, modify_ns: ?u64 };
+
+        /// The disk stores nanoseconds since the epoch, so times before it
+        /// cannot be represented and are rejected rather than clamped.
+        fn diskTimes(backend: *Backend, access: Io.File.SetTimestamp, modify: Io.File.SetTimestamp) error{Unexpected}!DiskTimes {
+            return .{ .access_ns = try diskTime(backend, access), .modify_ns = try diskTime(backend, modify) };
+        }
+
+        fn diskTime(backend: *Backend, timestamp: Io.File.SetTimestamp) error{Unexpected}!?u64 {
+            const value = switch (timestamp) {
+                .unchanged => return null,
+                .now => backend.nowTimestamp(),
+                .new => |value| value,
+            };
+            return std.math.cast(u64, value.nanoseconds) orelse error.Unexpected;
         }
 
         pub fn simFileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {

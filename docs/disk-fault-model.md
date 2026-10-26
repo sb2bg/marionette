@@ -79,6 +79,14 @@ try directory.sync(io); // the simulated backend runs `syncDir` for it
 
 So durable application code needs only `std.Io`, not the `Disk` capability.
 
+Files and directories carry a modification and an access time. Writes and
+length changes move the modification time; reads do not move the access time,
+as on a `noatime` mount. `File.setTimestamps`, `Dir.setTimestamps`, and
+`Disk.setTimes` set either time without making pending writes durable: a set
+time overrides earlier writes, and later writes move the modification time
+again. Timestamps survive a crash, as they do on a real machine, even when the
+data that set them is lost. Times before the Unix epoch return `Unexpected`.
+
 `setLength` extension is zero-filled by the disk authority. It is one
 lifecycle operation, not a series of independently fallible sector writes.
 

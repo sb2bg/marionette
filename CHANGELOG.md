@@ -5,6 +5,11 @@
 - Sending a file to a simulated stream (`Stream.Writer.sendFile`) now falls
   back to reading the file and writing its bytes, as on hosts without
   zero-copy support. It previously failed with a fabricated `NetworkDown`.
+- `File.setTimestamps` and `Dir.setTimestamps` now set modification and access
+  times in simulation; they silently did nothing. Simulated `stat` reports the
+  access time it stores, and `Disk.setTimes` sets times on the simulated and
+  real disks. Setting times never makes pending writes durable, and times
+  survive a crash.
 
 ## v0.8.1 - 2026-10-26
 

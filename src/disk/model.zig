@@ -115,9 +115,10 @@ pub const Disk = struct {
     pub const DirEntry = DiskDirEntry;
     pub const DirEntryKind = DiskDirEntryKind;
     pub const DirList = DiskDirList;
+    pub const SetTimes = DiskSetTimes;
     /// Non-suspending simulator metadata view. Host adapters leave it absent.
     /// Paths are borrowed only until the next disk mutation.
-    pub const Snapshot = struct { path: []const u8, inode: u64, size: u64, mtime_ns: u64 };
+    pub const Snapshot = struct { path: []const u8, inode: u64, size: u64, mtime_ns: u64, atime_ns: u64 = 0 };
     pub const VTable = struct {
         inspect: ?*const fn (*anyopaque, u64) ?Snapshot = null,
         read: *const fn (*anyopaque, Read) DiskError!void,
@@ -132,6 +133,7 @@ pub const Disk = struct {
         create_dir: *const fn (*anyopaque, CreateDir) DiskError!void,
         stat_dir: *const fn (*anyopaque, StatDir) DiskError!StatDirResult,
         read_dir: *const fn (*anyopaque, ReadDir) DiskError!DirList,
+        set_times: *const fn (*anyopaque, SetTimes) DiskError!void,
     };
 
     /// Fill `options.buffer` from sector-aligned `options.offset`,
@@ -206,6 +208,13 @@ pub const Disk = struct {
         return try self.vtable.read_dir(self.ptr, options);
     }
 
+    /// Set a file's or directory's access and modification times. Times
+    /// survive a crash, as filesystem timestamps do; setting them never makes
+    /// pending writes durable.
+    pub fn setTimes(self: Disk, options: SetTimes) DiskError!void {
+        try self.vtable.set_times(self.ptr, options);
+    }
+
     /// A disk whose every operation returns `error.DiskUnavailable`.
     pub fn unavailable() Disk {
         return .{ .ptr = &unavailable_disk_ctx, .vtable = &unavailable_disk_vtable };
@@ -227,6 +236,7 @@ const unavailable_disk_vtable: Disk.VTable = .{
     .create_dir = unavailableCreateDir,
     .stat_dir = unavailableStatDir,
     .read_dir = unavailableReadDir,
+    .set_times = unavailableSetTimes,
 };
 
 fn unavailableRead(_: *anyopaque, _: Disk.Read) DiskError!void {
@@ -274,6 +284,10 @@ fn unavailableStatDir(_: *anyopaque, _: Disk.StatDir) DiskError!Disk.StatDirResu
 }
 
 fn unavailableReadDir(_: *anyopaque, _: Disk.ReadDir) DiskError!Disk.DirList {
+    return error.DiskUnavailable;
+}
+
+fn unavailableSetTimes(_: *anyopaque, _: Disk.SetTimes) DiskError!void {
     return error.DiskUnavailable;
 }
 
@@ -341,6 +355,16 @@ pub const DiskStatDir = struct {
 pub const DiskStatDirResult = struct {
     inode: u64,
     mtime_ns: u64,
+    atime_ns: u64 = 0,
+};
+
+pub const DiskSetTimes = struct {
+    /// A file or directory path; "." names the root directory.
+    path: []const u8,
+    /// Null leaves the access time unchanged.
+    access_ns: ?u64 = null,
+    /// Null leaves the modification time unchanged.
+    modify_ns: ?u64 = null,
 };
 
 pub const DiskReadDir = struct {

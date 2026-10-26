@@ -245,6 +245,35 @@ pub const RealDisk = struct {
         };
     }
 
+    fn setTimes(self: *Self, options: Disk.SetTimes) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        const host_options: std.Io.Dir.SetTimestampsOptions = .{
+            .follow_symlinks = false,
+            .access_timestamp = hostTimestamp(options.access_ns),
+            .modify_timestamp = hostTimestamp(options.modify_ns),
+        };
+        if (std.mem.eql(u8, options.path, ".")) {
+            self.root.setTimestamps(self.io, ".", host_options) catch |err| return mapSetTimesError(err);
+            return;
+        }
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+        try self.rejectSymlink(parent.dir, parent.name, false);
+        parent.dir.setTimestamps(self.io, parent.name, host_options) catch |err| return mapSetTimesError(err);
+    }
+
+    fn hostTimestamp(ns: ?u64) std.Io.File.SetTimestamp {
+        const value = ns orelse return .unchanged;
+        return .{ .new = .fromNanoseconds(@intCast(value)) };
+    }
+
+    fn mapSetTimesError(err: std.Io.Dir.SetTimestampsError) DiskError {
+        return switch (err) {
+            error.Canceled => error.Canceled,
+            else => error.WriteError,
+        };
+    }
+
     fn statDir(self: *Self, options: Disk.StatDir) DiskError!Disk.StatDirResult {
         try validateLogicalPath(options.path, .directory);
 
@@ -426,6 +455,7 @@ pub const RealDisk = struct {
         .create_dir = diskCreateDir,
         .stat_dir = diskStatDir,
         .read_dir = diskReadDir,
+        .set_times = diskSetTimes,
     };
 
     fn fromOpaque(ptr: *anyopaque) *Self {
@@ -478,6 +508,10 @@ pub const RealDisk = struct {
 
     fn diskReadDir(ptr: *anyopaque, options: Disk.ReadDir) DiskError!Disk.DirList {
         return try fromOpaque(ptr).readDir(options);
+    }
+
+    fn diskSetTimes(ptr: *anyopaque, options: Disk.SetTimes) DiskError!void {
+        try fromOpaque(ptr).setTimes(options);
     }
 };
 
@@ -723,6 +757,24 @@ test "disk: real disk logical_len trims padding without truncating existing byte
         .logical_len = 12,
     });
     try std.testing.expectEqual(@as(u64, 12), (try app_disk.stat(.{ .path = "data.bin" })).size);
+}
+
+test "disk: real disk sets host file and directory times" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    try app_disk.write(.{ .path = "dir/file", .offset = 0, .bytes = "abcd" });
+    const modified: u64 = 1_700_000_000_000_000_000;
+    try app_disk.setTimes(.{ .path = "dir/file", .modify_ns = modified });
+    try app_disk.setTimes(.{ .path = "dir", .modify_ns = modified });
+    const file_stat = try tmp.dir.statFile(std.testing.io, "dir/file", .{});
+    try std.testing.expectEqual(@as(i96, modified), file_stat.mtime.nanoseconds);
+    const dir_stat = try tmp.dir.statFile(std.testing.io, "dir", .{});
+    try std.testing.expectEqual(@as(i96, modified), dir_stat.mtime.nanoseconds);
 }
 
 test "disk: real disk rejects symlink escapes" {

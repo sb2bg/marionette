@@ -584,6 +584,7 @@ pub const Backend = struct {
         inode: Io.File.INode,
         len: u64 = 0,
         mtime: Io.Timestamp = .zero,
+        atime: Io.Timestamp = .zero,
         deleted: bool = false,
         /// Set when a disk crash invalidates cached state. The length is
         /// re-derived from disk truth on next touch; the timestamp is kept,
@@ -705,6 +706,7 @@ pub const Backend = struct {
             if (inspect(self.disk.ptr, meta.inode)) |snapshot| {
                 meta.len = snapshot.size;
                 meta.mtime = Io.Timestamp.fromNanoseconds(@intCast(snapshot.mtime_ns));
+                meta.atime = Io.Timestamp.fromNanoseconds(@intCast(snapshot.atime_ns));
             } else {
                 meta.deleted = true;
                 meta.len = 0;
@@ -2204,7 +2206,7 @@ const sim_vtable: Io.VTable = .{
     .dirSetFileOwner = Io.failingDirSetFileOwner,
     .dirSetPermissions = Io.failingDirSetPermissions,
     .dirSetFilePermissions = Io.failingDirSetFilePermissions,
-    .dirSetTimestamps = Io.noDirSetTimestamps,
+    .dirSetTimestamps = file_ops.simDirSetTimestamps,
     .dirHardLink = Io.failingDirHardLink,
 
     .fileStat = file_ops.simFileStat,
@@ -2223,7 +2225,7 @@ const sim_vtable: Io.VTable = .{
     .fileSetLength = file_ops.simFileSetLength,
     .fileSetOwner = Io.failingFileSetOwner,
     .fileSetPermissions = Io.failingFileSetPermissions,
-    .fileSetTimestamps = Io.noFileSetTimestamps,
+    .fileSetTimestamps = file_ops.simFileSetTimestamps,
     .fileLock = Io.failingFileLock,
     .fileTryLock = Io.failingFileTryLock,
     .fileUnlock = Io.unreachableFileUnlock,
