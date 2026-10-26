@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.1 - Unreleased
+## v0.8.1 - 2026-10-26
 
 - **Decision-model change.** Every probabilistic fault roll (network drops,
   disk faults, allocation and application BUGGIFY) now fires on the top
