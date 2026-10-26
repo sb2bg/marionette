@@ -560,7 +560,7 @@ test "disk: crash can roll back unsynced delete and rename metadata" {
 }
 
 test "disk: later kept create wins over an earlier lost delete" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -591,7 +591,7 @@ test "disk: later kept create wins over an earlier lost delete" {
 }
 
 test "disk: later kept source create wins over an earlier lost rename" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -631,7 +631,7 @@ test "disk: later kept source create wins over an earlier lost rename" {
 }
 
 test "disk: later kept rename wins over an older lost rename of the same file" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -663,7 +663,7 @@ test "disk: later kept rename wins over an older lost rename of the same file" {
 }
 
 test "disk: kept rename preserves the identity of an older lost create" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -682,7 +682,7 @@ test "disk: kept rename preserves the identity of an older lost create" {
 }
 
 test "disk: kept rename preserves an older-created destination directory" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -713,7 +713,7 @@ test "disk: kept rename preserves an older-created destination directory" {
 }
 
 test "disk: kept file create preserves its older-created parent directory" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -732,7 +732,7 @@ test "disk: kept file create preserves its older-created parent directory" {
 }
 
 test "disk: kept child directory preserves its older-created parent" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -883,7 +883,7 @@ test "disk: all-lost flat directory recovery handles a large batch" {
 }
 
 test "disk: later kept directory wins over an earlier lost file delete" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();
@@ -1079,8 +1079,9 @@ test "disk: crash-global reorder classifies every reversed write" {
     try disk.control().restart();
 
     const trace = world.traceBytes();
-    try std.testing.expect(std.mem.indexOf(u8, trace, "roll=0 fired=true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trace, "roll=1 fired=false") != null);
+    // At one in two the top roll fires; one fired roll reverses every write.
+    try std.testing.expect(std.mem.indexOf(u8, trace, "roll=1 fired=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "roll=0 fired=false") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "result=landed") == null);
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, trace, "result=reordered"));
     try std.testing.expect(std.mem.indexOf(u8, trace, "disk.crash pending_writes=3 landed=0 lost=0 torn=0 reordered=3") != null);
@@ -1227,7 +1228,7 @@ test "disk: crash staging is leak-free across metadata allocation failures" {
 }
 
 fn keptEntryDependencyAllocationFailureSweep(allocator: std.mem.Allocator) !void {
-    var world = try World.init(std.testing.allocator, .{ .seed = 3, .tick_ns = 1 });
+    var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
     defer world.deinit();
     var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
     defer disk.deinit();

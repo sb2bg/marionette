@@ -178,10 +178,7 @@ pub const ProcessSupervisor = struct {
     }
 
     pub fn validateCore(self: *const ProcessSupervisor, core: []const network_module.NodeId) !void {
-        for (core) |node| {
-            const index = try self.nodeIndex(node);
-            if (self.states[index] == .killed and self.lifecycles[index] == null) return error.ProcessNotRegistered;
-        }
+        for (core) |node| _ = try self.nodeIndex(node);
     }
 
     pub fn disableDynamics(self: *ProcessSupervisor) !void {
@@ -245,9 +242,12 @@ pub const ProcessSupervisor = struct {
         try self.restartProcessInternal(node, false);
     }
 
+    /// A node without a registered lifecycle restarts with its I/O revived
+    /// and no callback, so a harness that keeps no per-process state can
+    /// restart after a crash without registering a placeholder.
     fn restartProcessInternal(self: *ProcessSupervisor, node: network_module.NodeId, automatic: bool) !void {
         const index = try self.nodeIndex(node);
-        const lifecycle = self.lifecycles[index] orelse return error.ProcessNotRegistered;
+        const lifecycle = self.lifecycles[index];
 
         if (self.states[index] == .alive) {
             try self.io_runtime.kill(node);
@@ -257,10 +257,10 @@ pub const ProcessSupervisor = struct {
         try self.io_runtime.revive(node);
         errdefer {
             self.io_runtime.kill(node) catch @panic("failed to roll back partial process restart");
-            if (lifecycle.on_kill) |on_kill| on_kill(lifecycle.ptr);
+            if (lifecycle) |registered| if (registered.on_kill) |on_kill| on_kill(registered.ptr);
         }
 
-        try lifecycle.restart(lifecycle.ptr, try self.environmentForNode(node));
+        if (lifecycle) |registered| try registered.restart(registered.ptr, try self.environmentForNode(node));
         try self.world.recordFields("process.restart", &.{
             traceField("node", .{ .uint = node }),
             traceField("automatic", .{ .boolean = automatic }),

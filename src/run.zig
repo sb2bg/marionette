@@ -61,12 +61,40 @@ pub fn SimCase(comptime App: type) type {
         sim: World.Simulation,
         app: App,
         state_checks: []const StateCheck(Self) = &.{},
+        /// Disk operations before this run's armed crash, in a crash-point
+        /// sweep. Null otherwise.
+        crash_point: ?u64 = null,
+        crash_point_armed: bool = false,
+        /// Null until this scenario arms a sweep point; retained after finish.
+        crash_point_fired: ?bool = null,
         property_failure: ?struct { err: anyerror, name: []const u8 } = null,
 
         /// Execute an optional action group. Keep dependencies and required
         /// setup outside actions; disabled groups are visible in the tape.
         pub fn action(self: *Self, comptime id: []const u8, comptime callback: fn (*Self) anyerror!void) !void {
             if (try self.control().world.actionEnabled(id)) try callback(self);
+        }
+
+        /// Arm this run's crash point: in a crash-point sweep, the disk crashes
+        /// before the operation that would exceed it. Does nothing outside a
+        /// sweep, so the same scenario runs normally too.
+        pub fn armCrashPoint(self: *Self) !void {
+            const point = self.crash_point orelse return;
+            try self.control().disk.crashAfterOps(point);
+            self.crash_point_armed = true;
+            if (self.crash_point_fired == null) self.crash_point_fired = false;
+        }
+
+        /// End the work under test: an armed crash that has not fired is
+        /// disarmed, so recovery and checks run without it. Returns whether
+        /// the armed crash fired; false outside a sweep. The runner also
+        /// disarms when the scenario returns, before checks run.
+        pub fn finishCrashPoint(self: *Self) !bool {
+            if (!self.crash_point_armed) return false;
+            const fired = !(try self.control().disk.disarmCrash());
+            self.crash_point_armed = false;
+            self.crash_point_fired = (self.crash_point_fired orelse false) or fired;
+            return fired;
         }
 
         /// Evaluate explicitly selected properties at a named harness safe point.
@@ -128,8 +156,13 @@ pub fn SimCase(comptime App: type) type {
 ///
 /// Optional fields are `seed`, `seed_schedule`, `start_ns`, `tick_ns`,
 /// `name`, `tags`, `attributes`, `checks`, `watchdog`, `check_resources`,
-/// and host-owned `artifacts`.
+/// and host-owned `artifacts`. Any other field is a compile error.
 pub fn runSimCase(config: anytype) RunError!RunReport {
+    comptime requireKnownConfigFields(@TypeOf(config), "runSimCase", &.{});
+    return runSimCaseUnchecked(config);
+}
+
+fn runSimCaseUnchecked(config: anytype) RunError!RunReport {
     var report = try runConfiguredCase(config, null, .record);
     errdefer report.deinit();
     if (@hasField(@TypeOf(config), "artifacts")) try @import("artifact.zig").write(config.allocator, &report, config.artifacts);
@@ -138,8 +171,10 @@ pub fn runSimCase(config: anytype) RunError!RunReport {
 
 /// Execute a saved capsule against the exact harness build/input identity.
 /// Config supplies allocator, init, scenario, and optional compile-time checks.
-/// Runtime options and simulation configuration come exclusively from the capsule.
+/// Runtime options and simulation configuration come exclusively from the
+/// capsule, so the original run config may be passed unchanged.
 pub fn replaySimCase(config: anytype, capsule: *const @import("replay.zig").Capsule, identity: @import("replay.zig").Identity) !RunReport {
+    comptime requireKnownConfigFields(@TypeOf(config), "replaySimCase", &.{});
     try capsule.validateIdentity(identity);
     const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
     try Harness.validate();
@@ -154,7 +189,8 @@ pub fn replaySimCase(config: anytype, capsule: *const @import("replay.zig").Caps
 
 /// Expect a simulation case to pass. Prints the failure summary otherwise.
 pub fn expectSimPass(config: anytype) ExpectRunError!void {
-    var report = try runSimCase(config);
+    comptime requireKnownConfigFields(@TypeOf(config), "expectSimPass", &.{});
+    var report = try runSimCaseUnchecked(config);
     defer report.deinit();
 
     switch (report) {
@@ -170,7 +206,8 @@ pub fn expectSimPass(config: anytype) ExpectRunError!void {
 /// the accepted kind, error name, and/or check name. Use `runSimCase` directly
 /// when the test needs to inspect the full failure details.
 pub fn expectSimFailure(config: anytype) ExpectRunError!void {
-    var report = try runSimCase(config);
+    comptime requireKnownConfigFields(@TypeOf(config), "expectSimFailure", &.{"failure"});
+    var report = try runSimCaseUnchecked(config);
     defer report.deinit();
 
     switch (report) {
@@ -193,6 +230,7 @@ pub fn expectSimFuzz(config: anytype) ExpectRunError!void {
     if (!@hasField(@TypeOf(config), "seeds")) {
         @compileError("expectSimFuzz config requires a `seeds` field");
     }
+    comptime requireKnownConfigFields(@TypeOf(config), "expectSimFuzz", &.{"seeds"});
     if (config.seeds == 0) return error.InvalidSeedCount;
 
     for (0..config.seeds) |iteration| {
@@ -246,12 +284,16 @@ fn PreparedHarness(
 }
 
 fn runConfiguredCase(config: anytype, seed_override: ?u64, mode: decision_module.Mode) RunError!RunReport {
+    return runConfiguredCaseWith(config, seed_override, mode, &.{});
+}
+
+fn runConfiguredCaseWith(config: anytype, seed_override: ?u64, mode: decision_module.Mode, extra_attributes: []const RunAttribute) RunError!RunReport {
     if (!@hasField(@TypeOf(config), "simulate")) {
         @compileError("runSimCase config requires a `simulate` field");
     }
     const Harness = PreparedHarness(config.init, config.scenario, if (@hasField(@TypeOf(config), "checks")) config.checks else &.{});
     try Harness.validate();
-    var options = try runOptionsFromConfig(config, seed_override);
+    var options = try runOptionsFromConfig(config, seed_override, extra_attributes);
     defer deinitRunOptions(config.allocator, &options);
     return runTwiceWithSimCase(
         config.allocator,
@@ -271,6 +313,32 @@ fn validateStateChecks(comptime State: type, checks: []const StateCheck(State)) 
         for (checks[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, check.name)) return error.InvalidStateChecks;
         }
+    }
+}
+
+/// Fields a run config may carry. Entry points add their own extras.
+const run_config_fields = [_][]const u8{
+    "allocator",     "simulate", "init",     "scenario",        "seed",
+    "seed_schedule", "start_ns", "tick_ns",  "name",            "tags",
+    "attributes",    "checks",   "watchdog", "check_resources", "artifacts",
+};
+
+/// The first field of `Config` that no runner reads, if any.
+pub fn unknownConfigField(comptime Config: type, comptime extra: []const []const u8) ?[]const u8 {
+    outer: for (@typeInfo(Config).@"struct".field_names) |name| {
+        for (run_config_fields ++ extra) |known| {
+            if (std.mem.eql(u8, name, known)) continue :outer;
+        }
+        return name;
+    }
+    return null;
+}
+
+/// Optional config fields are read by name, so a misspelled one would be
+/// ignored and a test could pass without its checks. Reject it instead.
+pub fn requireKnownConfigFields(comptime Config: type, comptime entry_point: []const u8, comptime extra: []const []const u8) void {
+    if (unknownConfigField(Config, extra)) |name| {
+        @compileError(entry_point ++ " config has no field `" ++ name ++ "`; check its spelling");
     }
 }
 
@@ -313,12 +381,37 @@ pub fn runCapsuleCandidate(
     );
 }
 
-fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.Error!RunOptions {
+/// Run attribute carrying a crash-point sweep's current point, so capsules
+/// replay the same point.
+pub const crash_point_attribute = "marionette.crash_point";
+
+fn crashPointFromOptions(options: RunOptions) ?u64 {
+    for (options.attributes) |attribute| {
+        if (!std.mem.eql(u8, attribute.key, crash_point_attribute)) continue;
+        return switch (attribute.value) {
+            .uint => |point| point,
+            else => null,
+        };
+    }
+    return null;
+}
+
+/// Internal crash-point sweep execution: one recorded case at `point`.
+pub fn runCrashPoint(config: anytype, point: u64) RunError!RunReport {
+    return runConfiguredCaseWith(config, null, .record, &.{runAttribute(crash_point_attribute, point)});
+}
+
+fn runOptionsFromConfig(config: anytype, seed_override: ?u64, extra_attributes: []const RunAttribute) std.mem.Allocator.Error!RunOptions {
     const schedule = if (@hasField(@TypeOf(config), "seed_schedule"))
         try normalizeSchedule(config.allocator, config.seed_schedule)
     else
         try config.allocator.alloc(seed_module.SeedCutover, 0);
     defer config.allocator.free(schedule);
+    const config_attributes: []const RunAttribute = if (@hasField(@TypeOf(config), "attributes")) config.attributes else &.{};
+    const attributes = try config.allocator.alloc(RunAttribute, config_attributes.len + extra_attributes.len);
+    defer config.allocator.free(attributes);
+    @memcpy(attributes[0..config_attributes.len], config_attributes);
+    @memcpy(attributes[config_attributes.len..], extra_attributes);
     // Coerce collection literals here and clone while their backing storage is live.
     const borrowed: RunOptions = .{
         .seed = seed_override orelse configSeed(config),
@@ -327,7 +420,7 @@ fn runOptionsFromConfig(config: anytype, seed_override: ?u64) std.mem.Allocator.
         .tick_ns = fieldOrDefault(config, "tick_ns", @import("clock.zig").default_tick_ns),
         .name = if (@hasField(@TypeOf(config), "name")) config.name else null,
         .tags = if (@hasField(@TypeOf(config), "tags")) config.tags else &.{},
-        .attributes = if (@hasField(@TypeOf(config), "attributes")) config.attributes else &.{},
+        .attributes = attributes,
         .watchdog = fieldOrDefault(config, "watchdog", @as(?WatchdogOptions, null)),
         .check_resources = fieldOrDefault(config, "check_resources", false),
     };
@@ -563,7 +656,7 @@ fn compareRunOnceResults(
         a.kind == b.kind and optionalTextEqual(a.error_name, b.error_name) and optionalTextEqual(a.check_name, b.check_name) and
             (equal_trace or (isWatchdogFailure(a.kind) and watchdogTracePrefixesCompatible(first.trace, second.trace)))
     else
-        false else second_failure == null and equal_trace;
+        false else second_failure == null and equal_trace and first.crash_point_fired == second.crash_point_fired;
     const owned_options = try cloneRunOptions(allocator, options);
     const trace = first.trace;
     first.trace = &.{};
@@ -578,6 +671,7 @@ fn compareRunOnceResults(
         .event_count = first.event_count,
         .decision_tape = tape,
         .tape_complete = first.tape_complete,
+        .crash_point_fired = first.crash_point_fired,
     } };
     const kind: RunFailureKind = if (second_failure != null and second_failure.?.kind == .replay_diverged) .replay_diverged else if (reproduced) first_failure.?.kind else if (first_failure == null and second_failure != null) .second_run_failed else if (first_failure != null and second_failure == null) .first_run_failed else .determinism_mismatch;
     var report: RunFailure = .{
@@ -683,6 +777,7 @@ fn runOnceWithSimCase(
     var state: SimCase(App) = .{
         .sim = sim,
         .state_checks = state_checks,
+        .crash_point = crashPointFromOptions(options),
         .app = init_app(sim) catch |err| {
             try sim.finishManagedProcesses();
             // An initializer that ran out of steps reports the budget, not
@@ -703,9 +798,16 @@ fn runOnceWithSimCase(
 
     for ([_]CheckPhase{ .after_init, .after_scenario }) |phase| {
         var scenario_error: ?anyerror = null;
-        if (phase == .after_scenario) scenario(&state) catch |err| {
-            scenario_error = err;
-        };
+        if (phase == .after_scenario) {
+            scenario(&state) catch |err| {
+                scenario_error = err;
+            };
+            // Disarm before checks and cleanup even when the scenario failed,
+            // keeping the scenario's error over any disarm failure.
+            _ = state.finishCrashPoint() catch |err| {
+                if (scenario_error == null) scenario_error = err;
+            };
+        }
         // A caught checkpoint failure must win over later execution failures.
         if (scenario_error == null and state.property_failure == null and state.control().tasks.failure() == null) {
             state.evaluateChecks(phase) catch |err| {
@@ -724,6 +826,7 @@ fn runOnceWithSimCase(
         }
     }
 
+    const crash_point_fired = state.crash_point_fired;
     state.deinit();
     state_live = false;
     try sim.finishManagedProcesses();
@@ -755,7 +858,9 @@ fn runOnceWithSimCase(
             null,
         );
     };
-    return execution.Result.capture(allocator, &world, null);
+    var result = try execution.Result.capture(allocator, &world, null);
+    result.crash_point_fired = crash_point_fired;
+    return result;
 }
 
 fn schedulerFailureFromWorld(
@@ -1897,4 +2002,13 @@ test "properties: successful check cannot hide a scheduler deadlock" {
             .failure = FailureExpectation{ .kind = .scheduler_deadlock, .error_name = "Deadlock" },
         });
     }
+}
+
+test "runner configs: a misspelled field is reported by name" {
+    // Entry points turn a non-null result into a compile error naming it.
+    const Misspelled = @TypeOf(.{ .allocator = std.testing.allocator, .chekcs = {} });
+    try std.testing.expectEqualStrings("chekcs", comptime unknownConfigField(Misspelled, &.{}).?);
+    const Fuzz = @TypeOf(.{ .allocator = std.testing.allocator, .checks = {}, .seeds = 1 });
+    try std.testing.expectEqualStrings("seeds", comptime unknownConfigField(Fuzz, &.{}).?);
+    try std.testing.expect(comptime unknownConfigField(Fuzz, &.{"seeds"}) == null);
 }

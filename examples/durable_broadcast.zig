@@ -113,18 +113,12 @@ fn runReport(
 }
 
 pub fn init(sim: mar.Sim) !DurableBroadcast {
-    try sim.registerProcess(0, .{
-        .ptr = sim.control.world,
-        .restart = noopProcessRestart,
-    });
     return DurableBroadcast.init(
         sim.env,
         try sim.endpoint(MessagePayload, client_node_id),
         try sim.endpoints(MessagePayload, replica_count, 0),
     );
 }
-
-fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
 
 fn restartAfterDiskCrash(case: *Case) !void {
     try case.control().disk.restart();

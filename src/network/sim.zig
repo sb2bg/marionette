@@ -974,6 +974,15 @@ pub fn streamLiveBuffersFromControl(control: AnyNetworkControl) !usize {
     return runtime.pool.liveBuffers();
 }
 
+/// Stream packets queued on every path, including empty connect probes.
+pub fn streamQueuedPacketsFromControl(control: AnyNetworkControl) !usize {
+    const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
+    const runtime = try SimByteRuntime.getOrInit(shared);
+    var count: usize = 0;
+    for (runtime.queues) |queue| count += queue.items.len;
+    return count;
+}
+
 pub fn nextStreamDeliveryAtForControl(control: AnyNetworkControl, node: NodeId) !?clock_module.Timestamp {
     const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
     const runtime = try SimByteRuntime.getOrInit(shared);
@@ -1071,7 +1080,7 @@ fn TypedRuntime(comptime Payload: type) type {
                 u32,
                 shared.faults.drop_rate.denominator,
             );
-            if (drop_roll < shared.faults.drop_rate.numerator) {
+            if (shared.faults.drop_rate.fires(drop_roll)) {
                 try shared.world.record(
                     "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
                     .{ packet_id, from, to, shared.faults.drop_rate.numerator, shared.faults.drop_rate.denominator, drop_roll },
@@ -1327,7 +1336,7 @@ const SimByteRuntime = struct {
             u32,
             shared.faults.drop_rate.denominator,
         );
-        if (drop_roll < shared.faults.drop_rate.numerator) {
+        if (shared.faults.drop_rate.fires(drop_roll)) {
             try shared.world.record(
                 "network.drop id={} from={} to={} drop_rate={}/{} roll={} reason=send_drop",
                 .{ packet_id, from, to, shared.faults.drop_rate.numerator, shared.faults.drop_rate.denominator, drop_roll },

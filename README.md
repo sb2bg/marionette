@@ -121,10 +121,10 @@ including application random bytes, for a pinned build and workload.
 
 ## Install
 
-Marionette v0.8.0 requires Zig 0.17.x:
+Marionette v0.8.1 requires Zig 0.17.x:
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.8.0.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.8.1.tar.gz
 ```
 
 For Zig 0.16.x, use v0.7.2 instead.
@@ -215,7 +215,7 @@ For exact contracts and unsupported behavior, see the
 - **Understand the design -** [architecture](docs/architecture.md) and [determinism contract](docs/determinism.md)
 - **Use the library -** [API reference](docs/api.md), [campaigns](docs/campaigns.md), [determinism contract](docs/determinism.md), and [trace format](docs/trace-format.md)
 - **Follow the project -** [roadmap](ROADMAP.md), [findings](FOUND_BUGS.md), and the [technical blog](docs/blog/index.md)
-- **Contribute -** [local verification](docs/development.md) and [performance baseline](docs/performance.md)
+- **Contribute -** [local verification](docs/development.md)
 
 The complete documentation is published at [sb2bg.github.io/marionette](https://sb2bg.github.io/marionette/).
 

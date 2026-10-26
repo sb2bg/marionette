@@ -30,3 +30,15 @@ test {
 test {
     _ = @import("fault_coverage.zig");
 }
+
+test {
+    _ = @import("regressions_081.zig");
+}
+
+test {
+    _ = @import("crash_points.zig");
+}
+
+test {
+    _ = @import("network_characterization.zig");
+}

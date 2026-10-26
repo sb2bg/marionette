@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.8.1 - Unreleased
+
+- **Decision-model change.** Every probabilistic fault roll (network drops,
+  disk faults, allocation and application BUGGIFY) now fires on the top
+  `numerator` rolls of `0..denominator` instead of the bottom ones, so a zero
+  roll never fires. Reduction replaces removed decisions with zero, so it
+  previously injected faults and could never remove one that had fired; it now
+  strips them. `BuggifyRate.fires(roll)` states the rule. The same seed now
+  produces different fault outcomes, so capsules recorded before 0.8.1 that
+  contain fault rolls no longer replay; give the harness a new build identity.
+- Runner configs reject unknown fields at compile time. Optional fields are read
+  by name, so a misspelled one such as `.chekcs` was ignored and a test passed
+  without running its checks. `runSimCase`, the `expectSim*` helpers,
+  `replaySimCase`, the reduction entry points, and `runCampaign` now name the
+  unknown field in a compile error.
+- Canceling a task blocked in `Future.await` now forwards cancellation to the
+  awaited child and joins it, fixing hangs when the child is waiting at a
+  cancellation point. Cancellation responsibility follows Zig 0.17's
+  `std.Io.Threaded`: the parent re-arms its request if the child does not
+  acknowledge it or calls `recancel`. Explicit `Future.cancel` joins preserve
+  the caller's own pending cancellation.
+- Restarting a node with no registered lifecycle revives its I/O and runs no
+  callback, so a disk crash, which kills every process, no longer forces a
+  placeholder `ProcessLifecycle`. `transitionToLiveness` no longer requires
+  lifecycles for killed core nodes, and automatic restarts revive unregistered
+  nodes instead of failing with `ProcessNotRegistered`.
+- Adds crash-point sweeps. `sweepCrashPoints` and `expectCrashPointsPass` run a
+  scenario once per disk operation, crashing before it, until the work under
+  test completes. Scenarios mark that work with `SimCase.armCrashPoint` and
+  `finishCrashPoint`; each point is an ordinary exact-replayed run whose point
+  is a run attribute, so a failing point replays from its capsule, and the
+  config's `artifacts` receive the failing point. The armed crash is cancelled
+  when the scenario returns or fails, before checks and cleanup. Adds
+  `DiskControl.disarmCrash`, and a firing armed crash now records
+  `disk.fault kind=armed_crash fired=true`.
+  Sweep completion tracks the scenario's own armed region, so ordinary armed
+  crashes during setup or recovery neither satisfy sweep arming nor keep a
+  completed sweep running. Passing sweep outcomes survive watchdog execution
+  and capsule replay.
+- Documents and tests directory durability through `std.Io`: syncing a
+  directory opened with `allow_directory` commits its entries, so durable code
+  does not need the `Disk` capability for `syncDir`.
+- Connect probes no longer take a stream buffer. Empty messages hold no pooled
+  buffer, so a connection whose reader never reads can no longer exhaust the
+  world's 64 stream buffers and make an unrelated connect fail with
+  `SystemResources`. Unrelated connections still share those buffers for data
+  until 0.9.
+- Adds network characterization tests (`tests/network_characterization.zig`)
+  that record how today's stream model reacts to partitions, closes, kills,
+  loss, and binds, next to what Linux TCP does instead, so the 0.9 network
+  model changes each expectation deliberately.
+
 ## v0.8.0 - 2026-10-20
 
 - Requires Zig 0.17.0; updates the source, toolchain pin, and CI checks for the

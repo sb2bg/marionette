@@ -37,6 +37,13 @@ pub const BuggifyRate = struct {
         return .{ .numerator = 1, .denominator = denominator };
     }
 
+    /// Whether a roll drawn from `0..denominator` fires. The top `numerator`
+    /// rolls fire, so a zero roll never does: reduction, which replaces removed
+    /// decisions with zero, then strips faults instead of injecting them.
+    pub fn fires(self: BuggifyRate, roll: u64) bool {
+        return roll >= self.denominator - self.numerator;
+    }
+
     pub fn validate(self: BuggifyRate) BuggifyError!void {
         if (self.denominator == 0) return error.InvalidRate;
         if (self.numerator > self.denominator) return error.InvalidRate;

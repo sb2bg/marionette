@@ -41,15 +41,6 @@ const byte_values = [_][]const u8{
 
 const data_probe_value: [4096]u8 = @splat('d');
 
-fn registerNoopProcess(sim: mar.Sim) !void {
-    try sim.registerProcess(0, .{
-        .ptr = sim.control.world,
-        .restart = noopProcessRestart,
-    });
-}
-
-fn noopProcessRestart(_: *anyopaque, _: mar.Env) anyerror!void {}
-
 fn restartAfterDiskCrash(sim: mar.Sim) !void {
     try sim.control.disk.restart();
     try sim.restartProcess(0);
@@ -271,7 +262,6 @@ fn runDataRegionCrashCase(
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = sector_size } });
-    try registerNoopProcess(sim);
     const io = sim.env.io();
 
     var file = try std.Io.Dir.cwd().createFile(io, "xit-data.db", .{ .read = true, .truncate = true });
@@ -363,7 +353,6 @@ fn runTornHeaderRecoveryCase(allocator: std.mem.Allocator, seed: u64, sector_siz
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = sector_size } });
-    try registerNoopProcess(sim);
     const io = sim.env.io();
 
     var file = try std.Io.Dir.cwd().createFile(io, "xit-torn.db", .{ .read = true, .truncate = true });
@@ -459,7 +448,6 @@ fn runTrace(allocator: std.mem.Allocator, seed: u64, fault_mode: FaultMode) ![]u
     defer world.deinit();
 
     const sim = try world.simulate(.{ .disk = .{ .sector_size = 4096 } });
-    try registerNoopProcess(sim);
     const io = sim.env.io();
 
     var file = try std.Io.Dir.cwd().createFile(io, "xit.db", .{ .read = true, .truncate = true });
@@ -778,7 +766,6 @@ fn runFuzzCase(
         .sector_size = params.sector_size,
         .min_latency_ns = fuzz_tick_ns,
     } });
-    try registerNoopProcess(sim);
     const io = sim.env.io();
 
     var file = try std.Io.Dir.cwd().createFile(io, "xit-fuzz.db", .{ .read = true, .truncate = true });

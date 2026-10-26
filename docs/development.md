@@ -40,5 +40,6 @@ campaigns on pinned xitdb and redis.zig in separate processes; see
 [Campaigns](campaigns.md#validation-on-real-systems). Its evidence lands in
 `zig-out/campaigns` unless `-Dcampaign-dir` says otherwise.
 
-For repeatable measurements before performance work, see
-[Performance Baseline](performance.md).
+For repeatable measurements before performance work, run
+`zig build baseline -Doptimize=fast`; it prints one JSON line of run and
+reduction throughput and retained trace and tape sizes.

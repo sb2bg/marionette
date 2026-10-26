@@ -283,6 +283,9 @@ pub const RunResult = struct {
     decision_tape: decision_module.Tape = .{},
     /// False when watchdog termination prevented a complete decision record.
     tape_complete: bool = true,
+    /// Whether a sweep crash fired in the scenario's armed region. Null when
+    /// the scenario never called `SimCase.armCrashPoint` in a sweep.
+    crash_point_fired: ?bool = null,
 
     /// Release the owned trace.
     pub fn deinit(self: *RunResult) void {

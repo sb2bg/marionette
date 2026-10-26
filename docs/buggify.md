@@ -16,6 +16,8 @@ Production envs should construct `Env` with buggify disabled, so
 `world.simulate` draw through `env.io()` into the world's single PRNG according
 to the supplied `BuggifyRate` and record
 `buggify hook=<name> rate=<n>/<d> roll=<value> fired=<bool>` in the trace.
+A roll drawn from `0..d` fires when it is at least `d - n`, so a zero roll
+never fires. Every simulator fault rate follows the same rule.
 Invalid runtime rates return `error.InvalidRate` before any random draw or
 hook trace event.
 

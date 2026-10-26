@@ -74,7 +74,9 @@ test "scenario" {
 Required runner fields are `allocator`, `simulate`, `init`, and `scenario`.
 `simulate` must be a `mar.World.SimulateOptions` value. Optional fields are
 `seed`, `seed_schedule`, `start_ns`, `tick_ns`, `name`, `tags`, `attributes`,
-`checks`, `watchdog`, and `check_resources`.
+`checks`, `watchdog`, `check_resources`, and `artifacts`. Any other field is a
+compile error that names it, so a misspelled `checks` cannot silently skip the
+checks.
 
 - `runSimCase` returns an owned `RunReport`.
 - `expectSimPass` accepts only a passing replay.
@@ -248,6 +250,14 @@ and `writeRunArtifacts` persist reports through caller-supplied host I/O.
 `Operation` span. `sim.manageProcess(App, node, initialize)` returns world-owned
 `*ManagedProcess(App)` state with automatic restart/reopen and runner cleanup.
 See the [complete contracts and examples](reduction-and-explanation.md).
+
+## Crash-Point Sweeps
+
+`sweepCrashPoints(config, CrashSweepOptions)` runs a `runSimCase` config once
+per disk crash point and returns an owned `CrashSweepResult` with the number of
+points and the first failing report; `expectCrashPointsPass` fails the test
+instead. Scenarios mark the work under test with `SimCase.armCrashPoint` and
+`SimCase.finishCrashPoint`. See [Crash-Point Sweeps](run.md#crash-point-sweeps).
 
 ## Campaigns
 

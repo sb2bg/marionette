@@ -68,6 +68,17 @@ pending bytes. `syncDir` commits creates, deletes, and renames for that logical
 directory. A newly created file becomes durable by syncing the file and then
 its parent directory. A cross-directory rename requires syncing both parents.
 
+Code that uses `std.Io` syncs a directory the way it would on POSIX: open the
+directory as a file and sync it.
+
+```zig
+var directory = try std.Io.Dir.cwd().openFile(io, ".", .{ .allow_directory = true });
+defer directory.close(io);
+try directory.sync(io); // the simulated backend runs `syncDir` for it
+```
+
+So durable application code needs only `std.Io`, not the `Disk` capability.
+
 `setLength` extension is zero-filled by the disk authority. It is one
 lifecycle operation, not a series of independently fallible sector writes.
 
@@ -89,11 +100,15 @@ path-and-sector-scoped fault.
 or metadata operations complete, the next operation crashes the disk before
 doing work and fails like any post-crash operation. Re-arming replaces the
 budget; any crash disarms it. If the workload never reaches the boundary, the
-crash never fires.
+crash never fires; `control.disk.disarmCrash()` cancels it and reports whether
+one was pending. A firing armed crash records
+`disk.fault kind=armed_crash fired=true` before its `disk.crash`, and a
+cancelled one records `disk.fault kind=armed_crash disarmed=true`.
 
 Crash marks the disk down and stops live logical processes. Disk restart only
-restores the disk authority; applications restart explicitly through their
-registered process lifecycle.
+restores the disk authority; applications restart explicitly through
+`control.process.restart`, which reruns a registered lifecycle or, without one,
+revives the node's I/O.
 
 ## Recovery windows
 

@@ -10,15 +10,101 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: Stabilization And 1.0 Acceptance
+## Next: 0.9: Honest Network
 
 0.8 delivered dependable campaigns: bounded runs that survive bad cases,
 deterministic step budgets, deduplicated and reduced evidence, resume after a
-kill, fresh-process replay and reduction, and an end-to-end validation on
-pinned storage and network workloads (`zig build validate-campaigns`).
+kill, fresh-process replay and reduction, fault coverage, and an end-to-end
+validation on pinned storage and network workloads
+(`zig build validate-campaigns`). 0.8.1 made reduction strip faults instead of
+injecting them, added crash-point sweeps, and recorded today's network behavior
+as characterization tests; see `CHANGELOG.md`.
 
-A 0.9 or release-candidate phase should close the following evidence gates.
-1.0 commits to the documented deterministic `std.Io` subset and testing workflow.
+The network turns faults into immediate, invented errors and lets endpoints read
+each other's state, so the bugs partitions really cause (hangs, half-open
+connections, late replies, ambiguous retries) cannot happen in simulation.
+Connecting into a partition fails at once even with a 10 s timeout, a peer's
+close or kill reaches it across a partition with no delay, and 1% loss kills a
+stream. Two pinned validations (`std_io_net_kv` and dusty's partition scenarios)
+pass only because the simulator invents a timeout error for clients that set
+none.
+That is a trustworthy-models defect, and fixing it changes network semantics and
+API, so it lands before the stabilization candidates start.
+
+- **Hosts own addresses.** Per-host IPv4 and IPv6 addresses, port tables, and
+  ephemeral ranges; binding another host's address fails with
+  `AddressUnavailable`; `accept` reports the client's real address; a simulated
+  DNS resolves host names. Behind `address_model = .per_host_v1`.
+- **A push-based fabric.** Directed links with latency and loss policies, one
+  network event queue the scheduler waits on, and per-socket buffers, so
+  delivery no longer waits for readers and one stalled connection cannot starve
+  another.
+- **TCP-lite.** Handshake, cumulative ACKs, receive windows, timed
+  retransmission with backoff, and FIN and RST on the wire. A fault by itself
+  produces silence; errors come only from mechanisms with Linux-shaped timing:
+  refusal, retry exhaustion, keepalive, or an explicit reject fault. Behind
+  `semantics = .tcp_v1`, with `.linux` and `.compressed` timing profiles.
+- **Faults as handles.** `partition`, `isolate`, `cut`, and `degrade` return
+  faults with ids, a disruption mode (drop, hold, slow, reject), an optional
+  duration, and one composition rule; healing one fault leaves the others.
+  Include isolate-one and partial partitions, which failure studies show
+  trigger most partition bugs. Today's calls map onto these.
+- **Explain every packet's fate.** Trace sends, drops, holds, and deliveries with
+  their reason and fault id, and print a `netstat` table of sockets and active
+  faults on deadlock, watchdog, and check failures.
+- **Versioned semantics.** Capsules record the network model and replay rejects
+  a mismatch. Convert validations that relied on invented errors to real
+  application timeouts, then flip the defaults with a changelog entry.
+- **Decide `Endpoint(Message)`.** raftz builds its cluster tests on it: promote a
+  small stable subset or document a migration path to `std.Io.net`.
+
+Exit when the characterization probes behave as Linux TCP would under `tcp_v1`,
+every pinned validation passes without invented errors, a missing application
+timeout surfaces as a reported deadlock, and the performance baseline holds.
+
+## 0.10: Harness API
+
+The runner works, but the pinned real-world workloads do not use it: 9 of the 11
+files in `validation/` call `World.init` directly and compare traces by hand, so
+the best evidence gets no capsules, reduction, campaigns, or crash-point sweeps.
+They also fail from task bodies by panicking (91 panic sites). This milestone
+settles the harness API before the freeze, with those workloads as its
+acceptance test.
+
+- **Run the validations through the runner.** Port beanstalkz and dusty first;
+  what they cannot express (multi-node setup, outcome assertions, failing a run
+  from a task) is the gap to close.
+- **Fail a run from a task.** Make a task error a scenario failure with a report
+  instead of a panic, through error-returning `std.Io` futures or a case helper.
+- **One typed harness.** Replace `config: anytype` with a harness type built once
+  from the app, scenario, and checks, driving run, fuzz, replay, reduction,
+  campaigns, and sweeps. Replay then cannot be handed different checks, and
+  simulation options can default.
+- **Infallible recording.** Recording errors land in every caller's signature
+  although production recording cannot fail. Record the first failure on the
+  world and fail the run at the next boundary; give `Recorder` a sink so
+  production code can send events somewhere.
+- **One process-control surface.** Choose between `sim.killProcess`,
+  `control.process.kill`, and `ManagedProcess`.
+- **Keep `World` an engine detail.** Move the choices harnesses need
+  (`chooseBool`, `chooseIntLessThan`, `randomBytes`) onto `Control`, stop
+  exposing mutable `World` fields, and return precise error sets where a control
+  interface has one implementation.
+- **Group the root exports** into namespaces such as `mar.disk`, `mar.net`, and
+  `mar.replay`.
+- **Reproduce without editing code.** Rerun a failing fuzz or campaign seed
+  through a build option, fill `ReplayIdentity` from the build, and replay a
+  downstream capsule from the command line.
+
+Exit when the ported validations need no `World.init`, no task panics, and no
+hand-compared traces, and the public API is ready for the first stabilization
+candidate.
+
+## Stabilization And 1.0 Acceptance
+
+After 0.9 flips the network defaults and 0.10 settles the harness API, a
+release-candidate phase should close the following evidence gates. 1.0 commits to the documented deterministic `std.Io`
+subset and testing workflow.
 
 - **Stable public contract:** identify supported application/harness APIs and
   explicitly experimental surfaces; publish deprecation and compatibility rules.
@@ -46,13 +132,23 @@ A 0.9 or release-candidate phase should close the following evidence gates.
   scaling and resource limits with regression budgets for representative workloads.
 
 PCT, bounded schedule exploration, linearizability checking, semantic coverage,
-campaign sharding, new transports, and broader platform support require concrete
+campaign sharding, network nemesis and swarm profiles, targeted packet rules,
+datagrams, new transports, and broader platform support require concrete
 workload evidence. They are not prerequisites for a narrow, dependable 1.0.
 
 ## Deferred Harness Work
 
 - Add allocation-site stacks and generic user-resource tracking beyond the
   existing simulated-handle checks.
+- Give each host its own disk and clock, so a host crash loses only that host's
+  unsynced writes and leases can meet clock skew.
+- Build a network nemesis, per-seed swarm fault profiles, and targeted packet
+  rules on 0.9's fault handles.
+- Add datagrams, and rebuild `Endpoint(Message)` on them under a declared
+  delivery contract, once a pinned workload needs UDP.
+- Let `std.testing.fuzz` input drive simulator decisions, so coverage-guided
+  fuzzing can steer faults and schedules. raftz runs its nightly WAL fuzzing
+  this way, with Marionette only seeded from the fuzzer.
 
 ## Standing Decisions
 
@@ -66,7 +162,8 @@ bus. Harness fault powers stay out of application handles.
 
 `std.Io.net` tests codecs, framing, partial I/O, stream lifecycle, and transport
 glue. `Endpoint(Message)` explores protocol/state-machine behavior above the
-wire. It is not a promise of production transport parity.
+wire. It is not a promise of production transport parity. 0.9 decides its
+long-term status.
 
 ### Breadth Is SUT-Driven
 
