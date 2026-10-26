@@ -42,6 +42,7 @@ const PostCreateStatFailDisk = struct {
         .stat_dir = statDir,
         .read_dir = readDir,
         .set_times = setTimes,
+        .delete_dir = deleteDir,
     };
 
     fn read(_: *anyopaque, _: disk_module.Disk.Read) disk_module.DiskError!void {
@@ -49,6 +50,10 @@ const PostCreateStatFailDisk = struct {
     }
 
     fn setTimes(_: *anyopaque, _: disk_module.Disk.SetTimes) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn deleteDir(_: *anyopaque, _: disk_module.Disk.DeleteDir) disk_module.DiskError!void {
         return error.FileNotFound;
     }
 
@@ -6494,4 +6499,24 @@ test "io: file and directory timestamps can be set and survive sync and crash" {
     try std.testing.expectEqual(accessed, stat.atime);
     stat = try cwd.statFile(io, "folder", .{});
     try std.testing.expectEqual(modified, stat.mtime);
+}
+
+test "io: directories can be removed one at a time or as a tree" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xD1E, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    try cwd.createDir(io, "empty", .default_dir);
+    try cwd.deleteDir(io, "empty");
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "empty", .{}));
+
+    try cwd.createDirPath(io, "tree/a/b");
+    const file = try cwd.createFile(io, "tree/a/b/leaf", .{});
+    try file.writePositionalAll(io, "DATA", 0);
+    file.close(io);
+    try std.testing.expectError(error.DirNotEmpty, cwd.deleteDir(io, "tree"));
+    try cwd.deleteTree(io, "tree");
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "tree", .{}));
 }

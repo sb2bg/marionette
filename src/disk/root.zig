@@ -32,6 +32,7 @@ pub const DiskStatResult = model.DiskStatResult;
 pub const DiskStatDir = model.DiskStatDir;
 pub const DiskStatDirResult = model.DiskStatDirResult;
 pub const DiskSetTimes = model.DiskSetTimes;
+pub const DiskDeleteDir = model.DiskDeleteDir;
 pub const DiskSync = model.DiskSync;
 pub const DiskSyncDir = model.DiskSyncDir;
 pub const DiskWrite = model.DiskWrite;

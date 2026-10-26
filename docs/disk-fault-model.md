@@ -79,6 +79,12 @@ try directory.sync(io); // the simulated backend runs `syncDir` for it
 
 So durable application code needs only `std.Io`, not the `Disk` capability.
 
+`Disk.deleteDir` and `Dir.deleteDir` remove an empty directory; the removal is
+pending until its parent is synced, like a file delete. Because a directory is
+removed only once empty, a removal that becomes durable, by a parent sync or by
+surviving a crash, makes the changes that emptied it durable too: a crash never
+restores a file into a directory it keeps removed, or moves one back into it.
+
 Files and directories carry a modification and an access time. Writes and
 length changes move the modification time; reads do not move the access time,
 as on a `noatime` mount. `File.setTimestamps`, `Dir.setTimestamps`, and

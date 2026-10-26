@@ -417,6 +417,23 @@ pub fn Ops(comptime Backend: type) type {
             backend.discardFileIdentity(index);
         }
 
+        pub fn simDirDeleteDir(
+            userdata: ?*anyopaque,
+            dir: Io.Dir,
+            sub_path: []const u8,
+        ) Io.Dir.DeleteDirError!void {
+            const backend = backendFromUserdata(userdata);
+            const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
+            defer backend.freeOpScratch(path);
+            if (std.mem.eql(u8, path, ".")) return error.AccessDenied;
+            backend.reserveFileMutationPaths(path, null) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.SystemResources,
+            };
+            defer backend.releaseFileMutationPaths(path, null);
+            backend.disk.deleteDir(.{ .path = path }) catch |err| return errors.mapDiskDeleteDirError(err);
+        }
+
         pub fn simDirRename(
             userdata: ?*anyopaque,
             old_dir: Io.Dir,

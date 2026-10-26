@@ -10,6 +10,12 @@
   access time it stores, and `Disk.setTimes` sets times on the simulated and
   real disks. Setting times never makes pending writes durable, and times
   survive a crash.
+- `Dir.deleteDir`, and with it `Dir.deleteTree`, now remove directories in
+  simulation; `deleteDir` previously reported `FileNotFound` for an existing
+  directory. Adds `Disk.deleteDir` on the simulated and real disks. A removal is
+  pending until its parent is synced, and once durable it keeps the deletes and
+  renames that emptied the directory, so a crash cannot restore entries into a
+  removed directory.
 
 ## v0.8.1 - 2026-10-26
 

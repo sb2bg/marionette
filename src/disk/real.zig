@@ -245,6 +245,22 @@ pub const RealDisk = struct {
         };
     }
 
+    fn deleteDir(self: *Self, options: Disk.DeleteDir) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        if (std.mem.eql(u8, options.path, ".")) return error.InvalidPath;
+
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+        try self.rejectSymlink(parent.dir, parent.name, false);
+        parent.dir.deleteDir(self.io, parent.name) catch |err| return switch (err) {
+            error.DirNotEmpty => error.DirNotEmpty,
+            error.FileNotFound => error.FileNotFound,
+            error.NotDir => error.NotDir,
+            error.Canceled => error.Canceled,
+            else => error.WriteError,
+        };
+    }
+
     fn setTimes(self: *Self, options: Disk.SetTimes) DiskError!void {
         try validateLogicalPath(options.path, .directory);
         const host_options: std.Io.Dir.SetTimestampsOptions = .{
@@ -456,6 +472,7 @@ pub const RealDisk = struct {
         .stat_dir = diskStatDir,
         .read_dir = diskReadDir,
         .set_times = diskSetTimes,
+        .delete_dir = diskDeleteDir,
     };
 
     fn fromOpaque(ptr: *anyopaque) *Self {
@@ -512,6 +529,10 @@ pub const RealDisk = struct {
 
     fn diskSetTimes(ptr: *anyopaque, options: Disk.SetTimes) DiskError!void {
         try fromOpaque(ptr).setTimes(options);
+    }
+
+    fn diskDeleteDir(ptr: *anyopaque, options: Disk.DeleteDir) DiskError!void {
+        try fromOpaque(ptr).deleteDir(options);
     }
 };
 
@@ -775,6 +796,21 @@ test "disk: real disk sets host file and directory times" {
     try std.testing.expectEqual(@as(i96, modified), file_stat.mtime.nanoseconds);
     const dir_stat = try tmp.dir.statFile(std.testing.io, "dir", .{});
     try std.testing.expectEqual(@as(i96, modified), dir_stat.mtime.nanoseconds);
+}
+
+test "disk: real disk removes only empty host directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    try app_disk.write(.{ .path = "dir/file", .offset = 0, .bytes = "abcd" });
+    try std.testing.expectError(error.DirNotEmpty, app_disk.deleteDir(.{ .path = "dir" }));
+    try app_disk.delete(.{ .path = "dir/file" });
+    try app_disk.deleteDir(.{ .path = "dir" });
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "dir", .{}));
 }
 
 test "disk: real disk rejects symlink escapes" {

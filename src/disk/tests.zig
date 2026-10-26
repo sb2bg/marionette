@@ -1503,3 +1503,97 @@ test "disk: manual crash disarms a pending armed crash" {
     // The manual crash consumed the armed trigger: operations run again.
     try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "aaaa" });
 }
+
+test "disk: an empty directory can be removed and a non-empty one cannot" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app = disk.disk();
+
+    try app.createDir(.{ .path = "full" });
+    try app.write(.{ .path = "full/file", .offset = 0, .bytes = "DATA" });
+    try std.testing.expectError(error.DirNotEmpty, app.deleteDir(.{ .path = "full" }));
+    try std.testing.expectError(error.FileNotFound, app.deleteDir(.{ .path = "missing" }));
+    try std.testing.expectError(error.NotDir, app.deleteDir(.{ .path = "full/file" }));
+
+    try app.delete(.{ .path = "full/file" });
+    try app.deleteDir(.{ .path = "full" });
+    try std.testing.expectError(error.FileNotFound, app.statDir(.{ .path = "full" }));
+}
+
+test "disk: an unsynced directory removal is lost in a crash, a synced one is kept" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app = disk.disk();
+
+    try app.createDir(.{ .path = "kept" });
+    try app.createDir(.{ .path = "lost" });
+    try app.syncDir(.{ .path = "." });
+    try app.deleteDir(.{ .path = "kept" });
+    try app.syncDir(.{ .path = "." });
+    try app.deleteDir(.{ .path = "lost" });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectError(error.FileNotFound, app.statDir(.{ .path = "kept" }));
+    _ = try app.statDir(.{ .path = "lost" });
+}
+
+test "disk: a kept directory removal keeps the deletes it depended on" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app = disk.disk();
+
+    try app.createDir(.{ .path = "dir" });
+    try app.write(.{ .path = "dir/file", .offset = 0, .bytes = "DATA" });
+    try app.sync(.{ .path = "dir/file" });
+    try app.syncDir(.{ .path = "dir" });
+    try app.syncDir(.{ .path = "." });
+    // The file delete is never synced; the removal of its directory is.
+    try app.delete(.{ .path = "dir/file" });
+    try app.deleteDir(.{ .path = "dir" });
+    try app.syncDir(.{ .path = "." });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    try std.testing.expectError(error.FileNotFound, app.statDir(.{ .path = "dir" }));
+    try std.testing.expectError(error.FileNotFound, app.stat(.{ .path = "dir/file" }));
+}
+
+test "disk: a pending directory removal that a crash keeps keeps what emptied it" {
+    // Seed 2390 keeps the newest metadata and loses the next one at 1/2.
+    for ([_]bool{ false, true }) |rename_out| {
+        var world = try World.init(std.testing.allocator, .{ .seed = 2390, .tick_ns = 1 });
+        defer world.deinit();
+        var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+        defer disk.deinit();
+        const app = disk.disk();
+
+        try app.createDir(.{ .path = "dir" });
+        try app.write(.{ .path = "dir/file", .offset = 0, .bytes = "DATA" });
+        try app.sync(.{ .path = "dir/file" });
+        try app.syncDir(.{ .path = "dir" });
+        try app.syncDir(.{ .path = "." });
+        if (rename_out) {
+            try app.rename(.{ .old_path = "dir/file", .new_path = "file" });
+        } else {
+            try app.delete(.{ .path = "dir/file" });
+        }
+        try app.deleteDir(.{ .path = "dir" });
+        try disk.control().setFaults(.{ .crash_lost_metadata_rate = .oneIn(2) });
+        try disk.control().crash();
+        try disk.control().restart();
+
+        try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "kind=delete_dir result=kept") != null);
+        try std.testing.expectError(error.FileNotFound, app.statDir(.{ .path = "dir" }));
+        try std.testing.expectError(error.FileNotFound, app.stat(.{ .path = "dir/file" }));
+        if (rename_out) _ = try app.stat(.{ .path = "file" });
+    }
+}

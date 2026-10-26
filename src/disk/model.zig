@@ -25,6 +25,7 @@ pub const DiskError = error{
     PathAlreadyExists,
     NotDir,
     IsDir,
+    DirNotEmpty,
     InvalidAlignment,
     InvalidDuration,
     InvalidPath,
@@ -116,6 +117,7 @@ pub const Disk = struct {
     pub const DirEntryKind = DiskDirEntryKind;
     pub const DirList = DiskDirList;
     pub const SetTimes = DiskSetTimes;
+    pub const DeleteDir = DiskDeleteDir;
     /// Non-suspending simulator metadata view. Host adapters leave it absent.
     /// Paths are borrowed only until the next disk mutation.
     pub const Snapshot = struct { path: []const u8, inode: u64, size: u64, mtime_ns: u64, atime_ns: u64 = 0 };
@@ -134,6 +136,7 @@ pub const Disk = struct {
         stat_dir: *const fn (*anyopaque, StatDir) DiskError!StatDirResult,
         read_dir: *const fn (*anyopaque, ReadDir) DiskError!DirList,
         set_times: *const fn (*anyopaque, SetTimes) DiskError!void,
+        delete_dir: *const fn (*anyopaque, DeleteDir) DiskError!void,
     };
 
     /// Fill `options.buffer` from sector-aligned `options.offset`,
@@ -196,6 +199,11 @@ pub const Disk = struct {
         try self.vtable.create_dir(self.ptr, options);
     }
 
+    /// Remove one empty directory. Durable only after `syncDir` on its parent.
+    pub fn deleteDir(self: Disk, options: DeleteDir) DiskError!void {
+        try self.vtable.delete_dir(self.ptr, options);
+    }
+
     /// Report one directory's existence.
     pub fn statDir(self: Disk, options: StatDir) DiskError!StatDirResult {
         return try self.vtable.stat_dir(self.ptr, options);
@@ -237,6 +245,7 @@ const unavailable_disk_vtable: Disk.VTable = .{
     .stat_dir = unavailableStatDir,
     .read_dir = unavailableReadDir,
     .set_times = unavailableSetTimes,
+    .delete_dir = unavailableDeleteDir,
 };
 
 fn unavailableRead(_: *anyopaque, _: Disk.Read) DiskError!void {
@@ -288,6 +297,10 @@ fn unavailableReadDir(_: *anyopaque, _: Disk.ReadDir) DiskError!Disk.DirList {
 }
 
 fn unavailableSetTimes(_: *anyopaque, _: Disk.SetTimes) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableDeleteDir(_: *anyopaque, _: Disk.DeleteDir) DiskError!void {
     return error.DiskUnavailable;
 }
 
@@ -356,6 +369,10 @@ pub const DiskStatDirResult = struct {
     inode: u64,
     mtime_ns: u64,
     atime_ns: u64 = 0,
+};
+
+pub const DiskDeleteDir = struct {
+    path: []const u8,
 };
 
 pub const DiskSetTimes = struct {

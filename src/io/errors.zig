@@ -97,6 +97,17 @@ pub fn mapDiskSetTimesError(err: disk_module.DiskError) Io.File.SetTimestampsErr
     };
 }
 
+pub fn mapDiskDeleteDirError(err: disk_module.DiskError) Io.Dir.DeleteDirError {
+    return switch (err) {
+        error.OutOfMemory => error.SystemResources,
+        error.Canceled => error.Canceled,
+        error.FileNotFound, error.InvalidPath => error.FileNotFound,
+        error.DirNotEmpty => error.DirNotEmpty,
+        error.NotDir => error.NotDir,
+        else => error.FileSystem,
+    };
+}
+
 pub fn mapDiskDeleteError(err: disk_module.DiskError) Io.Dir.DeleteFileError {
     return switch (err) {
         error.OutOfMemory => error.SystemResources,

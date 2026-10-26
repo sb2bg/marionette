@@ -118,6 +118,8 @@ pub const SimDisk = struct {
             create: FileId,
             create_dir: DirId,
             delete: ?File,
+            /// The removed directory, owned until a crash restores it.
+            delete_dir: ?Directory,
             rename: RenameUndo,
         };
 
@@ -139,6 +141,7 @@ pub const SimDisk = struct {
             switch (self.kind) {
                 .create, .create_dir => {},
                 .delete => |*file| if (file.*) |*owned| owned.deinit(allocator),
+                .delete_dir => |*directory| if (directory.*) |*owned| owned.deinit(allocator),
                 .rename => |*undo| undo.deinit(allocator),
             }
             self.* = undefined;
@@ -163,6 +166,9 @@ pub const SimDisk = struct {
         directory_changes: std.ArrayList(DirectoryChange) = .empty,
         pending_metadata: std.ArrayList(PendingMetadata) = .empty,
         kept_file_ids: std.AutoHashMapUnmanaged(FileId, void) = .empty,
+        /// Paths of directory removals this crash keeps. Borrowed from their
+        /// pending records, which outlive metadata resolution.
+        kept_removed_dirs: std.ArrayList([]const u8) = .empty,
         next_file_id: FileId,
         next_file_inode: u64,
         next_dir_id: DirId,
@@ -196,6 +202,7 @@ pub const SimDisk = struct {
             self.clearPendingMetadata();
             self.pending_metadata.deinit(self.disk.world.allocator);
             self.kept_file_ids.deinit(self.disk.world.allocator);
+            self.kept_removed_dirs.deinit(self.disk.world.allocator);
             self.* = undefined;
         }
 
@@ -319,7 +326,7 @@ pub const SimDisk = struct {
             if (file.metadata_durable) return;
             for (self.pending_metadata.items) |pending| switch (pending.kind) {
                 .create => |id| if (id == file.id) return,
-                .create_dir, .delete, .rename => {},
+                .create_dir, .delete, .delete_dir, .rename => {},
             };
 
             const dir = try self.disk.ownedParentDir(file.path);
@@ -368,6 +375,9 @@ pub const SimDisk = struct {
                     }
                 },
                 .delete => {},
+                .delete_dir => |removed| {
+                    if (removed) |*directory| try self.kept_removed_dirs.append(self.disk.world.allocator, directory.path);
+                },
                 .rename => |rename_undo| {
                     if (try self.mutableFileById(rename_undo.file_id)) |file| {
                         try self.kept_file_ids.put(self.disk.world.allocator, rename_undo.file_id, {});
@@ -456,6 +466,7 @@ pub const SimDisk = struct {
         /// record for normal teardown.
         fn restoreFile(self: *CrashStage, file: File) DiskError!bool {
             if (self.pathOccupiedByDifferentEntry(file.path, file.id)) return false;
+            if (self.underKeptRemoval(file.path)) return false;
             if (self.findFileChange(file.id)) |change| {
                 std.debug.assert(change.file == null);
                 change.file = file;
@@ -465,6 +476,34 @@ pub const SimDisk = struct {
                 .id = file.id,
                 .existed = self.disk.findFileById(file.id) != null,
                 .file = file,
+            });
+            return true;
+        }
+
+        /// A directory can only be removed once empty, so a kept removal
+        /// keeps the deletes it depended on: nothing is restored below a
+        /// directory this crash keeps removed, even if it was created again.
+        /// Parent directories are otherwise implicit, so their absence alone
+        /// does not block a restore.
+        fn underKeptRemoval(self: *const CrashStage, path: []const u8) bool {
+            for (self.kept_removed_dirs.items) |removed| {
+                if (isDescendant(removed, path)) return true;
+            }
+            return false;
+        }
+
+        fn restoreDirectory(self: *CrashStage, directory: Directory) DiskError!bool {
+            if (self.directoryPathOccupiedByDifferentEntry(directory.path, directory.id)) return false;
+            if (self.underKeptRemoval(directory.path)) return false;
+            if (self.findDirectoryChange(directory.id)) |change| {
+                std.debug.assert(change.directory == null);
+                change.directory = directory;
+                return true;
+            }
+            try self.directory_changes.append(self.disk.world.allocator, .{
+                .id = directory.id,
+                .existed = self.disk.findDirectoryIndexById(directory.id) != null,
+                .directory = directory,
             });
             return true;
         }
@@ -526,10 +565,22 @@ pub const SimDisk = struct {
                         if (try self.restoreFile(file)) deleted.* = null;
                     }
                 },
+                .delete_dir => |*deleted| {
+                    if (deleted.*) |directory| {
+                        if (try self.restoreDirectory(directory)) deleted.* = null;
+                    }
+                },
                 .rename => |*rename_undo| {
                     if (!self.kept_file_ids.contains(rename_undo.file_id)) {
                         if (rename_undo.old_path) |old_path| {
-                            if (self.pathOccupiedByDifferentEntry(old_path, rename_undo.file_id)) {
+                            if (self.underKeptRemoval(old_path)) {
+                                // The source directory stays removed, so the
+                                // rename is kept along with what it required.
+                                if (try self.mutableFileById(rename_undo.file_id)) |file| {
+                                    try self.kept_file_ids.put(self.disk.world.allocator, rename_undo.file_id, {});
+                                    file.metadata_durable = true;
+                                }
+                            } else if (self.pathOccupiedByDifferentEntry(old_path, rename_undo.file_id)) {
                                 // A later surviving create owns the old source
                                 // name, so the older renamed incarnation cannot
                                 // also move back into that namespace slot.
@@ -977,6 +1028,55 @@ pub const SimDisk = struct {
             traceField("status", .{ .literal = "ok" }),
             traceField("latency_ns", .{ .uint = latency_ns }),
         });
+    }
+
+    fn deleteDir(self: *Self, options: Disk.DeleteDir) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        if (std.mem.eql(u8, options.path, ".")) return error.InvalidPath;
+        try self.beginOp();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        const index = for (self.directories.items, 0..) |directory, index| {
+            if (std.mem.eql(u8, directory.path, options.path)) break index;
+        } else {
+            if (self.visibleLength(options.path) != null) {
+                try self.recordPathOp("disk.delete_dir", op_id, options.path, "not_dir", latency_ns);
+                return error.NotDir;
+            }
+            try self.recordPathOp("disk.delete_dir", op_id, options.path, "not_found", latency_ns);
+            return error.FileNotFound;
+        };
+        if (self.directoryHasChild(options.path)) {
+            try self.recordPathOp("disk.delete_dir", op_id, options.path, "not_empty", latency_ns);
+            return error.DirNotEmpty;
+        }
+
+        const parent = try self.ownedParentDir(options.path);
+        errdefer self.world.allocator.free(parent);
+        try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
+        const removed = self.directories.orderedRemove(index);
+        self.pending_metadata.appendAssumeCapacity(.{
+            .op_id = op_id,
+            .dir = parent,
+            .kind = .{ .delete_dir = removed },
+        });
+        try self.recordPathOp("disk.delete_dir", op_id, options.path, "ok", latency_ns);
+    }
+
+    /// Any visible entry below `path`, including files that exist only as
+    /// pending writes.
+    fn directoryHasChild(self: *Self, path: []const u8) bool {
+        for (self.directories.items) |directory| {
+            if (isDescendant(path, directory.path)) return true;
+        }
+        for (self.files.items) |file| {
+            if (isDescendant(path, file.path)) return true;
+        }
+        for (self.pending_writes.items) |pending| {
+            if (isDescendant(path, pending.path)) return true;
+        }
+        return false;
     }
 
     fn statDir(self: *Self, options: Disk.StatDir) DiskError!Disk.StatDirResult {
@@ -1667,7 +1767,7 @@ pub const SimDisk = struct {
         if (file.metadata_durable) return;
         for (self.pending_metadata.items) |pending| switch (pending.kind) {
             .create => |id| if (id == file.id) return,
-            .create_dir, .delete, .rename => {},
+            .create_dir, .delete, .delete_dir, .rename => {},
         };
 
         const dir = try self.ownedParentDir(file.path);
@@ -1759,10 +1859,43 @@ pub const SimDisk = struct {
 
             self.markMetadataDurable(pending);
             var removed = self.pending_metadata.orderedRemove(index);
+            defer removed.deinit(self.world.allocator);
+            committed += 1;
+            if (removed.kind == .delete_dir) {
+                if (removed.kind.delete_dir) |*directory| {
+                    committed += self.commitMetadataUnder(directory.path);
+                    // The cascade may have removed earlier records.
+                    index = 0;
+                }
+            }
+        }
+        return committed;
+    }
+
+    /// A directory is removed only once empty, so making its removal durable
+    /// makes the earlier changes that emptied it durable too, as a journaling
+    /// filesystem orders them.
+    fn commitMetadataUnder(self: *Self, path: []const u8) u64 {
+        var committed: u64 = 0;
+        var index: usize = 0;
+        while (index < self.pending_metadata.items.len) {
+            const pending = &self.pending_metadata.items[index];
+            const inside = isWithin(path, pending.dir) or
+                (if (pending.other_dir) |other| isWithin(path, other) else false);
+            if (!inside) {
+                index += 1;
+                continue;
+            }
+            self.markMetadataDurable(pending);
+            var removed = self.pending_metadata.orderedRemove(index);
             removed.deinit(self.world.allocator);
             committed += 1;
         }
         return committed;
+    }
+
+    fn isWithin(directory: []const u8, path: []const u8) bool {
+        return std.mem.eql(u8, directory, path) or isDescendant(directory, path);
     }
 
     fn markPendingMetadataDirSynced(pending: *PendingMetadata, dir: []const u8) bool {
@@ -1799,7 +1932,7 @@ pub const SimDisk = struct {
                     self.directories.items[index].metadata_durable = true;
                 }
             },
-            .delete => {},
+            .delete, .delete_dir => {},
             .rename => |rename_undo| {
                 if (self.findFileById(rename_undo.file_id)) |file| file.metadata_durable = true;
             },
@@ -1865,6 +1998,13 @@ pub const SimDisk = struct {
                 try self.cloneFile(file)
             else
                 null },
+            .delete_dir => |deleted| .{ .delete_dir = if (deleted) |directory| .{
+                .id = directory.id,
+                .path = try self.world.allocator.dupe(u8, directory.path),
+                .mtime_ns = directory.mtime_ns,
+                .atime_ns = directory.atime_ns,
+                .metadata_durable = directory.metadata_durable,
+            } else null },
             .rename => |*rename_undo| .{ .rename = try self.cloneRenameUndo(rename_undo) },
         };
         return .{
@@ -2229,6 +2369,7 @@ pub const SimDisk = struct {
         .stat_dir = diskStatDir,
         .read_dir = diskReadDir,
         .set_times = diskSetTimes,
+        .delete_dir = diskDeleteDir,
     };
 
     const control_vtable: DiskControl.VTable = .{
@@ -2290,6 +2431,10 @@ pub const SimDisk = struct {
 
     fn diskSetTimes(ptr: *anyopaque, options: Disk.SetTimes) DiskError!void {
         try fromOpaque(ptr).setTimes(options);
+    }
+
+    fn diskDeleteDir(ptr: *anyopaque, options: Disk.DeleteDir) DiskError!void {
+        try fromOpaque(ptr).deleteDir(options);
     }
 
     fn diskStat(ptr: *anyopaque, options: Disk.Stat) DiskError!Disk.StatResult {
