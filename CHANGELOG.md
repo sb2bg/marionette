@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.2 - Unreleased
+
+- Sending a file to a simulated stream (`Stream.Writer.sendFile`) now falls
+  back to reading the file and writing its bytes, as on hosts without
+  zero-copy support. It previously failed with a fabricated `NetworkDown`.
+
 ## v0.8.1 - 2026-10-26
 
 - **Decision-model change.** Every probabilistic fault roll (network drops,

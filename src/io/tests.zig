@@ -6408,3 +6408,36 @@ test "io: a stalled reader does not starve an unrelated connect" {
     flood_future.await(node_io[0]);
     flooding.close(node_io[0]);
 }
+
+test "io: sending a file to a stream falls back to reading it" {
+    var world = try World.init(task_world_allocator, .{ .seed = 0x5E7D, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+
+    const contents = "file contents sent with sendFileAll";
+    const file = try Io.Dir.cwd().createFile(client_io, "payload", .{ .read = true });
+    defer file.close(client_io);
+    try file.writePositionalAll(client_io, contents, 0);
+
+    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4741) catch unreachable;
+    var listener = try address.listen(server_io, .{});
+    defer listener.deinit(server_io);
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(client_io);
+    const accepted = try listener.accept(server_io);
+    defer accepted.close(server_io);
+
+    var read_buffer: [16]u8 = undefined;
+    var file_reader = file.reader(client_io, &read_buffer);
+    var write_buffer: [16]u8 = undefined;
+    var writer = client.writer(client_io, &write_buffer);
+    try std.testing.expectEqual(contents.len, try writer.interface.sendFileAll(&file_reader, .unlimited));
+    try writer.interface.flush();
+
+    var received: [contents.len]u8 = undefined;
+    var reader = accepted.reader(server_io, &.{});
+    try reader.interface.readSliceAll(&received);
+    try std.testing.expectEqualStrings(contents, &received);
+}

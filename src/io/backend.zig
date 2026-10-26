@@ -2135,6 +2135,25 @@ pub fn onProcessRuntimeDiskCrashOpaque(ptr: *anyopaque) void {
     runtime.onDiskCrash();
 }
 
+/// Zero-copy file sends are not modeled. `Unimplemented` makes the standard
+/// stream writer fall back to reading the file and writing its bytes, which
+/// the simulated stream does model; any other error would reach the caller as
+/// a failed send.
+fn simNetWriteFile(
+    userdata: ?*anyopaque,
+    handle: Io.net.Socket.Handle,
+    header: []const u8,
+    file_reader: *Io.File.Reader,
+    limit: Io.Limit,
+) Io.net.Stream.Writer.WriteFileError!usize {
+    _ = userdata;
+    _ = handle;
+    _ = header;
+    _ = file_reader;
+    _ = limit;
+    return error.Unimplemented;
+}
+
 const sim_vtable: Io.VTable = .{
     .crashHandler = Io.noCrashHandler,
 
@@ -2249,7 +2268,7 @@ const sim_vtable: Io.VTable = .{
     .netListenUnix = Io.failingNetListenUnix,
     .netConnectUnix = Io.failingNetConnectUnix,
     .netSocketCreatePair = Io.failingNetSocketCreatePair,
-    .netWriteFile = Io.failingNetWriteFile,
+    .netWriteFile = simNetWriteFile,
     .netClose = net_ops.simNetClose,
     .netShutdown = net_ops.simNetShutdown,
     .netInterfaceNameResolve = Io.failingNetInterfaceNameResolve,
