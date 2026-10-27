@@ -171,6 +171,36 @@ Status and fault names are stable literals such as `ok`, `not_found`,
 `crash_torn_write`. Payload hashes, if ever added for debugging, must name a
 stable algorithm.
 
+## `std.Io` file operations
+
+Simulated `std.Io` supports:
+
+- creating, opening, and closing files; positional and streaming reads and
+  writes; seeking; length changes; and `sync`;
+- `stat` with size, modification and access times, and permissions, and setting
+  times and permissions;
+- open-time locks and `lock`, `tryLock`, `unlock`, and `downgradeLock`;
+- `deleteFile`, `rename`, `renamePreserve`, and `createFileAtomic` with
+  `File.Atomic.replace` and `link`;
+- `createDir`, `createDirPath`, `openDir`, iteration, `deleteDir`,
+  `deleteTree`, and directory sync through a directory opened with
+  `allow_directory`.
+
+Operations the model does not provide fail as a host without the feature
+would, never with a misleading `FileNotFound`:
+
+| Operation | Result |
+| --- | --- |
+| Creating a symbolic link | `PermissionDenied`, as on a filesystem without them |
+| `readLink` | `NotLink` for an existing path, `FileNotFound` otherwise |
+| Hard links, `realPath` | `OperationUnsupported` |
+| Changing ownership | `PermissionDenied`; `stat` reports no owner |
+| Memory maps | `AccessDenied` |
+| Zero-copy file-to-file and file-to-socket transfer | `Unimplemented`, so the standard writer falls back to reading and writing |
+
+Permissions are recorded, not enforced, and every node shares one disk. Names
+are case-sensitive byte strings with no Unicode normalization.
+
 ## Limits
 
 The model does not provide full filesystem behavior, transparent interception

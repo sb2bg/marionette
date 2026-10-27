@@ -43,7 +43,10 @@ This ledger classifies Marionette's simulated `std.Io.net` surface against Zig
 
 UDP, Unix-domain sockets, non-literal DNS, broader socket-option parity, and
 kernel-specific readiness behavior are unsupported. They should be added only
-when a pinned system under test requires them.
+when a pinned system under test requires them. Binding a datagram socket
+returns `ProtocolUnsupportedBySystem`, and Unix-domain listen and connect return
+`AddressFamilyUnsupported`. Sending a file to a stream returns `Unimplemented`
+to the standard writer, which then reads the file and writes its bytes.
 
 The no-fault differential tests run the same portable bidirectional exchange,
 accepted-peer port/family observations, send-half-close/EOF scenario, and IPv4
