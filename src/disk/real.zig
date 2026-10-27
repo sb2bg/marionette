@@ -835,7 +835,7 @@ test "disk: real disk sets host file modes" {
     try app_disk.write(.{ .path = "file", .offset = 0, .bytes = "abcd" });
     try app_disk.setMode(.{ .path = "file", .mode = 0o600 });
     const stat = try tmp.dir.statFile(std.testing.io, "file", .{});
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(stat.permissions.toMode())) & 0o777);
 }
 
 test "disk: real disk removes only empty host directories" {
