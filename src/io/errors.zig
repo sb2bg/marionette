@@ -90,6 +90,14 @@ pub fn mapDiskSetLengthError(err: disk_module.DiskError) Io.File.SetLengthError 
     };
 }
 
+pub fn mapDiskSetPermissionsError(err: disk_module.DiskError) Io.File.SetPermissionsError {
+    return switch (err) {
+        error.Canceled => error.Canceled,
+        error.DiskCrashed => error.ReadOnlyFileSystem,
+        else => error.Unexpected,
+    };
+}
+
 pub fn mapDiskSetTimesError(err: disk_module.DiskError) Io.File.SetTimestampsError {
     return switch (err) {
         error.Canceled => error.Canceled,

@@ -245,6 +245,27 @@ pub const RealDisk = struct {
         };
     }
 
+    fn setMode(self: *Self, options: Disk.SetMode) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        const permissions: std.Io.File.Permissions = .fromMode(@intCast(options.mode));
+        if (std.mem.eql(u8, options.path, ".")) {
+            self.root.setFilePermissions(self.io, ".", permissions, .{}) catch |err| return mapSetModeError(err);
+            return;
+        }
+        var parent = try self.openParent(options.path, false);
+        defer parent.deinit(self.io);
+        // Symlinks are refused here, so following them below is safe.
+        try self.rejectSymlink(parent.dir, parent.name, false);
+        parent.dir.setFilePermissions(self.io, parent.name, permissions, .{}) catch |err| return mapSetModeError(err);
+    }
+
+    fn mapSetModeError(err: std.Io.Dir.SetFilePermissionsError) DiskError {
+        return switch (err) {
+            error.Canceled => error.Canceled,
+            else => error.WriteError,
+        };
+    }
+
     fn deleteDir(self: *Self, options: Disk.DeleteDir) DiskError!void {
         try validateLogicalPath(options.path, .directory);
         if (std.mem.eql(u8, options.path, ".")) return error.InvalidPath;
@@ -473,6 +494,7 @@ pub const RealDisk = struct {
         .read_dir = diskReadDir,
         .set_times = diskSetTimes,
         .delete_dir = diskDeleteDir,
+        .set_mode = diskSetMode,
     };
 
     fn fromOpaque(ptr: *anyopaque) *Self {
@@ -533,6 +555,10 @@ pub const RealDisk = struct {
 
     fn diskDeleteDir(ptr: *anyopaque, options: Disk.DeleteDir) DiskError!void {
         try fromOpaque(ptr).deleteDir(options);
+    }
+
+    fn diskSetMode(ptr: *anyopaque, options: Disk.SetMode) DiskError!void {
+        try fromOpaque(ptr).setMode(options);
     }
 };
 
@@ -796,6 +822,20 @@ test "disk: real disk sets host file and directory times" {
     try std.testing.expectEqual(@as(i96, modified), file_stat.mtime.nanoseconds);
     const dir_stat = try tmp.dir.statFile(std.testing.io, "dir", .{});
     try std.testing.expectEqual(@as(i96, modified), dir_stat.mtime.nanoseconds);
+}
+
+test "disk: real disk sets host file modes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var disk = try RealDisk.init(tmp.dir, std.testing.io, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app_disk = disk.disk();
+
+    try app_disk.write(.{ .path = "file", .offset = 0, .bytes = "abcd" });
+    try app_disk.setMode(.{ .path = "file", .mode = 0o600 });
+    const stat = try tmp.dir.statFile(std.testing.io, "file", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
 }
 
 test "disk: real disk removes only empty host directories" {

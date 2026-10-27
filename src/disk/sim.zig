@@ -53,6 +53,8 @@ pub const SimDisk = struct {
         len: u64 = 0,
         mtime_ns: u64 = 0,
         atime_ns: u64 = 0,
+        /// Null keeps the default mode.
+        mode: ?u32 = null,
         metadata_durable: bool = true,
         sectors: std.ArrayList(Sector) = .empty,
 
@@ -80,6 +82,7 @@ pub const SimDisk = struct {
         path: []u8,
         mtime_ns: u64,
         atime_ns: u64 = 0,
+        mode: ?u32 = null,
         metadata_durable: bool = true,
 
         fn deinit(self: *Directory, allocator: std.mem.Allocator) void {
@@ -96,8 +99,10 @@ pub const SimDisk = struct {
         bytes: []u8,
         logical_len: ?u64,
         written_at_ns: u64 = 0,
-        /// Access time set while this write was pending; applied when it lands.
+        /// Access time and mode set while this write was pending; applied
+        /// when it lands.
         atime_ns: ?u64 = null,
+        mode: ?u32 = null,
 
         fn deinit(self: *PendingWrite, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
@@ -296,6 +301,7 @@ pub const SimDisk = struct {
                     .path = path,
                     .mtime_ns = source.mtime_ns,
                     .atime_ns = source.atime_ns,
+                    .mode = source.mode,
                     .metadata_durable = source.metadata_durable,
                 },
             });
@@ -710,6 +716,7 @@ pub const SimDisk = struct {
     armed_crash_budget: ?u64 = null,
     root_mtime_ns: u64 = 0,
     root_atime_ns: u64 = 0,
+    root_mode: ?u32 = null,
     crash_observer: ?CrashObserver = null,
     latency_runtime: ?DiskLatencyRuntime = null,
 
@@ -1044,6 +1051,34 @@ pub const SimDisk = struct {
         });
     }
 
+    fn setMode(self: *Self, options: Disk.SetMode) DiskError!void {
+        try validateLogicalPath(options.path, .directory);
+        try self.beginOp();
+
+        const op_id = self.consumeOpId();
+        const latency_ns = try self.advanceLatency();
+        if (std.mem.eql(u8, options.path, ".")) {
+            self.root_mode = options.mode;
+        } else if (self.findDirectory(options.path)) |directory| {
+            directory.mode = options.mode;
+        } else if (self.visibleLength(options.path) != null) {
+            if (self.findFile(options.path)) |file| file.mode = options.mode;
+            for (self.pending_writes.items) |*pending| {
+                if (std.mem.eql(u8, pending.path, options.path)) pending.mode = options.mode;
+            }
+        } else {
+            try self.recordPathOp("disk.set_mode", op_id, options.path, "not_found", latency_ns);
+            return error.FileNotFound;
+        }
+        try self.world.recordFields("disk.set_mode", &.{
+            traceField("op", .{ .uint = op_id }),
+            traceField("path", .{ .text = options.path }),
+            traceField("mode", .{ .uint = options.mode }),
+            traceField("status", .{ .literal = "ok" }),
+            traceField("latency_ns", .{ .uint = latency_ns }),
+        });
+    }
+
     fn deleteDir(self: *Self, options: Disk.DeleteDir) DiskError!void {
         try validateLogicalPath(options.path, .directory);
         if (std.mem.eql(u8, options.path, ".")) return error.InvalidPath;
@@ -1101,7 +1136,7 @@ pub const SimDisk = struct {
         const latency_ns = try self.advanceLatency();
         if (std.mem.eql(u8, options.path, ".")) {
             try self.recordPathOp("disk.stat_dir", op_id, options.path, "ok", latency_ns);
-            return .{ .inode = 1, .mtime_ns = self.root_mtime_ns, .atime_ns = self.root_atime_ns };
+            return .{ .inode = 1, .mtime_ns = self.root_mtime_ns, .atime_ns = self.root_atime_ns, .mode = self.root_mode };
         }
         const directory = self.findDirectory(options.path) orelse {
             try self.recordPathOp("disk.stat_dir", op_id, options.path, "not_found", latency_ns);
@@ -1112,6 +1147,7 @@ pub const SimDisk = struct {
             .inode = directoryInode(directory.id),
             .mtime_ns = directory.mtime_ns,
             .atime_ns = directory.atime_ns,
+            .mode = directory.mode,
         };
     }
 
@@ -1980,6 +2016,7 @@ pub const SimDisk = struct {
             .len = source.len,
             .mtime_ns = source.mtime_ns,
             .atime_ns = source.atime_ns,
+            .mode = source.mode,
             .metadata_durable = source.metadata_durable,
         };
         errdefer cloned.deinit(self.world.allocator);
@@ -2017,6 +2054,7 @@ pub const SimDisk = struct {
                 .path = try self.world.allocator.dupe(u8, directory.path),
                 .mtime_ns = directory.mtime_ns,
                 .atime_ns = directory.atime_ns,
+                .mode = directory.mode,
                 .metadata_durable = directory.metadata_durable,
             } else null },
             .rename => |*rename_undo| .{ .rename = try self.cloneRenameUndo(rename_undo) },
@@ -2069,6 +2107,7 @@ pub const SimDisk = struct {
         file.len = @max(file.len, pending.logical_len orelse physical_end);
         if (pending.bytes.len != 0) file.mtime_ns = pending.written_at_ns;
         if (pending.atime_ns) |atime_ns| file.atime_ns = atime_ns;
+        if (pending.mode) |mode| file.mode = mode;
     }
 
     fn findSector(_: *Self, file: *File, index: u64) ?*Sector {
@@ -2415,6 +2454,7 @@ pub const SimDisk = struct {
         .read_dir = diskReadDir,
         .set_times = diskSetTimes,
         .delete_dir = diskDeleteDir,
+        .set_mode = diskSetMode,
     };
 
     const control_vtable: DiskControl.VTable = .{
@@ -2437,7 +2477,7 @@ pub const SimDisk = struct {
         var result: ?Disk.Snapshot = null;
         for (self.files.items) |file| {
             if (file.inode == inode) {
-                result = .{ .path = file.path, .inode = inode, .size = file.len, .mtime_ns = file.mtime_ns, .atime_ns = file.atime_ns };
+                result = .{ .path = file.path, .inode = inode, .size = file.len, .mtime_ns = file.mtime_ns, .atime_ns = file.atime_ns, .mode = file.mode };
                 break;
             }
         }
@@ -2447,6 +2487,7 @@ pub const SimDisk = struct {
             result.?.size = @max(result.?.size, pending.logical_len orelse (pending.offset + pending.bytes.len));
             if (pending.bytes.len != 0) result.?.mtime_ns = pending.written_at_ns;
             if (pending.atime_ns) |atime_ns| result.?.atime_ns = atime_ns;
+            if (pending.mode) |mode| result.?.mode = mode;
         }
         return result;
     }
@@ -2456,6 +2497,7 @@ pub const SimDisk = struct {
     fn retainTimes(file: *File, snapshot: Disk.Snapshot) void {
         file.mtime_ns = snapshot.mtime_ns;
         file.atime_ns = snapshot.atime_ns;
+        file.mode = snapshot.mode;
     }
 
     fn diskRead(ptr: *anyopaque, options: Disk.Read) DiskError!void {
@@ -2480,6 +2522,10 @@ pub const SimDisk = struct {
 
     fn diskDeleteDir(ptr: *anyopaque, options: Disk.DeleteDir) DiskError!void {
         try fromOpaque(ptr).deleteDir(options);
+    }
+
+    fn diskSetMode(ptr: *anyopaque, options: Disk.SetMode) DiskError!void {
+        try fromOpaque(ptr).setMode(options);
     }
 
     fn diskStat(ptr: *anyopaque, options: Disk.Stat) DiskError!Disk.StatResult {

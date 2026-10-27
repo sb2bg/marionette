@@ -124,9 +124,10 @@ pub const Disk = struct {
     pub const DirList = DiskDirList;
     pub const SetTimes = DiskSetTimes;
     pub const DeleteDir = DiskDeleteDir;
+    pub const SetMode = DiskSetMode;
     /// Non-suspending simulator metadata view. Host adapters leave it absent.
     /// Paths are borrowed only until the next disk mutation.
-    pub const Snapshot = struct { path: []const u8, inode: u64, size: u64, mtime_ns: u64, atime_ns: u64 = 0 };
+    pub const Snapshot = struct { path: []const u8, inode: u64, size: u64, mtime_ns: u64, atime_ns: u64 = 0, mode: ?u32 = null };
     pub const VTable = struct {
         inspect: ?*const fn (*anyopaque, u64) ?Snapshot = null,
         read: *const fn (*anyopaque, Read) DiskError!void,
@@ -143,6 +144,7 @@ pub const Disk = struct {
         read_dir: *const fn (*anyopaque, ReadDir) DiskError!DirList,
         set_times: *const fn (*anyopaque, SetTimes) DiskError!void,
         delete_dir: *const fn (*anyopaque, DeleteDir) DiskError!void,
+        set_mode: *const fn (*anyopaque, SetMode) DiskError!void,
     };
 
     /// Fill `options.buffer` from sector-aligned `options.offset`,
@@ -229,6 +231,13 @@ pub const Disk = struct {
         try self.vtable.set_times(self.ptr, options);
     }
 
+    /// Set a file's or directory's permission bits. Like timestamps, modes
+    /// survive a crash and setting one never makes pending writes durable.
+    /// They are recorded, not enforced.
+    pub fn setMode(self: Disk, options: SetMode) DiskError!void {
+        try self.vtable.set_mode(self.ptr, options);
+    }
+
     /// A disk whose every operation returns `error.DiskUnavailable`.
     pub fn unavailable() Disk {
         return .{ .ptr = &unavailable_disk_ctx, .vtable = &unavailable_disk_vtable };
@@ -252,6 +261,7 @@ const unavailable_disk_vtable: Disk.VTable = .{
     .read_dir = unavailableReadDir,
     .set_times = unavailableSetTimes,
     .delete_dir = unavailableDeleteDir,
+    .set_mode = unavailableSetMode,
 };
 
 fn unavailableRead(_: *anyopaque, _: Disk.Read) DiskError!void {
@@ -307,6 +317,10 @@ fn unavailableSetTimes(_: *anyopaque, _: Disk.SetTimes) DiskError!void {
 }
 
 fn unavailableDeleteDir(_: *anyopaque, _: Disk.DeleteDir) DiskError!void {
+    return error.DiskUnavailable;
+}
+
+fn unavailableSetMode(_: *anyopaque, _: Disk.SetMode) DiskError!void {
     return error.DiskUnavailable;
 }
 
@@ -375,6 +389,14 @@ pub const DiskStatDirResult = struct {
     inode: u64,
     mtime_ns: u64,
     atime_ns: u64 = 0,
+    /// Null when the directory has the default mode.
+    mode: ?u32 = null,
+};
+
+pub const DiskSetMode = struct {
+    /// A file or directory path; "." names the root directory.
+    path: []const u8,
+    mode: u32,
 };
 
 pub const DiskDeleteDir = struct {

@@ -39,7 +39,7 @@ pub fn Ops(comptime Backend: type) type {
                 .inode = stat.inode,
                 .nlink = 1,
                 .size = 0,
-                .permissions = .default_dir,
+                .permissions = permissionsOf(stat.mode, .default_dir),
                 .kind = .directory,
                 .atime = Io.Timestamp.fromNanoseconds(@intCast(stat.atime_ns)),
                 .mtime = Io.Timestamp.fromNanoseconds(@intCast(stat.mtime_ns)),
@@ -70,31 +70,100 @@ pub fn Ops(comptime Backend: type) type {
             userdata: ?*anyopaque,
             dir: Io.Dir,
             sub_path: []const u8,
-            _: Io.Dir.Permissions,
+            permissions: Io.Dir.Permissions,
         ) Io.Dir.CreateDirError!void {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
             backend.createDirectory(path) catch |err| return mapCreateDirError(err);
+            if (permissions != Io.Dir.Permissions.default_dir) {
+                backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return mapCreateDirError(err);
+            }
         }
 
         pub fn simDirCreateDirPath(
             userdata: ?*anyopaque,
             dir: Io.Dir,
             sub_path: []const u8,
-            _: Io.Dir.Permissions,
+            permissions: Io.Dir.Permissions,
         ) Io.Dir.CreateDirPathError!Io.Dir.CreatePathStatus {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
-            return backend.createDirectoryPath(path) catch |err| switch (err) {
-                error.Canceled => error.Canceled,
-                error.OutOfMemory => error.SystemResources,
-                error.PathAlreadyExists => error.PathAlreadyExists,
-                error.FileNotFound => error.FileNotFound,
-                error.NotDir => error.NotDir,
-                else => error.Unexpected,
+            const status = backend.createDirectoryPath(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.OutOfMemory => return error.SystemResources,
+                error.PathAlreadyExists => return error.PathAlreadyExists,
+                error.FileNotFound => return error.FileNotFound,
+                error.NotDir => return error.NotDir,
+                else => return error.Unexpected,
             };
+            // The requested mode applies to the directory this call created.
+            if (status == .created and permissions != Io.Dir.Permissions.default_dir) {
+                backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => return error.Unexpected,
+                };
+            }
+            return status;
+        }
+
+        fn modeOf(permissions: Io.File.Permissions) u32 {
+            return @intCast(permissions.toMode());
+        }
+
+        fn permissionsOf(mode: ?u32, default: Io.File.Permissions) Io.File.Permissions {
+            return if (mode) |value| .fromMode(@intCast(value)) else default;
+        }
+
+        pub fn simFileSetPermissions(userdata: ?*anyopaque, file: Io.File, permissions: Io.File.Permissions) Io.File.SetPermissionsError!void {
+            const backend = backendFromUserdata(userdata);
+            const state = backend.file(file.handle) orelse return error.AccessDenied;
+            if (state.closed) return error.AccessDenied;
+            if (Backend.fileDirectoryPath(state)) |path| {
+                backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
+                return;
+            }
+            if (backend.fileMeta(state).deleted) return error.AccessDenied;
+            var lease = acquireFilePathLease(backend, backend.fileMeta(state)) catch |err| switch (err) {
+                error.OutOfMemory => return error.Unexpected,
+                error.FileDeleted => return error.AccessDenied,
+                error.Canceled => return error.Canceled,
+            };
+            defer lease.deinit();
+            backend.disk.setMode(.{ .path = lease.path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
+        }
+
+        pub fn simDirSetPermissions(userdata: ?*anyopaque, dir: Io.Dir, permissions: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
+            const backend = backendFromUserdata(userdata);
+            const path = resolvePath(backend, dir, ".", .directory) catch |err| switch (err) {
+                error.AccessDenied => return error.AccessDenied,
+                error.FileNotFound, error.SystemResources => return error.Unexpected,
+            };
+            defer backend.freeOpScratch(path);
+            backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
+        }
+
+        pub fn simDirSetFilePermissions(
+            userdata: ?*anyopaque,
+            dir: Io.Dir,
+            sub_path: []const u8,
+            permissions: Io.File.Permissions,
+            _: Io.Dir.SetFilePermissionsOptions,
+        ) Io.Dir.SetFilePermissionsError!void {
+            const backend = backendFromUserdata(userdata);
+            const path = resolvePath(backend, dir, sub_path, .directory) catch |err| switch (err) {
+                error.AccessDenied => return error.AccessDenied,
+                // The error set has no FileNotFound, as for the host backend.
+                error.FileNotFound, error.SystemResources => return error.Unexpected,
+            };
+            defer backend.freeOpScratch(path);
+            backend.acquireFilePathLease(path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return error.Unexpected,
+            };
+            defer backend.releaseFilePathLease(path);
+            backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
         }
 
         pub fn simDirCreateDirPathOpen(
@@ -189,6 +258,11 @@ pub fn Ops(comptime Backend: type) type {
                 backend.disk.write(.{ .path = path, .offset = 0, .bytes = &.{} }) catch |err| {
                     return errors.mapDiskOpenError(err);
                 };
+                if (options.permissions != Io.File.Permissions.default_file) {
+                    backend.disk.setMode(.{ .path = path, .mode = modeOf(options.permissions) }) catch |err| {
+                        return errors.mapDiskOpenError(err);
+                    };
+                }
                 const index = backend.createFileMeta(path) catch return error.SystemResources;
                 const stat_result = backend.disk.stat(.{ .path = path }) catch |err| {
                     backend.discardFileMeta(index);
@@ -613,7 +687,7 @@ pub fn Ops(comptime Backend: type) type {
                 .inode = meta.inode,
                 .nlink = 1,
                 .size = meta.len,
-                .permissions = .default_file,
+                .permissions = permissionsOf(meta.mode, .default_file),
                 .kind = .file,
                 .atime = meta.atime,
                 .mtime = meta.mtime,

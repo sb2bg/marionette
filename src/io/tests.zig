@@ -43,6 +43,7 @@ const PostCreateStatFailDisk = struct {
         .read_dir = readDir,
         .set_times = setTimes,
         .delete_dir = deleteDir,
+        .set_mode = setMode,
     };
 
     fn read(_: *anyopaque, _: disk_module.Disk.Read) disk_module.DiskError!void {
@@ -54,6 +55,10 @@ const PostCreateStatFailDisk = struct {
     }
 
     fn deleteDir(_: *anyopaque, _: disk_module.Disk.DeleteDir) disk_module.DiskError!void {
+        return error.FileNotFound;
+    }
+
+    fn setMode(_: *anyopaque, _: disk_module.Disk.SetMode) disk_module.DiskError!void {
         return error.FileNotFound;
     }
 
@@ -6660,4 +6665,37 @@ test "io: unsupported file and socket operations fail with honest errors" {
     const unix = try Io.net.UnixAddress.init("socket");
     try std.testing.expectError(error.AddressFamilyUnsupported, unix.listen(io, .{}));
     try std.testing.expectError(error.AddressFamilyUnsupported, unix.connect(io));
+}
+
+test "io: file and directory permissions can be set and survive sync and crash" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x9E2, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+    const private: Io.File.Permissions = .fromMode(0o600);
+    const executable: Io.File.Permissions = .fromMode(0o755);
+
+    const created = try cwd.createFile(io, "secret", .{ .permissions = private });
+    try std.testing.expectEqual(private, (try created.stat(io)).permissions);
+    try created.writePositionalAll(io, "DATA", 0);
+    try created.setPermissions(io, executable);
+    try std.testing.expectEqual(executable, (try created.stat(io)).permissions);
+    try created.sync(io);
+    created.close(io);
+    try std.testing.expectEqual(executable, (try cwd.statFile(io, "secret", .{})).permissions);
+
+    try cwd.createDir(io, "folder", private);
+    try std.testing.expectEqual(private, (try cwd.statFile(io, "folder", .{})).permissions);
+    try cwd.setFilePermissions(io, "folder", executable, .{});
+    try std.testing.expectEqual(executable, (try cwd.statFile(io, "folder", .{})).permissions);
+
+    var root = try cwd.openFile(io, ".", .{ .allow_directory = true });
+    try root.sync(io);
+    root.close(io);
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    try sim.control.process.restart(0);
+    try std.testing.expectEqual(executable, (try cwd.statFile(io, "secret", .{})).permissions);
+    try std.testing.expectEqual(executable, (try cwd.statFile(io, "folder", .{})).permissions);
 }

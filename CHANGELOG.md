@@ -34,6 +34,11 @@
   creation report `PermissionDenied`; `readLink` reports `NotLink` for an
   existing path; UDP reports `ProtocolUnsupportedBySystem`; and Unix-domain
   sockets report `AddressFamilyUnsupported`.
+- File and directory permissions now work in simulation: `File.setPermissions`,
+  `Dir.setPermissions`, `Dir.setFilePermissions`, and the permissions given at
+  creation set the mode `stat` reports, through `Disk.setMode` on the simulated
+  and real disks. Modes are recorded, not enforced, and like timestamps they
+  survive a crash. The setters previously reported `FileNotFound`.
 
 ## v0.8.1 - 2026-10-26
 

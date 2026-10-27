@@ -597,6 +597,7 @@ pub const Backend = struct {
         len: u64 = 0,
         mtime: Io.Timestamp = .zero,
         atime: Io.Timestamp = .zero,
+        mode: ?u32 = null,
         deleted: bool = false,
         /// Set when a disk crash invalidates cached state. The length is
         /// re-derived from disk truth on next touch; the timestamp is kept,
@@ -719,6 +720,7 @@ pub const Backend = struct {
                 meta.len = snapshot.size;
                 meta.mtime = Io.Timestamp.fromNanoseconds(@intCast(snapshot.mtime_ns));
                 meta.atime = Io.Timestamp.fromNanoseconds(@intCast(snapshot.atime_ns));
+                meta.mode = snapshot.mode;
             } else {
                 meta.deleted = true;
                 meta.len = 0;
@@ -2262,8 +2264,8 @@ const sim_vtable: Io.VTable = .{
     .dirReadLink = file_ops.simDirReadLink,
     .dirSetOwner = file_ops.simDirSetOwner,
     .dirSetFileOwner = file_ops.simDirSetFileOwner,
-    .dirSetPermissions = Io.failingDirSetPermissions,
-    .dirSetFilePermissions = Io.failingDirSetFilePermissions,
+    .dirSetPermissions = file_ops.simDirSetPermissions,
+    .dirSetFilePermissions = file_ops.simDirSetFilePermissions,
     .dirSetTimestamps = file_ops.simDirSetTimestamps,
     .dirHardLink = file_ops.simDirHardLink,
 
@@ -2282,7 +2284,7 @@ const sim_vtable: Io.VTable = .{
     .fileSupportsAnsiEscapeCodes = Io.unreachableFileSupportsAnsiEscapeCodes,
     .fileSetLength = file_ops.simFileSetLength,
     .fileSetOwner = file_ops.simFileSetOwner,
-    .fileSetPermissions = Io.failingFileSetPermissions,
+    .fileSetPermissions = file_ops.simFileSetPermissions,
     .fileSetTimestamps = file_ops.simFileSetTimestamps,
     .fileLock = file_ops.simFileLock,
     .fileTryLock = file_ops.simFileTryLock,

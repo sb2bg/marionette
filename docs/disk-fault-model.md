@@ -92,6 +92,10 @@ as on a `noatime` mount. `File.setTimestamps`, `Dir.setTimestamps`, and
 time overrides earlier writes, and later writes move the modification time
 again. Timestamps survive a crash, as they do on a real machine, even when the
 data that set them is lost. Times before the Unix epoch return `Unexpected`.
+Permissions follow the same rules: `File.setPermissions`,
+`Dir.setFilePermissions`, the `permissions` given when creating a file or
+directory, and `Disk.setMode` set the mode `stat` reports. Modes are recorded,
+not enforced.
 
 `setLength` extension is zero-filled by the disk authority. It is one
 lifecycle operation, not a series of independently fallible sector writes.
