@@ -99,8 +99,9 @@ pub const SimDisk = struct {
         bytes: []u8,
         logical_len: ?u64,
         written_at_ns: u64 = 0,
-        /// Access time and mode set while this write was pending; applied
-        /// when it lands.
+        /// Times and mode set while this write was pending; applied when it
+        /// lands. An explicit mtime wins over this write's own time.
+        mtime_ns: ?u64 = null,
         atime_ns: ?u64 = null,
         mode: ?u32 = null,
 
@@ -1030,11 +1031,12 @@ pub const SimDisk = struct {
                 if (options.modify_ns) |time| file.mtime_ns = time;
             }
             // Pending writes carry the times they land with, so the set times
-            // win over earlier writes and later writes still move mtime.
+            // win over earlier writes, even empty ones that create the file,
+            // and later writes still move mtime.
             for (self.pending_writes.items) |*pending| {
                 if (!std.mem.eql(u8, pending.path, options.path)) continue;
                 if (options.access_ns) |time| pending.atime_ns = time;
-                if (options.modify_ns) |time| pending.written_at_ns = time;
+                if (options.modify_ns) |time| pending.mtime_ns = time;
             }
         } else {
             try self.recordPathOp("disk.set_times", op_id, options.path, "not_found", latency_ns);
@@ -2105,7 +2107,11 @@ pub const SimDisk = struct {
         try self.writeBytes(file, pending.offset, pending.bytes[0..write_len]);
         const physical_end = try endOffset(pending.offset, write_len);
         file.len = @max(file.len, pending.logical_len orelse physical_end);
-        if (pending.bytes.len != 0) file.mtime_ns = pending.written_at_ns;
+        if (pending.mtime_ns) |mtime_ns| {
+            file.mtime_ns = mtime_ns;
+        } else if (pending.bytes.len != 0) {
+            file.mtime_ns = pending.written_at_ns;
+        }
         if (pending.atime_ns) |atime_ns| file.atime_ns = atime_ns;
         if (pending.mode) |mode| file.mode = mode;
     }
@@ -2485,7 +2491,11 @@ pub const SimDisk = struct {
             if (pending.inode != inode) continue;
             if (result == null) result = .{ .path = pending.path, .inode = inode, .size = 0, .mtime_ns = 0 };
             result.?.size = @max(result.?.size, pending.logical_len orelse (pending.offset + pending.bytes.len));
-            if (pending.bytes.len != 0) result.?.mtime_ns = pending.written_at_ns;
+            if (pending.mtime_ns) |mtime_ns| {
+                result.?.mtime_ns = mtime_ns;
+            } else if (pending.bytes.len != 0) {
+                result.?.mtime_ns = pending.written_at_ns;
+            }
             if (pending.atime_ns) |atime_ns| result.?.atime_ns = atime_ns;
             if (pending.mode) |mode| result.?.mode = mode;
         }

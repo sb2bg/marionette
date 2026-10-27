@@ -6699,3 +6699,18 @@ test "io: file and directory permissions can be set and survive sync and crash" 
     try std.testing.expectEqual(executable, (try cwd.statFile(io, "secret", .{})).permissions);
     try std.testing.expectEqual(executable, (try cwd.statFile(io, "folder", .{})).permissions);
 }
+
+test "io: times set on an empty unsynced file stick" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xE7, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const modified: Io.Timestamp = .fromNanoseconds(1_700_000_000_000_000_000);
+
+    const file = try Io.Dir.cwd().createFile(io, "empty", .{});
+    defer file.close(io);
+    try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = modified } });
+    try std.testing.expectEqual(modified, (try file.stat(io)).mtime);
+    try file.sync(io);
+    try std.testing.expectEqual(modified, (try file.stat(io)).mtime);
+}
