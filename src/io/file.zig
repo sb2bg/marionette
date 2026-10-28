@@ -560,7 +560,11 @@ pub fn Ops(comptime Backend: type) type {
             if (backend.directoryExists(new_path) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => return error.FileNotFound,
-            }) return error.IsDir;
+            }) {
+                // A no-replace rename reports any existing destination as a
+                // collision, as renameat2 and renamex_np do for directories.
+                return if (preserve) error.PathAlreadyExists else error.IsDir;
+            }
             const new_parent = std.fs.path.dirname(new_path) orelse ".";
             if (!std.mem.eql(u8, new_parent, ".") and
                 !(backend.directoryExists(new_parent) catch |err| switch (err) {

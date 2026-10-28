@@ -6690,6 +6690,23 @@ test "io: closing a handle during a blocked lock wait leaks no lock" {
     probe.unlock(io);
 }
 
+test "io: preserving rename treats an existing directory as a collision" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xA70E, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    const file = try cwd.createFile(io, "source", .{});
+    file.close(io);
+    try cwd.createDir(io, "taken", .default_dir);
+
+    // Host renameat2 and renamex_np both report EEXIST here.
+    try std.testing.expectError(error.PathAlreadyExists, cwd.renamePreserve("source", cwd, "taken", io));
+    try std.testing.expectError(error.IsDir, cwd.rename("source", cwd, "taken", io));
+    _ = try cwd.statFile(io, "source", .{});
+}
+
 test "io: atomic files replace or link into place and are crash-atomic" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0xA70F, .tick_ns = 10 });
     defer world.deinit();
