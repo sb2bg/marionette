@@ -49,6 +49,10 @@ test "fault coverage: counts effects, not injections" {
     try std.testing.expect(!vacuous.fired());
 
     try std.testing.expectError(error.InvalidTraceEvent, mar.faultCoverage("event=0 disk.crash pending_writes=1 lost=1\n"));
+
+    // A refused extension is a disk-full refusal too.
+    const extension = try mar.faultCoverage("event=0 disk.set_length op=1 path=f len=8 status=no_space\n");
+    try std.testing.expectEqual(@as(u64, 1), extension.disk_no_space_errors);
 }
 
 const Faulty = struct {

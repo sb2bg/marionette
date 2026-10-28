@@ -99,6 +99,8 @@ not enforced.
 
 `setLength` extension is zero-filled by the disk authority. It is one
 lifecycle operation, not a series of independently fallible sector writes.
+Extension allocates like a write, so under `capacity_bytes` it fails with
+`NoSpaceLeft`; `File.setLength` reports that as `FileTooBig`.
 
 ## Faults
 

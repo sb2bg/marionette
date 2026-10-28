@@ -86,6 +86,8 @@ pub fn mapDiskSetLengthError(err: disk_module.DiskError) Io.File.SetLengthError 
         error.InvalidAlignment,
         error.InvalidRange,
         => error.AccessDenied,
+        // SetLengthError has no NoSpaceLeft; the length cannot be stored.
+        error.NoSpaceLeft => error.FileTooBig,
         else => error.InputOutput,
     };
 }

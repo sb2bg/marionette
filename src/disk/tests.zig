@@ -1645,6 +1645,12 @@ test "disk: a capacity limit fails growing writes with NoSpaceLeft" {
     try app.write(.{ .path = "b", .offset = 0, .bytes = "BBBB" });
     try std.testing.expectError(error.NoSpaceLeft, app.write(.{ .path = "b", .offset = 4, .bytes = "MORE" }));
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "status=no_space") != null);
+    // Extending through setLength allocates too; shrinking always fits.
+    try std.testing.expectError(error.NoSpaceLeft, app.setLength(.{ .path = "b", .len = 8 }));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.set_length") != null);
+    try std.testing.expectEqual(@as(u64, 4), (try app.stat(.{ .path = "b" })).size);
+    try app.setLength(.{ .path = "b", .len = 2 });
+    try app.setLength(.{ .path = "b", .len = 4 });
     // Overwriting allocated space needs no more of it.
     try app.write(.{ .path = "a", .offset = 0, .bytes = "aaaa" });
 

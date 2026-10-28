@@ -6596,6 +6596,9 @@ test "io: a full simulated disk fails writes with NoSpaceLeft" {
     try file.writePositionalAll(io, "12345678", 0);
     try std.testing.expectError(error.NoSpaceLeft, file.writePositionalAll(io, "9", 8));
     try std.testing.expectEqual(@as(u64, 8), (try file.stat(io)).size);
+    // SetLengthError has no NoSpaceLeft; a refused extension is FileTooBig.
+    try std.testing.expectError(error.FileTooBig, file.setLength(io, 12));
+    try std.testing.expectEqual(@as(u64, 8), (try file.stat(io)).size);
 }
 
 test "io: explicit file locks block, try, downgrade, and release" {

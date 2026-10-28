@@ -16,8 +16,10 @@
   pending until its parent is synced, and once durable it keeps the deletes and
   renames that emptied the directory, so a crash cannot restore entries into a
   removed directory.
-- Adds `DiskFaultOptions.capacity_bytes`, a disk-full limit: a write that would
-  grow usage past it fails with `NoSpaceLeft`, through `std.Io` as well.
+- Adds `DiskFaultOptions.capacity_bytes`, a disk-full limit: a write or
+  `setLength` extension that would grow usage past it fails with `NoSpaceLeft`,
+  through `std.Io` as well (`File.setLength`, whose error set has no
+  `NoSpaceLeft`, reports `FileTooBig`).
   Overwrites need no new space and deletes free it. Fault coverage counts these
   refusals as `disk_no_space_errors`.
 - `File.lock`, `tryLock`, `unlock`, and `downgradeLock` now work in simulation

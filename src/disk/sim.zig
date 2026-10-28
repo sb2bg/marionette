@@ -1287,6 +1287,11 @@ pub const SimDisk = struct {
             try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, 0, "not_found", latency_ns);
             return error.FileNotFound;
         }
+        // Extension allocates like a write does, so it obeys the same limit.
+        if (!self.hasSpaceFor(options.path, options.len)) {
+            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, 0, "no_space", latency_ns);
+            return error.NoSpaceLeft;
+        }
 
         var committed: u64 = 0;
         for (self.pending_writes.items) |*pending| {
