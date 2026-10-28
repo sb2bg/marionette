@@ -90,7 +90,9 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| return err;
             defer backend.freeOpScratch(path);
-            const status = backend.createDirectoryPath(path) catch |err| switch (err) {
+            // The requested mode applies to every directory this call creates.
+            const mode = if (permissions != Io.Dir.Permissions.default_dir) modeOf(permissions) else null;
+            return backend.createDirectoryPath(path, mode) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => return error.SystemResources,
                 error.PathAlreadyExists => return error.PathAlreadyExists,
@@ -98,14 +100,12 @@ pub fn Ops(comptime Backend: type) type {
                 error.NotDir => return error.NotDir,
                 else => return error.Unexpected,
             };
-            // The requested mode applies to the directory this call created.
-            if (status == .created and permissions != Io.Dir.Permissions.default_dir) {
-                backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| switch (err) {
-                    error.Canceled => return error.Canceled,
-                    else => return error.Unexpected,
-                };
-            }
-            return status;
+        }
+
+        /// Changes a host makes through a handle to a removed directory reach
+        /// only the removed directory, never one recreated at its path.
+        fn namesRemovedDirectory(backend: *Backend, dir: Io.Dir, sub_path: []const u8) bool {
+            return std.mem.eql(u8, sub_path, ".") and backend.directoryHandleRemoved(dir);
         }
 
         fn modeOf(permissions: Io.File.Permissions) u32 {

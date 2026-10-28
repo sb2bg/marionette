@@ -6802,6 +6802,23 @@ test "io: file and directory permissions can be set and survive sync and crash" 
     try std.testing.expectEqual(executable, (try cwd.statFile(io, "folder", .{})).permissions);
 }
 
+test "io: createDirPath applies permissions to every directory it creates" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0x9E3, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+    const private: Io.Dir.Permissions = .fromMode(0o700);
+
+    try cwd.createDir(io, "kept", .default_dir);
+    try std.testing.expectEqual(Io.Dir.CreatePathStatus.created, try cwd.createDirPathStatus(io, "kept/a/b", private));
+    // Each missing component gets the mode, as host mkdirat calls would;
+    // the directory that already existed keeps its own.
+    try std.testing.expectEqual(private, (try cwd.statFile(io, "kept/a", .{})).permissions);
+    try std.testing.expectEqual(private, (try cwd.statFile(io, "kept/a/b", .{})).permissions);
+    try std.testing.expectEqual(Io.Dir.Permissions.default_dir, (try cwd.statFile(io, "kept", .{})).permissions);
+}
+
 test "io: times set on an empty unsynced file stick" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0xE7, .tick_ns = 10 });
     defer world.deinit();

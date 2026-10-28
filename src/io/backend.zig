@@ -1437,7 +1437,9 @@ pub const Backend = struct {
         try self.disk.createDir(.{ .path = path });
     }
 
-    pub fn createDirectoryPath(self: *Backend, path: []const u8) disk_module.DiskError!Io.Dir.CreatePathStatus {
+    /// Create `path` and any missing parents. A non-null `mode` applies to
+    /// every directory this call creates, as each host `mkdirat` would.
+    pub fn createDirectoryPath(self: *Backend, path: []const u8, mode: ?u32) disk_module.DiskError!Io.Dir.CreatePathStatus {
         if (try self.directoryExists(path)) return .existed;
 
         var created = false;
@@ -1455,6 +1457,7 @@ pub const Backend = struct {
                 },
                 else => return err,
             };
+            if (mode) |requested| try self.disk.setMode(.{ .path = prefix.items, .mode = requested });
             created = true;
         }
         return if (created) .created else .existed;
