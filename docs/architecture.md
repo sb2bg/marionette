@@ -114,8 +114,9 @@ simulated disk is
 the authority for identity, visible length, and modification time, including
 pending writes. A non-suspending identity lookup refreshes metadata and resolves
 paths after direct disk mutations. Custom disks may omit this optional lookup;
-they retain the cached adapter contract. Crash recovery still rediscovers
-stale metadata under the named disk semantics.
+they retain the cached adapter contract. Crash recovery rediscovers stale
+metadata on first touch and refreshes length, timestamps, and permissions from
+the disk's record of the surviving inode.
 
 ## Owned Execution Results
 

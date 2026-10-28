@@ -599,9 +599,8 @@ pub const Backend = struct {
         atime: Io.Timestamp = .zero,
         mode: ?u32 = null,
         deleted: bool = false,
-        /// Set when a disk crash invalidates cached state. The length is
-        /// re-derived from disk truth on next touch; the timestamp is kept,
-        /// since filesystem timestamps survive a real machine crash.
+        /// Set when a disk crash invalidates cached state. Length, timestamps,
+        /// and permissions are re-derived from disk truth on next touch.
         stale: bool = false,
 
         fn deinit(self: *FileMeta, allocator: std.mem.Allocator) void {

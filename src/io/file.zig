@@ -1092,9 +1092,11 @@ pub fn Ops(comptime Backend: type) type {
         /// Find the cached metadata for `path`, refreshing or rediscovering
         /// it from the disk authority when needed. A disk crash (modeling a
         /// machine crash that kills the process) marks cached metadata
-        /// stale, so surviving files land here on first touch after restart
-        /// and have their length re-derived from disk truth. Timestamps are
-        /// kept across the refresh, matching real filesystems.
+        /// stale, so surviving files land here on first touch after restart.
+        /// Length, timestamps, and permissions are then re-derived from the
+        /// disk's record of the inode, which may belong to a different file
+        /// than the cached entry if the crash rolled back a delete and
+        /// re-create.
         fn findOrDiscoverFileMeta(
             backend: *Backend,
             path: []const u8,
@@ -1115,6 +1117,7 @@ pub fn Ops(comptime Backend: type) type {
                 meta.len = stat_result.size;
                 meta.inode = stat_result.inode;
                 meta.stale = false;
+                backend.refreshFileMeta(meta);
                 return index;
             }
 
@@ -1134,6 +1137,7 @@ pub fn Ops(comptime Backend: type) type {
                 meta.stale = false;
                 meta.len = stat_result.size;
                 meta.inode = stat_result.inode;
+                backend.refreshFileMeta(meta);
                 return index;
             }
 
@@ -1143,8 +1147,10 @@ pub fn Ops(comptime Backend: type) type {
             };
             // Stat can suspend; another process may discover this inode first.
             const index = backend.findFileMetaIndex(path) orelse try backend.createFileMeta(path);
-            backend.fileStore().files.items[index].len = stat_result.size;
-            backend.fileStore().files.items[index].inode = stat_result.inode;
+            const meta = backend.fileStore().files.items[index];
+            meta.len = stat_result.size;
+            meta.inode = stat_result.inode;
+            backend.refreshFileMeta(meta);
             return index;
         }
 

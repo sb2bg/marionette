@@ -4425,12 +4425,70 @@ test "io: file lengths re-derive from disk truth after a crash" {
     try std.testing.expectEqual(@as(u64, 4), try reopened.length(io));
     const stat_after_crash = try Io.Dir.cwd().statFile(io, "length.bin", .{});
     try std.testing.expectEqual(@as(u64, 4), stat_after_crash.size);
-    // Filesystem timestamps survive a machine crash; only lengths refresh.
+    // The disk keeps this file's modification time across the crash.
     try std.testing.expectEqual(mtime_before_crash, stat_after_crash.mtime);
 
     var read_out: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 4), try reopened.readPositionalAll(io, &read_out, 0));
     try std.testing.expectEqualStrings("abcd", read_out[0..4]);
+}
+
+test "io: first stat of a discovered file reports the disk's timestamps and permissions" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    const io = sim.env.io();
+
+    // No file-layer metadata exists yet; discovery must not invent defaults.
+    try sim.env.disk.write(.{ .path = "seeded", .offset = 0, .bytes = "abcd" });
+    try sim.env.disk.setMode(.{ .path = "seeded", .mode = 0o600 });
+    try sim.env.disk.setTimes(.{ .path = "seeded", .access_ns = 77, .modify_ns = 99 });
+
+    const stat = try Io.Dir.cwd().statFile(io, "seeded", .{});
+    try std.testing.expectEqual(@as(u64, 4), stat.size);
+    try std.testing.expectEqual(@as(i96, 99), stat.mtime.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 77), stat.atime.?.nanoseconds);
+    try std.testing.expectEqual(Io.File.Permissions.fromMode(0o600), stat.permissions);
+}
+
+test "io: crash rediscovery reports the surviving file, not the rolled-back replacement" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4 } });
+    try registerNoopProcess(sim, 0);
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    var original = try cwd.createFile(io, "config", .{ .permissions = .fromMode(0o600) });
+    try original.writePositionalAll(io, "old!", 0);
+    try original.sync(io);
+    original.close(io);
+    var root = try cwd.openFile(io, ".", .{ .allow_directory = true });
+    try root.sync(io);
+    root.close(io);
+    const durable = try cwd.statFile(io, "config", .{});
+
+    // An unsynced delete and re-create that the crash rolls back.
+    try Io.sleep(io, .fromNanoseconds(1000), .awake);
+    try cwd.deleteFile(io, "config");
+    var replacement = try cwd.createFile(io, "config", .{});
+    try replacement.writePositionalAll(io, "new!", 0);
+    replacement.close(io);
+    try sim.control.disk.setFaults(.{
+        .crash_lost_write_rate = .always(),
+        .crash_lost_metadata_rate = .always(),
+    });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    try sim.restartProcess(0);
+
+    // Stat is the first touch, so it alone must re-derive the metadata.
+    const recovered = try cwd.statFile(io, "config", .{});
+    try std.testing.expectEqual(durable.inode, recovered.inode);
+    try std.testing.expectEqual(durable.mtime, recovered.mtime);
+    try std.testing.expectEqual(Io.File.Permissions.fromMode(0o600), recovered.permissions);
+    var bytes: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("old!", try cwd.readFile(io, "config", &bytes));
 }
 
 test "io: crash rolls back unsynced deletion and preserves timestamps" {
