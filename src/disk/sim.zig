@@ -1104,7 +1104,8 @@ pub const SimDisk = struct {
         }
 
         const parent = try self.ownedParentDir(options.path);
-        errdefer self.world.allocator.free(parent);
+        var parent_owned = true;
+        errdefer if (parent_owned) self.world.allocator.free(parent);
         try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
         const removed = self.directories.orderedRemove(index);
         self.pending_metadata.appendAssumeCapacity(.{
@@ -1112,6 +1113,7 @@ pub const SimDisk = struct {
             .dir = parent,
             .kind = .{ .delete_dir = removed },
         });
+        parent_owned = false;
         try self.recordPathOp("disk.delete_dir", op_id, options.path, "ok", latency_ns);
     }
 

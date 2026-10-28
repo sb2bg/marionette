@@ -1522,6 +1522,41 @@ test "disk: an empty directory can be removed and a non-empty one cannot" {
     try std.testing.expectError(error.FileNotFound, app.statDir(.{ .path = "full" }));
 }
 
+fn deleteDirAllocationFailureCase(fail_index: usize) !void {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
+    defer world.deinit();
+    // Zero latency keeps the clock from recording, so the final status record
+    // is the operation's only trace write.
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4, .min_latency_ns = 0 });
+    defer disk.deinit();
+
+    try disk.disk().createDir(.{ .path = "parent" });
+    try disk.disk().createDir(.{ .path = "parent/child" });
+    // A full trace forces that record to allocate.
+    try world.trace_log.appendNTimes(world.allocator, 0, world.trace_log.capacity - world.trace_log.items.len);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = fail_index,
+        .resize_fail_index = 0,
+    });
+    world.allocator = failing.allocator();
+    defer world.allocator = std.testing.allocator;
+    try disk.disk().deleteDir(.{ .path = "parent/child" });
+}
+
+test "disk: deleteDir allocation failures neither leak nor double-free the parent" {
+    var reached_success = false;
+    for (0..32) |fail_index| {
+        deleteDirAllocationFailureCase(fail_index) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        reached_success = true;
+        break;
+    }
+    try std.testing.expect(reached_success);
+}
+
 test "disk: an unsynced directory removal is lost in a crash, a synced one is kept" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
     defer world.deinit();
