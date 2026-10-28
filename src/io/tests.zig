@@ -6588,6 +6588,47 @@ test "io: explicit file locks block, try, downgrade, and release" {
     try std.testing.expectError(error.FileLocksUnsupported, directory.lock(io, .shared));
 }
 
+test "io: closing a handle during a blocked lock wait leaks no lock" {
+    if (!fiber_supported) return error.SkipZigTest;
+
+    const Waiter = struct {
+        io: Io,
+        file: Io.File,
+        result: ?Io.File.LockError!void = null,
+
+        fn run(self: *@This()) void {
+            self.result = self.file.lock(self.io, .exclusive);
+        }
+    };
+
+    var world = try World.init(task_world_allocator, .{ .seed = 0x10CD, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    const holder = try cwd.createFile(io, "raced", .{});
+    defer holder.close(io);
+    const doomed = try cwd.openFile(io, "raced", .{});
+
+    try holder.lock(io, .exclusive);
+    var waiter: Waiter = .{ .io = io, .file = doomed };
+    var future = try Io.concurrent(io, Waiter.run, .{&waiter});
+    try Io.sleep(io, .fromNanoseconds(50), .awake);
+    try std.testing.expect(waiter.result == null);
+
+    // Free the waiter's handle state while it is parked, then wake it.
+    doomed.close(io);
+    holder.unlock(io);
+    future.await(io);
+    try std.testing.expectError(error.Unexpected, waiter.result.?);
+
+    const probe = try cwd.openFile(io, "raced", .{});
+    defer probe.close(io);
+    try std.testing.expect(try probe.tryLock(io, .exclusive));
+    probe.unlock(io);
+}
+
 test "io: atomic files replace or link into place and are crash-atomic" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0xA70F, .tick_ns = 10 });
     defer world.deinit();

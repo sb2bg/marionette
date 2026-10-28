@@ -1692,10 +1692,12 @@ pub const Backend = struct {
     /// flock, a held lock is released before a different one is acquired.
     pub fn setFileLock(
         self: *Backend,
-        state: *FileState,
+        handle: Io.File.Handle,
         lock: Io.File.Lock,
         nonblocking: bool,
-    ) (std.mem.Allocator.Error || error{ WouldBlock, Canceled, FileLocksUnsupported })!void {
+    ) (std.mem.Allocator.Error || error{ WouldBlock, Canceled, FileLocksUnsupported, FileClosed })!void {
+        const state = self.file(handle) orelse return error.FileClosed;
+        if (state.closed) return error.FileClosed;
         const index = switch (state.target) {
             .file => |index| index,
             .directory => return error.FileLocksUnsupported,
@@ -1706,7 +1708,17 @@ pub const Backend = struct {
             state.lock = .none;
         }
         try self.fileLockRegistry().acquire(self, self.task_runtime, index, lock, nonblocking);
-        state.lock = lock;
+        // Acquisition may block while another task closes this handle and frees
+        // its state. Handles are never reused, so a fresh lookup is authoritative.
+        const current = live: {
+            if (self.file(handle)) |current| if (!current.closed) break :live current;
+            self.fileLockRegistry().release(self.task_runtime, index, lock);
+            return error.FileClosed;
+        };
+        // Another task may have locked this same handle during the wait. Keep
+        // one lock per handle so close releases exactly what the registry holds.
+        if (current.lock != .none) self.fileLockRegistry().release(self.task_runtime, index, current.lock);
+        current.lock = lock;
     }
 
     pub fn downgradeFileLock(self: *Backend, state: *FileState) void {

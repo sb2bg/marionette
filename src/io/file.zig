@@ -952,36 +952,33 @@ pub fn Ops(comptime Backend: type) type {
 
         pub fn simFileLock(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!void {
             const backend = backendFromUserdata(userdata);
-            const state = backend.file(file.handle) orelse return error.Unexpected;
-            if (state.closed) return error.Unexpected;
-            backend.setFileLock(state, lock, false) catch |err| return switch (err) {
+            backend.setFileLock(file.handle, lock, false) catch |err| return switch (err) {
                 error.OutOfMemory => error.SystemResources,
                 error.Canceled => error.Canceled,
                 error.FileLocksUnsupported => error.FileLocksUnsupported,
                 // Blocking needs a scheduler to wait on.
                 error.WouldBlock => error.Unexpected,
+                // EBADF, including a close that raced a blocked acquisition.
+                error.FileClosed => error.Unexpected,
             };
         }
 
         pub fn simFileTryLock(userdata: ?*anyopaque, file: Io.File, lock: Io.File.Lock) Io.File.LockError!bool {
             const backend = backendFromUserdata(userdata);
-            const state = backend.file(file.handle) orelse return error.Unexpected;
-            if (state.closed) return error.Unexpected;
-            backend.setFileLock(state, lock, true) catch |err| return switch (err) {
+            backend.setFileLock(file.handle, lock, true) catch |err| return switch (err) {
                 error.WouldBlock => false,
                 error.OutOfMemory => error.SystemResources,
                 error.Canceled => error.Canceled,
                 error.FileLocksUnsupported => error.FileLocksUnsupported,
+                error.FileClosed => error.Unexpected,
             };
             return true;
         }
 
         pub fn simFileUnlock(userdata: ?*anyopaque, file: Io.File) void {
             const backend = backendFromUserdata(userdata);
-            const state = backend.file(file.handle) orelse return;
-            if (state.closed) return;
             // Releasing never waits or allocates.
-            backend.setFileLock(state, .none, true) catch {};
+            backend.setFileLock(file.handle, .none, true) catch {};
         }
 
         pub fn simFileDowngradeLock(userdata: ?*anyopaque, file: Io.File) Io.File.DowngradeLockError!void {
