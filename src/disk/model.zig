@@ -125,8 +125,9 @@ pub const Disk = struct {
     pub const SetTimes = DiskSetTimes;
     pub const DeleteDir = DiskDeleteDir;
     pub const SetMode = DiskSetMode;
-    /// Non-suspending simulator metadata view. Host adapters leave it absent.
-    /// Paths are borrowed only until the next disk mutation.
+    /// Non-suspending simulator metadata view of a file or directory by inode.
+    /// Host adapters leave it absent. Paths are borrowed only until the next
+    /// disk mutation.
     pub const Snapshot = struct { path: []const u8, inode: u64, size: u64, mtime_ns: u64, atime_ns: u64 = 0, mode: ?u32 = null };
     pub const VTable = struct {
         inspect: ?*const fn (*anyopaque, u64) ?Snapshot = null,

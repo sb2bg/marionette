@@ -15,7 +15,8 @@
   directory. Adds `Disk.deleteDir` on the simulated and real disks. A removal is
   pending until its parent is synced, and once durable it keeps the deletes and
   renames that emptied the directory, so a crash cannot restore entries into a
-  removed directory.
+  removed directory. A handle to a removed directory reaches nothing by name and
+  never changes or syncs a directory recreated at its path.
 - Adds `DiskFaultOptions.capacity_bytes`, a disk-full limit: a write or
   `setLength` extension that would grow usage past it fails with `NoSpaceLeft`,
   through `std.Io` as well (`File.setLength`, whose error set has no

@@ -87,6 +87,11 @@ restores a file into a directory it keeps removed, or moves one back into it.
 Changes made after the removal, in a directory recreated at the same path, still
 need that directory's own sync.
 
+A handle names the directory it opened, not its path. Once that directory is
+removed, nothing resolves by name through the handle (`FileNotFound`), it lists
+no entries, and setting its permissions or times, or syncing it, succeeds
+without touching a directory recreated at the same path, as on a host.
+
 Files and directories carry a modification and an access time. Writes and
 length changes move the modification time; reads do not move the access time,
 as on a `noatime` mount. `File.setTimestamps`, `Dir.setTimestamps`, and

@@ -6850,3 +6850,70 @@ test "io: times set on an empty unsynced file stick" {
     try file.sync(io);
     try std.testing.expectEqual(modified, (try file.stat(io)).mtime);
 }
+
+test "io: a handle to a removed directory does not reach its replacement" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xD1, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+    const private: Io.Dir.Permissions = .fromMode(0o700);
+    const modified: Io.Timestamp = .fromNanoseconds(1_700_000_000_000_000_000);
+
+    try cwd.createDir(io, "dir", .default_dir);
+    const stale = try cwd.openDir(io, "dir", .{ .iterate = true });
+    defer stale.close(io);
+    const stale_file = try cwd.openFile(io, "dir", .{ .allow_directory = true });
+    defer stale_file.close(io);
+    try cwd.deleteDir(io, "dir");
+    try cwd.createDir(io, "dir", .default_dir);
+    (try cwd.createFile(io, "dir/entry", .{})).close(io);
+    const before = try cwd.statFile(io, "dir", .{});
+
+    // As on a host, changes through the old handles reach only the removed
+    // directory, and nothing resolves by name through it.
+    try stale.setPermissions(io, private);
+    try stale.setFilePermissions(io, ".", private, .{});
+    try stale.setTimestamps(io, ".", .{ .modify_timestamp = .{ .new = modified } });
+    try stale_file.setPermissions(io, private);
+    try stale_file.setTimestamps(io, .{ .modify_timestamp = .{ .new = modified } });
+    const after = try cwd.statFile(io, "dir", .{});
+    try std.testing.expectEqual(Io.Dir.Permissions.default_dir, after.permissions);
+    try std.testing.expectEqual(before.mtime, after.mtime);
+
+    try std.testing.expectError(error.FileNotFound, stale.statFile(io, "entry", .{}));
+    try std.testing.expectError(error.FileNotFound, stale.createFile(io, "new", .{}));
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "dir/new", .{}));
+    var iterator = stale.iterate();
+    try std.testing.expectEqual(@as(?Io.Dir.Entry, null), try iterator.next(io));
+}
+
+test "io: syncing a removed directory's handle does not make its replacement durable" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 0xD2, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{});
+    const io = sim.env.io();
+    const cwd = Io.Dir.cwd();
+
+    try cwd.createDir(io, "dir", .default_dir);
+    const root = try cwd.openFile(io, ".", .{ .allow_directory = true });
+    try root.sync(io);
+    const stale = try cwd.openFile(io, "dir", .{ .allow_directory = true });
+    try cwd.deleteDir(io, "dir");
+    try cwd.createDir(io, "dir", .default_dir);
+    try root.sync(io);
+    const entry = try cwd.createFile(io, "dir/entry", .{});
+    try entry.sync(io);
+    entry.close(io);
+    try stale.sync(io);
+    stale.close(io);
+    root.close(io);
+
+    try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try sim.control.disk.crash();
+    try sim.control.disk.restart();
+    try sim.control.process.restart(0);
+
+    _ = try cwd.statFile(io, "dir", .{});
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, "dir/entry", .{}));
+}

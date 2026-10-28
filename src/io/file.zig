@@ -22,7 +22,9 @@ pub fn Ops(comptime Backend: type) type {
             const path = backend.resolvePathAlloc(dir, sub_path, kind) catch |err| switch (err) {
                 error.OutOfMemory => return error.SystemResources,
                 error.InvalidDirHandle => return error.AccessDenied,
-                error.InvalidPath => return error.FileNotFound,
+                // A removed directory has no entries, so nothing resolves
+                // through it; the host reports ENOENT.
+                error.InvalidPath, error.DirectoryRemoved => return error.FileNotFound,
             };
             // Registered as operation scratch: these paths are held across
             // disk-latency suspension points, and a task killed while parked
@@ -121,6 +123,7 @@ pub fn Ops(comptime Backend: type) type {
             const state = backend.file(file.handle) orelse return error.AccessDenied;
             if (state.closed) return error.AccessDenied;
             if (Backend.fileDirectoryPath(state)) |path| {
+                if (backend.fileDirectoryRemoved(state)) return;
                 backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
                 return;
             }
@@ -136,6 +139,7 @@ pub fn Ops(comptime Backend: type) type {
 
         pub fn simDirSetPermissions(userdata: ?*anyopaque, dir: Io.Dir, permissions: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
             const backend = backendFromUserdata(userdata);
+            if (namesRemovedDirectory(backend, dir, ".")) return;
             const path = resolvePath(backend, dir, ".", .directory) catch |err| switch (err) {
                 error.AccessDenied => return error.AccessDenied,
                 error.FileNotFound, error.SystemResources => return error.Unexpected,
@@ -152,6 +156,7 @@ pub fn Ops(comptime Backend: type) type {
             _: Io.Dir.SetFilePermissionsOptions,
         ) Io.Dir.SetFilePermissionsError!void {
             const backend = backendFromUserdata(userdata);
+            if (namesRemovedDirectory(backend, dir, sub_path)) return;
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| switch (err) {
                 error.AccessDenied => return error.AccessDenied,
                 // The error set has no FileNotFound, as for the host backend.
@@ -307,9 +312,9 @@ pub fn Ops(comptime Backend: type) type {
             };
             var path_leased = true;
             defer if (path_leased) backend.releaseFilePathLease(path);
-            if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) {
+            if (backend.statDirectory(path) catch |err| return mapDiskOpenError(err)) |stat| {
                 if (!options.allow_directory or options.isWrite()) return error.IsDir;
-                return backend.openDirectoryFileHandle(path) catch return error.SystemResources;
+                return backend.openDirectoryFileHandle(path, stat.inode) catch return error.SystemResources;
             }
             const file_index = (findOrDiscoverFileMeta(backend, path) catch |err| {
                 return errors.mapDiskOpenError(err);
@@ -418,6 +423,11 @@ pub fn Ops(comptime Backend: type) type {
             if (reader.state == .reset) {
                 reader.index = 0;
                 reader.state = .reading;
+            }
+            // A removed directory lists no entries, as on a host.
+            if (backend.directoryHandleRemoved(reader.dir)) {
+                reader.end = 0;
+                reader.state = .finished;
             }
             if (reader.state == .finished or entries.len == 0) return 0;
 
@@ -675,8 +685,8 @@ pub fn Ops(comptime Backend: type) type {
                     error.AccessDenied
                 else
                     buildFileStat(backend, file_index),
-                .directory => |path| {
-                    const stat = backend.disk.statDir(.{ .path = path }) catch |err| switch (err) {
+                .directory => |directory| {
+                    const stat = backend.disk.statDir(.{ .path = directory.path }) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         else => return error.AccessDenied,
                     };
@@ -998,6 +1008,7 @@ pub fn Ops(comptime Backend: type) type {
             if (state.closed) return error.AccessDenied;
             const times = try diskTimes(backend, options.access_timestamp, options.modify_timestamp);
             if (Backend.fileDirectoryPath(state)) |path| {
+                if (backend.fileDirectoryRemoved(state)) return;
                 backend.disk.setTimes(.{ .path = path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return errors.mapDiskSetTimesError(err);
                 return;
             }
@@ -1019,6 +1030,7 @@ pub fn Ops(comptime Backend: type) type {
         ) Io.Dir.SetTimestampsError!void {
             const backend = backendFromUserdata(userdata);
             const times = try diskTimes(backend, options.access_timestamp, options.modify_timestamp);
+            if (namesRemovedDirectory(backend, dir, sub_path)) return;
             const path = resolvePath(backend, dir, sub_path, .directory) catch |err| switch (err) {
                 error.AccessDenied => return error.AccessDenied,
                 // Like the host backend, an invalid or missing path is
@@ -1056,6 +1068,9 @@ pub fn Ops(comptime Backend: type) type {
             const state = backend.file(file.handle) orelse return error.AccessDenied;
             if (state.closed) return error.AccessDenied;
             if (Backend.fileDirectoryPath(state)) |path| {
+                // Syncing a removed directory must not make its replacement's
+                // entries durable.
+                if (backend.fileDirectoryRemoved(state)) return;
                 backend.disk.syncDir(.{ .path = path }) catch |err| return errors.mapDiskSyncError(err);
                 return;
             }

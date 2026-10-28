@@ -612,6 +612,8 @@ pub const Backend = struct {
     pub const DirectoryHandle = struct {
         handle: Io.Dir.Handle,
         path: []u8,
+        /// The directory opened, which `path` stops naming once it is removed.
+        inode: u64,
         iterate: bool,
 
         fn deinit(self: *DirectoryHandle, allocator: std.mem.Allocator) void {
@@ -681,13 +683,19 @@ pub const Backend = struct {
 
         pub const Target = union(enum) {
             file: usize,
-            directory: []u8,
+            directory: Directory,
+        };
+
+        pub const Directory = struct {
+            path: []u8,
+            /// The directory opened, which `path` stops naming once it is removed.
+            inode: u64,
         };
 
         fn deinit(self: *FileState, allocator: std.mem.Allocator) void {
             switch (self.target) {
                 .file => {},
-                .directory => |path| allocator.free(path),
+                .directory => |directory| allocator.free(directory.path),
             }
             allocator.destroy(self);
         }
@@ -1379,7 +1387,7 @@ pub const Backend = struct {
     pub fn fileDirectoryPath(file_state: *const FileState) ?[]const u8 {
         return switch (file_state.target) {
             .file => null,
-            .directory => |path| path,
+            .directory => |directory| directory.path,
         };
     }
 
@@ -1391,12 +1399,36 @@ pub const Backend = struct {
         return null;
     }
 
+    /// Whether the directory a handle opened has been removed, so its path
+    /// is gone or names a replacement. As on a host, such a handle reaches
+    /// nothing by name, and changes to the directory itself affect nothing.
+    pub fn directoryHandleRemoved(self: *Backend, dir: Io.Dir) bool {
+        for (self.directory_handles.items) |handle| {
+            if (handle.handle == dir.handle) return self.directoryRemoved(handle.path, handle.inode);
+        }
+        return false;
+    }
+
+    pub fn fileDirectoryRemoved(self: *Backend, file_state: *const FileState) bool {
+        return switch (file_state.target) {
+            .file => false,
+            .directory => |directory| self.directoryRemoved(directory.path, directory.inode),
+        };
+    }
+
+    fn directoryRemoved(self: *Backend, path: []const u8, inode: u64) bool {
+        if (std.mem.eql(u8, path, ".")) return false;
+        const inspect = self.disk.vtable.inspect orelse return false;
+        const snapshot = inspect(self.disk.ptr, inode) orelse return true;
+        return !std.mem.eql(u8, snapshot.path, path);
+    }
+
     pub fn resolvePathAlloc(
         self: *Backend,
         dir: Io.Dir,
         sub_path: []const u8,
         kind: disk_module.LogicalPathKind,
-    ) (std.mem.Allocator.Error || error{ InvalidPath, InvalidDirHandle })![]u8 {
+    ) (std.mem.Allocator.Error || error{ InvalidPath, InvalidDirHandle, DirectoryRemoved })![]u8 {
         const absolute = sub_path.len > 0 and sub_path[0] == '/';
         var first_relative: usize = 0;
         if (absolute) {
@@ -1412,6 +1444,7 @@ pub const Backend = struct {
         }
 
         const base = if (absolute) "." else self.directoryPath(dir) orelse return error.InvalidDirHandle;
+        if (!absolute and self.directoryHandleRemoved(dir)) return error.DirectoryRemoved;
         if (kind == .directory and std.mem.eql(u8, relative, ".")) {
             return try self.allocator.dupe(u8, base);
         }
@@ -1426,11 +1459,14 @@ pub const Backend = struct {
     }
 
     pub fn directoryExists(self: *Backend, path: []const u8) disk_module.DiskError!bool {
-        _ = self.disk.statDir(.{ .path = path }) catch |err| switch (err) {
-            error.FileNotFound => return false,
+        return try self.statDirectory(path) != null;
+    }
+
+    pub fn statDirectory(self: *Backend, path: []const u8) disk_module.DiskError!?disk_module.Disk.StatDirResult {
+        return self.disk.statDir(.{ .path = path }) catch |err| switch (err) {
+            error.FileNotFound => return null,
             else => return err,
         };
-        return true;
     }
 
     pub fn createDirectory(self: *Backend, path: []const u8) disk_module.DiskError!void {
@@ -1464,13 +1500,14 @@ pub const Backend = struct {
     }
 
     pub fn openDirectoryHandle(self: *Backend, path: []const u8, iterate: bool) !Io.Dir {
-        _ = try self.disk.statDir(.{ .path = path });
+        const stat = try self.disk.statDir(.{ .path = path });
         const owned_path = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned_path);
         const handle: Io.Dir.Handle = @intCast(self.allocateHandle());
         try self.directory_handles.append(self.allocator, .{
             .handle = handle,
             .path = owned_path,
+            .inode = stat.inode,
             .iterate = iterate,
         });
         return .{ .handle = handle };
@@ -1803,13 +1840,13 @@ pub const Backend = struct {
         self.pathGate().retireInactive(self, task_control, self.task_runtime);
     }
 
-    pub fn openDirectoryFileHandle(self: *Backend, path: []const u8) std.mem.Allocator.Error!Io.File {
+    pub fn openDirectoryFileHandle(self: *Backend, path: []const u8, inode: u64) std.mem.Allocator.Error!Io.File {
         const owned_path = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned_path);
         const file_state = try self.allocator.create(FileState);
         errdefer self.allocator.destroy(file_state);
         file_state.* = .{
-            .target = .{ .directory = owned_path },
+            .target = .{ .directory = .{ .path = owned_path, .inode = inode } },
             .read = true,
             .write = false,
         };
@@ -2047,7 +2084,7 @@ pub const ProcessRuntime = struct {
                 const path: []const u8 = switch (entry.state) {
                     .file => |file| switch (file.target) {
                         .file => |index| backend.currentFilePath(backend.fileStore().files.items[index]),
-                        .directory => |name| name,
+                        .directory => |directory| directory.path,
                     },
                     .listener => |listener| if (listener.closed) continue else "-",
                     .connection => |connection| blk: {

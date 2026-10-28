@@ -2453,7 +2453,7 @@ pub const SimDisk = struct {
     }
 
     const disk_vtable: Disk.VTable = .{
-        .inspect = inspectFile,
+        .inspect = inspectEntry,
         .read = diskRead,
         .write = diskWrite,
         .sync = diskSync,
@@ -2485,9 +2485,17 @@ pub const SimDisk = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn inspectFile(ptr: *anyopaque, inode: u64) ?Disk.Snapshot {
+    fn inspectEntry(ptr: *anyopaque, inode: u64) ?Disk.Snapshot {
         const self = fromOpaque(ptr);
         if (self.crashed) return null;
+        for (self.directories.items) |directory| {
+            if (directoryInode(directory.id) != inode) continue;
+            return .{ .path = directory.path, .inode = inode, .size = 0, .mtime_ns = directory.mtime_ns, .atime_ns = directory.atime_ns, .mode = directory.mode };
+        }
+        return inspectFile(self, inode);
+    }
+
+    fn inspectFile(self: *Self, inode: u64) ?Disk.Snapshot {
         var result: ?Disk.Snapshot = null;
         for (self.files.items) |file| {
             if (file.inode == inode) {
