@@ -84,6 +84,8 @@ pending until its parent is synced, like a file delete. Because a directory is
 removed only once empty, a removal that becomes durable, by a parent sync or by
 surviving a crash, makes the changes that emptied it durable too: a crash never
 restores a file into a directory it keeps removed, or moves one back into it.
+Changes made after the removal, in a directory recreated at the same path, still
+need that directory's own sync.
 
 Files and directories carry a modification and an access time. Writes and
 length changes move the modification time; reads do not move the access time,

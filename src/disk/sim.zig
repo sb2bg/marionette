@@ -1922,7 +1922,7 @@ pub const SimDisk = struct {
             committed += 1;
             if (removed.kind == .delete_dir) {
                 if (removed.kind.delete_dir) |*directory| {
-                    committed += self.commitMetadataUnder(directory.path);
+                    committed += self.commitMetadataUnder(directory.path, removed.op_id);
                     // The cascade may have removed earlier records.
                     index = 0;
                 }
@@ -1933,15 +1933,16 @@ pub const SimDisk = struct {
 
     /// A directory is removed only once empty, so making its removal durable
     /// makes the earlier changes that emptied it durable too, as a journaling
-    /// filesystem orders them.
-    fn commitMetadataUnder(self: *Self, path: []const u8) u64 {
+    /// filesystem orders them. Changes after the removal belong to a directory
+    /// recreated at the same path and still wait for their own sync.
+    fn commitMetadataUnder(self: *Self, path: []const u8, removal_op_id: u64) u64 {
         var committed: u64 = 0;
         var index: usize = 0;
         while (index < self.pending_metadata.items.len) {
             const pending = &self.pending_metadata.items[index];
             const inside = isWithin(path, pending.dir) or
                 (if (pending.other_dir) |other| isWithin(path, other) else false);
-            if (!inside) {
+            if (!inside or pending.op_id > removal_op_id) {
                 index += 1;
                 continue;
             }

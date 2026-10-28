@@ -1602,6 +1602,29 @@ test "disk: a kept directory removal keeps the deletes it depended on" {
     try std.testing.expectError(error.FileNotFound, app.stat(.{ .path = "dir/file" }));
 }
 
+test "disk: a kept directory removal does not make a recreated directory's entries durable" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const app = disk.disk();
+
+    try app.createDir(.{ .path = "dir" });
+    try app.syncDir(.{ .path = "." });
+    try app.deleteDir(.{ .path = "dir" });
+    try app.createDir(.{ .path = "dir" });
+    try app.write(.{ .path = "dir/file", .offset = 0, .bytes = "DATA" });
+    try app.sync(.{ .path = "dir/file" });
+    // Only the parent is synced; the new entry inside "dir" never is.
+    try app.syncDir(.{ .path = "." });
+    try disk.control().setFaults(.{ .crash_lost_metadata_rate = .always() });
+    try disk.control().crash();
+    try disk.control().restart();
+
+    _ = try app.statDir(.{ .path = "dir" });
+    try std.testing.expectError(error.FileNotFound, app.stat(.{ .path = "dir/file" }));
+}
+
 test "disk: a pending directory removal that a crash keeps keeps what emptied it" {
     // Seed 2390 keeps the newest metadata and loses the next one at 1/2.
     for ([_]bool{ false, true }) |rename_out| {
