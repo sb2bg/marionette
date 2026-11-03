@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.2 - Unreleased
+## v0.8.2 - 2026-11-03
 
 - A terminal scheduler failure during `Future.await` or `cancel` now stops the
   runner callback instead of returning fabricated zero bytes as its result.
