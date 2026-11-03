@@ -217,7 +217,11 @@ fn processAllocationCase(allocator: std.mem.Allocator) !void {
 }
 
 test "managed processes: allocation failure does not publish dangling lifecycle" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, processAllocationCase, .{});
+    // In-place growth can depend on host address layout: Linux may use 16
+    // allocations in the baseline but only 15 and one resize in a later run.
+    // Make growth allocate so every failure index tests the same sequence.
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(backing.allocator(), processAllocationCase, .{});
 }
 
 test "reduction: zero-byte decisions are captured in the fresh executable tape" {
