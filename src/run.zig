@@ -65,6 +65,7 @@ pub fn SimCase(comptime App: type) type {
         /// sweep. Null otherwise.
         crash_point: ?u64 = null,
         crash_point_armed: bool = false,
+        crash_point_trigger: @import("disk/control.zig").DiskControl.CrashTrigger = .{},
         /// Null until this scenario arms a sweep point; retained after finish.
         crash_point_fired: ?bool = null,
         property_failure: ?struct { err: anyerror, name: []const u8 } = null,
@@ -80,7 +81,7 @@ pub fn SimCase(comptime App: type) type {
         /// sweep, so the same scenario runs normally too.
         pub fn armCrashPoint(self: *Self) !void {
             const point = self.crash_point orelse return;
-            try self.control().disk.crashAfterOps(point);
+            try self.control().disk.crashAfterOpsTracked(point, &self.crash_point_trigger);
             self.crash_point_armed = true;
             if (self.crash_point_fired == null) self.crash_point_fired = false;
         }
@@ -89,9 +90,11 @@ pub fn SimCase(comptime App: type) type {
         /// disarmed, so recovery and checks run without it. Returns whether
         /// the armed crash fired; false outside a sweep. The runner also
         /// disarms when the scenario returns, before checks run.
+        /// A separate request armed during recovery is left alone.
         pub fn finishCrashPoint(self: *Self) !bool {
             if (!self.crash_point_armed) return false;
-            const fired = !(try self.control().disk.disarmCrash());
+            _ = try self.control().disk.disarmTrackedCrash(&self.crash_point_trigger);
+            const fired = self.crash_point_trigger.fired;
             self.crash_point_armed = false;
             self.crash_point_fired = (self.crash_point_fired orelse false) or fired;
             return fired;
@@ -778,8 +781,8 @@ fn runOnceWithSimCase(
         .sim = sim,
         .state_checks = state_checks,
         .crash_point = crashPointFromOptions(options),
-        .app = init_app(sim) catch |err| {
-            try sim.finishManagedProcesses();
+        .app = invokeHarness(sim, init_app, .{sim}) catch |err| {
+            try finishManagedProcesses(sim);
             // An initializer that ran out of steps reports the budget, not
             // the error its interrupted wait surfaced.
             if (sim.control.tasks.failure()) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
@@ -794,12 +797,12 @@ fn runOnceWithSimCase(
         },
     };
     var state_live = true;
-    defer if (state_live) state.deinit();
+    defer if (state_live) deinitCase(&state) catch {};
 
     for ([_]CheckPhase{ .after_init, .after_scenario }) |phase| {
         var scenario_error: ?anyerror = null;
         if (phase == .after_scenario) {
-            scenario(&state) catch |err| {
+            invokeHarness(sim, scenario, .{&state}) catch |err| {
                 scenario_error = err;
             };
             // Disarm before checks and cleanup even when the scenario failed,
@@ -810,16 +813,16 @@ fn runOnceWithSimCase(
         }
         // A caught checkpoint failure must win over later execution failures.
         if (scenario_error == null and state.property_failure == null and state.control().tasks.failure() == null) {
-            state.evaluateChecks(phase) catch |err| {
+            invokeHarness(sim, SimCase(App).evaluateChecks, .{ &state, phase }) catch |err| {
                 if (state.property_failure == null and state.control().tasks.failure() == null) return @errorCast(err);
             };
         }
         const scheduler_failure = state.control().tasks.failure();
         const property_failure = state.property_failure;
         if (scheduler_failure != null or property_failure != null or scenario_error != null) {
-            state.deinit();
             state_live = false;
-            try sim.finishManagedProcesses();
+            try deinitCase(&state);
+            try finishManagedProcesses(sim);
             if (property_failure) |failure| return try failureFromWorld(allocator, options, .check_failed, &world, failure.err, failure.name);
             if (scheduler_failure) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
             return try failureFromWorld(allocator, options, .scenario_error, &world, scenario_error.?, null);
@@ -827,9 +830,9 @@ fn runOnceWithSimCase(
     }
 
     const crash_point_fired = state.crash_point_fired;
-    state.deinit();
     state_live = false;
-    try sim.finishManagedProcesses();
+    try deinitCase(&state);
+    try finishManagedProcesses(sim);
     // Application cleanup still schedules work: a budget or deadlock reached
     // there fails the run instead of passing with the failure in its trace.
     if (sim.control.tasks.failure()) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
@@ -861,6 +864,47 @@ fn runOnceWithSimCase(
     var result = try execution.Result.capture(allocator, &world, null);
     result.crash_point_fired = crash_point_fired;
     return result;
+}
+
+fn HarnessPayload(comptime callback: anytype) type {
+    const Return = @typeInfo(@TypeOf(callback)).@"fn".return_type.?;
+    return switch (@typeInfo(Return)) {
+        .error_union => |info| info.payload,
+        else => Return,
+    };
+}
+
+/// Keep the scenario in the main scheduler context, but give an untyped
+/// await a safe return boundary if its result can no longer be produced.
+fn invokeHarness(sim: World.Simulation, comptime callback: anytype, args: anytype) anyerror!HarnessPayload(callback) {
+    const Return = @typeInfo(@TypeOf(callback)).@"fn".return_type.?;
+    const Context = struct {
+        args: @TypeOf(args),
+        result: ?Return = null,
+
+        fn invoke(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.result = @call(.auto, callback, self.args);
+        }
+    };
+    var context: Context = .{ .args = args };
+    try sim.control.tasks.invoke(Context.invoke, &context);
+    return context.result.?;
+}
+
+fn deinitCase(state: anytype) RunError!void {
+    invokeHarness(state.sim, @TypeOf(state.*).deinit, .{state}) catch |err| switch (err) {
+        error.SchedulerFailed => {}, // The runner reports the retained failure.
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+}
+
+fn finishManagedProcesses(sim: World.Simulation) RunError!void {
+    invokeHarness(sim, World.Simulation.finishManagedProcesses, .{sim}) catch |err| switch (err) {
+        error.SchedulerFailed => {},
+        else => return @errorCast(err),
+    };
 }
 
 fn schedulerFailureFromWorld(

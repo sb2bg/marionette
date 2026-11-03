@@ -63,11 +63,12 @@ bounded delta debugging to omit groups of nonzero semantic sites. Omitted
 scalar choices become zero/false; byte choices become zero-filled buffers.
 Omitted actions therefore skip their callbacks. Zero is also nominal for faults:
 a fault roll of zero never fires, a zero schedule draw puts the next automatic
-fault beyond reach, and zero latency jitter is the minimum, so reduction removes
-faults rather than injecting them. Other choices reuse the original
-selection at the same site occurrence when the alternatives still match; new or
-incompatible sites use generated values. This is candidate exploration, **not
-exact replay**. Each candidate records a fresh tape and must pass an exact second
+fault beyond reach (there is no finite deadline), and zero latency jitter is
+the minimum, so reduction removes faults rather than injecting them. Other
+choices reuse the original selection at the same site occurrence when the
+alternatives still match; new or incompatible sites use generated values.
+This is candidate exploration, **not exact replay**. Each candidate records a
+fresh tape and must pass an exact second
 execution and preserve the original full failure fingerprint before acceptance.
 
 `attempts` counts candidate runs (each includes replay). `remaining_groups`

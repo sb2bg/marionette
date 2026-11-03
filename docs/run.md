@@ -247,9 +247,12 @@ try mar.expectCrashPointsPass(config, .{});
 
 `armCrashPoint` arms `crashAfterOps(k)` for the sweep's current point `k`, and
 does nothing in an ordinary run, so the same scenario works in both.
-`finishCrashPoint` cancels a crash that has not fired, so recovery code after it
+`finishCrashPoint` cancels its crash if it has not fired, so recovery code after it
 runs normally; the runner also cancels it when the scenario returns or fails,
-so checks and cleanup never run with a crash armed. `sweepCrashPoints(config, CrashSweepOptions)`
+so checks and cleanup never run with that sweep crash armed. Its firing outcome
+survives recovery rearming; manual crashes and replacement requests do not count
+as its firing, and finishing leaves unrelated requests alone.
+`sweepCrashPoints(config, CrashSweepOptions)`
 tries points 0, 1, 2, and so on until one where the armed crash never fired,
 and returns the first failing report instead of stopping at an error. Each point
 is an ordinary recorded and exact-replayed run whose point is the
@@ -280,6 +283,14 @@ runs out the scheduler records
 `scheduler.step_budget_exceeded budget=<u64> ready=<u64> blocked=<u64>` and the
 run fails as `step_budget_exceeded` with error name `StepBudgetExceeded`. No
 task runs past the budget, including during application cleanup.
+
+If an awaited future cannot finish after a terminal scheduler failure, the
+runner stops the current callback rather than returning an invented value.
+This applies to initialization, scenarios, checks, and cleanup, with or without
+a watchdog. The interrupted callback's local defers do not run; keep owned
+resources in application state with `deinit` or in managed process state for
+runner cleanup. A cleanup callback that itself awaits unreachable work is also
+stopped and is not retried.
 
 The count depends only on the decisions, so both executions stop at the same
 step. Unlike a watchdog `livelock`, the decision tape is complete: the failure

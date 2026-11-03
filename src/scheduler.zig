@@ -103,6 +103,24 @@ pub const TaskScheduler = struct {
     /// an ABI that cannot return scheduler errors directly. The scenario
     /// runner reads this latch before accepting the scenario or its checks.
     failure: ?io_internal.TaskControl.Failure = null,
+    callback_boundary: ?*CallbackBoundary = null,
+    /// Reused across init, scenario, checks, and cleanup so aborting a
+    /// callback never needs another allocation just to enter cleanup.
+    callback_fiber: ?*fiber.Fiber = null,
+
+    const CallbackBoundary = struct {
+        caller: fiber.Context = undefined,
+        abandoned: fiber.Context = undefined,
+        entry: *const fn (*anyopaque) void,
+        arg: *anyopaque,
+        completed: bool = false,
+
+        fn run(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.entry(self.arg);
+            self.completed = true;
+        }
+    };
 
     const MainWait = struct {
         key: WaitKey,
@@ -252,6 +270,7 @@ pub const TaskScheduler = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.callback_fiber) |callback_fiber| callback_fiber.destroy();
         for (self.tasks.items) |task| {
             if (task.fiber_instance) |fiber_instance| fiber_instance.destroy();
             self.allocator.destroy(task);
@@ -1321,10 +1340,44 @@ fn taskControlFailure(ptr: *const anyopaque) ?io_internal.TaskControl.Failure {
     return scheduler.failure;
 }
 
+fn taskControlInvoke(ptr: *anyopaque, entry: *const fn (*anyopaque) void, arg: *anyopaque) io_internal.TaskControl.CallbackError!void {
+    if (!fiber.supported) {
+        entry(arg);
+        return;
+    }
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    std.debug.assert(scheduler.current == null);
+    std.debug.assert(scheduler.callback_boundary == null);
+    var boundary: TaskScheduler.CallbackBoundary = .{ .entry = entry, .arg = arg };
+    // Harness callbacks used to run on the host stack. Keep a host-sized
+    // stack rather than imposing the smaller scheduled-task stack on them.
+    const callback_fiber = scheduler.callback_fiber orelse callback: {
+        const created = fiber.Fiber.create(scheduler.allocator, .{
+            .stack_size = @max(scheduler.task_stack_size, 8 * 1024 * 1024),
+            .finish_context = &boundary.caller,
+            .entry = TaskScheduler.CallbackBoundary.run,
+            .arg = &boundary,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.FiberUnsupported, error.StackTooSmall => unreachable,
+        };
+        scheduler.callback_fiber = created;
+        break :callback created;
+    };
+    callback_fiber.reset(&boundary.caller, TaskScheduler.CallbackBoundary.run, &boundary);
+    scheduler.callback_boundary = &boundary;
+    defer scheduler.callback_boundary = null;
+    const contexts: fiber.Switch = .{ .old = &boundary.caller, .new = callback_fiber.contextPtr() };
+    _ = fiber.contextSwitch(&contexts);
+    if (!callback_fiber.canaryIntact()) @panic("harness callback stack overflow");
+    if (!boundary.completed) return error.SchedulerFailed;
+}
+
 const task_control_vtable: io_internal.TaskControl.VTable = .{
     .run_until_idle = taskControlRunUntilIdle,
     .blocked_count = taskControlBlockedCount,
     .failure = taskControlFailure,
+    .invoke = taskControlInvoke,
 };
 
 fn processTaskControlKillProcess(ptr: *anyopaque, process_id: io_internal.ProcessId) void {
@@ -1418,6 +1471,21 @@ fn taskRuntimeSwapCancelProtection(ptr: *anyopaque, new: Io.CancelProtection) Io
     return scheduler.swapCancelProtection(new);
 }
 
+fn taskRuntimeAbortFailed(ptr: *anyopaque) noreturn {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    std.debug.assert(scheduler.failure != null);
+    const boundary = scheduler.callback_boundary orelse
+        @panic("cannot produce an awaited result after scheduler failure outside a runner callback");
+    if (scheduler.current) |task| {
+        scheduler.world.executionTaskStop(task.id);
+        scheduler.current = null;
+    }
+    scheduler.main_wait = null;
+    const contexts: fiber.Switch = .{ .old = &boundary.abandoned, .new = &boundary.caller };
+    _ = fiber.contextSwitch(&contexts);
+    unreachable;
+}
+
 const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .spawn = taskRuntimeSpawn,
     .in_task = taskRuntimeInTask,
@@ -1431,6 +1499,7 @@ const task_runtime_vtable: io_internal.TaskRuntime.VTable = .{
     .cancel_acknowledged = taskRuntimeCancelAcknowledged,
     .recancel = taskRuntimeRecancel,
     .swap_cancel_protection = taskRuntimeSwapCancelProtection,
+    .abort_failed = taskRuntimeAbortFailed,
 };
 
 const ToyTask = struct {

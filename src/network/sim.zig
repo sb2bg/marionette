@@ -577,10 +577,13 @@ const SharedRuntime = struct {
         link.auto_clog_schedule = .pending;
         if (self.faults.path_clog_rate.numerator == 0) return;
         if (link.clogged_until != 0 and link.clogged_until >= from_ns) return;
-        const ticks = try self.sampleNextOccurrenceTicks(
+        const ticks = (try self.sampleNextOccurrenceTicks(
             "network.auto_clog_schedule",
             self.faults.path_clog_rate,
-        );
+        )) orelse {
+            link.auto_clog_schedule = .beyond_clock;
+            return;
+        };
         const at_ns = addDurationTicks(from_ns, ticks, self.world.clock().tick_ns) catch {
             link.auto_clog_schedule = .beyond_clock;
             return;
@@ -605,10 +608,13 @@ const SharedRuntime = struct {
             return;
         };
         const eligible_from = if (floor_ns <= from_ns) from_ns else floor_ns - self.world.clock().tick_ns;
-        const ticks = if (self.auto_partitioned_node == null)
+        const ticks = (if (self.auto_partitioned_node == null)
             try self.sampleNextOccurrenceTicks("network.auto_partition_schedule", rate)
         else
-            try self.sampleNextOccurrenceTicks("network.auto_heal_schedule", rate);
+            try self.sampleNextOccurrenceTicks("network.auto_heal_schedule", rate)) orelse {
+            self.auto_partition_schedule = .beyond_clock;
+            return;
+        };
         const at_ns = addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns) catch {
             self.auto_partition_schedule = .beyond_clock;
             return;
@@ -620,7 +626,7 @@ const SharedRuntime = struct {
         self: *SharedRuntime,
         comptime site_id: []const u8,
         rate: env_module.BuggifyRate,
-    ) !u64 {
+    ) !?u64 {
         std.debug.assert(rate.numerator > 0);
         std.debug.assert(rate.numerator <= rate.denominator);
         if (rate.numerator == rate.denominator) return 1;
@@ -631,6 +637,8 @@ const SharedRuntime = struct {
             u64,
             random_space,
         );
+        // An omitted schedule must stay absent however far the harness runs.
+        if (draw == 0) return null;
         const uniform = (@as(f64, @floatFromInt(draw)) + 1.0) / (@as(f64, @floatFromInt(random_space)) + 1.0);
         const failure_probability =
             @as(f64, @floatFromInt(rate.denominator - rate.numerator)) /

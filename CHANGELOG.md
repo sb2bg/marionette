@@ -2,6 +2,20 @@
 
 ## v0.8.2 - Unreleased
 
+- A terminal scheduler failure during `Future.await` or `cancel` now stops the
+  runner callback instead of returning fabricated zero bytes as its result.
+  Pointer-valued futures can no longer turn step-budget exhaustion into a
+  worker or host crash. Initialization, checks, and cleanup use the same
+  boundary; the original scheduler failure and complete tape are retained.
+- Crash-point sweeps track whether their particular armed crash fired.
+  Recovery rearming no longer stops a sweep early, and unrelated manual or
+  replacement crashes no longer extend it. Finishing a sweep cancels only its
+  own pending request. Adds caller-owned `DiskControl.CrashTrigger` tracking.
+- **Decision-model correction.** A zero automatic process or network schedule
+  draw now disables that occurrence, so reduction removes automatic crashes,
+  restarts, partitions, heals, and clogs instead of giving them a finite delay.
+  Previously recorded capsules containing these zero schedule draws no longer
+  replay exactly; use a new harness build identity for new captures.
 - Sending a file to a simulated stream (`Stream.Writer.sendFile`) now falls
   back to reading the file and writing its bytes, as on hosts without
   zero-copy support. It previously failed with a fabricated `NetworkDown`.

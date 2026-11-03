@@ -1504,6 +1504,41 @@ test "disk: manual crash disarms a pending armed crash" {
     try disk.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "aaaa" });
 }
 
+test "disk: tracked crash outcomes survive rearming and failed crash landings" {
+    const DiskControl = @import("control.zig").DiskControl;
+    const FailingObserver = struct {
+        fn prepare(_: *anyopaque) disk_model.DiskError!void {
+            return error.OutOfMemory;
+        }
+        fn commit(_: *anyopaque) void {
+            unreachable;
+        }
+    };
+    var world = try World.init(std.testing.allocator, .{ .seed = 1 });
+    defer world.deinit();
+    var disk = try SimDisk.init(&world, .{ .sector_size = 4 });
+    defer disk.deinit();
+    const control = disk.control();
+    var trigger: DiskControl.CrashTrigger = .{};
+    try control.crashAfterOpsTracked(0, &trigger);
+    disk.setCrashObserver(.{ .ptr = &world, .prepare = FailingObserver.prepare, .commit = FailingObserver.commit });
+    try std.testing.expectError(error.OutOfMemory, disk.disk().write(.{ .path = "data", .offset = 0, .bytes = "DATA" }));
+    try std.testing.expect(!trigger.fired);
+    disk.crash_observer = null;
+    try std.testing.expectError(error.DiskCrashed, disk.disk().write(.{ .path = "data", .offset = 0, .bytes = "DATA" }));
+    try std.testing.expect(trigger.fired);
+    try control.restart();
+    try control.crashAfterOps(1000);
+    try std.testing.expect(!try control.disarmTrackedCrash(&trigger));
+    try std.testing.expect(try control.disarmCrash());
+    try std.testing.expect(trigger.fired);
+
+    try control.crashAfterOpsTracked(0, &trigger);
+    try std.testing.expect(!trigger.fired);
+    try control.crash();
+    try std.testing.expect(!trigger.fired);
+}
+
 test "disk: an empty directory can be removed and a non-empty one cannot" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 });
     defer world.deinit();

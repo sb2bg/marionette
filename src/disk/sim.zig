@@ -715,6 +715,7 @@ pub const SimDisk = struct {
     /// the operation boundary, before the first operation past the budget
     /// does any work. Any crash disarms it.
     armed_crash_budget: ?u64 = null,
+    armed_crash_trigger: ?*DiskControl.CrashTrigger = null,
     root_mtime_ns: u64 = 0,
     root_atime_ns: u64 = 0,
     root_mode: ?u32 = null,
@@ -1468,6 +1469,10 @@ pub const SimDisk = struct {
     }
 
     fn crash(self: *Self, _: Crash) DiskError!void {
+        try self.crashWithTrigger(null);
+    }
+
+    fn crashWithTrigger(self: *Self, trigger: ?*DiskControl.CrashTrigger) DiskError!void {
         // A control action, not a data operation: it must neither consume
         // armed-crash budget nor recursively trigger itself.
         try self.ensureRunning();
@@ -1597,7 +1602,11 @@ pub const SimDisk = struct {
         staged.commit();
         self.clearPendingWrites();
         self.clearPendingMetadata();
+        // Publish the firing outcome only after every fallible part of the
+        // landing succeeded, and before the observer can retire task stacks.
+        if (trigger) |tracked| tracked.fired = true;
         self.armed_crash_budget = null;
+        self.armed_crash_trigger = null;
         self.crashed = true;
 
         if (self.crash_observer) |observer| observer.commit(observer.ptr);
@@ -1646,7 +1655,7 @@ pub const SimDisk = struct {
                     traceField("kind", .{ .literal = "armed_crash" }),
                     traceField("fired", .{ .literal = "true" }),
                 });
-                try self.crash(.{});
+                try self.crashWithTrigger(self.armed_crash_trigger);
                 return error.DiskCrashed;
             }
             self.armed_crash_budget = budget - 1;
@@ -1654,12 +1663,18 @@ pub const SimDisk = struct {
     }
 
     fn crashAfterOps(self: *Self, ops: u64) DiskError!void {
+        try self.armCrash(ops, null);
+    }
+
+    fn armCrash(self: *Self, ops: u64, trigger: ?*DiskControl.CrashTrigger) DiskError!void {
         try self.ensureRunning();
-        self.armed_crash_budget = ops;
         try self.world.recordFields("disk.fault", &.{
             traceField("kind", .{ .literal = "armed_crash" }),
             traceField("after_ops", .{ .uint = ops }),
         });
+        self.armed_crash_budget = ops;
+        self.armed_crash_trigger = trigger;
+        if (trigger) |tracked| tracked.fired = false;
     }
 
     fn disarmCrash(self: *Self) DiskError!bool {
@@ -1669,6 +1684,7 @@ pub const SimDisk = struct {
             traceField("disarmed", .{ .literal = "true" }),
         });
         self.armed_crash_budget = null;
+        self.armed_crash_trigger = null;
         return true;
     }
 
@@ -2479,6 +2495,8 @@ pub const SimDisk = struct {
         .disarm_crash = controlDisarmCrash,
         .restart = controlRestart,
         .disk = controlDisk,
+        .crash_after_ops_tracked = controlCrashAfterOpsTracked,
+        .disarm_tracked_crash = controlDisarmTrackedCrash,
     };
 
     fn fromOpaque(ptr: *anyopaque) *Self {
@@ -2604,6 +2622,16 @@ pub const SimDisk = struct {
 
     fn controlDisarmCrash(ptr: *anyopaque) DiskError!bool {
         return fromOpaque(ptr).disarmCrash();
+    }
+
+    fn controlCrashAfterOpsTracked(ptr: *anyopaque, ops: u64, trigger: *DiskControl.CrashTrigger) DiskError!void {
+        try fromOpaque(ptr).armCrash(ops, trigger);
+    }
+
+    fn controlDisarmTrackedCrash(ptr: *anyopaque, trigger: *DiskControl.CrashTrigger) DiskError!bool {
+        const self = fromOpaque(ptr);
+        if (self.armed_crash_trigger != trigger) return false;
+        return try self.disarmCrash();
     }
 
     fn controlRestart(ptr: *anyopaque) DiskError!void {

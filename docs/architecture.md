@@ -85,6 +85,10 @@ before trace capture and resource checks.
 Normal runs, replay, and reduction share private callback and property preparation
 in `run.zig`. Normal runs and reduction also share owned configuration preparation;
 replay takes runtime configuration exclusively from its identity-checked capsule.
+Runner callbacks execute on a reusable fiber without becoming scheduler tasks
+or consuming steps or decisions. A terminal untyped await can return control
+directly to the runner, which retains the scheduler failure and enters cleanup
+through a fresh callback frame instead of inventing a result value.
 
 ## Decisions And Tracing
 

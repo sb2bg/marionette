@@ -195,6 +195,16 @@ pub const Fiber = struct {
         return &self.context;
     }
 
+    /// Reuse an inactive stack for a fresh entry, including after its caller
+    /// abandoned it. The old frames are discarded without running defers.
+    pub fn reset(self: *Fiber, finish_context: *Context, entry: Entry, arg: *anyopaque) void {
+        self.finished = false;
+        self.closure.finish_context = finish_context;
+        self.closure.entry = entry;
+        self.closure.arg = arg;
+        self.context = initContext(self.closure);
+    }
+
     pub fn isFinished(self: *const Fiber) bool {
         return self.finished;
     }

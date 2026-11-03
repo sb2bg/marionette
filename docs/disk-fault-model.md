@@ -132,6 +132,11 @@ one was pending. A firing armed crash records
 `disk.fault kind=armed_crash fired=true` before its `disk.crash`, and a
 cancelled one records `disk.fault kind=armed_crash disarmed=true`.
 
+Crash-point sweeps use a caller-owned `DiskControl.CrashTrigger` to latch the
+firing of their own request. Manual crashes do not fire that latch, and
+rearming a separate recovery crash cannot erase it. `disarmTrackedCrash`
+cancels only the associated request, leaving a later recovery request alone.
+
 Crash marks the disk down and stops live logical processes. Disk restart only
 restores the disk authority; applications restart explicitly through
 `control.process.restart`, which reruns a registered lifecycle or, without one,

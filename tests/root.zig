@@ -36,6 +36,10 @@ test {
 }
 
 test {
+    _ = @import("regressions_082.zig");
+}
+
+test {
     _ = @import("crash_points.zig");
 }
 

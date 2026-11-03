@@ -29,15 +29,22 @@ pub fn ManagedProcess(comptime App: type) type {
     return struct {
         const Self = @This();
         app: ?App = null,
+        cleanup_started: bool = false,
         initialize: *const fn (env_module.Env) anyerror!App,
         runtime: *io_module.internal.ProcessRuntime,
         node: network_module.NodeId,
 
         pub fn state(self: *Self) ?*App {
+            if (self.cleanup_started) return null;
             return if (self.app) |*value| value else null;
         }
         fn killed(ptr: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            // A terminal await can abandon cleanup. Retire ownership first
+            // so teardown cannot retry it, without moving the app whose
+            // destructor may rely on its stable address.
+            if (self.cleanup_started) return;
+            self.cleanup_started = true;
             if (self.app) |*value| {
                 if (@hasDecl(App, "deinit")) value.deinit();
                 self.app = null;
@@ -47,11 +54,12 @@ pub fn ManagedProcess(comptime App: type) type {
             const self: *Self = @ptrCast(@alignCast(ptr));
             const fresh = try self.initialize(env);
             self.app = fresh;
+            self.cleanup_started = false;
         }
         fn destroy(ptr: *anyopaque, allocator: std.mem.Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             // Stop every task before freeing the state it may reference.
-            if (self.app != null) self.runtime.kill(self.node) catch unreachable;
+            if (self.app != null and !self.cleanup_started) self.runtime.kill(self.node) catch unreachable;
             killed(ptr);
             allocator.destroy(self);
         }
@@ -391,9 +399,12 @@ pub const ProcessSupervisor = struct {
             return;
         };
         const eligible_from = if (floor_ns <= from_ns) from_ns else floor_ns - self.world.clock().tick_ns;
-        const ticks = switch (self.states[index]) {
+        const ticks = (switch (self.states[index]) {
             .alive => try self.sampleNextOccurrenceTicks("process.crash_schedule", rate),
             .killed => try self.sampleNextOccurrenceTicks("process.restart_schedule", rate),
+        }) orelse {
+            self.transition_schedules[index] = .beyond_clock;
+            return;
         };
         const at_ns = addDurationTicks(eligible_from, ticks, self.world.clock().tick_ns) catch {
             self.transition_schedules[index] = .beyond_clock;
@@ -429,7 +440,7 @@ pub const ProcessSupervisor = struct {
         self: *ProcessSupervisor,
         comptime site_id: []const u8,
         rate: env_module.BuggifyRate,
-    ) !u64 {
+    ) !?u64 {
         std.debug.assert(rate.numerator > 0);
         std.debug.assert(rate.numerator <= rate.denominator);
         if (rate.numerator == rate.denominator) return 1;
@@ -440,6 +451,9 @@ pub const ProcessSupervisor = struct {
             u64,
             random_space,
         );
+        // Reduction replaces an omitted schedule with zero. It must remove
+        // the occurrence, not merely give it the longest finite delay.
+        if (draw == 0) return null;
         const uniform = (@as(f64, @floatFromInt(draw)) + 1.0) / (@as(f64, @floatFromInt(random_space)) + 1.0);
         const failure_probability =
             @as(f64, @floatFromInt(rate.denominator - rate.numerator)) /

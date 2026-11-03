@@ -2905,20 +2905,14 @@ fn awaitFuture(any_future: *Io.AnyFuture, result: []u8, cancelable: bool) void {
                         forwarded = true;
                         runtime.requestCancel(future.task_id);
                     },
-                    error.SchedulerFailed => {
-                        @memset(result, 0);
-                        return;
-                    },
+                    error.SchedulerFailed => runtime.abortFailed(),
                 };
             }
             // Await transfers cancellation responsibility to the child only
             // when it acknowledges the request, matching std.Io.Threaded.
             if (forwarded and !future.cancel_acknowledged) runtime.recancel();
         } else {
-            runtime.runUntilDone(&future.done) catch {
-                @memset(result, 0);
-                return;
-            };
+            runtime.runUntilDone(&future.done) catch runtime.abortFailed();
         }
     }
 

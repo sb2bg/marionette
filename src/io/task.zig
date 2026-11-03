@@ -60,6 +60,9 @@ pub const TaskRuntime = struct {
         recancel: *const fn (ptr: *anyopaque) void,
         /// Swap the calling context's cancel-protection state.
         swap_cancel_protection: *const fn (ptr: *anyopaque, new: std.Io.CancelProtection) std.Io.CancelProtection,
+        /// Stop a runner callback whose awaited result cannot be produced.
+        /// Never return fabricated bytes through std.Io's untyped await ABI.
+        abort_failed: *const fn (ptr: *anyopaque) noreturn,
     };
 
     pub fn spawn(self: TaskRuntime, entry: *const fn (*anyopaque) void, arg: *anyopaque) SpawnError!u64 {
@@ -88,6 +91,10 @@ pub const TaskRuntime = struct {
 
     pub fn runUntilDone(self: TaskRuntime, done: *const bool) DriveError!void {
         try self.vtable.run_until_done(self.ptr, done);
+    }
+
+    pub fn abortFailed(self: TaskRuntime) noreturn {
+        self.vtable.abort_failed(self.ptr);
     }
 
     pub fn requestCancel(self: TaskRuntime, task_id: u64) void {
@@ -143,6 +150,8 @@ pub const TaskControl = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
+    pub const CallbackError = error{ OutOfMemory, SchedulerFailed };
+
     pub const Failure = union(enum) {
         deadlock,
         /// The simulation's deterministic step budget ran out.
@@ -154,6 +163,7 @@ pub const TaskControl = struct {
         run_until_idle: *const fn (ptr: *anyopaque) anyerror!void,
         blocked_count: *const fn (ptr: *const anyopaque) usize,
         failure: *const fn (ptr: *const anyopaque) ?Failure,
+        invoke: ?*const fn (ptr: *anyopaque, entry: *const fn (*anyopaque) void, arg: *anyopaque) CallbackError!void = null,
     };
 
     pub fn runUntilIdle(self: TaskControl) !void {
@@ -168,5 +178,13 @@ pub const TaskControl = struct {
     /// it because the corresponding `std.Io` ABI has no error channel.
     pub fn failure(self: TaskControl) ?Failure {
         return self.vtable.failure(self.ptr);
+    }
+
+    /// Run a harness callback with a return boundary for terminal scheduler
+    /// failures. This is a main-context call, not a scheduled task, so it
+    /// consumes no decisions or steps. Aborted callback frames are discarded.
+    pub fn invoke(self: TaskControl, entry: *const fn (*anyopaque) void, arg: *anyopaque) CallbackError!void {
+        if (self.vtable.invoke) |invoke_callback| return try invoke_callback(self.ptr, entry, arg);
+        entry(arg);
     }
 };
