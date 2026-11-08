@@ -99,8 +99,13 @@ pub const Capsule = struct {
         self.* = undefined;
     }
 
+    /// Reject replay under a different build, workload, toolchain, or model.
+    /// A disk-model mismatch is reported on its own: the capsule was recorded
+    /// under different storage semantics and must replay on its pinned build.
     pub fn validateIdentity(self: *const Capsule, identity: Identity) !void {
-        if (!self.parsed.value.identity.compatible(identity)) return error.IncompatibleReplay;
+        const recorded = self.parsed.value.identity;
+        if (recorded.disk_version != identity.disk_version) return error.IncompatibleDiskModel;
+        if (!recorded.compatible(identity)) return error.IncompatibleReplay;
     }
 
     pub fn options(self: *const Capsule) types.RunOptions {

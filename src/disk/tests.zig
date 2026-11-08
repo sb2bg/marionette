@@ -35,12 +35,12 @@ test "disk: writes and reads sector-aligned logical files" {
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "disk.read op=1 path=wal.log offset=0 len=8 status=ok latency_ns=10") != null);
 }
 
-test "disk: trace names the portable v1 semantic contract" {
+test "disk: trace names the portable v2 semantic contract" {
     try std.testing.expectEqual(
-        disk_model.DiskSemanticContract.portable_v1,
+        disk_model.DiskSemanticContract.portable_v2,
         disk_model.disk_semantic_contract,
     );
-    try std.testing.expectEqual(@as(u32, 1), disk_model.disk_semantic_version);
+    try std.testing.expectEqual(@as(u32, 2), disk_model.disk_semantic_version);
 
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
@@ -50,7 +50,7 @@ test "disk: trace names the portable v1 semantic contract" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         world.traceBytes(),
-        "disk.model contract=portable_v1 version=1 sector_size=4 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=commit_pending",
+        "disk.model contract=portable_v2 version=2 sector_size=4 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=identity_pending",
     ) != null);
 }
 
@@ -97,9 +97,9 @@ test "disk: lifecycle operations are deterministic and trace-visible" {
     const trace = world.traceBytes();
     try std.testing.expect(std.mem.indexOf(u8, trace, "disk.stat op=1 path=wal.log status=ok size=4 latency_ns=10") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "disk.read_some op=2 path=wal.log offset=2 requested_len=2 read_len=2 status=ok latency_ns=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.set_length op=4 path=wal.log len=2 status=ok committed_writes=1 latency_ns=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.rename op=6 path=wal.log new_path=archive/wal.log status=ok committed_writes=0 latency_ns=10") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.delete op=9 path=archive/wal.log status=ok committed_writes=0 latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.set_length op=4 path=wal.log len=2 status=ok latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.rename op=6 path=wal.log new_path=archive/wal.log status=ok latency_ns=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "disk.delete op=9 path=archive/wal.log status=ok latency_ns=10") != null);
 }
 
 test "disk: sync consumes operation ids and escapes logical paths" {
@@ -214,7 +214,7 @@ test "disk: rename onto a directory fails before committing source writes" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         world.traceBytes(),
-        "disk.rename op=5 path=source new_path=victim status=is_dir committed_writes=0 latency_ns=1",
+        "disk.rename op=5 path=source new_path=victim status=is_dir latency_ns=1",
     ) != null);
 }
 

@@ -7,16 +7,24 @@ const env_module = @import("../env.zig");
 
 /// Versioned simulator semantics applications may rely on.
 ///
-/// `portable_v1` is deliberately a Marionette contract rather than a claim
-/// about any one host filesystem. It uses sector-prefix tears, one
-/// crash-global reversal for surviving writes, and commits a path's pending
-/// writes before `setLength`, `delete`, or `rename` changes its lifecycle.
+/// `portable_v2` is deliberately a Marionette contract rather than a claim
+/// about any one host filesystem. It uses sector-prefix tears and one
+/// crash-global reversal for surviving data operations. Data and namespace
+/// durability are separate: unsynced writes and length changes stay pending
+/// on the file's identity until that file is synced, across rename, delete,
+/// and `setLength`; creation, rename, and unlink are namespace records made
+/// durable only by syncing the parent directory.
+///
+/// `portable_v1` (version 1) was the contract through 0.8.2. It committed a
+/// path's pending writes before `setLength`, `delete`, or `rename`, and an
+/// empty creation existed only as a pending write. Artifacts recorded under
+/// it replay only on their pinned builds.
 pub const DiskSemanticContract = enum {
-    portable_v1,
+    portable_v2,
 };
 
-pub const disk_semantic_contract: DiskSemanticContract = .portable_v1;
-pub const disk_semantic_version: u32 = 1;
+pub const disk_semantic_contract: DiskSemanticContract = .portable_v2;
+pub const disk_semantic_version: u32 = 2;
 
 /// Errors shared by every disk implementation and control operation.
 pub const DiskError = error{
@@ -94,6 +102,58 @@ pub const DiskFaultOptions = struct {
     /// included, so a sparse `setLength` extension counts as used. A write
     /// that would grow usage past this fails with `error.NoSpaceLeft`.
     capacity_bytes: ?u64 = null,
+
+    /// These options with every crash-time rate replaced by `profile`'s.
+    /// Operation-time rates and capacity are kept.
+    pub fn withCrashProfile(self: DiskFaultOptions, profile: CrashProfile) DiskFaultOptions {
+        var faults = self;
+        const rates = profile.rates();
+        faults.crash_lost_write_rate = rates.lost_write;
+        faults.crash_torn_write_rate = rates.torn_write;
+        faults.crash_reordered_write_rate = rates.reordered_write;
+        faults.crash_lost_metadata_rate = rates.lost_metadata;
+        return faults;
+    }
+};
+
+/// Named crash-time durability profiles. Durability helpers take one
+/// explicitly, so a sweep states what a crash may do instead of inheriting
+/// whatever rates happen to be configured. The resolved rates are traced as
+/// `disk.crash_profile` when a profile is applied.
+pub const CrashProfile = enum {
+    /// A deliberate clean crash: every pending operation lands and every
+    /// namespace change is kept. Processes still stop.
+    clean,
+    /// Everything unsynced is lost: every pending data operation and every
+    /// namespace change not made durable by a sync. Exposes a missing file
+    /// sync and a missing parent-directory sync.
+    lost_write,
+    /// Every pending write tears to a whole-sector prefix; length changes
+    /// land and namespace changes are kept.
+    torn_write,
+    /// Seeded mixture of every crash fault class.
+    mixed,
+
+    pub const Rates = struct {
+        lost_write: env_module.BuggifyRate,
+        torn_write: env_module.BuggifyRate,
+        reordered_write: env_module.BuggifyRate,
+        lost_metadata: env_module.BuggifyRate,
+    };
+
+    pub fn rates(self: CrashProfile) Rates {
+        return switch (self) {
+            .clean => .{ .lost_write = .never(), .torn_write = .never(), .reordered_write = .never(), .lost_metadata = .never() },
+            .lost_write => .{ .lost_write = .always(), .torn_write = .never(), .reordered_write = .never(), .lost_metadata = .always() },
+            .torn_write => .{ .lost_write = .never(), .torn_write = .always(), .reordered_write = .never(), .lost_metadata = .never() },
+            .mixed => .{
+                .lost_write = .{ .numerator = 1, .denominator = 4 },
+                .torn_write = .{ .numerator = 1, .denominator = 4 },
+                .reordered_write = .{ .numerator = 1, .denominator = 4 },
+                .lost_metadata = .{ .numerator = 1, .denominator = 2 },
+            },
+        };
+    }
 };
 
 /// App-facing disk capability handle. Apps receive it as `Env.disk`;

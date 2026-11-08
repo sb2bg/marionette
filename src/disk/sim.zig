@@ -91,24 +91,42 @@ pub const SimDisk = struct {
         }
     };
 
+    /// One unsynced data operation, attached to the file identity it was
+    /// issued against rather than to a path. Rename and delete move or hide
+    /// the name; the data stays pending until that identity is synced, or
+    /// until a crash resolves it.
     const PendingWrite = struct {
         op_id: u64,
-        inode: u64,
+        file_id: FileId,
+        /// The path at operation time, used for trace and fault labels.
         path: []u8,
-        offset: u64,
-        bytes: []u8,
-        logical_len: ?u64,
-        written_at_ns: u64 = 0,
-        /// Times and mode set while this write was pending; applied when it
-        /// lands. An explicit mtime wins over this write's own time.
-        mtime_ns: ?u64 = null,
-        atime_ns: ?u64 = null,
-        mode: ?u32 = null,
+        op: Op,
+
+        const Op = union(enum) {
+            write: struct {
+                offset: u64,
+                bytes: []u8,
+                logical_len: ?u64,
+            },
+            set_length: u64,
+        };
 
         fn deinit(self: *PendingWrite, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
-            allocator.free(self.bytes);
+            switch (self.op) {
+                .write => |write_op| allocator.free(write_op.bytes),
+                .set_length => {},
+            }
             self.* = undefined;
+        }
+
+        /// The logical length after applying this operation to `len`.
+        fn lengthAfter(self: *const PendingWrite, len: u64) u64 {
+            return switch (self.op) {
+                .write => |write_op| @max(len, write_op.logical_len orelse
+                    (endOffset(write_op.offset, write_op.bytes.len) catch std.math.maxInt(u64))),
+                .set_length => |new_len| new_len,
+            };
         }
     };
 
@@ -309,59 +327,25 @@ pub const SimDisk = struct {
             return &self.directory_changes.items[self.directory_changes.items.len - 1].directory.?;
         }
 
-        fn getOrCreateFile(self: *CrashStage, path: []const u8, inode: u64) DiskError!*File {
-            if (self.findFileId(path)) |id| return (try self.mutableFileById(id)).?;
-
-            const owned_path = try self.disk.world.allocator.dupe(u8, path);
-            var file: File = .{
-                .id = self.next_file_id,
-                .inode = inode,
-                .path = owned_path,
-                .metadata_durable = false,
-            };
-            errdefer file.deinit(self.disk.world.allocator);
-            try self.file_changes.append(self.disk.world.allocator, .{
-                .id = file.id,
-                .existed = false,
-                .file = file,
-            });
-            self.next_file_id += 1;
-            return &self.file_changes.items[self.file_changes.items.len - 1].file.?;
-        }
-
-        fn ensurePendingCreate(self: *CrashStage, op_id: u64, file: *const File) DiskError!void {
-            if (file.metadata_durable) return;
-            for (self.pending_metadata.items) |pending| switch (pending.kind) {
-                .create => |id| if (id == file.id) return,
-                .create_dir, .delete, .delete_dir, .rename => {},
-            };
-
-            const dir = try self.disk.ownedParentDir(file.path);
-            errdefer self.disk.world.allocator.free(dir);
-            try self.pending_metadata.append(self.disk.world.allocator, .{
-                .op_id = op_id,
-                .dir = dir,
-                .kind = .{ .create = file.id },
-            });
-        }
-
+        /// Apply a surviving data operation to its identity's staged media.
+        /// The caller has already checked that the identity survived
+        /// metadata resolution.
         fn applyFullWrite(self: *CrashStage, pending: *const PendingWrite) DiskError!void {
-            const file = try self.getOrCreateFile(pending.path, pending.inode);
-            try self.ensurePendingCreate(pending.op_id, file);
-            try self.disk.applyWriteToFile(file, pending, pending.bytes.len);
+            const file = (try self.mutableFileById(pending.file_id)) orelse unreachable;
+            try self.disk.applyPendingToFile(file, pending);
         }
 
         fn applyTornWrite(self: *CrashStage, pending: *const PendingWrite) DiskError!void {
+            const write_op = pending.op.write;
             const sector_size: usize = @intCast(self.disk.options.sector_size);
-            const midpoint = pending.bytes.len / 2;
+            const midpoint = write_op.bytes.len / 2;
             const torn_len = midpoint - midpoint % sector_size;
             if (torn_len == 0) return;
 
-            const file = try self.getOrCreateFile(pending.path, pending.inode);
-            try self.ensurePendingCreate(pending.op_id, file);
-            try self.disk.writeBytes(file, pending.offset, pending.bytes[0..torn_len]);
-            const torn_end = try endOffset(pending.offset, torn_len);
-            const logical_end = if (pending.logical_len) |logical_len|
+            const file = (try self.mutableFileById(pending.file_id)) orelse unreachable;
+            try self.disk.writeBytes(file, write_op.offset, write_op.bytes[0..torn_len]);
+            const torn_end = try endOffset(write_op.offset, torn_len);
+            const logical_end = if (write_op.logical_len) |logical_len|
                 @min(logical_len, torn_end)
             else
                 torn_end;
@@ -732,7 +716,7 @@ pub const SimDisk = struct {
             traceField("sector_size", .{ .uint = resolved_options.sector_size }),
             traceField("torn_write", .{ .literal = "sector_prefix" }),
             traceField("reorder", .{ .literal = "crash_global_reverse" }),
-            traceField("lifecycle", .{ .literal = "commit_pending" }),
+            traceField("lifecycle", .{ .literal = "identity_pending" }),
         });
         return .{
             .world = world,
@@ -790,12 +774,28 @@ pub const SimDisk = struct {
         self.faults = faults;
     }
 
+    fn setCrashProfile(self: *Self, profile: model.CrashProfile) DiskError!void {
+        const faults = self.faults.withCrashProfile(profile);
+        var buffers: [4][32]u8 = undefined;
+        try self.world.recordFields("disk.crash_profile", &.{
+            traceField("name", .{ .literal = @tagName(profile) }),
+            traceField("lost_write", .{ .literal = formatRate(&buffers[0], faults.crash_lost_write_rate) }),
+            traceField("torn_write", .{ .literal = formatRate(&buffers[1], faults.crash_torn_write_rate) }),
+            traceField("reordered_write", .{ .literal = formatRate(&buffers[2], faults.crash_reordered_write_rate) }),
+            traceField("lost_metadata", .{ .literal = formatRate(&buffers[3], faults.crash_lost_metadata_rate) }),
+        });
+        self.faults = faults;
+    }
+
+    fn formatRate(buffer: *[32]u8, rate: env_module.BuggifyRate) []const u8 {
+        return std.fmt.bufPrint(buffer, "{}/{}", .{ rate.numerator, rate.denominator }) catch unreachable;
+    }
+
     fn corruptSector(self: *Self, path: []const u8, offset: u64) DiskError!void {
         try self.validatePath(path);
         try self.validateRange(offset, @intCast(self.options.sector_size));
 
-        if (self.visibleLength(path) == null) return error.FileNotFound;
-        const file = try self.getOrCreateFile(path, null);
+        const file = self.findFile(path) orelse return error.FileNotFound;
         const sector = try self.getOrCreateSector(file, offset / self.options.sector_size);
         sector.corrupt = true;
 
@@ -831,8 +831,8 @@ pub const SimDisk = struct {
 
         if (self.findFile(options.path)) |file| {
             try self.readSectors(file, options.offset, options.buffer);
+            self.overlayPendingWrites(file.id, options.offset, options.buffer);
         }
-        self.overlayPendingWrites(options.path, options.offset, options.buffer);
 
         const corrupt = self.rangeHasCorruption(options.path, options.offset, options.buffer.len) or
             try self.rollFault(op_id, options.path, "corrupt_read", self.faults.corrupt_read_rate);
@@ -898,13 +898,7 @@ pub const SimDisk = struct {
             return error.WriteError;
         }
 
-        try self.appendPendingWrite(
-            op_id,
-            options.path,
-            options.offset,
-            options.bytes,
-            options.logical_len,
-        );
+        try self.appendWrite(op_id, options);
 
         try self.recordRangeOp(
             "disk.write",
@@ -923,7 +917,10 @@ pub const SimDisk = struct {
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
-        const committed = try self.commitPendingWrites(options.path);
+        const committed = if (self.findFile(options.path)) |file|
+            try self.commitPendingWrites(file.id)
+        else
+            0;
 
         try self.world.recordFields("disk.sync", &.{
             traceField("op", .{ .uint = op_id }),
@@ -961,7 +958,7 @@ pub const SimDisk = struct {
             try self.recordPathOp("disk.stat", op_id, options.path, "not_found", latency_ns);
             return error.FileNotFound;
         };
-        const inode = self.visibleInode(options.path) orelse unreachable;
+        const inode = self.findFile(options.path).?.inode;
 
         try self.world.recordFields("disk.stat", &.{
             traceField("op", .{ .uint = op_id }),
@@ -1026,19 +1023,11 @@ pub const SimDisk = struct {
         } else if (self.findDirectory(options.path)) |directory| {
             if (options.access_ns) |time| directory.atime_ns = time;
             if (options.modify_ns) |time| directory.mtime_ns = time;
-        } else if (self.visibleLength(options.path) != null) {
-            if (self.findFile(options.path)) |file| {
-                if (options.access_ns) |time| file.atime_ns = time;
-                if (options.modify_ns) |time| file.mtime_ns = time;
-            }
-            // Pending writes carry the times they land with, so the set times
-            // win over earlier writes, even empty ones that create the file,
-            // and later writes still move mtime.
-            for (self.pending_writes.items) |*pending| {
-                if (!std.mem.eql(u8, pending.path, options.path)) continue;
-                if (options.access_ns) |time| pending.atime_ns = time;
-                if (options.modify_ns) |time| pending.mtime_ns = time;
-            }
+        } else if (self.findFile(options.path)) |file| {
+            // Times are observable attributes of the identity, retained
+            // across a crash; they are not pending data.
+            if (options.access_ns) |time| file.atime_ns = time;
+            if (options.modify_ns) |time| file.mtime_ns = time;
         } else {
             try self.recordPathOp("disk.set_times", op_id, options.path, "not_found", latency_ns);
             return error.FileNotFound;
@@ -1064,11 +1053,8 @@ pub const SimDisk = struct {
             self.root_mode = options.mode;
         } else if (self.findDirectory(options.path)) |directory| {
             directory.mode = options.mode;
-        } else if (self.visibleLength(options.path) != null) {
-            if (self.findFile(options.path)) |file| file.mode = options.mode;
-            for (self.pending_writes.items) |*pending| {
-                if (std.mem.eql(u8, pending.path, options.path)) pending.mode = options.mode;
-            }
+        } else if (self.findFile(options.path)) |file| {
+            file.mode = options.mode;
         } else {
             try self.recordPathOp("disk.set_mode", op_id, options.path, "not_found", latency_ns);
             return error.FileNotFound;
@@ -1092,7 +1078,7 @@ pub const SimDisk = struct {
         const index = for (self.directories.items, 0..) |directory, index| {
             if (std.mem.eql(u8, directory.path, options.path)) break index;
         } else {
-            if (self.visibleLength(options.path) != null) {
+            if (self.findFile(options.path) != null) {
                 try self.recordPathOp("disk.delete_dir", op_id, options.path, "not_dir", latency_ns);
                 return error.NotDir;
             }
@@ -1118,17 +1104,13 @@ pub const SimDisk = struct {
         try self.recordPathOp("disk.delete_dir", op_id, options.path, "ok", latency_ns);
     }
 
-    /// Any visible entry below `path`, including files that exist only as
-    /// pending writes.
+    /// Any visible entry below `path`, durable or not.
     fn directoryHasChild(self: *Self, path: []const u8) bool {
         for (self.directories.items) |directory| {
             if (isDescendant(path, directory.path)) return true;
         }
         for (self.files.items) |file| {
             if (isDescendant(path, file.path)) return true;
-        }
-        for (self.pending_writes.items) |pending| {
-            if (isDescendant(path, pending.path)) return true;
         }
         return false;
     }
@@ -1188,23 +1170,6 @@ pub const SimDisk = struct {
                 .inode = file.inode,
             });
         }
-        for (self.pending_writes.items) |pending| {
-            if (self.findFile(pending.path) != null) continue;
-            const name = directChildName(options.path, pending.path) orelse continue;
-            var already_listed = false;
-            for (entries.items) |entry| {
-                if (entry.kind == .file and std.mem.eql(u8, entry.name, name)) {
-                    already_listed = true;
-                    break;
-                }
-            }
-            if (already_listed) continue;
-            try entries.append(options.allocator, .{
-                .name = try options.allocator.dupe(u8, name),
-                .kind = .file,
-                .inode = pending.inode,
-            });
-        }
         try self.recordPathOp("disk.read_dir", op_id, options.path, "ok", latency_ns);
         return .{
             .allocator = options.allocator,
@@ -1252,10 +1217,9 @@ pub const SimDisk = struct {
 
         if (read_len > 0) {
             @memset(options.buffer[0..read_len], 0);
-            if (self.findFile(options.path)) |file| {
-                try self.readBytes(file, options.offset, options.buffer[0..read_len]);
-            }
-            self.overlayPendingWrites(options.path, options.offset, options.buffer[0..read_len]);
+            const file = self.findFile(options.path).?;
+            try self.readBytes(file, options.offset, options.buffer[0..read_len]);
+            self.overlayPendingWrites(file.id, options.offset, options.buffer[0..read_len]);
         }
 
         const corrupt = read_len > 0 and
@@ -1278,102 +1242,52 @@ pub const SimDisk = struct {
         return read_len;
     }
 
+    /// A length change is pending data on the file's identity, like a
+    /// write: it becomes durable with a file sync, and a crash can lose it.
     fn setLength(self: *Self, options: Disk.SetLength) DiskError!void {
         try self.validatePath(options.path);
         try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
-        if (self.visibleLength(options.path) == null) {
-            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, 0, "not_found", latency_ns);
+        const visible_len = self.visibleLength(options.path) orelse {
+            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, "not_found", latency_ns);
             return error.FileNotFound;
-        }
+        };
         // Extension allocates like a write does, so it obeys the same limit.
         if (!self.hasSpaceFor(options.path, options.len)) {
-            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, 0, "no_space", latency_ns);
+            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, "no_space", latency_ns);
             return error.NoSpaceLeft;
         }
 
-        var committed: u64 = 0;
-        for (self.pending_writes.items) |*pending| {
-            if (!std.mem.eql(u8, pending.path, options.path)) continue;
-            committed += 1;
-        }
+        const path = try self.world.allocator.dupe(u8, options.path);
+        var path_owned = true;
+        defer if (path_owned) self.world.allocator.free(path);
+        try self.pending_writes.ensureUnusedCapacity(self.world.allocator, 1);
+        try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, "ok", latency_ns);
 
-        // With no pending writes, resizing is infallible after the trace is
-        // published, so no media staging or allocation is needed at all.
-        if (committed == 0) {
-            try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, 0, "ok", latency_ns);
-            const file = self.findFile(options.path).?;
-            self.truncateFile(file, options.len);
-            if (file.len != options.len) file.mtime_ns = self.world.now();
-            file.len = options.len;
-            return;
-        }
-
-        // Pending writes are part of the portable setLength commit. Clone only
-        // the affected file, not unrelated media, and prepare a pending-create
-        // record when those writes are the file's first materialization.
-        const existing_index = self.findFileIndex(options.path);
-        var staged_file = if (existing_index) |index|
-            try self.cloneFile(&self.files.items[index])
-        else
-            File{
-                .id = self.next_file_id,
-                .inode = self.visibleInode(options.path).?,
-                .path = try self.world.allocator.dupe(u8, options.path),
-                .metadata_durable = false,
-            };
-        var staged_file_owned = true;
-        defer if (staged_file_owned) staged_file.deinit(self.world.allocator);
-
-        var create_metadata: ?PendingMetadata = null;
-        var create_metadata_owned = false;
-        defer if (create_metadata_owned) create_metadata.?.deinit(self.world.allocator);
-        if (existing_index == null) {
-            const dir = try self.ownedParentDir(options.path);
-            create_metadata = .{
-                .op_id = for (self.pending_writes.items) |pending| {
-                    if (std.mem.eql(u8, pending.path, options.path)) break pending.op_id;
-                } else unreachable,
-                .dir = dir,
-                .kind = .{ .create = staged_file.id },
-            };
-            create_metadata_owned = true;
-            try self.files.ensureUnusedCapacity(self.world.allocator, 1);
-            try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
-        }
-
-        for (self.pending_writes.items) |*pending| {
-            if (!std.mem.eql(u8, pending.path, options.path)) continue;
-            try self.applyWriteToFile(&staged_file, pending, pending.bytes.len);
-        }
-        self.truncateFile(&staged_file, options.len);
-        if (staged_file.len != options.len) staged_file.mtime_ns = self.world.now();
-        staged_file.len = options.len;
-        try self.recordMetadataOp("disk.set_length", op_id, options.path, options.len, committed, "ok", latency_ns);
-
-        if (existing_index) |index| {
-            std.mem.swap(File, &self.files.items[index], &staged_file);
-        } else {
-            self.files.appendAssumeCapacity(staged_file);
-            staged_file_owned = false;
-            self.pending_metadata.appendAssumeCapacity(create_metadata.?);
-            create_metadata_owned = false;
-            self.next_file_id += 1;
-        }
-        self.clearPendingWritesFor(options.path);
+        const file = self.findFile(options.path).?;
+        if (visible_len != options.len) file.mtime_ns = self.world.now();
+        self.pending_writes.appendAssumeCapacity(.{
+            .op_id = op_id,
+            .file_id = file.id,
+            .path = path,
+            .op = .{ .set_length = options.len },
+        });
+        path_owned = false;
     }
 
+    /// Unlinking removes the name only. The identity's pending data stays
+    /// attached to it, so a crash that loses the delete restores the file
+    /// with whatever of that data survives.
     fn delete(self: *Self, options: Disk.Delete) DiskError!void {
         try self.validatePath(options.path);
         try self.beginOp();
 
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
-        const committed = try self.commitPendingWrites(options.path);
         const index = self.findFileIndex(options.path) orelse {
-            try self.recordLifecycleOp("disk.delete", op_id, options.path, null, committed, "not_found", latency_ns);
+            try self.recordLifecycleOp("disk.delete", op_id, options.path, null, "not_found", latency_ns);
             return error.FileNotFound;
         };
 
@@ -1381,6 +1295,7 @@ pub const SimDisk = struct {
         var dir_owned = true;
         errdefer if (dir_owned) self.world.allocator.free(dir);
         try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
+        try self.recordLifecycleOp("disk.delete", op_id, options.path, null, "ok", latency_ns);
 
         const deleted = self.files.orderedRemove(index);
         self.pending_metadata.appendAssumeCapacity(.{
@@ -1389,10 +1304,12 @@ pub const SimDisk = struct {
             .kind = .{ .delete = deleted },
         });
         dir_owned = false;
-        self.clearPendingWritesFor(options.path);
-        try self.recordLifecycleOp("disk.delete", op_id, options.path, null, committed, "ok", latency_ns);
     }
 
+    /// Rename moves a name between identities' namespace slots and commits
+    /// no data: unsynced data stays pending on the renamed identity, and a
+    /// replaced identity keeps its own pending data in case the rename is
+    /// lost.
     fn rename(self: *Self, options: Disk.Rename) DiskError!void {
         try self.validatePath(options.old_path);
         try self.validatePath(options.new_path);
@@ -1401,16 +1318,15 @@ pub const SimDisk = struct {
         const op_id = self.consumeOpId();
         const latency_ns = try self.advanceLatency();
         if (self.findDirectory(options.new_path) != null) {
-            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, 0, "is_dir", latency_ns);
+            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, "is_dir", latency_ns);
             return error.IsDir;
         }
-        const committed = try self.commitPendingWrites(options.old_path);
         const old_index = self.findFileIndex(options.old_path) orelse {
-            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "not_found", latency_ns);
+            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, "not_found", latency_ns);
             return error.FileNotFound;
         };
         if (std.mem.eql(u8, options.old_path, options.new_path)) {
-            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "ok", latency_ns);
+            try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, "ok", latency_ns);
             return;
         }
 
@@ -1427,33 +1343,25 @@ pub const SimDisk = struct {
         var new_dir_owned = true;
         errdefer if (new_dir_owned) self.world.allocator.free(new_dir);
         try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
+        try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, "ok", latency_ns);
 
-        self.clearPendingWritesFor(options.new_path);
-
-        var file_id: FileId = self.files.items[old_index].id;
+        var file_index = old_index;
         var replaced: ?File = null;
         if (self.findFileIndex(options.new_path)) |new_index| {
-            if (new_index != old_index) {
-                var old_index_adjusted = old_index;
-                replaced = self.files.orderedRemove(new_index);
-                if (new_index < old_index_adjusted) old_index_adjusted -= 1;
-                file_id = self.files.items[old_index_adjusted].id;
-                self.world.allocator.free(self.files.items[old_index_adjusted].path);
-                self.files.items[old_index_adjusted].path = owned_new_path;
-                new_path_owned = false;
-            }
-        } else {
-            self.world.allocator.free(self.files.items[old_index].path);
-            self.files.items[old_index].path = owned_new_path;
-            new_path_owned = false;
+            replaced = self.files.orderedRemove(new_index);
+            if (new_index < file_index) file_index -= 1;
         }
+        const file = &self.files.items[file_index];
+        self.world.allocator.free(file.path);
+        file.path = owned_new_path;
+        new_path_owned = false;
 
         self.pending_metadata.appendAssumeCapacity(.{
             .op_id = op_id,
             .dir = old_dir,
             .other_dir = if (std.mem.eql(u8, old_dir, new_dir)) null else new_dir,
             .kind = .{ .rename = .{
-                .file_id = file_id,
+                .file_id = file.id,
                 .old_path = owned_old_path,
                 .replaced = replaced,
             } },
@@ -1464,8 +1372,6 @@ pub const SimDisk = struct {
             self.world.allocator.free(new_dir);
         }
         new_dir_owned = false;
-
-        try self.recordLifecycleOp("disk.rename", op_id, options.old_path, options.new_path, committed, "ok", latency_ns);
     }
 
     fn crash(self: *Self, _: Crash) DiskError!void {
@@ -1487,17 +1393,52 @@ pub const SimDisk = struct {
         var staged = try CrashStage.init(self);
         defer staged.deinit();
 
+        // Namespace first: which identities survive, under which names.
+        // Data is then resolved only for surviving identities, so a lost
+        // create or a kept delete takes its unsynced data with it.
+        const pending_metadata_count = staged.pending_metadata.items.len;
+        var metadata_kept: u64 = 0;
+        var metadata_lost: u64 = 0;
+        var metadata_index = staged.pending_metadata.items.len;
+        while (metadata_index > 0) {
+            metadata_index -= 1;
+            const pending = &staged.pending_metadata.items[metadata_index];
+            if (try self.rollFault(
+                pending.op_id,
+                pending.dir,
+                "crash_lost_metadata",
+                self.faults.crash_lost_metadata_rate,
+            )) {
+                try staged.rollbackPendingMetadata(pending);
+                metadata_lost += 1;
+                try self.recordCrashMetadata(pending, "lost");
+            } else {
+                try staged.markMetadataDurable(pending);
+                metadata_kept += 1;
+                try self.recordCrashMetadata(pending, "kept");
+            }
+        }
+
         const pending_count = self.pending_writes.items.len;
         var landed: u64 = 0;
         var lost: u64 = 0;
         var torn: u64 = 0;
         var reordered: u64 = 0;
+        var orphaned: u64 = 0;
         const CrashLanding = struct { index: usize };
         var landing = std.ArrayList(CrashLanding).empty;
         defer landing.deinit(self.world.allocator);
         var reorder_requested = false;
 
         for (self.pending_writes.items, 0..) |*pending, index| {
+            if (staged.findFileById(pending.file_id) == null) {
+                // No eligible state: the identity did not survive, so no
+                // fault decision is spent on its data.
+                orphaned += 1;
+                try self.recordCrashWrite(pending, "orphaned");
+                continue;
+            }
+
             if (try self.rollFault(
                 pending.op_id,
                 pending.path,
@@ -1509,16 +1450,18 @@ pub const SimDisk = struct {
                 continue;
             }
 
-            if (try self.rollFault(
-                pending.op_id,
-                pending.path,
-                "crash_torn_write",
-                self.faults.crash_torn_write_rate,
-            )) {
-                try staged.applyTornWrite(pending);
-                torn += 1;
-                try self.recordCrashWrite(pending, "torn");
-                continue;
+            if (pending.op == .write) {
+                if (try self.rollFault(
+                    pending.op_id,
+                    pending.path,
+                    "crash_torn_write",
+                    self.faults.crash_torn_write_rate,
+                )) {
+                    try staged.applyTornWrite(pending);
+                    torn += 1;
+                    try self.recordCrashWrite(pending, "torn");
+                    continue;
+                }
             }
 
             if (try self.rollFault(
@@ -1552,28 +1495,6 @@ pub const SimDisk = struct {
                 try self.recordCrashWrite(pending, "landed");
             }
         }
-        const pending_metadata_count = staged.pending_metadata.items.len;
-        var metadata_kept: u64 = 0;
-        var metadata_lost: u64 = 0;
-        var index = staged.pending_metadata.items.len;
-        while (index > 0) {
-            index -= 1;
-            const pending = &staged.pending_metadata.items[index];
-            if (try self.rollFault(
-                pending.op_id,
-                pending.dir,
-                "crash_lost_metadata",
-                self.faults.crash_lost_metadata_rate,
-            )) {
-                try staged.rollbackPendingMetadata(pending);
-                metadata_lost += 1;
-                try self.recordCrashMetadata(pending, "lost");
-            } else {
-                try staged.markMetadataDurable(pending);
-                metadata_kept += 1;
-                try self.recordCrashMetadata(pending, "kept");
-            }
-        }
         staged.clearPendingMetadata();
         try staged.validateChangedPaths();
         try staged.prepareCommit();
@@ -1584,6 +1505,7 @@ pub const SimDisk = struct {
             traceField("lost", .{ .uint = lost }),
             traceField("torn", .{ .uint = torn }),
             traceField("reordered", .{ .uint = reordered }),
+            traceField("orphaned", .{ .uint = orphaned }),
             traceField("pending_metadata", .{ .uint = @intCast(pending_metadata_count) }),
             traceField("metadata_kept", .{ .uint = metadata_kept }),
             traceField("metadata_lost", .{ .uint = metadata_lost }),
@@ -1591,14 +1513,6 @@ pub const SimDisk = struct {
 
         if (self.crash_observer) |observer| try observer.prepare(observer.ptr);
 
-        for (self.files.items) |*file| {
-            if (inspectFile(self, file.inode)) |snapshot| retainTimes(file, snapshot);
-        }
-        for (staged.file_changes.items) |*change| {
-            if (change.file) |*file| {
-                if (inspectFile(self, file.inode)) |snapshot| retainTimes(file, snapshot);
-            }
-        }
         staged.commit();
         self.clearPendingWrites();
         self.clearPendingMetadata();
@@ -1815,77 +1729,77 @@ pub const SimDisk = struct {
         return null;
     }
 
-    fn getOrCreateFile(self: *Self, path: []const u8, inode: ?u64) DiskError!*File {
-        if (self.findFile(path)) |file| return file;
-
-        const owned_path = try self.world.allocator.dupe(u8, path);
-        errdefer self.world.allocator.free(owned_path);
-
-        const id = self.next_file_id;
-        self.next_file_id += 1;
-        try self.files.append(self.world.allocator, .{
-            .id = id,
-            .inode = inode orelse self.allocateFileInode(),
-            .path = owned_path,
-            .metadata_durable = false,
-        });
-        return &self.files.items[self.files.items.len - 1];
-    }
-
     fn allocateFileInode(self: *Self) u64 {
         const inode = self.next_file_inode;
         self.next_file_inode += 1;
         return inode;
     }
 
-    fn ensurePendingCreate(self: *Self, op_id: u64, file: *const File) DiskError!void {
-        if (file.metadata_durable) return;
-        for (self.pending_metadata.items) |pending| switch (pending.kind) {
-            .create => |id| if (id == file.id) return,
-            .create_dir, .delete, .delete_dir, .rename => {},
-        };
-
-        const dir = try self.ownedParentDir(file.path);
-        errdefer self.world.allocator.free(dir);
-        try self.pending_metadata.append(self.world.allocator, .{
-            .op_id = op_id,
-            .dir = dir,
-            .kind = .{ .create = file.id },
-        });
-    }
-
-    fn appendPendingWrite(
-        self: *Self,
-        op_id: u64,
-        path: []const u8,
-        offset: u64,
-        bytes: []const u8,
-        logical_len: ?u64,
-    ) DiskError!void {
-        const existing_inode = self.visibleInode(path);
-        const inode = existing_inode orelse self.next_file_inode;
+    /// Create a visible, not-yet-durable identity at `path` together with
+    /// its pending namespace record. Parent-directory sync makes the name
+    /// durable independently of any data written to it.
+    fn createFileIdentity(self: *Self, op_id: u64, path: []const u8) DiskError!*File {
         const owned_path = try self.world.allocator.dupe(u8, path);
         errdefer self.world.allocator.free(owned_path);
+        const dir = try self.ownedParentDir(path);
+        errdefer self.world.allocator.free(dir);
+        try self.files.ensureUnusedCapacity(self.world.allocator, 1);
+        try self.pending_metadata.ensureUnusedCapacity(self.world.allocator, 1);
 
-        const owned_bytes = try self.world.allocator.dupe(u8, bytes);
-        errdefer self.world.allocator.free(owned_bytes);
-
-        try self.pending_writes.append(self.world.allocator, .{
-            .op_id = op_id,
-            .inode = inode,
+        const id = self.next_file_id;
+        self.next_file_id += 1;
+        self.files.appendAssumeCapacity(.{
+            .id = id,
+            .inode = self.allocateFileInode(),
             .path = owned_path,
-            .offset = offset,
-            .bytes = owned_bytes,
-            .logical_len = logical_len,
-            .written_at_ns = self.world.now(),
+            .metadata_durable = false,
         });
-        if (existing_inode == null) self.next_file_inode += 1;
+        self.pending_metadata.appendAssumeCapacity(.{
+            .op_id = op_id,
+            .dir = dir,
+            .kind = .{ .create = id },
+        });
+        return &self.files.items[self.files.items.len - 1];
     }
 
-    fn clearPendingWritesFor(self: *Self, path: []const u8) void {
+    /// Record a write against the identity at `path`, creating the identity
+    /// first when the path has none. An empty write only creates. Every
+    /// allocation precedes the first state change.
+    fn appendWrite(self: *Self, op_id: u64, options: Write) DiskError!void {
+        var pending: ?PendingWrite = null;
+        errdefer if (pending) |*owned| owned.deinit(self.world.allocator);
+        if (options.bytes.len != 0 or options.logical_len != null) {
+            try self.pending_writes.ensureUnusedCapacity(self.world.allocator, 1);
+            const path = try self.world.allocator.dupe(u8, options.path);
+            errdefer self.world.allocator.free(path);
+            const bytes = try self.world.allocator.dupe(u8, options.bytes);
+            pending = .{
+                .op_id = op_id,
+                .file_id = undefined,
+                .path = path,
+                .op = .{ .write = .{
+                    .offset = options.offset,
+                    .bytes = bytes,
+                    .logical_len = options.logical_len,
+                } },
+            };
+        }
+
+        const file = self.findFile(options.path) orelse try self.createFileIdentity(op_id, options.path);
+        if (options.bytes.len != 0) file.mtime_ns = self.world.now();
+        if (pending) |*owned| {
+            owned.file_id = file.id;
+            self.pending_writes.appendAssumeCapacity(owned.*);
+            pending = null;
+        }
+    }
+
+    /// Discard the pending data of an identity that can no longer return,
+    /// because its removal became durable.
+    fn dropPendingWritesFor(self: *Self, file_id: FileId) void {
         var index: usize = 0;
         while (index < self.pending_writes.items.len) {
-            if (!std.mem.eql(u8, self.pending_writes.items[index].path, path)) {
+            if (self.pending_writes.items[index].file_id != file_id) {
                 index += 1;
                 continue;
             }
@@ -1894,16 +1808,18 @@ pub const SimDisk = struct {
         }
     }
 
-    fn commitPendingWrites(self: *Self, path: []const u8) DiskError!u64 {
+    /// File sync: make the identity's pending data durable, in order.
+    fn commitPendingWrites(self: *Self, file_id: FileId) DiskError!u64 {
+        const file = self.findFileById(file_id) orelse return 0;
         var committed: u64 = 0;
         var index: usize = 0;
         while (index < self.pending_writes.items.len) {
-            if (!std.mem.eql(u8, self.pending_writes.items[index].path, path)) {
+            if (self.pending_writes.items[index].file_id != file_id) {
                 index += 1;
                 continue;
             }
 
-            try self.applyFullWrite(&self.pending_writes.items[index]);
+            try self.applyPendingToFile(file, &self.pending_writes.items[index]);
             var pending = self.pending_writes.orderedRemove(index);
             pending.deinit(self.world.allocator);
             committed += 1;
@@ -2008,9 +1924,13 @@ pub const SimDisk = struct {
                     self.directories.items[index].metadata_durable = true;
                 }
             },
-            .delete, .delete_dir => {},
+            // A durable unlink means the identity can never return, so its
+            // pending data has nowhere to land.
+            .delete => |deleted| if (deleted) |file| self.dropPendingWritesFor(file.id),
+            .delete_dir => {},
             .rename => |rename_undo| {
                 if (self.findFileById(rename_undo.file_id)) |file| file.metadata_durable = true;
+                if (rename_undo.replaced) |file| self.dropPendingWritesFor(file.id);
             },
         }
     }
@@ -2116,28 +2036,18 @@ pub const SimDisk = struct {
         return std.math.maxInt(u64) - id;
     }
 
-    fn applyFullWrite(self: *Self, pending: *const PendingWrite) DiskError!void {
-        const file = try self.getOrCreateFile(pending.path, pending.inode);
-        try self.ensurePendingCreate(pending.op_id, file);
-        try self.applyWriteToFile(file, pending, pending.bytes.len);
-    }
-
-    fn applyWriteToFile(
-        self: *Self,
-        file: *File,
-        pending: *const PendingWrite,
-        write_len: usize,
-    ) DiskError!void {
-        try self.writeBytes(file, pending.offset, pending.bytes[0..write_len]);
-        const physical_end = try endOffset(pending.offset, write_len);
-        file.len = @max(file.len, pending.logical_len orelse physical_end);
-        if (pending.mtime_ns) |mtime_ns| {
-            file.mtime_ns = mtime_ns;
-        } else if (pending.bytes.len != 0) {
-            file.mtime_ns = pending.written_at_ns;
+    /// Apply one data operation to a file's durable media.
+    fn applyPendingToFile(self: *Self, file: *File, pending: *const PendingWrite) DiskError!void {
+        switch (pending.op) {
+            .write => |write_op| {
+                try self.writeBytes(file, write_op.offset, write_op.bytes);
+                file.len = pending.lengthAfter(file.len);
+            },
+            .set_length => |len| {
+                self.truncateFile(file, len);
+                file.len = len;
+            },
         }
-        if (pending.atime_ns) |atime_ns| file.atime_ns = atime_ns;
-        if (pending.mode) |mode| file.mode = mode;
     }
 
     fn findSector(_: *Self, file: *File, index: u64) ?*Sector {
@@ -2240,16 +2150,8 @@ pub const SimDisk = struct {
 
     fn usedBytes(self: *Self) u64 {
         var used: u64 = 0;
-        for (self.files.items) |file| {
-            used +|= self.allocatedSize(self.visibleLength(file.path) orelse 0);
-        }
-        // Files that exist only as pending writes, counted once per path.
-        for (self.pending_writes.items, 0..) |pending, index| {
-            if (self.findFile(pending.path) != null) continue;
-            const counted = for (self.pending_writes.items[0..index]) |earlier| {
-                if (std.mem.eql(u8, earlier.path, pending.path)) break true;
-            } else false;
-            if (!counted) used +|= self.allocatedSize(self.visibleLength(pending.path) orelse 0);
+        for (self.files.items) |*file| {
+            used +|= self.allocatedSize(self.visibleLengthOf(file));
         }
         return used;
     }
@@ -2261,52 +2163,51 @@ pub const SimDisk = struct {
     }
 
     fn visibleLength(self: *Self, path: []const u8) ?u64 {
-        var found = false;
-        var len: u64 = 0;
-        if (self.findFile(path)) |file| {
-            found = true;
-            len = file.len;
-        }
-        for (self.pending_writes.items) |*pending| {
-            if (!std.mem.eql(u8, pending.path, path)) continue;
-            found = true;
-            const physical_end = endOffset(
-                pending.offset,
-                pending.bytes.len,
-            ) catch std.math.maxInt(u64);
-            len = @max(len, pending.logical_len orelse physical_end);
-        }
-        return if (found) len else null;
+        const file = self.findFile(path) orelse return null;
+        return self.visibleLengthOf(file);
     }
 
-    fn visibleInode(self: *Self, path: []const u8) ?u64 {
-        if (self.findFile(path)) |file| return file.inode;
+    /// Durable length with the identity's pending operations applied in
+    /// order.
+    fn visibleLengthOf(self: *const Self, file: *const File) u64 {
+        var len = file.len;
         for (self.pending_writes.items) |*pending| {
-            if (std.mem.eql(u8, pending.path, path)) return pending.inode;
+            if (pending.file_id == file.id) len = pending.lengthAfter(len);
         }
-        return null;
+        return len;
     }
 
-    fn overlayPendingWrites(self: *Self, path: []const u8, offset: u64, buffer: []u8) void {
+    /// Lay the identity's pending operations over durable bytes in issue
+    /// order: writes copy their overlap and length changes zero everything
+    /// from the new end.
+    fn overlayPendingWrites(self: *Self, file_id: FileId, offset: u64, buffer: []u8) void {
         const read_start = offset;
         const read_end = read_start + buffer.len;
 
         for (self.pending_writes.items) |*pending| {
-            if (!std.mem.eql(u8, pending.path, path)) continue;
+            if (pending.file_id != file_id) continue;
+            switch (pending.op) {
+                .write => |write_op| {
+                    const write_start = write_op.offset;
+                    const write_end = write_start + write_op.bytes.len;
+                    const overlap_start = @max(read_start, write_start);
+                    const overlap_end = @min(read_end, write_end);
+                    if (overlap_start >= overlap_end) continue;
 
-            const write_start = pending.offset;
-            const write_end = write_start + pending.bytes.len;
-            const overlap_start = @max(read_start, write_start);
-            const overlap_end = @min(read_end, write_end);
-            if (overlap_start >= overlap_end) continue;
-
-            const dst_start: usize = @intCast(overlap_start - read_start);
-            const src_start: usize = @intCast(overlap_start - write_start);
-            const overlap_len: usize = @intCast(overlap_end - overlap_start);
-            @memcpy(
-                buffer[dst_start..][0..overlap_len],
-                pending.bytes[src_start..][0..overlap_len],
-            );
+                    const dst_start: usize = @intCast(overlap_start - read_start);
+                    const src_start: usize = @intCast(overlap_start - write_start);
+                    const overlap_len: usize = @intCast(overlap_end - overlap_start);
+                    @memcpy(
+                        buffer[dst_start..][0..overlap_len],
+                        write_op.bytes[src_start..][0..overlap_len],
+                    );
+                },
+                .set_length => |len| {
+                    if (len >= read_end) continue;
+                    const zero_start: usize = @intCast(@max(len, read_start) - read_start);
+                    @memset(buffer[zero_start..], 0);
+                },
+            }
         }
     }
 
@@ -2360,13 +2261,21 @@ pub const SimDisk = struct {
         pending: *const PendingWrite,
         result: []const u8,
     ) DiskError!void {
-        try self.world.recordFields("disk.crash_write", &.{
-            traceField("op", .{ .uint = pending.op_id }),
-            traceField("path", .{ .text = pending.path }),
-            traceField("offset", .{ .uint = pending.offset }),
-            traceField("len", .{ .uint = @intCast(pending.bytes.len) }),
-            traceField("result", .{ .literal = result }),
-        });
+        switch (pending.op) {
+            .write => |write_op| try self.world.recordFields("disk.crash_write", &.{
+                traceField("op", .{ .uint = pending.op_id }),
+                traceField("path", .{ .text = pending.path }),
+                traceField("offset", .{ .uint = write_op.offset }),
+                traceField("len", .{ .uint = @intCast(write_op.bytes.len) }),
+                traceField("result", .{ .literal = result }),
+            }),
+            .set_length => |len| try self.world.recordFields("disk.crash_set_length", &.{
+                traceField("op", .{ .uint = pending.op_id }),
+                traceField("path", .{ .text = pending.path }),
+                traceField("len", .{ .uint = len }),
+                traceField("result", .{ .literal = result }),
+            }),
+        }
     }
 
     fn recordCrashMetadata(
@@ -2404,7 +2313,6 @@ pub const SimDisk = struct {
         op_id: u64,
         path: []const u8,
         len: u64,
-        committed: u64,
         status: []const u8,
         latency_ns: clock_module.Duration,
     ) DiskError!void {
@@ -2413,7 +2321,6 @@ pub const SimDisk = struct {
             traceField("path", .{ .text = path }),
             traceField("len", .{ .uint = len }),
             traceField("status", .{ .literal = status }),
-            traceField("committed_writes", .{ .uint = committed }),
             traceField("latency_ns", .{ .uint = latency_ns }),
         });
     }
@@ -2424,7 +2331,6 @@ pub const SimDisk = struct {
         op_id: u64,
         path: []const u8,
         new_path: ?[]const u8,
-        committed: u64,
         status: []const u8,
         latency_ns: clock_module.Duration,
     ) DiskError!void {
@@ -2434,7 +2340,6 @@ pub const SimDisk = struct {
                 traceField("path", .{ .text = path }),
                 traceField("new_path", .{ .text = renamed_to }),
                 traceField("status", .{ .literal = status }),
-                traceField("committed_writes", .{ .uint = committed }),
                 traceField("latency_ns", .{ .uint = latency_ns }),
             });
         } else {
@@ -2442,7 +2347,6 @@ pub const SimDisk = struct {
                 traceField("op", .{ .uint = op_id }),
                 traceField("path", .{ .text = path }),
                 traceField("status", .{ .literal = status }),
-                traceField("committed_writes", .{ .uint = committed }),
                 traceField("latency_ns", .{ .uint = latency_ns }),
             });
         }
@@ -2497,6 +2401,7 @@ pub const SimDisk = struct {
         .disk = controlDisk,
         .crash_after_ops_tracked = controlCrashAfterOpsTracked,
         .disarm_tracked_crash = controlDisarmTrackedCrash,
+        .set_crash_profile = controlSetCrashProfile,
     };
 
     fn fromOpaque(ptr: *anyopaque) *Self {
@@ -2514,34 +2419,18 @@ pub const SimDisk = struct {
     }
 
     fn inspectFile(self: *Self, inode: u64) ?Disk.Snapshot {
-        var result: ?Disk.Snapshot = null;
-        for (self.files.items) |file| {
-            if (file.inode == inode) {
-                result = .{ .path = file.path, .inode = inode, .size = file.len, .mtime_ns = file.mtime_ns, .atime_ns = file.atime_ns, .mode = file.mode };
-                break;
-            }
+        for (self.files.items) |*file| {
+            if (file.inode != inode) continue;
+            return .{
+                .path = file.path,
+                .inode = inode,
+                .size = self.visibleLengthOf(file),
+                .mtime_ns = file.mtime_ns,
+                .atime_ns = file.atime_ns,
+                .mode = file.mode,
+            };
         }
-        for (self.pending_writes.items) |pending| {
-            if (pending.inode != inode) continue;
-            if (result == null) result = .{ .path = pending.path, .inode = inode, .size = 0, .mtime_ns = 0 };
-            result.?.size = @max(result.?.size, pending.logical_len orelse (pending.offset + pending.bytes.len));
-            if (pending.mtime_ns) |mtime_ns| {
-                result.?.mtime_ns = mtime_ns;
-            } else if (pending.bytes.len != 0) {
-                result.?.mtime_ns = pending.written_at_ns;
-            }
-            if (pending.atime_ns) |atime_ns| result.?.atime_ns = atime_ns;
-            if (pending.mode) |mode| result.?.mode = mode;
-        }
-        return result;
-    }
-
-    /// portable_v1 keeps the latest observable timestamps across a crash,
-    /// even when the corresponding unsynced data is lost.
-    fn retainTimes(file: *File, snapshot: Disk.Snapshot) void {
-        file.mtime_ns = snapshot.mtime_ns;
-        file.atime_ns = snapshot.atime_ns;
-        file.mode = snapshot.mode;
+        return null;
     }
 
     fn diskRead(ptr: *anyopaque, options: Disk.Read) DiskError!void {
@@ -2606,6 +2495,10 @@ pub const SimDisk = struct {
 
     fn controlSetFaults(ptr: *anyopaque, faults: DiskFaultOptions) DiskError!void {
         try fromOpaque(ptr).setFaults(faults);
+    }
+
+    fn controlSetCrashProfile(ptr: *anyopaque, profile: model.CrashProfile) DiskError!void {
+        try fromOpaque(ptr).setCrashProfile(profile);
     }
 
     fn controlCorruptSector(ptr: *anyopaque, path: []const u8, offset: u64) DiskError!void {

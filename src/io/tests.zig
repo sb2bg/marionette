@@ -4613,18 +4613,19 @@ test "io: multi-sector setLength extension is one atomic metadata operation" {
     try std.testing.expect(std.mem.indexOf(u8, operation_trace, "disk.set_length") != null);
     try std.testing.expect(std.mem.indexOf(u8, operation_trace, "disk.write") == null);
 
+    // Under portable_v2 a length change is pending data on the identity, so
+    // recording it allocates. Failure to record it leaves both cached and
+    // disk state at their pre-call length, with or without earlier pending
+    // writes.
     try file.setLength(io, 4);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     world.allocator = failing.allocator();
-    const allocation_free_extension = file.setLength(io, 12);
+    const failed_bare_extension = file.setLength(io, 12);
     world.allocator = std.testing.allocator;
-    try allocation_free_extension;
-    try std.testing.expectEqual(@as(u64, 12), try file.length(io));
+    try std.testing.expectError(error.InputOutput, failed_bare_extension);
+    try std.testing.expectEqual(@as(u64, 4), try file.length(io));
+    try std.testing.expectEqual(@as(u64, 4), (try sim.env.disk.stat(.{ .path = "extend.bin" })).size);
 
-    // With a pending write, setLength stages only this file. Failure while
-    // preparing that affected-file copy leaves both cached and disk state at
-    // their pre-call length.
-    try file.setLength(io, 4);
     try sim.control.disk.setFaults(.{});
     try file.writePositionalAll(io, "DATA", 0);
     failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });

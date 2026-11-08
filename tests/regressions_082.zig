@@ -248,7 +248,7 @@ test "082: sweep outcomes belong to the sweep's particular armed crash" {
                 .init = Sweep.init,
                 .scenario = scenario,
                 .watchdog = watchdog,
-            }, .{ .max_points = 4 });
+            }, .{ .profile = .clean, .max_points = 4 });
             defer result.deinit();
             try std.testing.expect(result.failure == null);
             try std.testing.expectEqual(@as(u64, if (index < 2) 2 else 1), result.points);

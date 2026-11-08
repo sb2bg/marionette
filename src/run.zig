@@ -9,6 +9,7 @@ const run_types = @import("run_types.zig");
 const seed_module = @import("seed.zig");
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
+const CrashProfile = @import("disk/model.zig").CrashProfile;
 
 pub const RunAttribute = run_types.RunAttribute;
 pub const RunAttributeValue = run_types.RunAttributeValue;
@@ -64,6 +65,8 @@ pub fn SimCase(comptime App: type) type {
         /// Disk operations before this run's armed crash, in a crash-point
         /// sweep. Null otherwise.
         crash_point: ?u64 = null,
+        /// The sweep's named crash profile, applied when the point is armed.
+        crash_profile: ?CrashProfile = null,
         crash_point_armed: bool = false,
         crash_point_trigger: @import("disk/control.zig").DiskControl.CrashTrigger = .{},
         /// Null until this scenario arms a sweep point; retained after finish.
@@ -76,11 +79,13 @@ pub fn SimCase(comptime App: type) type {
             if (try self.control().world.actionEnabled(id)) try callback(self);
         }
 
-        /// Arm this run's crash point: in a crash-point sweep, the disk crashes
-        /// before the operation that would exceed it. Does nothing outside a
-        /// sweep, so the same scenario runs normally too.
+        /// Arm this run's crash point: in a crash-point sweep, the sweep's
+        /// crash profile replaces the crash-time fault rates and the disk
+        /// crashes before the operation that would exceed the point. Does
+        /// nothing outside a sweep, so the same scenario runs normally too.
         pub fn armCrashPoint(self: *Self) !void {
             const point = self.crash_point orelse return;
+            if (self.crash_profile) |profile| try self.control().disk.setCrashProfile(profile);
             try self.control().disk.crashAfterOpsTracked(point, &self.crash_point_trigger);
             self.crash_point_armed = true;
             if (self.crash_point_fired == null) self.crash_point_fired = false;
@@ -388,6 +393,21 @@ pub fn runCapsuleCandidate(
 /// replay the same point.
 pub const crash_point_attribute = "marionette.crash_point";
 
+/// Run attribute carrying a sweep's named crash profile, applied when the
+/// scenario arms its point, so capsules replay the same crash semantics.
+pub const crash_profile_attribute = "marionette.crash_profile";
+
+fn crashProfileFromOptions(options: RunOptions) ?CrashProfile {
+    for (options.attributes) |attribute| {
+        if (!std.mem.eql(u8, attribute.key, crash_profile_attribute)) continue;
+        return switch (attribute.value) {
+            .string => |name| std.meta.stringToEnum(CrashProfile, name),
+            else => null,
+        };
+    }
+    return null;
+}
+
 fn crashPointFromOptions(options: RunOptions) ?u64 {
     for (options.attributes) |attribute| {
         if (!std.mem.eql(u8, attribute.key, crash_point_attribute)) continue;
@@ -400,8 +420,11 @@ fn crashPointFromOptions(options: RunOptions) ?u64 {
 }
 
 /// Internal crash-point sweep execution: one recorded case at `point`.
-pub fn runCrashPoint(config: anytype, point: u64) RunError!RunReport {
-    return runConfiguredCaseWith(config, null, .record, &.{runAttribute(crash_point_attribute, point)});
+pub fn runCrashPoint(config: anytype, point: u64, profile: CrashProfile) RunError!RunReport {
+    return runConfiguredCaseWith(config, null, .record, &.{
+        runAttribute(crash_point_attribute, point),
+        runAttribute(crash_profile_attribute, @tagName(profile)),
+    });
 }
 
 fn runOptionsFromConfig(config: anytype, seed_override: ?u64, extra_attributes: []const RunAttribute) std.mem.Allocator.Error!RunOptions {
@@ -781,6 +804,7 @@ fn runOnceWithSimCase(
         .sim = sim,
         .state_checks = state_checks,
         .crash_point = crashPointFromOptions(options),
+        .crash_profile = crashProfileFromOptions(options),
         .app = invokeHarness(sim, init_app, .{sim}) catch |err| {
             try finishManagedProcesses(sim);
             // An initializer that ran out of steps reports the budget, not

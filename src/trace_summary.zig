@@ -136,6 +136,53 @@ pub fn faultCoverage(trace_bytes: []const u8) TraceSummaryError!FaultCoverage {
     return coverage;
 }
 
+/// Crash injections, whether each had anything to act on, and the storage
+/// effects they produced. An injection is not an effect: a crash with no
+/// eligible pending state, or one whose profile kept everything, is evidence
+/// only that processes stopped.
+pub const CrashEffects = struct {
+    /// Crashes injected (`disk.crash` events).
+    injected: u64 = 0,
+    /// Injected crashes with pending data on a surviving identity or a
+    /// pending namespace change.
+    eligible: u64 = 0,
+    /// Pending data operations lost, torn, or reordered.
+    data_effects: u64 = 0,
+    /// Pending namespace changes rolled back.
+    metadata_effects: u64 = 0,
+
+    pub fn add(self: *CrashEffects, other: CrashEffects) void {
+        inline for (@typeInfo(CrashEffects).@"struct".field_names) |name| {
+            @field(self, name) += @field(other, name);
+        }
+    }
+
+    fn record(self: *CrashEffects, event: ParsedEvent) TraceSummaryError!void {
+        if (!std.mem.eql(u8, event.name, "disk.crash")) return;
+        self.injected += 1;
+        const pending_writes = try requiredU64(event, "pending_writes");
+        // Absent before portable_v2, where no pending data was orphaned.
+        const orphaned = if (event.field("orphaned")) |_| try requiredU64(event, "orphaned") else 0;
+        const pending_metadata = try requiredU64(event, "pending_metadata");
+        if (pending_writes -| orphaned != 0 or pending_metadata != 0) self.eligible += 1;
+        self.data_effects += try requiredU64(event, "lost");
+        self.data_effects += try requiredU64(event, "torn");
+        self.data_effects += try requiredU64(event, "reordered");
+        self.metadata_effects += try requiredU64(event, "metadata_lost");
+    }
+};
+
+/// Count crash injections and effects in trace bytes without allocating.
+pub fn crashEffects(trace_bytes: []const u8) TraceSummaryError!CrashEffects {
+    var effects: CrashEffects = .{};
+    var lines = std.mem.splitScalar(u8, trace_bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or std.mem.startsWith(u8, line, "marionette.trace ")) continue;
+        try effects.record(try parseEventLine(line));
+    }
+    return effects;
+}
+
 fn requiredU64(event: ParsedEvent, key: []const u8) TraceSummaryError!u64 {
     const value = event.field(key) orelse return error.InvalidTraceEvent;
     return std.fmt.parseInt(u64, value, 10) catch error.InvalidTraceLine;

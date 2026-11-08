@@ -242,11 +242,14 @@ fn scenario(case: *Case) !void {
     // ...restart if crashed, recover, and check...
 }
 
-try mar.expectCrashPointsPass(config, .{});
+try mar.expectCrashPointsPass(config, .{ .profile = .lost_write });
 ```
 
-`armCrashPoint` arms `crashAfterOps(k)` for the sweep's current point `k`, and
-does nothing in an ordinary run, so the same scenario works in both.
+A sweep names its crash profile (`clean`, `lost_write`, `torn_write`, or
+`mixed`; see [Crash profiles](disk-fault-model.md#crash-profiles)).
+`armCrashPoint` applies that profile's crash-time rates and arms
+`crashAfterOps(k)` for the sweep's current point `k`; it does nothing in an
+ordinary run, so the same scenario works in both.
 `finishCrashPoint` cancels its crash if it has not fired, so recovery code after it
 runs normally; the runner also cancels it when the scenario returns or fails,
 so checks and cleanup never run with that sweep crash armed. Its firing outcome
@@ -255,13 +258,20 @@ as its firing, and finishing leaves unrelated requests alone.
 `sweepCrashPoints(config, CrashSweepOptions)`
 tries points 0, 1, 2, and so on until one where the armed crash never fired,
 and returns the first failing report instead of stopping at an error. Each point
-is an ordinary recorded and exact-replayed run whose point is the
-`marionette.crash_point` run attribute, so a failing point's capsule replays
-that point. With `artifacts` in the config, the first failing point is written
+is an ordinary recorded and exact-replayed run whose point and profile are the
+`marionette.crash_point` and `marionette.crash_profile` run attributes, so a
+failing point's capsule replays that point under the same semantics. With `artifacts` in the config, the first failing point is written
 there; `include_passes` returns `InvalidCrashSweepArtifacts`, because every
 point cannot share one directory. A scenario that never arms returns
 `CrashPointNotArmed`, and `max_points` (1024 by default) bounds a workload that
 never finishes.
+
+A passing sweep is evidence only if crashes acted on something. The result
+counts `points`, `injected` points where the armed crash fired, `eligible`
+injected points with pending state, and `effective` points whose crash lost,
+tore, reordered, or rolled back pending state, with summed `effects`.
+`.require = .data`, `.metadata`, or `.data_and_metadata` turns a sweep that
+passed without such effects into `error.CrashEffectRequirementUnmet`.
 
 Sweep arming and completion are tracked separately from ordinary disk faults:
 `DiskControl.crashAfterOps` in setup does not replace `armCrashPoint`, and

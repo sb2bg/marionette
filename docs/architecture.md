@@ -63,7 +63,8 @@ and trace. Disabled probabilistic faults consume no draws. `runFor` stops at
 scheduled fault boundaries so automatic changes happen at their exact virtual
 times.
 
-Disk recovery follows the named `portable_v1` contract. Network streams share
+Disk recovery follows the named `portable_v2` contract, which keeps data and
+namespace durability separate. Network streams share
 bounded queues and byte-pool capacity. Allocation traces use counters and
 sizes, never addresses.
 

@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.8.3 - 2026-11-04
+
+Storage correctness. The disk contract is now `portable_v2` (disk model
+version 2), which separates data durability from namespace durability. Two
+`portable_v1` behaviors hid missing-sync bugs: rename committed unsynced
+source data, and an empty creation was a pending zero-length write that a
+lost-write crash removed even after a parent-directory sync.
+
+- **Disk-model correction.** Unsynced writes and length changes stay pending
+  on the file's identity across `rename`, `delete`, and `setLength`, which no
+  longer commit data. Creation is a namespace record, so a parent sync alone
+  makes an empty file durable. A crash resolves namespace changes first, then
+  the data of surviving identities; data of an identity that did not survive
+  is classified `orphaned` without a fault decision. A durable delete or
+  replacement discards the removed identity's pending data. See the crash
+  outcomes for replacement, truncation, deletion, and recreation in
+  `docs/disk-fault-model.md`.
+- **Versioned semantics.** `disk_semantic_contract` is `.portable_v2` and
+  `disk_semantic_version` is 2. Replaying or reducing a capsule recorded under
+  another disk version fails with the new `error.IncompatibleDiskModel`
+  instead of `IncompatibleReplay`; `portable_v1` artifacts replay only on
+  their pinned build. `disk.model` reports `lifecycle=identity_pending`.
+- **Named crash profiles.** Adds `CrashProfile` (`clean`, `lost_write`,
+  `torn_write`, `mixed`), `DiskControl.setCrashProfile` and `crashWith`, and
+  `DiskFaultOptions.withCrashProfile`. Applying a profile records its
+  resolved rates as `disk.crash_profile`.
+- **Breaking:** `CrashSweepOptions.profile` is required. The sweep records it
+  as the `marionette.crash_profile` run attribute and applies it when the
+  scenario arms its point. `CrashSweepOptions.require`
+  (`CrashEffectRequirement`) makes a passing sweep without the required data
+  or namespace effects fail with `CrashEffectRequirementUnmet`.
+  `CrashSweepResult` now counts injected, eligible, and effective points and
+  sums their `CrashEffects`. Adds `crashEffects(trace)`.
+- Paired correct and deliberately broken workloads (`tests/storage_083.zig`):
+  atomic replacement without a file sync or without a parent sync, and an
+  empty marker without a parent sync, each fail at an eligible `lost_write`
+  crash point, exact-replay, and reduce; the correct versions pass with
+  required effects. The pinned xitdb validation adds a commit crash-point
+  sweep under `lost_write`, `torn_write`, and `mixed`, with a harness mutant
+  that omits the parent sync.
+
+Changed expectations, classified:
+
+- Traces: `disk.set_length`, `disk.delete`, and `disk.rename` drop the
+  always-zero `committed_writes` field; `disk.crash` adds `orphaned`;
+  `disk.crash_metadata` events now precede the data events of the same crash;
+  a pending `setLength` is classified by `disk.crash_set_length`; an empty
+  creation no longer appears as a zero-length `disk.crash_write`.
+- `tests/fixtures/0.7.1` is kept unchanged as `portable_v1` evidence.
+  `tests/fixtures/0.8.3` recaptures the same scenarios, and
+  `tests/compatibility_072.zig` fails if any difference other than the
+  declared model line, empty-creation classification, and the resulting
+  event renumbering appears. The 0.7.1 capsule is rejected for replay.
+- `setLength` always records a pending operation, so an extension with no
+  earlier pending writes now allocates; allocation failure leaves the cached
+  and disk lengths unchanged.
+- Fault draws: a crash spends no decision on orphaned data, and namespace
+  rolls now precede data rolls, so crash-time decision order differs from
+  0.8.2 for workloads with pending state.
+
 ## v0.8.2 - 2026-11-03
 
 - A terminal scheduler failure during `Future.await` or `cancel` now stops the

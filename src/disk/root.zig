@@ -18,6 +18,7 @@ pub const DiskDirEntryKind = model.DiskDirEntryKind;
 pub const DiskDirList = model.DiskDirList;
 pub const DiskError = model.DiskError;
 pub const DiskFaultOptions = model.DiskFaultOptions;
+pub const CrashProfile = model.CrashProfile;
 pub const DiskLatencyRuntime = model.DiskLatencyRuntime;
 pub const DiskOptions = model.DiskOptions;
 pub const DiskRead = model.DiskRead;

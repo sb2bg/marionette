@@ -5,35 +5,104 @@ not an emulator for a particular filesystem or block device. Storage code
 should normally use `std.Io` through `env.io()`; `mar.Disk` is the lower-level
 capability underneath that backend.
 
-## Portable v1
+## Portable v2
 
-The current contract is `portable_v1`, numeric version `1`. Its constants are
+The current contract is `portable_v2`, numeric version `2`. Its constants are
 `mar.disk_semantic_contract` and `mar.disk_semantic_version`. Each simulated
 disk records a `disk.model` event containing the contract, version, sector
-size, tear model, reorder model, and lifecycle policy.
+size, tear model, reorder model, and lifecycle policy
+(`lifecycle=identity_pending`). Replay capsules record the version, and replay
+or reduction of a capsule recorded under another version fails with
+`error.IncompatibleDiskModel`.
+
+Data durability and namespace durability are separate. A file is an identity
+(its inode) bound to a name; data belongs to the identity and names belong to
+directories.
 
 The contract guarantees:
 
-- A successful write is visible immediately but remains pending until the
-  file is synced.
+- A successful write or `setLength` is visible immediately but remains pending
+  on the file's identity until that file is synced. Rename, delete, and
+  `setLength` never commit pending data.
+- Creating a file, renaming it, and deleting it are namespace changes, pending
+  until the parent directory is synced (both parents for a cross-directory
+  rename). An empty creation is a namespace change with no data, so a parent
+  sync alone makes the empty file durable.
 - A torn pending write lands a prefix of whole sectors, never a byte prefix.
-- A successful reorder roll reverses all surviving pending writes for that
-  crash; each is classified as `reordered`.
-- Crash faults affect only pending writes and metadata. Unrelated durable
-  state remains exact.
+  A pending `setLength` is never torn: it lands or is lost.
+- A successful reorder roll reverses all surviving pending data operations for
+  that crash; each is classified as `reordered`.
+- Crash faults affect only pending data and namespace changes. Unrelated
+  durable state remains exact.
 - `corruptSector` destructively changes existing logical media. A corrupt-read
   fault changes only the returned bytes.
-- `setLength`, `delete`, and `rename` first commit pending writes for the
-  affected source path, then perform the lifecycle change.
-- Crash metadata is resolved newest to oldest. When rollback would collide
-  with a later surviving create, the later entry wins.
+- A crash resolves namespace changes first, newest to oldest, then the pending
+  data of each identity that survived, in issue order. Data of an identity
+  that did not survive (a lost creation, a kept delete, a kept replacement) is
+  reported `orphaned` and consumes no fault decision. When rollback would
+  collide with a later surviving create, the later entry wins.
 - A crash and its trace/process notification are atomic. Allocation or trace
   failure restores the pre-crash media, liveness, random stream, and trace so
   the same crash can be retried exactly.
 
-Lifecycle operations deliberately do not stand in for durability boundaries.
 Only successful `sync` and `syncDir` calls support a portable crash-survival
-claim.
+claim. In particular, `rename` cannot stand in for a missing file sync.
+
+### Crash outcomes
+
+| Sequence before the crash | Lost namespace change | Kept namespace change |
+| --- | --- | --- |
+| Write new data, rename over `final`, no parent sync | `final` is the replaced identity with its durable data and any of its own surviving pending data | `final` is the new identity; its unsynced data may be lost |
+| Write, rename, parent sync, no file sync | — | `final` exists; its unsynced data may be lost |
+| Unsynced data, then delete | the file returns with its durable data and any surviving pending data | the identity and its pending data are gone |
+| Delete, recreate, file sync | the new identity is gone and the old one returns | the new identity with its synced data |
+| `setLength` | — | the new length lands with the identity's other surviving data, or is lost, leaving the earlier durable length and bytes |
+
+A delete or replacement made durable by a parent sync discards the removed
+identity's pending data at that sync.
+
+### `portable_v1`
+
+`portable_v1` (version 1) was the contract through 0.8.2. It committed a
+path's pending writes before `setLength`, `delete`, or `rename`, and an empty
+creation existed only as a zero-length pending write, so a lost-write crash
+removed it even after a parent sync. Both behaviors masked missing-sync bugs.
+Artifacts recorded under it are rejected by later builds and replay only on
+their pinned build.
+
+### Crash profiles
+
+`mar.CrashProfile` names the crash-time semantics a durability check uses:
+
+| Profile | Lost data | Torn data | Reorder | Lost namespace |
+| --- | --- | --- | --- | --- |
+| `clean` | never | never | never | never |
+| `lost_write` | always | never | never | always |
+| `torn_write` | never | always | never | never |
+| `mixed` | 1/4 | 1/4 | 1/4 | 1/2 |
+
+`clean` is a deliberate clean crash: processes stop, nothing pending is lost.
+`lost_write` loses everything unsynced and exposes both a missing file sync
+and a missing parent-directory sync. `control.disk.setCrashProfile(profile)`
+replaces only the crash-time rates and records
+`disk.crash_profile name=<profile> lost_write=<rate> torn_write=<rate> reordered_write=<rate> lost_metadata=<rate>`;
+`control.disk.crashWith(profile)` applies a profile and crashes.
+`DiskFaultOptions.withCrashProfile` resolves the same rates without a disk.
+
+Crash-point sweeps require a profile (`.{ .profile = .lost_write }`), record
+it as the `marionette.crash_profile` run attribute, and apply it when the
+scenario arms its point, so a capsule replays the same crash semantics. A
+sweep can also require effects (`.require = .data`, `.metadata`, or
+`.data_and_metadata`) and fails with `error.CrashEffectRequirementUnmet` when
+every point passed without producing them. `mar.crashEffects(trace)` and the
+sweep result distinguish an injected crash, a crash with eligible pending
+state, and a crash that changed pending state:
+
+```zig
+var result = try mar.sweepCrashPoints(config, .{ .profile = .lost_write, .require = .metadata });
+defer result.deinit();
+// result.points, result.injected, result.eligible, result.effective, result.effects
+```
 
 ## Capabilities
 
@@ -63,10 +132,12 @@ Every operation receives a deterministic id. Ready operations are ordered by
 `(ready_at, op_id)`. Operations are synchronous to application code: a call
 may advance simulated time before returning.
 
-Successful writes are pending and visible to later reads. File `sync` commits
-pending bytes. `syncDir` commits creates, deletes, and renames for that logical
-directory. A newly created file becomes durable by syncing the file and then
-its parent directory. A cross-directory rename requires syncing both parents.
+Successful writes and length changes are pending and visible to later reads.
+File `sync` commits the identity's pending data, whatever name it now has.
+`syncDir` commits creates, deletes, and renames for that logical directory. A
+newly created file becomes durable by syncing the file and then its parent
+directory; an empty one needs only the parent sync. A cross-directory rename
+requires syncing both parents.
 
 Code that uses `std.Io` syncs a directory the way it would on POSIX: open the
 directory as a file and sync it.
@@ -104,8 +175,8 @@ Permissions follow the same rules: `File.setPermissions`,
 directory, and `Disk.setMode` set the mode `stat` reports. Modes are recorded,
 not enforced.
 
-`setLength` extension is zero-filled by the disk authority. It is one
-lifecycle operation, not a series of independently fallible sector writes.
+`setLength` extension is zero-filled by the disk authority. It is one pending
+data operation, not a series of independently fallible sector writes.
 Extension allocates like a write, so under `capacity_bytes` it fails with
 `NoSpaceLeft`; `File.setLength` reports that as `FileTooBig`.
 
@@ -146,7 +217,7 @@ revives the node's I/O.
 
 A durability boundary separates durable truth from pending state:
 
-- file bytes cross the boundary at successful file `sync`;
+- file bytes and lengths cross the boundary at successful file `sync`;
 - creates, deletes, and renames cross it at successful parent `syncDir`.
 
 Synced data must recover exactly. A pending write may be absent or present
@@ -172,9 +243,10 @@ records lengths and outcomes, not user payloads. The principal events are:
 - `disk.read`, `disk.read_some`, and `disk.write`
 - `disk.sync` and `disk.sync_dir`
 - `disk.stat`, `disk.set_length`, `disk.delete`, and `disk.rename`
-- `disk.fault`
-- `disk.crash_write` and `disk.crash_metadata`
-- `disk.crash` and `disk.restart`
+- `disk.fault` and `disk.crash_profile`
+- `disk.crash_metadata`, then `disk.crash_write` and `disk.crash_set_length`
+  (`result=landed|lost|torn|reordered|orphaned`)
+- `disk.crash` (with `orphaned=<count>`) and `disk.restart`
 
 Fault rolls are tied to an operation id or explicit crash. They are separate
 from the time-evolved `fault_evolution.boundary` contract used by network and

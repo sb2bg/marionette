@@ -254,9 +254,11 @@ See the [complete contracts and examples](reduction-and-explanation.md).
 ## Crash-Point Sweeps
 
 `sweepCrashPoints(config, CrashSweepOptions)` runs a `runSimCase` config once
-per disk crash point and returns an owned `CrashSweepResult` with the number of
-points and the first failing report; `expectCrashPointsPass` fails the test
-instead. Scenarios mark the work under test with `SimCase.armCrashPoint` and
+per disk crash point under a required `CrashProfile` and returns an owned
+`CrashSweepResult` with the number of points, how many crashes were injected,
+eligible, and effective, and the first failing report; `expectCrashPointsPass`
+fails the test instead. `CrashEffectRequirement` makes a sweep require data or
+namespace effects. `crashEffects(trace)` returns `CrashEffects` for any trace. Scenarios mark the work under test with `SimCase.armCrashPoint` and
 `SimCase.finishCrashPoint`. See [Crash-Point Sweeps](run.md#crash-point-sweeps).
 
 ## Campaigns

@@ -10,41 +10,7 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.8.3: Storage Correctness
-
-The current `portable_v1` disk contract can hide missing-sync bugs: rename
-commits pending file data, and an empty create is represented as a pending
-zero-length write, so directory sync alone cannot preserve its name against a
-lost-write crash. These behaviors reproduce on 0.8.2 through `std.Io`; see
-`SIMULATOR_FINDINGS.md`. Correct the existing storage guarantees before the
-network rewrite.
-
-- **Separate data from namespace durability.** Keep unsynced data pending
-  across rename and attached to the file's identity. Represent creation as
-  metadata independently of pending data, so parent sync can preserve an empty
-  file. Audit delete and `setLength` for implicit data commits and specify
-  crash outcomes for replacement, truncation, deletion, and recreation.
-- **Make durability profiles explicit.** Require a named crash profile in
-  durability helpers, with clean, lost-write, torn-write, and mixed profiles
-  whose resolved settings appear in evidence. Keep a deliberate clean-crash
-  option. Let a case or sweep require relevant data or metadata fault effects;
-  distinguish a crash injection from its effects and from points with no
-  eligible pending state.
-- **Prove the missing-sync cases.** Add paired correct and deliberately broken
-  storage workloads: removing a required file sync or parent-directory sync
-  must expose a failure at an eligible crash point. Cover empty creation and
-  pending data across rename directly, then exercise a pinned storage workload.
-- **Version the corrected semantics.** Give the replacement disk contract a
-  new model version, record it in capsules, and reject a mismatch. Document
-  `portable_v1` as the 0.8.2 contract and retain old artifacts with their pinned
-  builds rather than silently reinterpreting them.
-
-Exit when the correct workloads pass, both missing-sync mutants fail under
-their declared profiles, directory sync preserves an empty creation, and
-rename cannot supply a missing file sync. Failures must exact-replay and reduce
-under the new identity, and incompatible capsules must be rejected.
-
-## 0.9: Honest Network
+## Next: 0.9: Honest Network
 
 0.8 delivered dependable campaigns: bounded runs that survive bad cases,
 deterministic step budgets, deduplicated and reduced evidence, resume after a
@@ -53,7 +19,10 @@ validation on pinned storage and network workloads
 (`zig build validate-campaigns`). 0.8.1 made reduction strip faults instead of
 injecting them, added crash-point sweeps, and recorded today's network behavior
 as characterization tests. 0.8.2 fixed terminal future awaits, scoped sweep
-accounting, and reduction of automatic fault schedules; see `CHANGELOG.md`.
+accounting, and reduction of automatic fault schedules. 0.8.3 replaced the disk
+contract with `portable_v2`, which keeps data and namespace durability separate,
+and added named crash profiles, effect requirements, and paired missing-sync
+workloads; see `CHANGELOG.md`.
 
 The network turns faults into immediate, invented errors and lets endpoints read
 each other's state, so the bugs partitions really cause (hangs, half-open
@@ -153,8 +122,9 @@ test. Final API freeze follows 0.11's host-storage integration.
 
 ### Diagnostics Deliverables
 
-Land independent reporting improvements during 0.8.3 and 0.9; 0.10 closes the
-complete diagnostic workflow.
+Land independent reporting improvements during 0.9; 0.10 closes the complete
+diagnostic workflow. 0.8.3 already separates crash injections, eligible
+pending state, and crash effects in sweep results.
 
 - **Explain the failure boundary.** Determinism mismatches show the first
   differing events from both traces; scenario failures include a bounded tail.
@@ -199,7 +169,7 @@ remain deferred.
 
 ## Stabilization And 1.0 Acceptance
 
-After 0.8.3 closes the storage gaps, 0.9 flips the network defaults, and 0.10
+With 0.8.3's storage gaps closed, once 0.9 flips the network defaults and 0.10
 and 0.11 settle the workflow and host-storage APIs, a release-candidate phase
 should close the following evidence gates. 1.0 commits to the documented
 deterministic `std.Io` subset and testing workflow.

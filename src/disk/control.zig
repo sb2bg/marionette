@@ -5,6 +5,7 @@ const model = @import("model.zig");
 const Disk = model.Disk;
 const DiskError = model.DiskError;
 const DiskFaultOptions = model.DiskFaultOptions;
+const CrashProfile = model.CrashProfile;
 
 /// Simulator-control view over the simulated disk, obtained as
 /// `sim.control.disk`. See `docs/disk-fault-model.md` for the fault and
@@ -28,6 +29,7 @@ pub const DiskControl = struct {
         disk: *const fn (*anyopaque) Disk,
         crash_after_ops_tracked: ?*const fn (*anyopaque, u64, *CrashTrigger) DiskError!void = null,
         disarm_tracked_crash: ?*const fn (*anyopaque, *CrashTrigger) DiskError!bool = null,
+        set_crash_profile: ?*const fn (*anyopaque, CrashProfile) DiskError!void = null,
     };
 
     /// Replace the disk's probabilistic fault rates. Invalid rates return
@@ -35,6 +37,20 @@ pub const DiskControl = struct {
     /// trace when rolled.
     pub fn setFaults(self: DiskControl, faults: DiskFaultOptions) DiskError!void {
         try self.vtable.set_faults(self.ptr, faults);
+    }
+
+    /// Replace only the crash-time rates with a named profile's, keeping
+    /// operation-time rates and capacity. Traced as `disk.crash_profile`
+    /// with the resolved rates, so evidence states what a crash could do.
+    pub fn setCrashProfile(self: DiskControl, profile: CrashProfile) DiskError!void {
+        const set = self.vtable.set_crash_profile orelse return error.DiskUnavailable;
+        try set(self.ptr, profile);
+    }
+
+    /// Crash now under `profile`: apply it, then crash as `crash` does.
+    pub fn crashWith(self: DiskControl, profile: CrashProfile) DiskError!void {
+        try self.setCrashProfile(profile);
+        try self.crash();
     }
 
     /// Explicitly corrupt one sector so the next read of it fails. This is
@@ -45,9 +61,11 @@ pub const DiskControl = struct {
         try self.vtable.corrupt_sector(self.ptr, path, offset);
     }
 
-    /// Crash the disk now: pending writes land, tear, reorder, or vanish
-    /// according to the configured crash fault rates, pending metadata
-    /// commits or rolls back, and every live logical process is killed.
+    /// Crash the disk now: pending namespace changes are kept or rolled
+    /// back, then the pending data of each surviving file identity lands,
+    /// tears, reorders, or vanishes according to the configured crash fault
+    /// rates, and every live logical process is killed. Data of an identity
+    /// that did not survive is reported as orphaned.
     /// Until `restart`, disk operations return `error.DiskCrashed`.
     /// Traced as `disk.crash`.
     pub fn crash(self: DiskControl) DiskError!void {

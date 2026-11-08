@@ -97,6 +97,8 @@ pub const disk_semantic_version = disk_module.disk_semantic_version;
 
 /// Fault rates and corruption controls for one deterministic disk simulator.
 pub const DiskFaultOptions = disk_module.DiskFaultOptions;
+/// Named crash-time durability profile: clean, lost_write, torn_write, mixed.
+pub const CrashProfile = disk_module.CrashProfile;
 
 /// Errors returned by deterministic disk operations.
 pub const DiskError = disk_module.DiskError;
@@ -275,6 +277,12 @@ pub const FaultCoverage = trace_summary_module.FaultCoverage;
 /// Count injected faults in trace bytes without allocating.
 pub const faultCoverage = trace_summary_module.faultCoverage;
 
+/// Crash injections, their eligibility, and their data and namespace effects.
+pub const CrashEffects = trace_summary_module.CrashEffects;
+
+/// Count crash injections and effects in trace bytes without allocating.
+pub const crashEffects = trace_summary_module.crashEffects;
+
 test "public roots hide internal wiring" {
     const public_api = @This();
 
@@ -350,8 +358,11 @@ pub const sweepCrashPoints = @import("crash_points.zig").sweepCrashPoints;
 pub const expectCrashPointsPass = @import("crash_points.zig").expectCrashPointsPass;
 pub const CrashSweepOptions = @import("crash_points.zig").Options;
 pub const CrashSweepResult = @import("crash_points.zig").Result;
+pub const CrashEffectRequirement = @import("crash_points.zig").EffectRequirement;
 /// Run attribute that records a sweep's crash point.
 pub const crash_point_attribute = @import("run.zig").crash_point_attribute;
+/// Run attribute that records a sweep's crash profile.
+pub const crash_profile_attribute = @import("run.zig").crash_profile_attribute;
 
 /// World-owned volatile state for one logical process, reopened on restart.
 pub const ManagedProcess = @import("world.zig").ManagedProcess;

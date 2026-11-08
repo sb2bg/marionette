@@ -46,3 +46,7 @@ test {
 test {
     _ = @import("network_characterization.zig");
 }
+
+test {
+    _ = @import("storage_083.zig");
+}

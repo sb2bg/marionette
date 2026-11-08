@@ -12,36 +12,15 @@ findings and the additional self-review fixes are described in `CHANGELOG.md`.
 
 Network probe letters refer to `tests/network_characterization.zig`, which
 records the current behavior on Zig 0.17 so 0.9 changes each expectation
-deliberately. The storage reproductions below were verified through `std.Io`
-on v0.8.2 (`40e8502`).
+deliberately. The 0.8.3 storage findings (rename committing unsynced data and
+empty creation lost after a directory sync) are fixed by `portable_v2`; their
+regressions are in `tests/storage_083.zig`.
 
 | Severity | Target | Finding | Primary location |
 | --- | --- | --- | --- |
-| High | 0.8.3 | Rename commits unsynced source data, so a write/rename/parent-sync sequence survives an always-lose-writes crash without a file sync. This follows `portable_v1` but masks the missing-file-sync bug class. Audit delete and `setLength` for the same implicit commits. | `src/disk/sim.zig` (`rename`, `commitPendingWrites`, `delete`, `setLength`) |
-| High | 0.8.3 | Creating an empty file is a pending zero-length write. Even after parent-directory sync, an always-lose-writes crash removes the file with metadata faults disabled, coupling namespace durability to data-write survival. | `src/io/file.zig` (`simDirCreateFile`), `src/disk/sim.zig` |
 | Medium | 0.9 | One world-global pool of 64 stream buffers couples connections: once a reader that never reads fills it, unrelated connections cannot send data (probe G). Connects no longer need a buffer since 0.8.1. | `src/message_pool.zig`, `src/io/net.zig` |
 | High | 0.9 | Network faults become immediate errors, and close and kill reach peers through shared state even across a partition: connect into a partition fails in 0 ms despite a 10 s timeout, a reply sent during a partition becomes `ConnectionTimedOut` 1 ms later, and 1% loss kills a stream (probes A to E). | `src/io/net.zig` (`simNetConnectIp`, `drainNetworkReady`), `src/io/backend.zig` (`closeConnectionState`) |
 | Medium | 0.9 | One port namespace for the whole world: only one node can bind `0.0.0.0:7000`, any node can bind any IP, and accepted peers report the destination IP (probe F). | `src/io/backend.zig` (`ProcessRegistry`), `src/io/net.zig` (`simNetLookup`) |
-
-### Storage Reproductions
-
-Both cases use seed 7, four-byte sectors, and ordinary simulated `std.Io` file
-operations. Open the parent directory with `allow_directory` and sync that file
-handle to perform directory sync. After crashing, restart the disk and process
-before reopening paths.
-
-- **Missing file sync hidden by rename:** create `temporary`, write `DATA`,
-  close without syncing, rename it to `final`, and sync the parent. Set both
-  `crash_lost_write_rate` and `crash_lost_metadata_rate` to `.always()`, then
-  crash and restart. Reading `final` returns all four bytes. The source data was
-  committed by rename, so the configured loss cannot expose the missing sync.
-- **Empty creation lost after directory sync:** create and close `empty`, sync
-  the parent, and set only `crash_lost_write_rate` to `.always()`. Crash and
-  restart. Reopening `empty` returns `FileNotFound`, despite the parent sync and
-  disabled metadata-loss faults.
-
-These are storage-model coverage gaps. Correcting them requires versioned
-semantics and missing-sync mutation tests, as scheduled in `ROADMAP.md`.
 
 ## Later Or Scope-Dependent
 
@@ -54,14 +33,14 @@ semantics and missing-sync mutation tests, as scheduled in `ROADMAP.md`.
 - The stream backpressure wake key is world-global because the byte pool is
   world-global. Extra wakeups are a performance tradeoff; the pool's coupling of
   unrelated connections is an open finding above.
-- `setLength`, delete, and rename committing pending writes is the current
-  `portable_v1` contract through 0.8.2. Its missing-sync coverage gap is tracked
-  above for correction in 0.8.3; older artifacts retain their pinned-build
-  interpretation.
+- `portable_v1`, through 0.8.2, committed pending writes at `setLength`,
+  delete, and rename. `portable_v2` keeps that data pending on the file's
+  identity; older artifacts retain their pinned-build interpretation and are
+  rejected by later builds.
 - Default crash fault rates are zero, so a default disk crash preserves pending
   writes and metadata while stopping processes. This is a deliberate clean
-  crash case. Explicit durability profiles and effect requirements are 0.8.3
-  harness work rather than a claim that every crash must lose data.
+  crash case. Durability checks name a `CrashProfile` and can require effects
+  rather than relying on configured rates.
 - The harness main context is a scheduler driver, not a normal application
   task.
 - Seed schedules are positional same-build exploration controls. Persisted

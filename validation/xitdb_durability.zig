@@ -1045,3 +1045,101 @@ fn hashInt(buffer: []const u8) HashInt {
     std.crypto.hash.Sha1.hash(buffer, &hash, .{});
     return std.mem.readInt(HashInt, &hash, .big);
 }
+
+fn syncRoot(io: std.Io) !void {
+    var root = try std.Io.Dir.cwd().openFile(io, ".", .{ .allow_directory = true });
+    defer root.close(io);
+    try root.sync(io);
+}
+
+/// A crash-point sweep over one xitdb commit under a named crash profile.
+/// Setup makes the database durable, including its name, so the sweep tests
+/// the commit rather than first initialization. With `sync_parent` false
+/// the harness forgets the parent-directory sync: the paired broken
+/// workload, which lost_write must expose.
+fn XitdbCommitSweep(comptime sync_parent: bool) type {
+    return struct {
+        const App = @This();
+        const path = "xit-sweep.db";
+
+        fn init(_: mar.Sim) App {
+            return .{};
+        }
+
+        fn scenario(case: *mar.SimCase(App)) !void {
+            const allocator = std.testing.allocator;
+            const io = case.env().io();
+            var plan = try makeFuzzPlan(allocator, 0x0830_5EED, 3);
+            defer plan.deinit(allocator);
+            var model = std.ArrayList(Snapshot).empty;
+            defer model.deinit(allocator);
+            const victim = plan.items[plan.items.len - 1];
+
+            var acknowledged = false;
+            var fired = false;
+            {
+                var file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = true });
+                defer file.close(io);
+                var db = try DB.init(.{ .io = io, .file = file });
+                for (plan.items[0 .. plan.items.len - 1]) |transaction| {
+                    try applyTransaction(&db, transaction.slice());
+                    try appendModelTransaction(allocator, &model, transaction.slice());
+                }
+                try file.sync(io);
+                if (sync_parent) try syncRoot(io);
+
+                try case.armCrashPoint();
+                const committed = applyTransaction(&db, victim.slice());
+                fired = try case.finishCrashPoint();
+                if (committed) |_| {
+                    acknowledged = true;
+                } else |err| if (!fired) return err;
+            }
+            if (acknowledged) try appendModelTransaction(allocator, &model, victim.slice());
+            // Recovery always starts from a crash under the sweep's profile.
+            if (!fired) try case.control().disk.crash();
+            try case.control().disk.restart();
+            try case.control().process.restart(0);
+
+            var recovered_file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch
+                return error.AcknowledgedHistoryLost;
+            defer recovered_file.close(io);
+            var recovered = DB.init(.{ .io = io, .file = recovered_file }) catch return error.AcknowledgedHistoryLost;
+            if (!acknowledged) {
+                // Durable but unacknowledged: the victim may survive, whole.
+                const history = try DB.ArrayList(.read_only).init(recovered.rootCursor().readOnly());
+                if (try history.count() == model.items.len + 1) try appendModelTransaction(allocator, &model, victim.slice());
+            }
+            verifyHistory(allocator, &recovered, model.items) catch return error.AcknowledgedHistoryLost;
+        }
+
+        const Config = struct {
+            allocator: std.mem.Allocator = std.testing.allocator,
+            seed: u64 = 0x083,
+            simulate: mar.World.SimulateOptions = .{ .disk = .{ .sector_size = 512 } },
+            comptime init: @TypeOf(init) = init,
+            comptime scenario: @TypeOf(scenario) = scenario,
+        };
+    };
+}
+
+test "xitdb commit survives every crash point under each named crash profile" {
+    inline for (.{ mar.CrashProfile.lost_write, mar.CrashProfile.torn_write, mar.CrashProfile.mixed }) |profile| {
+        var result = try mar.sweepCrashPoints(XitdbCommitSweep(true).Config{}, .{ .profile = profile, .require = .data });
+        defer result.deinit();
+        if (result.failure) |failure| {
+            failure.failed.print();
+            return error.AcknowledgedHistoryLost;
+        }
+        try std.testing.expect(result.effective > 0);
+    }
+}
+
+test "xitdb harness without a parent sync loses history under lost_write" {
+    const config: XitdbCommitSweep(false).Config = .{};
+    try mar.expectCrashPointsPass(config, .{ .profile = .clean });
+    var result = try mar.sweepCrashPoints(config, .{ .profile = .lost_write });
+    defer result.deinit();
+    const failure = result.failure orelse return error.MutantSurvived;
+    try std.testing.expectEqualStrings("AcknowledgedHistoryLost", failure.failed.error_name.?);
+}

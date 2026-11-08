@@ -31,8 +31,7 @@ fn TwoFileCommit(comptime first: []const u8, comptime second: []const u8) type {
 
         fn scenario(case: *mar.SimCase(@This())) !void {
             const control = case.control();
-            // A crash loses everything not yet synced.
-            try control.disk.setFaults(.{ .crash_lost_write_rate = .always(), .crash_lost_metadata_rate = .always() });
+            // The sweep's lost_write profile loses everything not yet synced.
             try case.armCrashPoint();
             const disk = case.env().disk;
             const committed = blk: {
@@ -79,20 +78,20 @@ const Correct = TwoFileCommit("first", "second");
 const Reversed = TwoFileCommit("second", "first");
 
 test "crash points: every point of a correctly ordered commit passes" {
-    var result = try mar.sweepCrashPoints(Correct.config(), .{});
+    var result = try mar.sweepCrashPoints(Correct.config(), .{ .profile = .lost_write });
     defer result.deinit();
     try std.testing.expect(result.failure == null);
     // Six operations (write, sync, and directory sync per file), each crashed
     // before, then one run where the commit finishes.
     try std.testing.expectEqual(@as(u64, 7), result.points);
-    try mar.expectCrashPointsPass(Correct.config(), .{});
+    try mar.expectCrashPointsPass(Correct.config(), .{ .profile = .lost_write });
 }
 
 test "crash points: a misordered commit fails at its exact point and replays" {
     // Without a sweep the armed point does nothing and the bug stays hidden.
     try mar.expectSimPass(Reversed.config());
 
-    var result = try mar.sweepCrashPoints(Reversed.config(), .{});
+    var result = try mar.sweepCrashPoints(Reversed.config(), .{ .profile = .lost_write });
     defer result.deinit();
     const failure = result.failure.?.failed;
     try std.testing.expectEqual(mar.RunFailureKind.check_failed, failure.kind);
@@ -127,7 +126,7 @@ test "crash points: a scenario that never arms is reported" {
         .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
         .init = Unarmed.init,
         .scenario = Unarmed.scenario,
-    }, .{}));
+    }, .{ .profile = .clean }));
 }
 
 const UnrelatedCrash = struct {
@@ -151,7 +150,7 @@ test "crash points: ordinary disk arming does not satisfy sweep arming" {
             .init = UnrelatedCrash.init,
             .scenario = UnrelatedCrash.scenario,
             .watchdog = watchdog,
-        }, .{}));
+        }, .{ .profile = .clean }));
     }
 }
 
@@ -201,7 +200,7 @@ test "crash points: setup and recovery crashes do not extend the sweep" {
             .init = ScopedCrash.init,
             .scenario = ScopedCrash.scenario,
             .watchdog = watchdog,
-        }, .{ .max_points = 4 });
+        }, .{ .profile = .clean, .max_points = 4 });
         defer result.deinit();
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(@as(u64, 2), result.points);
@@ -245,7 +244,7 @@ test "crash points: returning from the scenario retains the sweep outcome" {
         .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
         .init = ScopedCrash.init,
         .scenario = ScopedCrash.finishOnReturn,
-    }, .{ .max_points = 4 });
+    }, .{ .profile = .clean, .max_points = 4 });
     defer result.deinit();
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(@as(u64, 2), result.points);
@@ -273,7 +272,7 @@ test "crash points: a failed scenario's cleanup runs with the crash disarmed" {
         .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
         .init = FailsBeforeCleanup.init,
         .scenario = FailsBeforeCleanup.scenario,
-    }, .{});
+    }, .{ .profile = .clean });
     defer result.deinit();
     const failure = result.failure.?.failed;
     try std.testing.expectEqualStrings("PlantedFailure", failure.error_name.?);
@@ -303,7 +302,7 @@ const ReversedArtifactsConfig = struct {
 test "crash points: the failing point is written to the configured artifacts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try std.testing.expectError(error.ExpectedRunPass, mar.expectCrashPointsPass(reversedWithArtifacts(tmp.dir, false), .{}));
+    try std.testing.expectError(error.ExpectedRunPass, mar.expectCrashPointsPass(reversedWithArtifacts(tmp.dir, false), .{ .profile = .lost_write }));
 
     var dir = try tmp.dir.openDir(std.testing.io, "failing-point", .{});
     defer dir.close(std.testing.io);
@@ -320,5 +319,5 @@ test "crash points: the failing point is written to the configured artifacts" {
 test "crash points: artifacts for every passing point are rejected" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try std.testing.expectError(error.InvalidCrashSweepArtifacts, mar.sweepCrashPoints(reversedWithArtifacts(tmp.dir, true), .{}));
+    try std.testing.expectError(error.InvalidCrashSweepArtifacts, mar.sweepCrashPoints(reversedWithArtifacts(tmp.dir, true), .{ .profile = .lost_write }));
 }
