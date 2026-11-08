@@ -2033,7 +2033,9 @@ test "io: disk crash trace failure leaves disk and process state coherent" {
     defer std.testing.allocator.free(trace_before);
     const event_before = world.nextEventIndex();
 
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    // Fail in-place growth too, so whether the allocator can extend the
+    // trace buffer in place cannot decide the outcome.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     world.allocator = failing.allocator();
     const crash_result = sim.control.disk.crash();
     world.allocator = std.testing.allocator;
