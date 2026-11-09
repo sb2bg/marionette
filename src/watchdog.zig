@@ -339,13 +339,18 @@ fn watchdogFailureFromShared(
             .{ event_count, @tagName(kind), task_id },
         );
     defer allocator.free(suffix);
-    const trace = try std.mem.concat(allocator, u8, &.{ prefix, suffix });
+    var netstat: std.ArrayList(u8) = .empty;
+    defer netstat.deinit(allocator);
+    const netstat_events = @import("network/netstat_trace.zig").append(allocator, &netstat, prefix, event_count + 1) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    const trace = try std.mem.concat(allocator, u8, &.{ prefix, suffix, netstat.items });
     errdefer allocator.free(trace);
     _ = options;
     return .{
         .allocator = allocator,
         .trace = trace,
-        .event_count = event_count + 1,
+        .event_count = event_count + 1 + netstat_events,
         .tape_complete = false,
         .outcome = .{ .failed = try (execution.Failure{
             .kind = kind,

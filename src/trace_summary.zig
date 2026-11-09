@@ -106,7 +106,13 @@ pub const FaultCoverage = struct {
             if (std.mem.eql(u8, event.field("status") orelse return error.InvalidTraceEvent, "no_space")) self.disk_no_space_errors += 1;
         } else if (std.mem.eql(u8, name, "network.partition") or std.mem.eql(u8, name, "network.auto_partition")) {
             self.network_partitions += 1;
-        } else if (std.mem.eql(u8, name, "network.drop")) {
+        } else if (std.mem.eql(u8, name, "network.fault")) {
+            // Partitions already count through `network.partition`.
+            const kind = event.field("kind") orelse return error.InvalidTraceEvent;
+            const mode = event.field("mode") orelse return error.InvalidTraceEvent;
+            const disrupts = std.mem.eql(u8, mode, "drop") or std.mem.eql(u8, mode, "reject");
+            if (disrupts and (std.mem.eql(u8, kind, "isolate") or std.mem.eql(u8, kind, "cut"))) self.network_partitions += 1;
+        } else if (std.mem.eql(u8, name, "network.drop") or std.mem.eql(u8, name, "net.drop")) {
             self.network_drops += 1;
         } else if (std.mem.eql(u8, name, "process.kill")) {
             // A disk crash restarts every process; those kills are part of
@@ -481,17 +487,17 @@ fn recordTime(summary: *Summary, event: ParsedEvent) !void {
 fn recordNetwork(summary: *Summary, event: ParsedEvent) !void {
     // Keep this parser in lockstep with the current network trace schema in
     // docs/network.md; missing required fields should surface as schema drift.
-    if (std.mem.eql(u8, event.name, "network.send")) {
+    if (std.mem.eql(u8, event.name, "network.send") or std.mem.eql(u8, event.name, "net.send")) {
         summary.network_sends += 1;
         const from = try parseU16(event.field("from") orelse return error.InvalidTraceEvent);
         const to = try parseU16(event.field("to") orelse return error.InvalidTraceEvent);
         (try linkFor(summary, from, to)).sends += 1;
-    } else if (std.mem.eql(u8, event.name, "network.deliver")) {
+    } else if (std.mem.eql(u8, event.name, "network.deliver") or std.mem.eql(u8, event.name, "net.deliver")) {
         summary.network_deliveries += 1;
         const from = try parseU16(event.field("from") orelse return error.InvalidTraceEvent);
         const to = try parseU16(event.field("to") orelse return error.InvalidTraceEvent);
         (try linkFor(summary, from, to)).deliveries += 1;
-    } else if (std.mem.eql(u8, event.name, "network.drop")) {
+    } else if (std.mem.eql(u8, event.name, "network.drop") or std.mem.eql(u8, event.name, "net.drop")) {
         summary.network_drops += 1;
         const from = try parseU16(event.field("from") orelse return error.InvalidTraceEvent);
         const to = try parseU16(event.field("to") orelse return error.InvalidTraceEvent);

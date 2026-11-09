@@ -849,6 +849,14 @@ fn runOnceWithSimCase(
         const scheduler_failure = state.control().tasks.failure();
         const property_failure = state.property_failure;
         if (scheduler_failure != null or property_failure != null or scenario_error != null) {
+            // Explain the network at the failure: sockets, queues, and the
+            // faults still active. A deadlock already recorded its own.
+            if (scheduler_failure == null) {
+                sim.control.network.recordNetstat(if (property_failure != null) "check_failed" else "scenario_error") catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {},
+                };
+            }
             state_live = false;
             try deinitCase(&state);
             try finishManagedProcesses(sim);

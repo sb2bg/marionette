@@ -69,4 +69,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("faults.zig");
     _ = @import("tcp.zig");
+    _ = @import("netstat_trace.zig");
 }

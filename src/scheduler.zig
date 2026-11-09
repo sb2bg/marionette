@@ -1140,6 +1140,13 @@ pub const TaskScheduler = struct {
     }
 
     fn recordDeadlock(self: *Self) (std.mem.Allocator.Error || world_module.TraceError)!void {
+        if (self.fault_evolution) |control| {
+            control.network.recordNetstat("deadlock") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidTracePayload => return error.InvalidTracePayload,
+                else => {},
+            };
+        }
         var waits: std.ArrayList(u8) = .empty;
         defer waits.deinit(self.allocator);
 

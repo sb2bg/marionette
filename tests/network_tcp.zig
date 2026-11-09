@@ -568,3 +568,24 @@ test "tcp_v1: healing one fault leaves the others" {
     try std.testing.expectError(error.FaultNotActive, sim.control.network.healFault(expiring));
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.fault_heal fault=3 reason=expired") != null);
 }
+
+test "tcp_v1: a deadlock records a netstat table of sockets and faults" {
+    if (!fibers) return error.SkipZigTest;
+    var world = try newWorld(0xDEAE);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{ .nodes = 2 });
+    defer pair.listener.deinit(pair.server_io);
+    defer pair.server.close(pair.server_io);
+
+    _ = try pair.sim.control.network.partition(&.{0}, &.{1}, .{});
+    var reader: Reader = .{ .io = pair.client_io, .stream = pair.client };
+    var future = try std.Io.concurrent(pair.client_io, Reader.run, .{&reader});
+    try std.testing.expectError(error.Deadlock, pair.sim.control.runTasksUntilIdle());
+    const trace = world.traceBytes();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "netstat.begin reason=deadlock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "netstat.tcp conn=2 host=1 state=ESTABLISHED") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "netstat.listen sock=1 host=0 local=10.0.0.1:7000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "netstat.fault fault=1 kind=partition mode=drop paths=2") != null);
+    pair.client.close(pair.client_io);
+    future.cancel(pair.client_io);
+}

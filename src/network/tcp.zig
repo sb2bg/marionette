@@ -1065,7 +1065,7 @@ pub const Engine = struct {
                     "net.send pkt={} from={} to={} src={f} dst={f} flags={s} seq={} ack={} len={} wnd={}",
                     .{ segment.id, segment.from, segment.to, segment.src, segment.dst, flags, segment.seq, segment.ack, segment.payload.len, segment.wnd },
                 ) catch {};
-                world_ptr.record("net.drop pkt={} reason=loss roll={}", .{ segment.id, roll }) catch {};
+                world_ptr.record("net.drop pkt={} from={} to={} reason=loss roll={}", .{ segment.id, segment.from, segment.to, roll }) catch {};
                 self.freeSegment(segment);
                 return;
             }
@@ -1095,7 +1095,7 @@ pub const Engine = struct {
                                 "net.send pkt={} from={} to={} src={f} dst={f} flags={s} seq={} ack={} len={} wnd={}",
                                 .{ segment.id, segment.from, segment.to, segment.src, segment.dst, flags, segment.seq, segment.ack, segment.payload.len, segment.wnd },
                             ) catch {};
-                            world_ptr.record("net.drop pkt={} reason=fault fault={} mode=slow roll={}", .{ segment.id, fault.id, roll }) catch {};
+                            world_ptr.record("net.drop pkt={} from={} to={} reason=fault fault={} mode=slow roll={}", .{ segment.id, segment.from, segment.to, fault.id, roll }) catch {};
                             self.freeSegment(segment);
                             return;
                         }
@@ -1123,12 +1123,12 @@ pub const Engine = struct {
             const verdict = self.fabric.registry.verdict(path);
             if (verdict.blocked) |blocked| switch (blocked.mode) {
                 .drop => {
-                    world_ptr.record("net.drop pkt={} reason=fault fault={} mode=drop", .{ segment.id, blocked.fault }) catch {};
+                    world_ptr.record("net.drop pkt={} from={} to={} reason=fault fault={} mode=drop", .{ segment.id, segment.from, segment.to, blocked.fault }) catch {};
                     self.freeSegment(segment);
                     return;
                 },
                 .reject => {
-                    world_ptr.record("net.drop pkt={} reason=fault fault={} mode=reject", .{ segment.id, blocked.fault }) catch {};
+                    world_ptr.record("net.drop pkt={} from={} to={} reason=fault fault={} mode=reject", .{ segment.id, segment.from, segment.to, blocked.fault }) catch {};
                     // The refusing hop answers the sender. The signal
                     // crosses back one base latency later.
                     const back = self.now() +| self.ceilTick(self.fabric.faults.min_latency_ns);
@@ -1147,33 +1147,33 @@ pub const Engine = struct {
             if (verdict.held_by) |fault| {
                 world_ptr.record("net.hold pkt={} fault={}", .{ segment.id, fault }) catch {};
                 self.held.append(self.allocator, segment) catch {
-                    world_ptr.record("net.drop pkt={} reason=hold_overflow", .{segment.id}) catch {};
+                    world_ptr.record("net.drop pkt={} from={} to={} reason=hold_overflow", .{ segment.id, segment.from, segment.to }) catch {};
                     self.freeSegment(segment);
                 };
                 return;
             }
         }
         if (self.fabric.down_nodes[segment.to]) {
-            world_ptr.record("net.drop pkt={} reason=destination_down", .{segment.id}) catch {};
+            world_ptr.record("net.drop pkt={} from={} to={} reason=destination_down", .{ segment.id, segment.from, segment.to }) catch {};
             self.freeSegment(segment);
             return;
         }
         defer self.freeSegment(segment);
 
         if (self.findConnection(segment.to, segment.dst, segment.src)) |conn| {
-            world_ptr.record("net.deliver pkt={} conn={}", .{ segment.id, conn.id }) catch {};
+            world_ptr.record("net.deliver pkt={} from={} to={} conn={}", .{ segment.id, segment.from, segment.to, conn.id }) catch {};
             self.input(conn, segment);
             return;
         }
         if (segment.flags.syn and !segment.flags.ack and !segment.flags.rst) {
             for (self.listeners.values()) |listener| {
                 if (!self.listenerMatches(listener, segment.to, segment.dst)) continue;
-                world_ptr.record("net.deliver pkt={} sock={}", .{ segment.id, listener.id }) catch {};
+                world_ptr.record("net.deliver pkt={} from={} to={} sock={}", .{ segment.id, segment.from, segment.to, listener.id }) catch {};
                 self.acceptSyn(listener, segment);
                 return;
             }
         }
-        world_ptr.record("net.deliver pkt={} socket=none", .{segment.id}) catch {};
+        world_ptr.record("net.deliver pkt={} from={} to={} socket=none", .{ segment.id, segment.from, segment.to }) catch {};
         self.sendRstReply(segment);
     }
 
