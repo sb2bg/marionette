@@ -154,6 +154,10 @@ pub const SimNetworkOptions = struct {
     timing: TimingProfile = .linux,
     /// Socket buffers for `tcp_v1`.
     tcp: TcpOptions = .{},
+    /// `network_semantic_version` the options were recorded under. Capsules
+    /// carry it; replay rejects a capsule whose version differs. Leave it at
+    /// its default.
+    model_version: u32 = network_semantic_version,
 
     pub const default_semantics: Semantics = .legacy_v0;
 
@@ -198,6 +202,8 @@ pub const SimNetworkOptions = struct {
         if (self.semantics != .legacy_v0) {
             try writer.objectField("tcp");
             try writer.write(self.tcp);
+            try writer.objectField("model_version");
+            try writer.write(self.model_version);
         }
         try writer.endObject();
     }
@@ -210,6 +216,7 @@ pub const SimNetworkOptions = struct {
         address_model: ?AddressModel = null,
         timing: TimingProfile = .linux,
         tcp: TcpOptions = .{},
+        model_version: u32 = network_semantic_version,
     };
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !SimNetworkOptions {
@@ -231,6 +238,7 @@ pub const SimNetworkOptions = struct {
             .address_model = wire.address_model,
             .timing = wire.timing,
             .tcp = wire.tcp,
+            .model_version = wire.model_version,
         };
     }
 };

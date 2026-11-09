@@ -412,3 +412,159 @@ test "tcp_v1: the simulated DNS resolves node names" {
     const second = try by_index.connect(client_io, 7000, .{ .mode = .stream });
     second.close(client_io);
 }
+
+test "tcp_v1: operateTimeout gives reads a real application timeout" {
+    var world = try newWorld(0x92);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{ .nodes = 2 });
+    defer pair.listener.deinit(pair.server_io);
+    defer pair.client.close(pair.client_io);
+    defer pair.server.close(pair.server_io);
+
+    var buffer: [16]u8 = undefined;
+    var data: [1][]u8 = .{&buffer};
+    const start = world.now();
+    try std.testing.expectError(error.Timeout, pair.client_io.operateTimeout(
+        .{ .net_read = .{ .socket_handle = pair.client.socket.handle, .data = &data } },
+        .{ .duration = .{ .raw = .fromMilliseconds(250), .clock = .awake } },
+    ));
+    try std.testing.expectEqual(start + 250 * ms, world.now());
+
+    try writeAll(pair.server_io, pair.server, "late");
+    const result = try pair.client_io.operateTimeout(
+        .{ .net_read = .{ .socket_handle = pair.client.socket.handle, .data = &data } },
+        .{ .duration = .{ .raw = .fromMilliseconds(250), .clock = .awake } },
+    );
+    const count = (try result.net_read).data_len;
+    try std.testing.expectEqualStrings("late", buffer[0..count]);
+}
+
+const CapsuleApp = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const server_io = (try case.sim.envForNode(0)).io();
+        const client_io = (try case.sim.envForNode(1)).io();
+        try case.control().network.setLossiness(.{ .drop_rate = .percent(20) });
+        const address = serverAddress(7100);
+        var listener = try address.listen(server_io, .{});
+        defer listener.deinit(server_io);
+        const client = try address.connect(client_io, .{ .mode = .stream });
+        defer client.close(client_io);
+        const server = try listener.accept(server_io);
+        defer server.close(server_io);
+        try writeAll(client_io, client, "capsule");
+        var buffer: [16]u8 = undefined;
+        const count = try read(server_io, server, &buffer);
+        try case.env().record("app.read len={}", .{count});
+    }
+};
+
+test "tcp_v1: capsules record the network model and replay exactly" {
+    const identity: mar.ReplayIdentity = .{ .build = "tcp-test", .sut = "capsule" };
+    var report = try mar.runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0x5eed,
+        .tick_ns = 1 * ms,
+        .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2, .semantics = .tcp_v1, .timing = .compressed } },
+        .init = CapsuleApp.init,
+        .scenario = CapsuleApp.scenario,
+    });
+    defer report.deinit();
+    try std.testing.expect(report == .passed);
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"semantics\":\"tcp_v1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_version\":1") != null);
+
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    try std.testing.expectEqual(mar.NetworkSemantics.tcp_v1, capsule.simulateOptions().network.?.semantics);
+    var replay = try mar.replaySimCase(.{ .allocator = std.testing.allocator, .init = CapsuleApp.init, .scenario = CapsuleApp.scenario }, &capsule, identity);
+    defer replay.deinit();
+    try std.testing.expect(replay == .passed);
+
+    const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"model_version\":1", "\"model_version\":2");
+    defer std.testing.allocator.free(changed);
+    try std.testing.expectError(error.IncompatibleNetworkModel, mar.ReplayCapsule.decode(std.testing.allocator, changed));
+
+    // A capsule written before 0.9 names no model and replays as legacy.
+    const legacy = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"semantics\":\"tcp_v1\",", "");
+    defer std.testing.allocator.free(legacy);
+    var legacy_capsule = try mar.ReplayCapsule.decode(std.testing.allocator, legacy);
+    defer legacy_capsule.deinit();
+    try std.testing.expectEqual(mar.NetworkSemantics.legacy_v0, legacy_capsule.simulateOptions().network.?.semantics);
+}
+
+test "tcp_v1: closing over unread data resets the peer" {
+    var world = try newWorld(0x93);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{ .nodes = 2 });
+    defer pair.listener.deinit(pair.server_io);
+    defer pair.client.close(pair.client_io);
+
+    try writeAll(pair.client_io, pair.client, "unread");
+    try pair.sim.control.runFor(10 * ms);
+    pair.server.close(pair.server_io);
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectError(error.ConnectionResetByPeer, read(pair.client_io, pair.client, &buffer));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "tcp.reset conn=3 host=0 reason=close_unread") != null);
+}
+
+test "tcp_v1: a disk crash is a machine crash: sockets vanish without a packet" {
+    var world = try newWorld(0x94);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{ .nodes = 2 });
+    const sends_before = std.mem.count(u8, world.traceBytes(), "net.send ");
+
+    try pair.sim.control.disk.crash();
+    try std.testing.expectEqual(sends_before, std.mem.count(u8, world.traceBytes(), "net.send "));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "tcp.machine_crash host=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "tcp.machine_crash host=1") != null);
+
+    try pair.sim.control.process.restart(0);
+    try pair.sim.control.process.restart(1);
+    const server_io = (try pair.sim.envForNode(0)).io();
+    const client_io = (try pair.sim.envForNode(1)).io();
+    var listener = try serverAddress(7000).listen(server_io, .{});
+    defer listener.deinit(server_io);
+    const client = try serverAddress(7000).connect(client_io, .{ .mode = .stream });
+    client.close(client_io);
+}
+
+test "tcp_v1: degrade adds latency to one direction" {
+    var world = try newWorld(0x95);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{ .nodes = 2 });
+    defer pair.listener.deinit(pair.server_io);
+    defer pair.client.close(pair.client_io);
+    defer pair.server.close(pair.server_io);
+
+    const fault = try pair.sim.control.network.degrade(1, 0, .{ .delay_ns = 20 * ms });
+    const start = world.now();
+    try writeAll(pair.client_io, pair.client, "slow");
+    var buffer: [16]u8 = undefined;
+    _ = try read(pair.server_io, pair.server, &buffer);
+    try std.testing.expectEqual(start + 21 * ms, world.now());
+    try pair.sim.control.network.healFault(fault);
+    try std.testing.expectError(error.FaultNotActive, pair.sim.control.network.healFault(fault));
+}
+
+test "tcp_v1: healing one fault leaves the others" {
+    var world = try newWorld(0x96);
+    defer world.deinit();
+    const sim = try tcpSim(&world, 3);
+    const first = try sim.control.network.isolate(2, .{});
+    const second = try sim.control.network.partition(&.{0}, &.{1}, .{});
+    try std.testing.expectEqual(@as(usize, 2), sim.control.network.activeFaultCount());
+    try sim.control.network.healFault(first);
+    try std.testing.expectEqual(@as(usize, 1), sim.control.network.activeFaultCount());
+    try sim.control.network.healFault(second);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.network.activeFaultCount());
+    const expiring = try sim.control.network.cut(0, 1, .{ .duration_ns = 5 * ms });
+    try sim.control.runFor(5 * ms);
+    try std.testing.expectError(error.FaultNotActive, sim.control.network.healFault(expiring));
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.fault_heal fault=3 reason=expired") != null);
+}

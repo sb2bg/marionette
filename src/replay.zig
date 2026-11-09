@@ -6,6 +6,7 @@ const world_module = @import("world.zig");
 const execution = @import("execution.zig");
 const codec = @import("execution_codec.zig");
 const disk = @import("disk/root.zig");
+const network_types = @import("network/types.zig");
 
 pub const Identity = struct {
     /// Exact simulator/application build identifier supplied by the harness.
@@ -89,6 +90,10 @@ pub const Capsule = struct {
             if (failure.divergence != null) return error.UnreproducibleRun;
         }
         try @import("seed.zig").validateSeedSchedule(value.options.seed_schedule);
+        if (value.simulate.network) |network| {
+            if (network.semantics != .legacy_v0 and network.model_version != network_types.network_semantic_version)
+                return error.IncompatibleNetworkModel;
+        }
         var verified = try value.result.cloneResult(allocator);
         verified.deinit();
         return .{ .parsed = parsed };

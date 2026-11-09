@@ -2349,9 +2349,9 @@ const sim_vtable: Io.VTable = .{
     .futexWake = futex_ops.simFutexWake,
 
     .operate = simOperate,
-    .batchAwaitAsync = Io.unreachableBatchAwaitAsync,
-    .batchAwaitConcurrent = Io.unreachableBatchAwaitConcurrent,
-    .batchCancel = Io.unreachableBatchCancel,
+    .batchAwaitAsync = simBatchAwaitAsync,
+    .batchAwaitConcurrent = simBatchAwaitConcurrent,
+    .batchCancel = simBatchCancel,
 
     .dirCreateDir = file_ops.simDirCreateDir,
     .dirCreateDirPath = file_ops.simDirCreateDirPath,
@@ -3105,6 +3105,149 @@ fn simCheckCancel(userdata: ?*anyopaque) Io.Cancelable!void {
     const backend = backendFromUserdata(userdata);
     const runtime = backend.task_runtime orelse return;
     if (runtime.takeCancelRequest()) return error.Canceled;
+}
+
+const net_tcp_ops = net_tcp_module.Ops(Backend);
+
+/// Whether `operation` would complete without blocking. File operations and
+/// unsupported datagram operations always complete. Streams under `tcp_v1`
+/// report real readiness; `legacy_v0` streams are ready only when their
+/// outcome is already known.
+fn simOperationReady(backend: *Backend, operation: Io.Operation) bool {
+    switch (operation) {
+        .net_read => |read| {
+            const connection = backend.connection(read.socket_handle) orelse return true;
+            if (connection.closed) return true;
+            if (connection.tcp != null) {
+                const engine = backend.tcpEngine() orelse return true;
+                return net_tcp_ops.readReady(engine, connection);
+            }
+            if (connection.node) |node| net_ops.drainNetworkReadyForBatch(backend, node);
+            return connection.inbox.items.len > 0 or connection.read_error != null or
+                connection.read_failed or connection.read_shutdown;
+        },
+        .net_write => |write| {
+            const connection = backend.connection(write.socket_handle) orelse return true;
+            if (connection.closed or connection.tcp == null) return true;
+            const engine = backend.tcpEngine() orelse return true;
+            return net_tcp_ops.writeReady(engine, connection);
+        },
+        else => return true,
+    }
+}
+
+fn batchHandle(operation: Io.Operation) ?u64 {
+    return switch (operation) {
+        .net_read => |read| @intCast(read.socket_handle),
+        .net_write => |write| @intCast(write.socket_handle),
+        else => null,
+    };
+}
+
+fn simBatchAwait(backend: *Backend, batch: *Io.Batch, deadline: ?u64, concurrent: bool) (Io.Cancelable || Io.Timeout.Error || Io.ConcurrentError)!void {
+    while (true) {
+        if (backend.task_runtime) |runtime| {
+            if (runtime.takeCancelRequest()) return error.Canceled;
+        }
+        var prev_index: Io.Operation.OptionalIndex = .none;
+        var index = batch.submitted.head;
+        var any_ready = false;
+        while (index != .none) {
+            const storage = &batch.storage[index.toIndex()];
+            const next_index = storage.submission.node.next;
+            const ready = simOperationReady(backend, storage.submission.operation);
+            if (ready or (!concurrent and batch.completed.head == .none and !any_ready and next_index == .none and prev_index == .none)) {
+                // Without concurrency a lone operation may simply block.
+                const result = try simOperate(backend, storage.submission.operation);
+                switch (prev_index) {
+                    .none => batch.submitted.head = next_index,
+                    else => batch.storage[prev_index.toIndex()].submission.node.next = next_index,
+                }
+                if (next_index == .none) batch.submitted.tail = prev_index;
+                switch (batch.completed.tail) {
+                    .none => batch.completed.head = index,
+                    else => |tail_index| batch.storage[tail_index.toIndex()].completion.node.next = index,
+                }
+                storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+                batch.completed.tail = index;
+                any_ready = true;
+            } else {
+                prev_index = index;
+            }
+            index = next_index;
+        }
+        if (batch.completed.head != .none or batch.submitted.head == .none) return;
+        if (deadline) |at| if (at <= backend.world.now()) return error.Timeout;
+        const wait_set = backend.futex_wait_set orelse return error.ConcurrencyUnavailable;
+        // Legacy streams are pull-based: nothing wakes a batch waiting on them.
+        var watched = batch.submitted.head;
+        while (watched != .none) {
+            const storage = &batch.storage[watched.toIndex()];
+            const handle = batchHandle(storage.submission.operation) orelse {
+                watched = storage.submission.node.next;
+                continue;
+            };
+            const connection = backend.connection(@intCast(handle)) orelse return error.ConcurrencyUnavailable;
+            if (connection.tcp == null) return error.ConcurrencyUnavailable;
+            watched = storage.submission.node.next;
+        }
+        const key = futex_module.waitKey(.connection, futex_module.max_wait_key_payload - backend.next_batch_key);
+        backend.next_batch_key += 1;
+        const registered_from = backend.batch_waiters.items.len;
+        watched = batch.submitted.head;
+        while (watched != .none) {
+            const storage = &batch.storage[watched.toIndex()];
+            if (batchHandle(storage.submission.operation)) |handle| {
+                backend.batch_waiters.append(backend.allocator, .{ .handle = handle, .key = key }) catch {
+                    backend.batch_waiters.shrinkRetainingCapacity(registered_from);
+                    return error.ConcurrencyUnavailable;
+                };
+            }
+            watched = storage.submission.node.next;
+        }
+        const result = wait_set.blockUntilCancelable(key, deadline);
+        var cursor: usize = 0;
+        while (cursor < backend.batch_waiters.items.len) {
+            if (backend.batch_waiters.items[cursor].key == key) {
+                _ = backend.batch_waiters.swapRemove(cursor);
+            } else cursor += 1;
+        }
+        switch (result) {
+            .woken, .timed_out => {},
+            .canceled, .failed => return error.Canceled,
+        }
+    }
+}
+
+fn simBatchAwaitAsync(userdata: ?*anyopaque, batch: *Io.Batch) Io.Cancelable!void {
+    const backend = backendFromUserdata(userdata);
+    simBatchAwait(backend, batch, null, false) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+    };
+}
+
+fn simBatchAwaitConcurrent(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+    const backend = backendFromUserdata(userdata);
+    const deadline: ?u64 = switch (timeout) {
+        .none => null,
+        .duration => |duration| blk: {
+            if (!supportsClock(duration.clock)) return error.ConcurrencyUnavailable;
+            if (duration.raw.nanoseconds <= 0) break :blk backend.world.now();
+            const delta = std.math.cast(u64, duration.raw.nanoseconds) orelse std.math.maxInt(u64);
+            break :blk backend.world.now() +| delta;
+        },
+        .deadline => |deadline| blk: {
+            if (!supportsClock(deadline.clock)) return error.ConcurrencyUnavailable;
+            if (deadline.raw.nanoseconds <= 0) break :blk 0;
+            break :blk std.math.cast(u64, deadline.raw.nanoseconds) orelse std.math.maxInt(u64);
+        },
+    };
+    try simBatchAwait(backend, batch, deadline, true);
+}
+
+fn simBatchCancel(_: ?*anyopaque, _: *Io.Batch) void {
+    // Operations complete synchronously once ready; none is ever pending.
 }
 
 fn simOperate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {

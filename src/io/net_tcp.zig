@@ -216,6 +216,16 @@ pub fn Ops(comptime Backend: type) type {
                 conn.read_shutdown or conn.state == .closed;
         }
 
+        pub fn writeReady(engine: *Engine, connection: *Backend.ConnectionState) bool {
+            const conn = engine.connection(connection.tcp.?) orelse return true;
+            return switch (conn.state) {
+                .established, .close_wait => conn.err != null or conn.terminal != null or conn.fin_queued or
+                    conn.send_buf.items.len < conn.send_capacity,
+                .syn_sent, .syn_received => false,
+                else => true,
+            };
+        }
+
         pub fn read(
             backend: *Backend,
             engine: *Engine,

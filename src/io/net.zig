@@ -181,6 +181,11 @@ pub fn Ops(comptime Backend: type) type {
             }
         }
 
+        /// Pull ready legacy frames into inboxes so a batch can see them.
+        pub fn drainNetworkReadyForBatch(backend: *Backend, node: network_module.NodeId) void {
+            drainNetworkReady(backend, node) catch {};
+        }
+
         fn streamTarget(backend: *Backend, bytes: []const u8) ?StreamTarget {
             if (bytes.len < stream_frame_handle_size) return null;
             const raw = std.mem.readInt(u64, bytes[0..stream_frame_handle_size], .little);
