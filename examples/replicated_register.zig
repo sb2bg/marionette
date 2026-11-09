@@ -125,7 +125,7 @@ pub fn partitionScenario(case: *Case) !void {
     const isolated = [_]mar.NodeId{0};
     const majority = [_]mar.NodeId{ 1, 2, client_node_id };
 
-    try case.control().network.partition(&isolated, &majority);
+    _ = try case.control().network.partition(&isolated, &majority, .{});
     try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
 
     try case.control().network.heal();

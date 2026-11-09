@@ -10,6 +10,7 @@ const disk_module = @import("../disk/root.zig");
 const file_module = @import("file.zig");
 const futex_module = @import("futex.zig");
 const net_module = @import("net.zig");
+const net_tcp_module = @import("net_tcp.zig");
 const network_module = @import("../network/root.zig");
 const World = @import("../world.zig").World;
 const traceField = @import("../world.zig").traceField;
@@ -579,6 +580,15 @@ pub const Backend = struct {
     /// Queued connect probes owned by suspended tasks. Process kill destroys
     /// fibers without running defers, so probe ownership must also live here.
     connect_probes: std.ArrayList(ConnectProbe) = .empty,
+    /// Tasks parked in a `Batch` await, keyed by the socket handles they
+    /// watch, so a readiness wake on any of them reaches the batch.
+    batch_waiters: std.ArrayList(BatchWaiter) = .empty,
+    next_batch_key: usize = 1,
+
+    pub const BatchWaiter = struct {
+        handle: u64,
+        key: usize,
+    };
 
     pub const HandleEntry = struct {
         handle: SocketHandle,
@@ -653,6 +663,8 @@ pub const Backend = struct {
     pub const ListenerState = struct {
         address: Io.net.IpAddress,
         node: ?network_module.NodeId = null,
+        /// Engine listener under `tcp_v1`.
+        tcp: ?u64 = null,
         backlog: u31,
         pending: std.ArrayList(SocketHandle) = .empty,
         closed: bool = false,
@@ -662,6 +674,8 @@ pub const Backend = struct {
     pub const ConnectionState = struct {
         address: Io.net.IpAddress,
         node: ?network_module.NodeId = null,
+        /// Engine connection under `tcp_v1`.
+        tcp: ?u64 = null,
         inbox: std.ArrayList(u8) = .empty,
         read_error: ?Io.net.Stream.Reader.Error = null,
         read_failed: bool = false,
@@ -777,6 +791,7 @@ pub const Backend = struct {
         // first. Kill paths discard probes while the network is live; ordinary
         // teardown only releases this process-local ownership ledger.
         self.connect_probes.deinit(self.allocator);
+        self.batch_waiters.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -882,6 +897,11 @@ pub const Backend = struct {
             .userdata = self,
             .vtable = &sim_vtable,
         };
+    }
+
+    /// The TCP-lite engine when the network runs `tcp_v1`.
+    pub fn tcpEngine(self: *const Backend) ?*network_module.internal.TcpEngine {
+        return network_module.internal.tcpEngineFromControl(self.network_control);
     }
 
     pub fn processIsAlive(self: *const Backend) bool {
@@ -990,6 +1010,13 @@ pub const Backend = struct {
 
     /// Wake tasks blocked on a connection handle becoming ready, if a
     /// scheduler is attached. No-op in the bare-backend case.
+    pub fn wakeBatchWaiters(self: *Backend, handle: u64) void {
+        const wait_set = self.futex_wait_set orelse return;
+        for (self.batch_waiters.items) |waiter| {
+            if (waiter.handle == handle) _ = wait_set.wake(waiter.key, std.math.maxInt(usize));
+        }
+    }
+
     pub fn wakeConnection(self: *Backend, handle: SocketHandle, count: usize) void {
         if (self.futex_wait_set) |wait_set| {
             _ = wait_set.wake(self.connectionWaitKey(handle), count);
@@ -1092,6 +1119,11 @@ pub const Backend = struct {
         reset_peer: bool,
     ) void {
         connection_state.closed = true;
+        if (connection_state.tcp) |id| {
+            if (self.tcpEngine()) |engine| engine.close(id);
+            self.wakeConnection(handle, std.math.maxInt(usize));
+            return;
+        }
         if (connection_state.node) |node| {
             _ = network_module.internal.discardStreamFramesFromControl(
                 self.network_control,
@@ -1169,6 +1201,9 @@ pub const Backend = struct {
             switch (entry.state) {
                 .listener => |listener_state| {
                     listener_state.closed = true;
+                    if (listener_state.tcp) |id| {
+                        if (self.tcpEngine()) |engine| engine.closeListener(id);
+                    }
                     self.unregisterListener(handle);
                     self.wakeListener(handle, std.math.maxInt(usize));
                     self.closePendingConnections(listener_state);
@@ -1600,6 +1635,13 @@ pub const Backend = struct {
     /// cached file metadata stale so restart re-derives it from disk truth.
     pub fn killProcess(self: *Backend, options: KillOptions) void {
         self.process_alive = false;
+        if (self.tcpEngine()) |engine| {
+            // A process exit lets the kernel close its sockets (FIN, or RST
+            // over unread data); a disk crash is a machine crash, and its
+            // sockets vanish without a packet.
+            const node = self.process_node orelse 0;
+            if (options.invalidate_files) engine.machineCrash(node) else engine.processExit(node);
+        }
         self.discardConnectProbes();
         var index: usize = 0;
         while (index < self.handles.items.len) {
@@ -1612,6 +1654,9 @@ pub const Backend = struct {
                 },
                 .listener => |listener_state| {
                     listener_state.closed = true;
+                    if (listener_state.tcp) |id| {
+                        if (self.tcpEngine()) |engine| engine.closeListener(id);
+                    }
                     self.unregisterListener(handle);
                     self.wakeListener(handle, std.math.maxInt(usize));
                     self.closePendingConnections(listener_state);
@@ -2163,6 +2208,21 @@ pub const ProcessRuntime = struct {
             .ptr = self,
             .wake = wakeNetworkWaitersOpaque,
         };
+    }
+
+    pub fn tcpNotifier(self: *ProcessRuntime) network_module.internal.TcpNotifier {
+        return .{ .ptr = self, .notify = notifyTcpOpaque };
+    }
+
+    fn notifyTcpOpaque(ptr: *anyopaque, kind: network_module.internal.TcpNotifier.Kind, handle: u64) void {
+        const self: *ProcessRuntime = @ptrCast(@alignCast(ptr));
+        const backend = &self.backends[0];
+        const key = switch (kind) {
+            .connection => backend.connectionWaitKey(@intCast(handle)),
+            .listener => backend.listenerWaitKey(@intCast(handle)),
+        };
+        if (backend.futex_wait_set) |wait_set| _ = wait_set.wake(key, std.math.maxInt(usize));
+        for (self.backends) |*candidate| candidate.wakeBatchWaiters(handle);
     }
 
     fn wakeNetworkWaitersOpaque(ptr: *anyopaque) void {

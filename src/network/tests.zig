@@ -518,7 +518,7 @@ test "composition network: manual and automatic partitions compose" {
     // service_nodes = 1 pins automatic partition selection to node 0, making
     // the auto/manual overlap deterministic without depending on RNG output.
     try sim.control.network.setPartitionDynamics(.{ .partition_rate = .always() });
-    try sim.control.network.partition(&isolated, &other);
+    _ = try sim.control.network.partition(&isolated, &other, .{});
     try sim.control.tick();
     try sim.control.network.setPartitionDynamics(.{ .unpartition_rate = .always() });
     try sim.control.tick();
@@ -605,7 +605,7 @@ test "network contract: partition healLinks and node lifecycle retain distinct m
     const b = try sim.endpoint(TestPayload, 1);
     const c = try sim.endpoint(TestPayload, 2);
     const control = sim.control.network;
-    try control.partition(&.{0}, &.{1});
+    _ = try control.partition(&.{0}, &.{1}, .{});
     try a.send(1, .{ .value = 1 });
     try std.testing.expect((try b.receive()) == null);
     try b.send(0, .{ .value = 2 });

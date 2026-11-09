@@ -910,6 +910,10 @@ pub const TaskScheduler = struct {
 
     fn advanceToNextTimer(self: *Self) !bool {
         const deadline = self.nextDeadline() orelse return false;
+        const network_event = if (self.fault_evolution) |control|
+            control.nextNetworkEventAt() == deadline
+        else
+            false;
         const now = self.world.now();
         var reached_deadline = true;
         if (deadline > now) {
@@ -936,7 +940,7 @@ pub const TaskScheduler = struct {
             try self.recordTimeout(task.id, task_deadline);
         }
 
-        return !reached_deadline or due.items.len > 0;
+        return !reached_deadline or due.items.len > 0 or network_event or self.ready.items.len > 0;
     }
 
     fn advanceClockToward(self: *Self, target_ns: u64) !bool {
@@ -964,6 +968,13 @@ pub const TaskScheduler = struct {
             if (task.state != .blocked) continue;
             const deadline = task.blocked_deadline_ns orelse continue;
             if (best == null or deadline < best.?) best = deadline;
+        }
+        // Network deliveries and protocol timers wake blocked tasks without
+        // a task deadline of their own.
+        if (self.fault_evolution) |control| {
+            if (control.nextNetworkEventAt()) |at| {
+                if (best == null or at < best.?) best = at;
+            }
         }
         return best;
     }
@@ -2500,7 +2511,7 @@ const NetPartitionScenario = struct {
 
         const server_side = [_]network_module.NodeId{0};
         const client_side = [_]network_module.NodeId{1};
-        self.network_control.partition(&server_side, &client_side) catch @panic("partition failed");
+        _ = self.network_control.partition(&server_side, &client_side, .{}) catch @panic("partition failed");
         scheduler.blockCurrent(partition_retry_key);
 
         self.network_control.heal() catch @panic("heal failed");

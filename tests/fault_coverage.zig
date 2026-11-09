@@ -80,7 +80,7 @@ const Faulty = struct {
         try control.disk.setFaults(.{ .corrupt_read_rate = .always() });
         try disk.read(.{ .path = "data", .offset = 0, .buffer = &buffer });
 
-        try control.network.partition(&.{0}, &.{1});
+        _ = try control.network.partition(&.{0}, &.{1}, .{});
 
         try control.allocation.setFaults(.{ .fail_after = 0 });
         try std.testing.expectError(error.OutOfMemory, case.env().allocator().alloc(u8, 1));
@@ -92,7 +92,7 @@ const Faulty = struct {
         try control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
         try control.disk.crash();
         try control.disk.restart();
-        try control.network.partition(&.{0}, &.{1});
+        _ = try control.network.partition(&.{0}, &.{1}, .{});
     }
 };
 

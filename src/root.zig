@@ -166,6 +166,38 @@ pub const SimNetworkOptions = network_module.SimNetworkOptions;
 /// Typed app-facing process endpoint.
 pub const Endpoint = network_module.Endpoint;
 
+/// Type-erased harness network control (`sim.control.network`). Its static
+/// `hostIp4` and `hostIp6` name each node's own address under
+/// `per_host_v1`.
+pub const AnyNetworkControl = network_module.AnyNetworkControl;
+
+/// Network semantics version (`legacy_v0` or `tcp_v1`).
+pub const NetworkSemantics = network_module.Semantics;
+
+/// How simulated hosts own addresses and ports.
+pub const NetworkAddressModel = network_module.AddressModel;
+
+/// `tcp_v1` timer profile (`linux` or `compressed`).
+pub const NetworkTimingProfile = network_module.TimingProfile;
+
+/// `tcp_v1` socket buffer sizes.
+pub const TcpOptions = network_module.TcpOptions;
+
+/// A handle to one injected network fault.
+pub const NetworkFault = network_module.Fault;
+
+/// How a network fault disrupts packets.
+pub const NetworkFaultMode = network_module.FaultMode;
+
+/// Which injection produced a network fault.
+pub const NetworkFaultKind = network_module.FaultKind;
+
+/// Options for `partition`, `isolate`, and `cut`.
+pub const NetworkFaultOptions = network_module.FaultOptions;
+
+/// Options for `degrade`.
+pub const NetworkDegradeOptions = network_module.DegradeOptions;
+
 /// Named simulation profile expansion helpers.
 pub const SimProfile = profile_module.SimProfile;
 

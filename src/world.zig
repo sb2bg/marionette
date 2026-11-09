@@ -556,6 +556,10 @@ pub const World = struct {
             network_control,
             io_module.internal.streamWaitObserver(sim_io),
         );
+        network_module.internal.attachTcpNotifierFromControl(
+            network_control,
+            io_module.internal.tcpNotifier(sim_io),
+        );
         sim_disk.attachLatencyRuntime(scheduler_module.diskLatencyRuntime(scheduler));
 
         const base_env: env_module.Env = .{

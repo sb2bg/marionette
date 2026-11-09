@@ -65,7 +65,7 @@ test "network probe A: connect into a partition fails at once, even with a timeo
     var listener = try address.listen(server_io, .{});
     defer listener.deinit(server_io);
 
-    try sim.control.network.partition(&.{0}, &.{1});
+    _ = try sim.control.network.partition(&.{0}, &.{1}, .{});
     const start = world.now();
     try std.testing.expectError(error.HostUnreachable, address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }));
     try std.testing.expectError(error.HostUnreachable, address.connect(client_io, .{
@@ -86,7 +86,7 @@ test "network probe B: a reply sent into a partition becomes a read error" {
     defer pair.client.close(pair.client_io);
     defer pair.server.close(pair.server_io);
 
-    try pair.sim.control.network.partition(&.{0}, &.{1});
+    _ = try pair.sim.control.network.partition(&.{0}, &.{1}, .{});
     const start = world.now();
     _ = try write(pair.server_io, pair.server, "reply");
     var buffer: [16]u8 = undefined;
@@ -103,7 +103,7 @@ test "network probe C: a close crosses a partition at once" {
     defer pair.deinit();
     defer pair.client.close(pair.client_io);
 
-    try pair.sim.control.network.partition(&.{0}, &.{1});
+    _ = try pair.sim.control.network.partition(&.{0}, &.{1}, .{});
     const start = world.now();
     pair.server.close(pair.server_io);
     var buffer: [16]u8 = undefined;
@@ -121,7 +121,7 @@ test "network probe D: a peer's death crosses a partition at once" {
     defer pair.deinit();
     defer pair.client.close(pair.client_io);
 
-    try pair.sim.control.network.partition(&.{0}, &.{1});
+    _ = try pair.sim.control.network.partition(&.{0}, &.{1}, .{});
     const start = world.now();
     try pair.sim.killProcess(0);
     var buffer: [16]u8 = undefined;

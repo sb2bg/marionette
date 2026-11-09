@@ -5,6 +5,7 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const futex_module = @import("futex.zig");
 const network_module = @import("../network/root.zig");
+const net_tcp = @import("net_tcp.zig");
 const Io = std.Io;
 const SocketHandle = Io.net.Socket.Handle;
 const stream_frame_handle_size = @sizeOf(u64);
@@ -22,6 +23,8 @@ const stream_backpressure_wait_key = futex_module.stream_backpressure_wait_key;
 
 pub fn Ops(comptime Backend: type) type {
     return struct {
+        const tcp_ops = net_tcp.Ops(Backend);
+
         const StreamTarget = struct {
             handle: SocketHandle,
             connection: *Backend.ConnectionState,
@@ -250,6 +253,7 @@ pub fn Ops(comptime Backend: type) type {
             if (options.protocol != .tcp) return error.ProtocolUnsupportedBySystem;
 
             const backend = backendFromUserdata(userdata);
+            if (backend.tcpEngine()) |engine| return tcp_ops.listen(backend, engine, address, options);
             try takeCancel(backend);
             if (!backend.processIsAlive()) return error.NetworkDown;
             // Port 0 asks for an ephemeral port, per POSIX bind semantics;
@@ -359,6 +363,32 @@ pub fn Ops(comptime Backend: type) type {
                 return;
             }
 
+            if (backend.tcpEngine()) |engine| {
+                if (engine.resolveName(name)) |node| {
+                    var results: [3]Io.net.HostName.LookupResult = undefined;
+                    var count: usize = 0;
+                    // IPv4 first: RFC 6724 ranks IPv4 above ULA `fd00::/8`.
+                    if (options.family != .ip6) {
+                        results[count] = .{ .address = network_module.AnyNetworkControl.hostIp4(node, options.port) };
+                        count += 1;
+                    }
+                    if (options.family != .ip4) {
+                        results[count] = .{ .address = network_module.AnyNetworkControl.hostIp6(node, options.port) };
+                        count += 1;
+                    }
+                    if (copyCanonicalName(options.canonical_name_buffer, name)) |canonical| {
+                        results[count] = .{ .canonical_name = canonical };
+                        count += 1;
+                    }
+                    backend.world.record(
+                        "io.net.lookup host={s} port={} results={} node={}",
+                        .{ name, options.port, count, node },
+                    ) catch return error.NameServerFailure;
+                    try resolved.putAll(backend_io, results[0..count]);
+                    return;
+                }
+            }
+
             return error.UnknownHostName;
         }
 
@@ -402,6 +432,7 @@ pub fn Ops(comptime Backend: type) type {
             }
 
             const backend = backendFromUserdata(userdata);
+            if (backend.tcpEngine()) |engine| return tcp_ops.connect(backend, engine, address, options);
             try takeCancel(backend);
             if (!backend.processIsAlive()) return error.NetworkDown;
             const timeout_at = try connectTimeoutDeadlineNs(backend, options.timeout);
@@ -606,6 +637,7 @@ pub fn Ops(comptime Backend: type) type {
             _ = options;
 
             const backend = backendFromUserdata(userdata);
+            if (backend.tcpEngine()) |engine| return tcp_ops.accept(backend, engine, server);
             try takeCancel(backend);
             const state = backend.listener(server) orelse return error.SocketNotListening;
             if (state.closed) return error.SocketNotListening;
@@ -645,6 +677,12 @@ pub fn Ops(comptime Backend: type) type {
             if (connection.closed) {
                 backend.retireClosedNetHandleIfIdle(src);
                 return error.SocketUnconnected;
+            }
+            if (connection.tcp != null) {
+                return tcp_ops.read(backend, backend.tcpEngine().?, src, connection, data, null) catch |err| switch (err) {
+                    error.Timeout => unreachable,
+                    else => |other| other,
+                };
             }
             if (connection.read_shutdown) return 0;
             if (connection.node) |node| try drainNetworkReady(backend, node);
@@ -707,6 +745,13 @@ pub fn Ops(comptime Backend: type) type {
             const backend = backendFromUserdata(userdata);
             try takeCancel(backend);
             const connection = backend.connection(dest) orelse return error.SocketUnconnected;
+            if (connection.tcp != null) {
+                if (connection.closed) return error.SocketUnconnected;
+                return tcp_ops.write(backend, backend.tcpEngine().?, dest, connection, header, data, splat, null) catch |err| switch (err) {
+                    error.Timeout => unreachable,
+                    else => |other| other,
+                };
+            }
             if (connection.closed or connection.write_shutdown) return error.SocketUnconnected;
             const peer_ref = connection.peer orelse return error.SocketUnconnected;
             const peer = peer_ref.backend.connection(peer_ref.handle) orelse return error.ConnectionResetByPeer;
@@ -867,6 +912,7 @@ pub fn Ops(comptime Backend: type) type {
             if (!backend.processIsAlive()) return error.NetworkDown;
             const connection = backend.connection(handle) orelse return error.SocketUnconnected;
             if (connection.closed) return error.SocketUnconnected;
+            if (connection.tcp != null) return tcp_ops.shutdown(backend, backend.tcpEngine().?, handle, connection, how);
             backend.world.record(
                 "io.net.shutdown handle={} how={s}",
                 .{ handle, @tagName(how) },

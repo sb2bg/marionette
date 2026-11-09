@@ -329,6 +329,13 @@ pub const FaultEvolutionControl = struct {
         return reached_end;
     }
 
+    /// Earliest pending network event the scheduler must advance time for:
+    /// a packet arrival or a timer whose firing can change what an
+    /// application observes.
+    pub fn nextNetworkEventAt(self: FaultEvolutionControl) ?clock_module.Timestamp {
+        return network_module.internal.nextEssentialEventAtFromControl(self.network);
+    }
+
     fn participants(self: FaultEvolutionControl) [2]fault_evolution_module.Participant {
         return .{
             network_module.internal.faultEvolutionParticipantFromControl(self.network),

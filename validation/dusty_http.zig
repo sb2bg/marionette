@@ -759,7 +759,7 @@ const FaultScenario = struct {
 
         const server_side = [_]mar.NodeId{0};
         const client_side = [_]mar.NodeId{1};
-        self.control.network.partition(&server_side, &client_side) catch @panic("dusty_fault partition failed");
+        _ = self.control.network.partition(&server_side, &client_side, .{}) catch @panic("dusty_fault partition failed");
         self.record("dusty_fault.partition", .{});
         self.signal(&self.partitioned);
 

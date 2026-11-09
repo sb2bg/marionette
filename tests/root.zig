@@ -50,3 +50,7 @@ test {
 test {
     _ = @import("storage_083.zig");
 }
+
+test {
+    _ = @import("network_tcp.zig");
+}

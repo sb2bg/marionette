@@ -20,6 +20,7 @@ pub const internal = struct {
     pub const deinitProcessRuntimeOpaque = backend.deinitProcessRuntimeOpaque;
     pub const onProcessRuntimeDiskCrashOpaque = backend.onProcessRuntimeDiskCrashOpaque;
     pub const streamWaitObserver = backend.ProcessRuntime.streamWaitObserver;
+    pub const tcpNotifier = backend.ProcessRuntime.tcpNotifier;
 };
 
 test {

@@ -2,8 +2,13 @@
 
 const clock_module = @import("../clock.zig");
 const fault_evolution_module = @import("../fault_evolution.zig");
+const faults = @import("faults.zig");
 const types = @import("types.zig");
 const World = @import("../world.zig").World;
+
+pub const Fault = faults.Fault;
+pub const FaultOptions = faults.FaultOptions;
+pub const DegradeOptions = faults.DegradeOptions;
 
 const NetworkClogOptions = types.NetworkClogOptions;
 const NetworkLatencyOptions = types.NetworkLatencyOptions;
@@ -26,7 +31,16 @@ pub const AnyNetworkControl = struct {
         clog: *const fn (*anyopaque, NodeId, NodeId, clock_module.Duration) anyerror!void,
         unclog: *const fn (*anyopaque, NodeId, NodeId) anyerror!void,
         unclog_all: *const fn (*anyopaque) anyerror!void,
-        partition: *const fn (*anyopaque, []const NodeId, []const NodeId) anyerror!void,
+        partition: *const fn (*anyopaque, []const NodeId, []const NodeId, FaultOptions) anyerror!Fault,
+        isolate: *const fn (*anyopaque, NodeId, FaultOptions) anyerror!Fault,
+        cut: *const fn (*anyopaque, NodeId, NodeId, FaultOptions) anyerror!Fault,
+        degrade: *const fn (*anyopaque, NodeId, NodeId, DegradeOptions) anyerror!Fault,
+        heal_fault: *const fn (*anyopaque, Fault) anyerror!void,
+        active_faults: *const fn (*anyopaque) usize,
+        add_host_name: *const fn (*anyopaque, []const u8, NodeId) anyerror!void,
+        record_netstat: *const fn (*anyopaque, []const u8) anyerror!void,
+        next_essential_event_at: *const fn (*anyopaque) ?clock_module.Timestamp,
+        semantics: *const fn (*anyopaque) ?types.Semantics,
         heal: *const fn (*anyopaque) anyerror!void,
         heal_links: *const fn (*anyopaque) anyerror!void,
         restore_core_liveness: *const fn (*anyopaque, []const NodeId) anyerror!void,
@@ -99,10 +113,67 @@ pub const AnyNetworkControl = struct {
         try self.vtable.unclog_all(self.ptr);
     }
 
-    /// Disable every directed link crossing between the two groups, in
-    /// both directions. Traced as `network.partition`.
-    pub fn partition(self: AnyNetworkControl, left: []const NodeId, right: []const NodeId) !void {
-        try self.vtable.partition(self.ptr, left, right);
+    /// Cut every directed link crossing between the two groups, in both
+    /// directions, and return the fault. Nodes in neither group keep
+    /// reaching both sides (a partial partition). Traced as
+    /// `network.partition` and, except under `legacy_v0`, `network.fault`.
+    pub fn partition(self: AnyNetworkControl, left: []const NodeId, right: []const NodeId, options: FaultOptions) !Fault {
+        return self.vtable.partition(self.ptr, left, right, options);
+    }
+
+    /// Cut one node off from every other node, in both directions.
+    pub fn isolate(self: AnyNetworkControl, node: NodeId, options: FaultOptions) !Fault {
+        return self.vtable.isolate(self.ptr, node, options);
+    }
+
+    /// Disrupt one directed link.
+    pub fn cut(self: AnyNetworkControl, from: NodeId, to: NodeId, options: FaultOptions) !Fault {
+        return self.vtable.cut(self.ptr, from, to, options);
+    }
+
+    /// Slow one directed link, optionally with seeded loss. `tcp_v1` only.
+    pub fn degrade(self: AnyNetworkControl, from: NodeId, to: NodeId, options: DegradeOptions) !Fault {
+        return self.vtable.degrade(self.ptr, from, to, options);
+    }
+
+    /// Heal one fault, leaving every other fault in place. Returns
+    /// `error.FaultNotActive` when it already healed or expired. Traced as
+    /// `network.fault_heal`.
+    pub fn healFault(self: AnyNetworkControl, fault: Fault) !void {
+        try self.vtable.heal_fault(self.ptr, fault);
+    }
+
+    /// Number of active fault handles.
+    pub fn activeFaultCount(self: AnyNetworkControl) usize {
+        return self.vtable.active_faults(self.ptr);
+    }
+
+    /// Make the simulated DNS resolve `name` to `node`'s addresses.
+    /// Every node also resolves as `nodeN`. `tcp_v1` only.
+    pub fn addHostName(self: AnyNetworkControl, name: []const u8, node: NodeId) !void {
+        try self.vtable.add_host_name(self.ptr, name, node);
+    }
+
+    /// Record a `netstat` table of sockets, held packets, and active
+    /// faults into the trace (`netstat.*` events). `tcp_v1` only; a no-op
+    /// otherwise.
+    pub fn recordNetstat(self: AnyNetworkControl, reason: []const u8) !void {
+        try self.vtable.record_netstat(self.ptr, reason);
+    }
+
+    /// Configured network semantics, or null without a network.
+    pub fn semantics(self: AnyNetworkControl) ?types.Semantics {
+        return self.vtable.semantics(self.ptr);
+    }
+
+    /// The node's IPv4 address under `per_host_v1`.
+    pub fn hostIp4(node: NodeId, port: u16) @import("std").Io.net.IpAddress {
+        return @import("tcp.zig").Engine.hostIp4(node, port);
+    }
+
+    /// The node's IPv6 address under `per_host_v1`.
+    pub fn hostIp6(node: NodeId, port: u16) @import("std").Io.net.IpAddress {
+        return @import("tcp.zig").Engine.hostIp6(node, port);
     }
 
     /// Re-enable every link, clear every clog, and mark every node up.
@@ -140,6 +211,10 @@ pub const internal = struct {
             .finish_run_for = control.vtable.finish_run_for,
         };
     }
+
+    pub fn nextEssentialEventAt(control: AnyNetworkControl) ?clock_module.Timestamp {
+        return control.vtable.next_essential_event_at(control.ptr);
+    }
 };
 
 var unavailable_network_control_ctx: u8 = 0;
@@ -155,6 +230,15 @@ const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
     .unclog = unavailableControlUnclog,
     .unclog_all = unavailableControlUnclogAll,
     .partition = unavailableControlPartition,
+    .isolate = unavailableControlIsolate,
+    .cut = unavailableControlCut,
+    .degrade = unavailableControlDegrade,
+    .heal_fault = unavailableControlHealFault,
+    .active_faults = unavailableControlActiveFaults,
+    .add_host_name = unavailableControlAddHostName,
+    .record_netstat = unavailableControlRecordNetstat,
+    .next_essential_event_at = unavailableControlNextEssentialEventAt,
+    .semantics = unavailableControlSemantics,
     .heal = unavailableControlHeal,
     .heal_links = unavailableControlHealLinks,
     .restore_core_liveness = unavailableControlRestoreCoreLiveness,
@@ -202,8 +286,42 @@ fn unavailableControlUnclogAll(_: *anyopaque) anyerror!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlPartition(_: *anyopaque, _: []const NodeId, _: []const NodeId) anyerror!void {
+fn unavailableControlPartition(_: *anyopaque, _: []const NodeId, _: []const NodeId, _: FaultOptions) anyerror!Fault {
     return error.NetworkUnavailable;
+}
+
+fn unavailableControlIsolate(_: *anyopaque, _: NodeId, _: FaultOptions) anyerror!Fault {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlCut(_: *anyopaque, _: NodeId, _: NodeId, _: FaultOptions) anyerror!Fault {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlDegrade(_: *anyopaque, _: NodeId, _: NodeId, _: DegradeOptions) anyerror!Fault {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlHealFault(_: *anyopaque, _: Fault) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlActiveFaults(_: *anyopaque) usize {
+    return 0;
+}
+
+fn unavailableControlAddHostName(_: *anyopaque, _: []const u8, _: NodeId) anyerror!void {
+    return error.NetworkUnavailable;
+}
+
+fn unavailableControlRecordNetstat(_: *anyopaque, _: []const u8) anyerror!void {}
+
+fn unavailableControlNextEssentialEventAt(_: *anyopaque) ?clock_module.Timestamp {
+    return null;
+}
+
+fn unavailableControlSemantics(_: *anyopaque) ?types.Semantics {
+    return null;
 }
 
 fn unavailableControlHeal(_: *anyopaque) anyerror!void {

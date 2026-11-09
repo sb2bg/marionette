@@ -5,10 +5,22 @@
 
 const control = @import("control.zig");
 const endpoint = @import("endpoint.zig");
+const faults = @import("faults.zig");
 const sim = @import("sim.zig");
+const tcp = @import("tcp.zig");
 const types = @import("types.zig");
 
 pub const AnyNetworkControl = control.AnyNetworkControl;
+pub const AddressModel = types.AddressModel;
+pub const DegradeOptions = faults.DegradeOptions;
+pub const Fault = faults.Fault;
+pub const FaultKind = faults.FaultKind;
+pub const FaultMode = faults.FaultMode;
+pub const FaultOptions = faults.FaultOptions;
+pub const Semantics = types.Semantics;
+pub const TcpOptions = types.TcpOptions;
+pub const TimingProfile = types.TimingProfile;
+pub const network_semantic_version = types.network_semantic_version;
 pub const Endpoint = endpoint.Endpoint;
 pub const NetworkClogOptions = types.NetworkClogOptions;
 pub const NetworkError = types.NetworkError;
@@ -36,6 +48,12 @@ pub const internal = struct {
     pub const commitReadyStreamEventFromControl = sim.commitReadyStreamEventFromControl;
     pub const peekReadyStreamEventFromControl = sim.peekReadyStreamEventFromControl;
     pub const processCountFromControl = sim.processCountFromControl;
+    pub const tcpEngineFromControl = sim.tcpEngineFromControl;
+    pub const attachTcpNotifierFromControl = sim.attachTcpNotifierFromControl;
+    pub const nextEssentialEventAtFromControl = control.internal.nextEssentialEventAt;
+    pub const TcpEngine = tcp.Engine;
+    pub const TcpNotifier = tcp.Notifier;
+    pub const tcp_ephemeral_port_min = tcp.ephemeral_port_min;
     pub const streamPathStateFromControl = sim.streamPathStateFromControl;
     pub const sendStreamBytesFromControl = sim.sendStreamBytesFromControl;
     pub const sendStreamProbeFromControl = sim.sendStreamProbeFromControl;
@@ -49,4 +67,6 @@ pub const internal = struct {
 
 test {
     _ = @import("tests.zig");
+    _ = @import("faults.zig");
+    _ = @import("tcp.zig");
 }

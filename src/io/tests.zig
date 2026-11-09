@@ -900,7 +900,7 @@ test "io: connect observes node and link availability" {
     var server = try address.listen(server_io, .{});
     defer server.deinit(server_io);
 
-    try sim.control.network.partition(&.{0}, &.{1});
+    _ = try sim.control.network.partition(&.{0}, &.{1}, .{});
     try std.testing.expectError(
         error.HostUnreachable,
         address.connect(client_io, .{ .mode = .stream, .protocol = .tcp }),
@@ -1250,7 +1250,7 @@ test "io: partitioning an in-flight connect prevents publication" {
 
         fn partition(self: *@This()) void {
             Io.sleep(self.io, .fromNanoseconds(10), .awake) catch unreachable;
-            self.sim.control.network.partition(&.{0}, &.{1}) catch @panic("partition failed");
+            _ = self.sim.control.network.partition(&.{0}, &.{1}, .{}) catch @panic("partition failed");
         }
     };
 
@@ -5821,7 +5821,7 @@ test "io: transitionToLiveness restores the core and leaves non-core failures pe
 
     try sim.killProcess(0);
     try sim.killProcess(2);
-    try sim.control.network.partition(&.{0}, &.{ 1, 2 });
+    _ = try sim.control.network.partition(&.{0}, &.{ 1, 2 }, .{});
     try sim.control.network.setNode(0, false);
     try sim.control.network.clog(1, 0, 1_000);
 

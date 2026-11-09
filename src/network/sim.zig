@@ -6,9 +6,15 @@ const clock_module = @import("../clock.zig");
 const control_module = @import("control.zig");
 const endpoint_module = @import("endpoint.zig");
 const env_module = @import("../env.zig");
+const faults_module = @import("faults.zig");
 const message_pool_module = @import("../message_pool.zig");
+const tcp_module = @import("tcp.zig");
 const types = @import("types.zig");
 const World = @import("../world.zig").World;
+
+pub const Fault = faults_module.Fault;
+pub const FaultOptions = faults_module.FaultOptions;
+pub const DegradeOptions = faults_module.DegradeOptions;
 
 const AnyNetworkControl = control_module.AnyNetworkControl;
 const Endpoint = endpoint_module.Endpoint;
@@ -120,20 +126,33 @@ const SharedRuntime = struct {
     auto_partition_changed_at_ns: clock_module.Timestamp = 0,
     auto_partition_schedule: AutoSchedule = .pending,
     last_fault_evolution_ns: clock_module.Timestamp = 0,
+    semantics: types.Semantics,
+    address_model: types.AddressModel,
+    registry: faults_module.Registry,
+    /// The TCP-lite engine, present under `semantics = .tcp_v1`.
+    tcp: ?*tcp_module.Engine = null,
+    /// Fault mirroring the automatic partition under `tcp_v1`.
+    auto_partition_fault: ?u64 = null,
 
     const Link = struct {
         manual_enabled: bool = true,
         auto_enabled: bool = true,
+        /// A drop or reject fault handle covers this path.
+        fault_blocked: bool = false,
         clogged_until: clock_module.Timestamp = 0,
         auto_clog_schedule: AutoSchedule = .pending,
+        /// Fault handles mirroring `setLink` and clogs under `tcp_v1`.
+        link_fault: ?u64 = null,
+        clog_fault: ?u64 = null,
 
         fn enabled(self: Link) bool {
-            return self.manual_enabled and self.auto_enabled;
+            return self.manual_enabled and self.auto_enabled and !self.fault_blocked;
         }
     };
 
     fn init(world: *World, options: SimNetworkOptions) !*SharedRuntime {
         const service_node_count = try validateTopology(options.nodes, options.service_nodes, options.path_capacity);
+        try options.validateModel();
 
         const runtime = try world.allocator.create(SharedRuntime);
         errdefer world.allocator.destroy(runtime);
@@ -157,8 +176,44 @@ const SharedRuntime = struct {
             .down_nodes = down_nodes,
             .auto_partition_changed_at_ns = world.now(),
             .last_fault_evolution_ns = world.now(),
+            .semantics = options.semantics,
+            .address_model = options.resolvedAddressModel(),
+            .registry = .init(world.allocator, options.nodes),
+        };
+        errdefer runtime.registry.deinit();
+        if (options.semantics == .tcp_v1) {
+            const engine = try world.allocator.create(tcp_module.Engine);
+            errdefer world.allocator.destroy(engine);
+            engine.* = try tcp_module.Engine.init(world.allocator, .{
+                .world = world,
+                .nodes = options.nodes,
+                .down_nodes = runtime.down_nodes,
+                .registry = &runtime.registry,
+                .faults = &runtime.faults,
+                .address_model = runtime.address_model,
+            }, .{
+                .timing = tcp_module.Timing.forProfile(options.timing),
+                .send_buffer_bytes = options.tcp.send_buffer_bytes,
+                .receive_buffer_bytes = options.tcp.receive_buffer_bytes,
+                .mss = options.tcp.mss,
+            });
+            runtime.tcp = engine;
+        }
+        errdefer if (runtime.tcp) |engine| {
+            engine.deinit();
+            world.allocator.destroy(engine);
         };
         try world.registerTeardown(runtime, deinitSharedRuntime);
+        if (runtime.tcp != null) {
+            try world.record("network.model semantics={s} address_model={s} timing={s} mss={} send_buffer={} receive_buffer={}", .{
+                @tagName(options.semantics),
+                @tagName(runtime.address_model),
+                @tagName(options.timing),
+                options.tcp.mss,
+                options.tcp.send_buffer_bytes,
+                options.tcp.receive_buffer_bytes,
+            });
+        }
         return runtime;
     }
 
@@ -168,6 +223,11 @@ const SharedRuntime = struct {
     };
 
     fn deinit(self: *SharedRuntime, allocator: std.mem.Allocator) void {
+        if (self.tcp) |engine| {
+            engine.deinit();
+            allocator.destroy(engine);
+        }
+        self.registry.deinit();
         self.typed_runtimes.deinit(allocator);
         allocator.free(self.links);
         allocator.free(self.down_nodes);
@@ -318,8 +378,225 @@ const SharedRuntime = struct {
     }
 
     fn setLink(self: *SharedRuntime, from: NodeId, to: NodeId, enabled: bool) !void {
-        self.links[try self.pathIndex(from, to)].manual_enabled = enabled;
+        const index = try self.pathIndex(from, to);
+        const link = &self.links[index];
+        link.manual_enabled = enabled;
         try self.world.record("network.link from={} to={} enabled={}", .{ from, to, enabled });
+        if (self.tcp == null) return;
+        if (!enabled and link.link_fault == null) {
+            link.link_fault = try self.addPathFault(.link, .{}, index, null);
+        } else if (enabled) {
+            if (link.link_fault) |id| {
+                link.link_fault = null;
+                try self.removeFault(id, "link_enabled");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Fault handles.
+
+    fn validateFaultOptions(self: *const SharedRuntime, options: FaultOptions) !void {
+        if (options.duration_ns) |duration| try self.validatePositiveTickDuration(duration);
+        try self.validateTickAlignedDuration(options.delay_ns);
+        if (self.semantics == .legacy_v0 and options.mode != .drop) return error.UnsupportedFaultMode;
+        if (options.mode != .slow and options.delay_ns != 0) return error.InvalidDuration;
+    }
+
+    fn untilFor(self: *const SharedRuntime, duration_ns: ?clock_module.Duration) !?clock_module.Timestamp {
+        const duration = duration_ns orelse return null;
+        return try addTimestamp(self.world.now(), duration);
+    }
+
+    fn commitFault(
+        self: *SharedRuntime,
+        kind: faults_module.FaultKind,
+        mode: faults_module.FaultMode,
+        paths: std.DynamicBitSetUnmanaged,
+        until_ns: ?clock_module.Timestamp,
+        extra: struct {
+            delay_ns: clock_module.Duration = 0,
+            jitter_ns: clock_module.Duration = 0,
+            drop_rate: env_module.BuggifyRate = .never(),
+        },
+    ) !Fault {
+        const active = try self.registry.add(.{
+            .id = 0,
+            .kind = kind,
+            .mode = mode,
+            .delay_ns = extra.delay_ns,
+            .jitter_ns = extra.jitter_ns,
+            .drop_rate = extra.drop_rate,
+            .until_ns = until_ns,
+            .paths = paths,
+        });
+        const handle = active.handle();
+        const path_count = active.pathCount();
+        errdefer _ = self.registry.remove(handle.id);
+        if (!(self.semantics == .legacy_v0 and kind == .partition)) {
+            try self.world.record(
+                "network.fault fault={} kind={s} mode={s} paths={} delay_ns={} until_ns={}",
+                .{ handle.id, @tagName(kind), @tagName(mode), path_count, extra.delay_ns, until_ns orelse 0 },
+            );
+        }
+        self.registryChanged();
+        return handle;
+    }
+
+    fn addPathFault(
+        self: *SharedRuntime,
+        kind: faults_module.FaultKind,
+        options: FaultOptions,
+        index: usize,
+        until_ns: ?clock_module.Timestamp,
+    ) !u64 {
+        var paths = try self.registry.emptyPaths();
+        paths.set(index);
+        const fault = try self.commitFault(kind, options.mode, paths, until_ns, .{ .delay_ns = options.delay_ns });
+        return fault.id;
+    }
+
+    fn removeFault(self: *SharedRuntime, id: u64, reason: []const u8) !void {
+        if (!self.registry.remove(id)) return;
+        try self.world.record("network.fault_heal fault={} reason={s}", .{ id, reason });
+        self.registryChanged();
+    }
+
+    /// Recompute fault-derived link flags and let waiting traffic observe
+    /// the change.
+    fn registryChanged(self: *SharedRuntime) void {
+        for (self.links, 0..) |*link, index| link.fault_blocked = self.registry.blocks(index);
+        if (self.tcp) |engine| engine.faultsChanged();
+        self.wakeStreamWaiters();
+    }
+
+    fn partitionGroups(self: *SharedRuntime, left: []const NodeId, right: []const NodeId, options: FaultOptions) !Fault {
+        try self.validateNodes(left);
+        try self.validateNodes(right);
+        try self.validateFaultOptions(options);
+        try self.world.record("network.partition left_count={} right_count={}", .{ left.len, right.len });
+        var paths = try self.registry.emptyPaths();
+        errdefer paths.deinit(self.world.allocator);
+        for (left) |from| {
+            for (right) |to| {
+                if (from == to) continue;
+                paths.set(try self.pathIndex(from, to));
+                paths.set(try self.pathIndex(to, from));
+            }
+        }
+        const until = try self.untilFor(options.duration_ns);
+        return self.commitFault(.partition, options.mode, paths, until, .{ .delay_ns = options.delay_ns });
+    }
+
+    fn isolate(self: *SharedRuntime, node: NodeId, options: FaultOptions) !Fault {
+        try self.validateNode(node);
+        try self.validateFaultOptions(options);
+        var paths = try self.registry.emptyPaths();
+        errdefer paths.deinit(self.world.allocator);
+        for (0..self.process_count) |other_index| {
+            if (other_index == node) continue;
+            const other: NodeId = @intCast(other_index);
+            paths.set(try self.pathIndex(node, other));
+            paths.set(try self.pathIndex(other, node));
+        }
+        const until = try self.untilFor(options.duration_ns);
+        return self.commitFault(.isolate, options.mode, paths, until, .{ .delay_ns = options.delay_ns });
+    }
+
+    fn cut(self: *SharedRuntime, from: NodeId, to: NodeId, options: FaultOptions) !Fault {
+        const index = try self.pathIndex(from, to);
+        try self.validateFaultOptions(options);
+        var paths = try self.registry.emptyPaths();
+        errdefer paths.deinit(self.world.allocator);
+        paths.set(index);
+        const until = try self.untilFor(options.duration_ns);
+        return self.commitFault(.cut, options.mode, paths, until, .{ .delay_ns = options.delay_ns });
+    }
+
+    fn degrade(self: *SharedRuntime, from: NodeId, to: NodeId, options: DegradeOptions) !Fault {
+        const index = try self.pathIndex(from, to);
+        if (self.semantics == .legacy_v0) return error.UnsupportedFaultMode;
+        try validateRate(options.drop_rate);
+        try self.validateTickAlignedDuration(options.delay_ns);
+        try self.validateTickAlignedDuration(options.jitter_ns);
+        if (options.duration_ns) |duration| try self.validatePositiveTickDuration(duration);
+        var paths = try self.registry.emptyPaths();
+        errdefer paths.deinit(self.world.allocator);
+        paths.set(index);
+        const until = try self.untilFor(options.duration_ns);
+        return self.commitFault(.degrade, .slow, paths, until, .{
+            .delay_ns = options.delay_ns,
+            .jitter_ns = options.jitter_ns,
+            .drop_rate = options.drop_rate,
+        });
+    }
+
+    fn healFault(self: *SharedRuntime, fault: Fault) !void {
+        if (self.registry.find(fault.id) == null) return error.FaultNotActive;
+        for (self.links) |*link| {
+            if (link.link_fault == fault.id) {
+                link.link_fault = null;
+                link.manual_enabled = true;
+            }
+            if (link.clog_fault == fault.id) {
+                link.clog_fault = null;
+                link.clogged_until = 0;
+                link.auto_clog_schedule = .pending;
+            }
+        }
+        if (self.auto_partition_fault == fault.id) {
+            self.auto_partition_fault = null;
+            self.clearAutoPartitionLinks();
+            self.auto_partitioned_node = null;
+            self.auto_partition_changed_at_ns = self.world.now();
+            self.auto_partition_schedule = .pending;
+        }
+        try self.removeFault(fault.id, "healed");
+    }
+
+    fn expireRegistryFaults(self: *SharedRuntime) !void {
+        const now_ns = self.world.now();
+        var index: usize = 0;
+        var changed = false;
+        while (index < self.registry.faults.items.len) {
+            const fault = &self.registry.faults.items[index];
+            const until = fault.until_ns orelse {
+                index += 1;
+                continue;
+            };
+            if (until > now_ns) {
+                index += 1;
+                continue;
+            }
+            const id = fault.id;
+            for (self.links) |*link| {
+                if (link.clog_fault == id) link.clog_fault = null;
+            }
+            fault.paths.deinit(self.world.allocator);
+            _ = self.registry.faults.orderedRemove(index);
+            try self.world.record("network.fault_heal fault={} reason=expired", .{id});
+            changed = true;
+        }
+        if (changed) self.registryChanged();
+    }
+
+    fn mirrorClog(self: *SharedRuntime, index: usize, kind: faults_module.FaultKind) !void {
+        if (self.tcp == null) return;
+        const link = &self.links[index];
+        if (link.clog_fault) |previous| {
+            link.clog_fault = null;
+            if (self.registry.remove(previous)) {
+                try self.world.record("network.fault_heal fault={} reason=replaced", .{previous});
+            }
+        }
+        link.clog_fault = try self.addPathFault(kind, .{ .mode = .hold }, index, link.clogged_until);
+    }
+
+    fn unmirrorClog(self: *SharedRuntime, index: usize, reason: []const u8) !void {
+        const link = &self.links[index];
+        const id = link.clog_fault orelse return;
+        link.clog_fault = null;
+        try self.removeFault(id, reason);
     }
 
     fn clog(self: *SharedRuntime, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
@@ -336,6 +613,7 @@ const SharedRuntime = struct {
             "network.clog from={} to={} duration_ns={} until_ns={}",
             .{ from, to, duration_ns, link.clogged_until },
         );
+        try self.mirrorClog(try self.pathIndex(from, to), .clog);
     }
 
     fn unclog(self: *SharedRuntime, from: NodeId, to: NodeId) !void {
@@ -344,6 +622,7 @@ const SharedRuntime = struct {
         link.clogged_until = 0;
         link.auto_clog_schedule = .pending;
         try self.world.record("network.unclog from={} to={} active={}", .{ from, to, active });
+        try self.unmirrorClog(try self.pathIndex(from, to), "unclog");
         if (active) self.wakeStreamWaiters();
     }
 
@@ -354,19 +633,8 @@ const SharedRuntime = struct {
             link.auto_clog_schedule = .pending;
         }
         try self.world.record("network.unclog_all clogged_count={}", .{clogged_count});
+        for (0..self.links.len) |index| try self.unmirrorClog(index, "unclog_all");
         if (clogged_count > 0) self.wakeStreamWaiters();
-    }
-
-    fn partition(self: *SharedRuntime, left: []const NodeId, right: []const NodeId) !void {
-        try self.validateNodes(left);
-        try self.validateNodes(right);
-        try self.world.record("network.partition left_count={} right_count={}", .{ left.len, right.len });
-        for (left) |from| {
-            for (right) |to| {
-                self.links[try self.pathIndex(from, to)].manual_enabled = false;
-                self.links[try self.pathIndex(to, from)].manual_enabled = false;
-            }
-        }
     }
 
     fn heal(self: *SharedRuntime) !void {
@@ -377,7 +645,11 @@ const SharedRuntime = struct {
             link.manual_enabled = true;
             link.auto_enabled = true;
             link.clogged_until = 0;
+            link.link_fault = null;
+            link.clog_fault = null;
         }
+        const healed_faults = self.registry.clear();
+        self.auto_partition_fault = null;
         @memset(self.down_nodes, false);
         self.auto_partitioned_node = null;
         self.auto_partition_changed_at_ns = self.world.now();
@@ -387,6 +659,8 @@ const SharedRuntime = struct {
             "network.heal disabled_count={} down_count={} clogged_count={}",
             .{ disabled_count, down_count, clogged_count },
         );
+        if (self.tcp != null) try self.world.record("network.fault_heal_all faults={}", .{healed_faults});
+        self.registryChanged();
         if (clogged_count > 0) self.wakeStreamWaiters();
     }
 
@@ -395,11 +669,20 @@ const SharedRuntime = struct {
         for (self.links) |*link| {
             link.manual_enabled = true;
             link.auto_enabled = true;
+            link.link_fault = null;
         }
         self.auto_partitioned_node = null;
         self.auto_partition_changed_at_ns = self.world.now();
         self.auto_partition_schedule = .pending;
+        self.auto_partition_fault = null;
+        const healed = self.registry.removeWhere({}, struct {
+            fn notHold(_: void, fault: *const faults_module.Active) bool {
+                return fault.mode != .hold;
+            }
+        }.notHold);
         try self.world.record("network.heal_links disabled_count={}", .{disabled_count});
+        if (self.tcp != null) try self.world.record("network.fault_heal_all faults={} scope=links", .{healed});
+        self.registryChanged();
     }
 
     fn restoreCoreLiveness(self: *SharedRuntime, core: []const NodeId) !void {
@@ -417,7 +700,13 @@ const SharedRuntime = struct {
                 link.auto_enabled = true;
                 link.clogged_until = 0;
                 link.auto_clog_schedule = .pending;
+                link.link_fault = null;
+                link.clog_fault = null;
+                _ = self.registry.clearPath(try self.pathIndex(from, to));
             }
+        }
+        if (self.auto_partition_fault) |id| {
+            if (self.registry.find(id) == null) self.auto_partition_fault = null;
         }
         var revived_nodes: usize = 0;
         for (core) |node| {
@@ -428,6 +717,7 @@ const SharedRuntime = struct {
             "network.liveness_restore core_count={} restored_links={} cleared_clogs={} revived_nodes={}",
             .{ core.len, restored_links, cleared_clogs, revived_nodes },
         );
+        self.registryChanged();
         if (cleared_clogs > 0) self.wakeStreamWaiters();
     }
 
@@ -441,6 +731,8 @@ const SharedRuntime = struct {
             link.auto_clog_schedule = .pending;
             try self.world.record("network.unclog from={} to={} active=false", .{ from, to });
         }
+        try self.expireRegistryFaults();
+        if (self.tcp) |engine| engine.pump();
     }
 
     fn evolveTickFaults(self: *SharedRuntime) !void {
@@ -481,6 +773,12 @@ const SharedRuntime = struct {
         self.last_fault_evolution_ns = self.world.now();
     }
 
+    /// Earliest network event the scheduler should advance time for.
+    fn nextEssentialEventAt(self: *SharedRuntime) ?clock_module.Timestamp {
+        const engine = self.tcp orelse return null;
+        return engine.nextEssentialEventAt();
+    }
+
     fn fireDueAutoClogs(self: *SharedRuntime) !void {
         const faults = self.faults;
         if (faults.path_clog_rate.numerator == 0) return;
@@ -506,6 +804,7 @@ const SharedRuntime = struct {
                 "network.clog from={} to={} duration_ns={} until_ns={} automatic=true",
                 .{ from, to, faults.path_clog_duration_ns, link.clogged_until },
             );
+            try self.mirrorClog(index, .auto_clog);
         }
     }
 
@@ -522,6 +821,10 @@ const SharedRuntime = struct {
             self.auto_partition_changed_at_ns = self.world.now();
             self.auto_partition_schedule = .pending;
             try self.world.record("network.auto_heal node={}", .{node});
+            if (self.auto_partition_fault) |id| {
+                self.auto_partition_fault = null;
+                try self.removeFault(id, "auto_heal");
+            }
             return;
         }
 
@@ -546,6 +849,18 @@ const SharedRuntime = struct {
             "network.auto_partition node={} isolated_count=1 connected_count={}",
             .{ isolated, self.process_count - 1 },
         );
+        if (self.tcp != null) {
+            var paths = try self.registry.emptyPaths();
+            errdefer paths.deinit(self.world.allocator);
+            for (0..self.process_count) |other_index| {
+                if (other_index == isolated) continue;
+                const other: NodeId = @intCast(other_index);
+                paths.set(try self.pathIndex(isolated, other));
+                paths.set(try self.pathIndex(other, isolated));
+            }
+            const fault = try self.commitFault(.auto_partition, .drop, paths, null, .{});
+            self.auto_partition_fault = fault.id;
+        }
     }
 
     fn ensureAutoSchedules(self: *SharedRuntime) !void {
@@ -666,6 +981,12 @@ const SharedRuntime = struct {
                 next = minOptionalTimestamp(next, auto_clog_at_ns);
             }
         }
+        if (self.registry.nextExpiryAfter(self.world.now(), end_ns)) |expiry| {
+            next = minOptionalTimestamp(next, expiry);
+        }
+        if (self.tcp) |engine| {
+            if (engine.nextEventBeforeOrAt(end_ns)) |event_at| next = minOptionalTimestamp(next, event_at);
+        }
         const auto_partition_at_ns = switch (self.auto_partition_schedule) {
             .at => |value| value,
             .pending, .beyond_clock => return next,
@@ -744,6 +1065,15 @@ const shared_control_vtable: AnyNetworkControl.VTable = .{
     .unclog = sharedControlUnclog,
     .unclog_all = sharedControlUnclogAll,
     .partition = sharedControlPartition,
+    .isolate = sharedControlIsolate,
+    .cut = sharedControlCut,
+    .degrade = sharedControlDegrade,
+    .heal_fault = sharedControlHealFault,
+    .active_faults = sharedControlActiveFaults,
+    .add_host_name = sharedControlAddHostName,
+    .record_netstat = sharedControlRecordNetstat,
+    .next_essential_event_at = sharedControlNextEssentialEventAt,
+    .semantics = sharedControlSemantics,
     .heal = sharedControlHeal,
     .heal_links = sharedControlHealLinks,
     .restore_core_liveness = sharedControlRestoreCoreLiveness,
@@ -791,8 +1121,50 @@ fn sharedControlUnclogAll(ptr: *anyopaque) anyerror!void {
     try sharedControl(ptr).unclogAll();
 }
 
-fn sharedControlPartition(ptr: *anyopaque, left: []const NodeId, right: []const NodeId) anyerror!void {
-    try sharedControl(ptr).partition(left, right);
+fn sharedControlPartition(ptr: *anyopaque, left: []const NodeId, right: []const NodeId, options: FaultOptions) anyerror!Fault {
+    return sharedControl(ptr).partitionGroups(left, right, options);
+}
+
+fn sharedControlIsolate(ptr: *anyopaque, node: NodeId, options: FaultOptions) anyerror!Fault {
+    return sharedControl(ptr).isolate(node, options);
+}
+
+fn sharedControlCut(ptr: *anyopaque, from: NodeId, to: NodeId, options: FaultOptions) anyerror!Fault {
+    return sharedControl(ptr).cut(from, to, options);
+}
+
+fn sharedControlDegrade(ptr: *anyopaque, from: NodeId, to: NodeId, options: DegradeOptions) anyerror!Fault {
+    return sharedControl(ptr).degrade(from, to, options);
+}
+
+fn sharedControlHealFault(ptr: *anyopaque, fault: Fault) anyerror!void {
+    try sharedControl(ptr).healFault(fault);
+}
+
+fn sharedControlActiveFaults(ptr: *anyopaque) usize {
+    return sharedControl(ptr).registry.faults.items.len;
+}
+
+fn sharedControlAddHostName(ptr: *anyopaque, name: []const u8, node: NodeId) anyerror!void {
+    const shared = sharedControl(ptr);
+    try shared.validateNode(node);
+    const engine = shared.tcp orelse return error.UnsupportedFaultMode;
+    try engine.registerName(name, node);
+    try shared.world.record("network.host_name name={s} node={}", .{ name, node });
+}
+
+fn sharedControlRecordNetstat(ptr: *anyopaque, reason: []const u8) anyerror!void {
+    const shared = sharedControl(ptr);
+    const engine = shared.tcp orelse return;
+    try engine.recordNetstat(reason);
+}
+
+fn sharedControlNextEssentialEventAt(ptr: *anyopaque) ?clock_module.Timestamp {
+    return sharedControl(ptr).nextEssentialEventAt();
+}
+
+fn sharedControlSemantics(ptr: *anyopaque) ?types.Semantics {
+    return sharedControl(ptr).semantics;
 }
 
 fn sharedControlHeal(ptr: *anyopaque) anyerror!void {
@@ -868,6 +1240,16 @@ pub fn endpointFromControl(comptime Payload: type, control: AnyNetworkControl, n
     const shared = sharedFromControl(control) orelse return error.NetworkUnavailable;
     try shared.validateNode(node);
     return try TypedRuntime(Payload).endpoint(shared, node);
+}
+
+pub fn attachTcpNotifierFromControl(control: AnyNetworkControl, notifier: tcp_module.Notifier) void {
+    const shared = sharedFromControl(control) orelse return;
+    if (shared.tcp) |engine| engine.notifier = notifier;
+}
+
+pub fn tcpEngineFromControl(control: AnyNetworkControl) ?*tcp_module.Engine {
+    const shared = sharedFromControl(control) orelse return null;
+    return shared.tcp;
 }
 
 pub fn processCountFromControl(control: AnyNetworkControl) ?usize {

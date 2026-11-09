@@ -146,7 +146,7 @@ const Scenario = struct {
 
         const server_side = [_]mar.NodeId{0};
         const client_side = [_]mar.NodeId{1};
-        self.control.network.partition(&server_side, &client_side) catch @panic("partition failed");
+        _ = self.control.network.partition(&server_side, &client_side, .{}) catch @panic("partition failed");
         self.record("std_io_net_kv.fault partitioned=true", .{});
 
         self.waitFor(&self.client_timed_out);
