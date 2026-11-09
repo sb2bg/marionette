@@ -21,7 +21,7 @@ const Pair = struct {
 
     /// Two nodes, 1 ms ticks and latency, and one established stream.
     fn init(world: *mar.World, port: u16) !Pair {
-        const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+        const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
         try sim.control.network.setLatency(.{ .min_latency_ns = 1 * ms });
         const server_io = (try sim.envForNode(0)).io();
         const client_io = (try sim.envForNode(1)).io();
@@ -57,7 +57,7 @@ test "network probe A: connect into a partition fails at once, even with a timeo
     // caller's timeout, or about 127 s without one, then times out.
     var world = try newWorld(0xA);
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     try sim.control.network.setLatency(.{ .min_latency_ns = 1 * ms });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
@@ -178,7 +178,7 @@ test "network probe F: one port namespace for the whole world" {
     // 0.0.0.0:7000, and no node can bind another host's address.
     var world = try newWorld(0xF);
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3 } });
     const io = [_]std.Io{ (try sim.envForNode(0)).io(), (try sim.envForNode(1)).io(), (try sim.envForNode(2)).io() };
     const any = std.Io.net.IpAddress.parseIp4("0.0.0.0", 7005) catch unreachable;
     var first = try any.listen(io[0], .{});

@@ -1113,7 +1113,7 @@ test "resource checkpoints: failed diagnostics roll back without closing handles
 test "resource checkpoints: directories, sockets, close and process kill" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const io = sim.env.io();
     const other_io = (try sim.envForNode(1)).io();
     try sim.control.checkResources();
@@ -1349,7 +1349,7 @@ test "runSimCase: initializes app from simulation and deinitializes each replay"
     var report = try runSimCase(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1477,7 +1477,7 @@ test "expectSimPass and expectSimFuzz accept passing cases" {
     try expectSimPass(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1487,7 +1487,7 @@ test "expectSimPass and expectSimFuzz accept passing cases" {
         .allocator = std.testing.allocator,
         .seed = 1234,
         .seeds = 4,
-        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1528,7 +1528,7 @@ test "expectSimFailure accepts failing simulation cases" {
     try expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1548,7 +1548,7 @@ test "expectSimFailure rejects a replayable failure with the wrong identity" {
     try std.testing.expectError(error.UnexpectedRunFailure, expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,
@@ -1750,7 +1750,7 @@ test "expectSimFailure keeps exact failure identity across watchdog isolation" {
     try expectSimFailure(.{
         .allocator = std.testing.allocator,
         .seed = 1234,
-        .simulate = World.SimulateOptions{ .network = .{ .nodes = 1 } },
+        .simulate = World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } },
         .init = SimCaseApp.init,
         .scenario = simCaseScenario,
         .checks = &case_checks,

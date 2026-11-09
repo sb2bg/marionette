@@ -80,7 +80,7 @@ test "0.7.2 compatibility: managed lifecycle, fault choices and artifact bytes" 
         .tags = &.{ "compatibility", "process" },
         .attributes = &.{mar.runAttribute("version", @as(u64, 1))},
         .seed_schedule = &.{.{ .seed = 71, .at = .{ .sim_time_ns = 3 } }},
-        .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2 } },
+        .simulate = mar.World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } },
         .init = App.init,
         .scenario = App.scenario,
         .check_resources = true,

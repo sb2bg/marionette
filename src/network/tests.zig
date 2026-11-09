@@ -25,7 +25,7 @@ test "network: full-range latency jitter does not overflow its draw bound" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0x1A7E, .tick_ns = 1 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     try sim.control.network.setLatency(.{
         .min_latency_ns = 0,
         .latency_jitter_ns = std.math.maxInt(clock_module.Duration),
@@ -40,7 +40,7 @@ test "composition network: endpoints for the same payload share one runtime" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const node_0 = try sim.endpoint(TestPayload, 0);
     const node_1 = try sim.endpoint(TestPayload, 1);
     _ = try sim.endpoint(OtherTestPayload, 1);
@@ -55,7 +55,7 @@ test "stream byte send copies borrowed bytes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
 
     var bytes = [_]u8{ 'p', 'i', 'n', 'g' };
     _ = try sendStreamBytesFromControl(sim.control.network, 0, 1, 1, &bytes, 0);
@@ -73,7 +73,7 @@ fn streamTraceAllocationFailureSweep(allocator: std.mem.Allocator) !void {
     var world = try World.init(allocator, .{ .seed = 0xA110C, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
 
     _ = try sendStreamBytesFromControl(sim.control.network, 0, 1, 1, "safe", 0);
     try world.runFor(10);
@@ -95,7 +95,7 @@ test "stream byte sends preserve delivery order under jitter" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0x51EA, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 64 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 64 } });
     try sim.control.network.setLatency(.{
         .min_latency_ns = 10,
         .latency_jitter_ns = 100,
@@ -124,7 +124,7 @@ test "composition network: receive advances only to global next delivery" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3, .path_capacity = 4 } });
     const node_0 = try sim.endpoint(TestPayload, 0);
     const node_1 = try sim.endpoint(TestPayload, 1);
     const node_2 = try sim.endpoint(TestPayload, 2);
@@ -152,7 +152,7 @@ test "composition network: successful send may be fault-dropped" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const sender = try sim.endpoint(TestPayload, 0);
     const receiver = try sim.endpoint(TestPayload, 1);
 
@@ -167,7 +167,7 @@ test "composition network: path capacity returns EventQueueFull" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .path_capacity = 1 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3, .path_capacity = 1 } });
     const sender = try sim.endpoint(TestPayload, 0);
 
     try sim.control.network.setLatency(.{ .min_latency_ns = 20 });
@@ -180,7 +180,7 @@ test "composition network: ready packet uses node state when consumed" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const sender = try sim.endpoint(TestPayload, 0);
     const receiver = try sim.endpoint(TestPayload, 1);
 
@@ -199,7 +199,7 @@ fn runCompositionClogTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
     var world = try World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setClogs(.{
         .path_clog_rate = .percent(10),
@@ -224,7 +224,7 @@ test "composition network: runFor jumps when no fault boundary is pending" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
 
     try sim.control.runFor(1_000);
@@ -238,7 +238,7 @@ test "composition network: runFor zero duration does not evolve faults" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 1, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 4, .service_nodes = 1, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setClogs(.{
         .path_clog_rate = .percent(10),
@@ -266,7 +266,7 @@ test "composition network: automatic clog schedule beyond clock range stays iner
     });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 1, .path_capacity = 1 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 1, .path_capacity = 1 } });
     try sim.control.network.setClogs(.{
         .path_clog_rate = .always(),
         .path_clog_duration_ns = 10,
@@ -288,7 +288,7 @@ test "composition network: automatic clog end beyond clock range stays inert" {
     });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 1, .path_capacity = 1 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 1, .path_capacity = 1 } });
     try sim.control.network.setClogs(.{
         .path_clog_rate = .always(),
         .path_clog_duration_ns = 20,
@@ -309,7 +309,7 @@ test "composition network: automatic partition beyond clock range stays inert" {
     });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 1 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 1 } });
     try sim.control.network.setPartitionDynamics(.{
         .partition_rate = .always(),
         .partition_stability_min_ns = 30,
@@ -325,7 +325,7 @@ fn randomAfterManualClogExpiry(advance_with_ticks: bool) !u64 {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     try sim.control.network.setClogs(.{
         .path_clog_rate = .percent(50),
         .path_clog_duration_ns = 20,
@@ -353,7 +353,7 @@ test "composition network: runFor advances through deterministic clog expiries" 
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
 
     try sim.control.network.clog(0, 1, 20);
@@ -373,7 +373,7 @@ test "composition network: probabilistic clogs are scheduled without per-tick RN
     var world = try World.init(std.testing.allocator, .{ .seed = 0x51EA, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
 
     try sim.control.network.setClogs(.{
@@ -395,7 +395,7 @@ test "composition network: runFor honors automatic partition stability boundary"
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setPartitionDynamics(.{
         .partition_rate = .always(),
@@ -416,7 +416,7 @@ test "composition network: receive jump does not strand due automatic partition"
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 1, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 4, .service_nodes = 1, .path_capacity = 4 } });
     const node_2 = try sim.endpoint(TestPayload, 2);
     const node_3 = try sim.endpoint(TestPayload, 3);
 
@@ -446,7 +446,7 @@ test "composition network: automatic partition honors unpartition stability" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setPartitionDynamics(.{
         .partition_rate = .always(),
@@ -471,7 +471,7 @@ test "composition network: nextDelivery wait does not evolve probabilistic fault
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
     const node_0 = try sim.endpoint(TestPayload, 0);
     const node_1 = try sim.endpoint(TestPayload, 1);
     try sim.control.network.setPartitionDynamics(.{ .partition_rate = .always() });
@@ -488,7 +488,7 @@ test "composition network: automatic partition honors partition stability" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 4, .service_nodes = 3, .path_capacity = 4 } });
     _ = try sim.endpoint(TestPayload, 0);
     try sim.control.network.setPartitionDynamics(.{
         .partition_rate = .always(),
@@ -509,7 +509,7 @@ test "composition network: manual and automatic partitions compose" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3, .service_nodes = 1, .path_capacity = 4 } });
     const node_1 = try sim.endpoint(TestPayload, 1);
     const node_2 = try sim.endpoint(TestPayload, 2);
     const isolated = [_]NodeId{1};
@@ -533,7 +533,7 @@ test "composition network: manual and automatic partitions compose" {
 test "network contract: invalid node rate and duration validation" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3 } });
     const control = sim.control.network;
     const sender = try sim.endpoint(TestPayload, 0);
     try std.testing.expectError(error.InvalidNode, sim.endpoint(TestPayload, 3));
@@ -552,7 +552,7 @@ test "network contract: invalid node rate and duration validation" {
 test "network contract: same destination orders by delivery time then packet id and drains" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3 } });
     const first = try sim.endpoint(TestPayload, 0);
     const second = try sim.endpoint(TestPayload, 1);
     const receiver = try sim.endpoint(TestPayload, 2);
@@ -572,7 +572,7 @@ test "network contract: clog isolation expiry explicit unclog and heal" {
     for (0..4) |mode| {
         var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
         defer world.deinit();
-        const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+        const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3 } });
         const sender = try sim.endpoint(TestPayload, 0);
         const blocked = try sim.endpoint(TestPayload, 1);
         const other = try sim.endpoint(TestPayload, 2);
@@ -600,7 +600,7 @@ test "network contract: clog isolation expiry explicit unclog and heal" {
 test "network contract: partition healLinks and node lifecycle retain distinct meanings" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3 } });
     const a = try sim.endpoint(TestPayload, 0);
     const b = try sim.endpoint(TestPayload, 1);
     const c = try sim.endpoint(TestPayload, 2);
@@ -633,7 +633,7 @@ test "network contract: partition healLinks and node lifecycle retain distinct m
 test "network: disabled loss consumes no decision for typed and stream sends" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const sender = try sim.endpoint(TestPayload, 0);
     const before = world.decisions.recorded.items.len;
     try sender.send(1, .{ .value = 1 });

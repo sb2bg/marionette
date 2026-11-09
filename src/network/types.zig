@@ -159,7 +159,7 @@ pub const SimNetworkOptions = struct {
     /// its default.
     model_version: u32 = network_semantic_version,
 
-    pub const default_semantics: Semantics = .legacy_v0;
+    pub const default_semantics: Semantics = .tcp_v1;
 
     pub fn resolvedAddressModel(self: SimNetworkOptions) AddressModel {
         return self.address_model orelse switch (self.semantics) {

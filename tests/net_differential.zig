@@ -115,7 +115,7 @@ fn hostOutcome() !Outcome {
 fn simulatedOutcome() !Outcome {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xD1FF, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 8 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -163,7 +163,7 @@ fn hostWildcardOutcome() !Outcome {
 fn simulatedWildcardOutcome() !Outcome {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xD1FE, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 8 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     const wildcard = Io.net.IpAddress.parseIp4("0.0.0.0", 0) catch unreachable;

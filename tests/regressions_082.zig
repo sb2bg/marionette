@@ -289,7 +289,7 @@ test "082: reduction removes automatic process and network schedules" {
         var reduced = try mar.reduceSimCase(.{
             .allocator = std.testing.allocator,
             .seed = 1234,
-            .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2 } },
+            .simulate = mar.World.SimulateOptions{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } },
             .init = AutomaticFaults.init,
             .scenario = scenario,
         }, .{});

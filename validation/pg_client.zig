@@ -7,7 +7,7 @@ const std = @import("std");
 const mar = @import("marionette");
 const pg = @import("pg");
 const Io = std.Io;
-const address = Io.net.IpAddress.parseIp4("127.0.0.1", 5432) catch unreachable;
+const address = Io.net.IpAddress.parseIp4("10.0.0.1", 5432) catch unreachable;
 const Mode = enum { normal, fragmented, truncated };
 
 const Scenario = struct {
@@ -96,7 +96,7 @@ const Scenario = struct {
     fn client(self: *Scenario) !void {
         while (self.ready == 0) try self.server_io.futexWait(u32, &self.ready, 0);
         var conn = try pg.Conn.openAndAuth(self.client_io, self.allocator, .{
-            .host = "127.0.0.1",
+            .host = "10.0.0.1",
             .port = 5432,
             .keepalive = false,
             .read_buffer = 32,

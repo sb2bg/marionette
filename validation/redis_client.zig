@@ -5,7 +5,7 @@ const std = @import("std");
 const mar = @import("marionette");
 const redis = @import("redis");
 const Io = std.Io;
-const address = Io.net.IpAddress.parseIp4("127.0.0.1", 6379) catch unreachable;
+const address = Io.net.IpAddress.parseIp4("10.0.0.1", 6379) catch unreachable;
 const Mode = enum { normal, fragmented, lost_reply, no_retry, pipeline_cut };
 const incr = "*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n";
 const ping = "*1\r\n$4\r\nPING\r\n";
@@ -96,7 +96,7 @@ const Scenario = struct {
     fn clientTask(self: *Scenario) !void {
         // Readiness belongs to the server node: futex keys are process-scoped.
         while (self.ready == 0) try self.server_io.futexWait(u32, &self.ready, 0);
-        var client = try redis.Client.init(self.allocator, self.client_io, "127.0.0.1:6379", .{
+        var client = try redis.Client.init(self.allocator, self.client_io, "10.0.0.1:6379", .{
             .retry_attempts = if (self.mode == .no_retry or self.mode == .pipeline_cut) 0 else 2,
         });
         defer client.deinit();

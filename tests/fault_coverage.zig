@@ -104,7 +104,7 @@ fn FaultyConfig(comptime scenario_fn: anytype) type {
     return struct {
         allocator: std.mem.Allocator,
         seed: u64 = 0xFA17,
-        simulate: mar.World.SimulateOptions = .{ .disk = .{ .sector_size = 4 }, .network = .{ .nodes = 2 } },
+        simulate: mar.World.SimulateOptions = .{ .disk = .{ .sector_size = 4 }, .network = .{ .semantics = .legacy_v0, .nodes = 2 } },
         comptime init: @TypeOf(Faulty.init) = Faulty.init,
         comptime scenario: @TypeOf(scenario_fn) = scenario_fn,
     };

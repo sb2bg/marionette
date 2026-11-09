@@ -32,6 +32,11 @@ pub const Outcome = struct {
     }
 };
 
+/// The client gives each response one simulated millisecond.
+const client_options: sut.Client.Options = .{
+    .response_timeout = .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } },
+};
+
 const Scenario = struct {
     server_io: Io,
     client_io: Io,
@@ -98,7 +103,7 @@ const Scenario = struct {
 
     fn clientTask(self: *Scenario) void {
         self.waitFor(&self.accept_waiting);
-        var client = sut.Client.connect(self.client_io, self.address) catch @panic("std_io_net_kv connect failed");
+        var client = sut.Client.connectWith(self.client_io, self.address, client_options) catch @panic("std_io_net_kv connect failed");
         defer client.deinit();
         self.record("std_io_net_kv.client.connected", .{});
 
@@ -112,13 +117,15 @@ const Scenario = struct {
             },
             .retry_safe, .retry_buggy => {
                 _ = client.put(7, 11, 41) catch |err| switch (err) {
-                    error.ConnectionTimedOut => {
+                    // The client's own deadline ends the wait. The network
+                    // only stays silent: the reply waits behind the partition.
+                    error.ResponseTimeout => {
                         self.first_response_timed_out = true;
                         self.record("std_io_net_kv.client.timeout request_id=7", .{});
                         self.signal(&self.client_timed_out);
                         self.waitFor(&self.network_healed);
                         client.deinit();
-                        client = sut.Client.connect(self.client_io, self.address) catch
+                        client = sut.Client.connectWith(self.client_io, self.address, client_options) catch
                             @panic("std_io_net_kv reconnect failed");
                         self.record("std_io_net_kv.client.reconnected", .{});
                     },
@@ -184,7 +191,8 @@ pub fn runScenario(
 
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
 
-    const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4570) catch unreachable;
+    // Node 0 owns its address; the client reaches it across the fabric.
+    const address = mar.AnyNetworkControl.hostIp4(0, 4570);
     var listener = try address.listen(server_io, .{});
     defer listener.deinit(server_io);
 
@@ -277,7 +285,7 @@ test "std Io net KV retry remains idempotent across partition and heal" {
     try std.testing.expect(!first.invariant_violated);
     try std.testing.expectEqual(@as(u64, 1), first.revision);
     try std.testing.expectEqual(@as(usize, 1), first.applied_puts);
-    try std.testing.expect(std.mem.indexOf(u8, first.trace, "reason=link_disabled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.trace, "reason=fault fault=1 mode=drop") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.trace, "std_io_net_kv.client.timeout request_id=7") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.trace, "std_io_net_kv.fault healed=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.trace, "std_io_net_kv.client.retry request_id=7 revision=1 duplicate=true") != null);

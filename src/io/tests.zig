@@ -435,7 +435,7 @@ test "io: process kill sweeps disk op scratch from killed tasks" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA66, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const io = sim.env.io();
 
     var scenario: Scenario = .{ .sim = sim, .io = io };
@@ -472,7 +472,7 @@ test "io: process kill releases shared pathname reservations" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0x6A7E, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
 
@@ -518,7 +518,7 @@ test "io: process kill aborts main-context pathname waits" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA80F7, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_one_io = (try sim.envForNode(1)).io();
     const node_zero_backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
     const node_one_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
@@ -548,7 +548,7 @@ test "io: task group completion keys are unique across processes" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5D, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
 
@@ -726,7 +726,7 @@ test "io: std.Io.net reconnects reuse process node identity" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5A, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -746,7 +746,7 @@ test "io: overlapping std.Io.net connections route bytes by socket handle" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5F, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 8 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -787,7 +787,7 @@ test "io: envForNode rejects nodes outside the configured topology" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5D, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     try std.testing.expectError(error.InvalidNode, sim.envForNode(2));
 }
 
@@ -795,7 +795,7 @@ test "io: sim env io is node zero" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA60, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const default_io = sim.env.io();
     const node_zero_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
@@ -814,7 +814,7 @@ test "io: duplicate listeners are rejected across process backends" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA61, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -829,7 +829,7 @@ test "io: wildcard listeners accept literals and conflict with exact binds" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA73, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -867,7 +867,7 @@ test "io: listener backlog refuses excess pending connections" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA63, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4579) catch unreachable;
@@ -893,7 +893,7 @@ test "io: connect observes node and link availability" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA66, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4582) catch unreachable;
@@ -924,7 +924,7 @@ test "io: connect traverses simulated latency" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA67, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -954,7 +954,7 @@ test "io: connect waits for a clogged path to become ready" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA6E, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
@@ -980,7 +980,7 @@ test "io: connect timeout rolls back its queued probe" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA68, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1036,7 +1036,7 @@ test "io: connect probe registration failure rolls back network ownership" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA6D, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1076,7 +1076,7 @@ test "io: canceling an in-flight connect reclaims its probe" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA69, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1123,7 +1123,7 @@ test "io: explicit unclog wakes an in-flight connect at the new ready time" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA74, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
@@ -1164,7 +1164,7 @@ test "io: process kill reclaims an in-flight connect probe without running task 
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA6F, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     try registerNoopProcess(sim, 1);
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
@@ -1211,7 +1211,7 @@ test "io: world teardown owns queued probes after abandoning a connect task" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA70, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1256,7 +1256,7 @@ test "io: partitioning an in-flight connect prevents publication" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA6C, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1308,7 +1308,7 @@ test "io: source node loss aborts in-flight connect publication and permits reco
 
     var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1381,7 +1381,7 @@ test "io: transient source node loss before probe readiness is not latched" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1450,7 +1450,7 @@ test "io: competing connect probes publish in delivery order independent of task
 
     var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
@@ -1538,7 +1538,7 @@ test "io: ordered probe follower preserves delivery at an equal timeout deadline
 
     var world = try World.init(task_world_allocator, .{ .seed = 0, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
@@ -1616,7 +1616,7 @@ test "io: connect probe removal wakes a reader hidden behind the probe" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA71, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 8 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1684,7 +1684,7 @@ test "io: connect probe wait keys cannot alias live connection handles" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA72, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
@@ -1761,7 +1761,7 @@ test "io: accept reports a deterministic abstracted peer port" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA64, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable;
@@ -1781,7 +1781,7 @@ test "io: directional stream shutdown preserves the opposite direction" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA65, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4581) catch unreachable;
@@ -1860,7 +1860,7 @@ test "io: ephemeral listener accepts connections to its assigned port" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA6B, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -1891,7 +1891,7 @@ test "io: process futex keys are namespaced by backend" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5C, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -2059,7 +2059,7 @@ test "io: disk crash closes process-local std.Io.net listeners" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5B, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     const server_backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
@@ -2103,7 +2103,7 @@ test "io: disk crash wakes std.Io.net accept waiters" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA62, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
 
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4578) catch unreachable;
@@ -2180,7 +2180,7 @@ test "io: disk crash closes live std.Io.net connections and wakes readers" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5E, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -2267,7 +2267,7 @@ test "io: process kill cancels owned tasks and resets peers" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA5F, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -2381,7 +2381,7 @@ test "io: process reset discards delayed outbound frames terminally" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xA75, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
     try sim.control.network.setLatency(.{ .min_latency_ns = 1_000 });
@@ -2425,7 +2425,7 @@ test "io: cross-process await releases the spawning backend closure" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA63, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -2559,7 +2559,7 @@ test "io: killed processes reject saved node capabilities until restart" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA64, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 1 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } });
     const saved_env = try sim.envForNode(0);
     const saved_io = saved_env.io();
     try registerNoopProcess(sim, 0);
@@ -2601,7 +2601,7 @@ test "io: manual restart invalidates process-local file metadata" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA641, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
 
@@ -2650,7 +2650,7 @@ test "io: failed restart rolls back partial process resources" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA642, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 1 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } });
     const saved_io = sim.env.io();
     var state: State = .{};
     try sim.registerProcess(0, .{
@@ -2875,6 +2875,7 @@ fn runCombinedFaultEvolutionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8
 
     const sim = try world.simulate(.{
         .network = .{
+            .semantics = .legacy_v0,
             .nodes = 3,
             .service_nodes = 2,
             .path_capacity = 4,
@@ -2972,7 +2973,7 @@ test "io: scheduler timer jumps evolve process and network faults" {
     defer world.deinit();
 
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 2, .path_capacity = 4 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .service_nodes = 2, .path_capacity = 4 },
     });
     var state: State = .{};
     try sim.registerProcess(1, .{
@@ -3534,7 +3535,7 @@ test "io: cancel unparks a task blocked in net accept" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xACC7, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const server_io = (try sim.envForNode(0)).io();
 
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 4590) catch unreachable;
@@ -3572,7 +3573,7 @@ test "io: armed cancellation reaches immediate net operations" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0xCA11, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 4 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 
@@ -4838,7 +4839,7 @@ test "io: simulated directory iteration returns direct children only" {
 test "io: directories are shared across processes and obey metadata durability" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     try registerNoopProcess(sim, 1);
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
@@ -4907,7 +4908,7 @@ test "io: file creation and rename enforce directory namespace invariants" {
 test "io: pending empty file creation prevents directory creation at the same path" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
 
@@ -4963,7 +4964,7 @@ test "io: file stat and directory iteration report the same inode" {
 test "io: pending file inode stays stable after another process discovers synced metadata" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
     const cwd = Io.Dir.cwd();
@@ -5045,7 +5046,7 @@ test "io: simulated exclusive file locks release on close" {
 test "io: rename over an actively locked destination fails without panicking" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
     const cwd = Io.Dir.cwd();
@@ -5072,7 +5073,7 @@ test "io: rename over an actively locked destination fails without panicking" {
 test "io: cross-process source lock holders release renamed lock path" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
     const cwd = Io.Dir.cwd();
@@ -5098,7 +5099,7 @@ test "io: cross-process source lock holders release renamed lock path" {
 test "io: rename updates file metadata caches across processes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
     const cwd = Io.Dir.cwd();
@@ -5135,7 +5136,7 @@ test "io: rename updates file metadata caches across processes" {
 test "io: delete invalidates file metadata caches across processes" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
     const cwd = Io.Dir.cwd();
@@ -5190,7 +5191,7 @@ test "io: rename preserves source and destination lock waiters" {
     defer world.deinit();
     const sim = try world.simulate(.{
         .disk = .{ .min_latency_ns = 100 },
-        .network = .{ .nodes = 2 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2 },
     });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
@@ -5264,7 +5265,7 @@ test "io: rename reserves destination lock across disk latency" {
     defer world.deinit();
     const sim = try world.simulate(.{
         .disk = .{ .min_latency_ns = 100 },
-        .network = .{ .nodes = 2 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2 },
     });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
@@ -5305,7 +5306,7 @@ test "io: rename reserves destination lock across disk latency" {
 test "io: file locks follow file rename" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
     const cwd = Io.Dir.cwd();
@@ -5341,7 +5342,7 @@ test "io: file locks coordinate processes and blocking acquisition waits" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
     const cwd = Io.Dir.cwd();
@@ -5393,7 +5394,7 @@ test "io: cancel interrupts blocking file lock acquisition" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0x10CC, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const holder_io = (try sim.envForNode(0)).io();
     const waiter_io = (try sim.envForNode(1)).io();
 
@@ -5425,7 +5426,7 @@ test "io: process kill retires blocked file lock waiters" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_zero_io = (try sim.envForNode(0)).io();
     const node_one_io = (try sim.envForNode(1)).io();
 
@@ -5671,7 +5672,7 @@ test "io: unmodified std.http.Client fetches an IPv4 literal URL under simulatio
     defer world.deinit();
 
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .path_capacity = 8 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 },
         .task_stack_size = 8 * 1024 * 1024,
     });
     const server_io = (try sim.envForNode(0)).io();
@@ -5702,7 +5703,7 @@ test "io: std.http.Client localhost URL races loopback candidates and v4 wins" {
     defer world.deinit();
 
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .path_capacity = 8 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 },
         .task_stack_size = 8 * 1024 * 1024,
     });
     const server_io = (try sim.envForNode(0)).io();
@@ -5735,7 +5736,7 @@ test "io: netLookup rejects non-literal host names as unknown" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xD07, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 1 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 1 } });
     const client_io = (try sim.envForNode(0)).io();
 
     // Real DNS, /etc/hosts, and search domains are host state and stay
@@ -5752,7 +5753,7 @@ fn simHttpFetchTrace(seed: u64) ![]u8 {
     defer world.deinit();
 
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .path_capacity = 8 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 },
         .task_stack_size = 8 * 1024 * 1024,
     });
     const server_io = (try sim.envForNode(0)).io();
@@ -5799,7 +5800,7 @@ test "io: transitionToLiveness restores the core and leaves non-core failures pe
     var world = try World.init(task_world_allocator, .{ .seed = 0xA70, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3 } });
 
     var states: [3]State = .{ .{}, .{}, .{} };
     for (&states, 0..) |*state, node| {
@@ -5857,7 +5858,7 @@ test "io: transitionToLiveness clears an automatic partition inside the core" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xA71, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     try sim.control.network.setPartitionDynamics(.{
         .partition_rate = .always(),
         .unpartition_rate = .never(),
@@ -5929,7 +5930,7 @@ test "io: transitionToLiveness preflight failures leave the transition retryable
     var world = try World.init(task_world_allocator, .{ .seed = 0xA73, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     var state: State = .{};
     try sim.registerProcess(0, .{ .ptr = &state, .restart = State.restart });
     try sim.killProcess(0);
@@ -6029,7 +6030,7 @@ fn runStartRace(allocator: std.mem.Allocator, seed: u64, jitter_ns: u64) !StartR
     defer world.deinit();
 
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 8 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .service_nodes = 1, .path_capacity = 8 },
         .task_start_jitter_ns = jitter_ns,
     });
     const server_io = (try sim.envForNode(0)).io();
@@ -6170,7 +6171,7 @@ test "io: stream writes larger than the path queue backpressure instead of faili
     // path queue: without write backpressure this fails EventQueueFull;
     // with it, the writer parks until the reader drains.
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 2 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .service_nodes = 1, .path_capacity = 2 },
     });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
@@ -6271,7 +6272,7 @@ const BackpressureTeardown = struct {
         defer world.deinit();
 
         const sim = try world.simulate(.{
-            .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 2 },
+            .network = .{ .semantics = .legacy_v0, .nodes = 2, .service_nodes = 1, .path_capacity = 2 },
         });
         const server_io = (try sim.envForNode(0)).io();
         const client_io = (try sim.envForNode(1)).io();
@@ -6355,7 +6356,7 @@ test "io: closing a connection reclaims its queued stream frames" {
     var world = try World.init(task_world_allocator, .{ .seed = 0xBACF, .tick_ns = 10 });
     defer world.deinit();
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 4 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .service_nodes = 1, .path_capacity = 4 },
     });
     try sim.control.network.setLatency(.{ .min_latency_ns = 1_000 });
 
@@ -6454,7 +6455,7 @@ test "io: a stalled reader does not starve an unrelated connect" {
 
     var world = try World.init(task_world_allocator, .{ .seed = 0x9001, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 4, .path_capacity = 1024 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 4, .path_capacity = 1024 } });
     const node_io = [_]Io{
         (try sim.envForNode(0)).io(), (try sim.envForNode(1)).io(),
         (try sim.envForNode(2)).io(), (try sim.envForNode(3)).io(),
@@ -6488,7 +6489,7 @@ test "io: a stalled reader does not starve an unrelated connect" {
 test "io: sending a file to a stream falls back to reading it" {
     var world = try World.init(task_world_allocator, .{ .seed = 0x5E7D, .tick_ns = 10 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const server_io = (try sim.envForNode(0)).io();
     const client_io = (try sim.envForNode(1)).io();
 

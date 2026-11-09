@@ -486,7 +486,7 @@ test "env: simulation clock sleep runs tasks and automatic fault boundaries" {
     defer world.deinit();
 
     const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 2, .path_capacity = 4 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .service_nodes = 2, .path_capacity = 4 },
     });
     try sim.control.process.setDynamics(1, .{
         .crash_rate = .always(),
@@ -511,7 +511,7 @@ test "env: killed node clock rejects sleep through stale capability" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0xC10D, .tick_ns = 10 });
     defer world.deinit();
 
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_env = try sim.envForNode(1);
     try sim.killProcess(1);
 

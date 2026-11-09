@@ -143,14 +143,29 @@ pub const Server = struct {
 pub const Client = struct {
     io: Io,
     stream: Io.net.Stream,
+    /// How long to wait for each response. A request whose response does
+    /// not arrive in time fails with `error.ResponseTimeout`; the
+    /// connection is then unusable and the caller should reconnect.
+    response_timeout: Io.Timeout = .none,
+
+    pub const Options = struct {
+        connect_timeout: Io.Timeout = .none,
+        response_timeout: Io.Timeout = .none,
+    };
 
     pub fn connect(io: Io, address: Io.net.IpAddress) !Client {
+        return connectWith(io, address, .{});
+    }
+
+    pub fn connectWith(io: Io, address: Io.net.IpAddress, options: Options) !Client {
         return .{
             .io = io,
             .stream = try address.connect(io, .{
                 .mode = .stream,
                 .protocol = .tcp,
+                .timeout = options.connect_timeout,
             }),
+            .response_timeout = options.response_timeout,
         };
     }
 
@@ -183,7 +198,7 @@ pub const Client = struct {
         try writeAll(self.io, self.stream, &request_bytes);
 
         var response_bytes: [response_size]u8 = undefined;
-        try readExact(self.io, self.stream, &response_bytes);
+        try readExactTimeout(self.io, self.stream, &response_bytes, self.response_timeout);
         const response = try decodeResponse(&response_bytes);
         if (response.request_id != value.request_id) return error.ResponseRequestMismatch;
         return response;
@@ -196,6 +211,25 @@ fn readExact(io: Io, stream: Io.net.Stream, dest: []u8) !void {
         error.ReadFailed => return reader.err orelse error.Unexpected,
         else => return err,
     };
+}
+
+fn readExactTimeout(io: Io, stream: Io.net.Stream, dest: []u8, timeout: Io.Timeout) !void {
+    if (timeout == .none) return readExact(io, stream, dest);
+    const deadline = timeout.toDeadline(io);
+    var filled: usize = 0;
+    while (filled < dest.len) {
+        var data: [1][]u8 = .{dest[filled..]};
+        const result = io.operateTimeout(.{ .net_read = .{
+            .socket_handle = stream.socket.handle,
+            .data = &data,
+        } }, deadline) catch |err| switch (err) {
+            error.Timeout => return error.ResponseTimeout,
+            else => |other| return other,
+        };
+        const count = (try result.net_read).data_len;
+        if (count == 0) return error.EndOfStream;
+        filled += count;
+    }
 }
 
 fn writeAll(io: Io, stream: Io.net.Stream, bytes: []const u8) !void {

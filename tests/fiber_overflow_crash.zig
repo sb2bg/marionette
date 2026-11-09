@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
 
     const sim = try world.simulate(.{
         .task_stack_size = configured_stack_size,
-        .network = .{ .nodes = 1 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 1 },
     });
     const io = (try sim.envForNode(0)).io();
 

@@ -322,6 +322,7 @@ test "SimProfile: swarm expands network controls into attributes" {
     const profile = SimProfile.swarm(.{
         .tick_ns = 10,
         .network = .{
+            .semantics = .legacy_v0,
             .nodes = 4,
             .service_nodes = 3,
             .path_capacity = 96,
@@ -351,7 +352,7 @@ test "SimProfile: replay preserves explicit runtime controls" {
     const profile = SimProfile.replay(.{
         .tick_ns = 5,
         .disk = .{ .sector_size = 512, .min_latency_ns = 15 },
-        .network = .{ .nodes = 2, .path_capacity = 8 },
+        .network = .{ .semantics = .legacy_v0, .nodes = 2, .path_capacity = 8 },
         .network_loss = .{ .drop_rate = .oneIn(7) },
         .network_latency = .{ .min_latency_ns = 10, .latency_jitter_ns = 5 },
     }).expand();

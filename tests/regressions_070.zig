@@ -5,7 +5,7 @@ const mar = @import("marionette");
 test "SIM-001 another live process sees an acknowledged file extension" {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 1 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const first_io = sim.env.io();
     const second_io = (try sim.envForNode(1)).io();
     const first = try std.Io.Dir.cwd().createFile(first_io, "shared", .{ .read = true });
@@ -77,7 +77,7 @@ test "SIM-004 inferred tuple metadata survives run option conversion" {
 test "shared filesystem: truncation direct disk mutation rename and reopen agree" {
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 3 });
     defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2 }, .disk = .{ .sector_size = 4 } });
+    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 }, .disk = .{ .sector_size = 4 } });
     const io = sim.env.io();
     const other_io = (try sim.envForNode(1)).io();
     const file = try std.Io.Dir.cwd().createFile(io, "shared", .{ .read = true });

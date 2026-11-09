@@ -31,7 +31,7 @@ const Client = bean.client;
 const Job = bean.Job;
 
 const server_port: u16 = 11300;
-const server_addr = "127.0.0.1";
+const server_addr = "10.0.0.1";
 const orders_tube = "orders";
 const max_connections = 8;
 const poll_interval_ns = 10_000_000; // 10 virtual milliseconds

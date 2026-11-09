@@ -32,7 +32,9 @@ const Io = std.Io;
 
 const hello_body = "hello from the simulation\n";
 const echo_payload = "determinism";
-const base_url = "http://127.0.0.1:4580";
+const base_url = "http://10.0.0.1:4580";
+/// Application deadline for the fetch a partition interrupts.
+const first_fetch_timeout: std.Io.Duration = .fromMilliseconds(5);
 const dusty_task_stack_size = 8 * 1024 * 1024;
 const chunk_len = 4 * 1024;
 const total_chunks = 16;
@@ -127,7 +129,7 @@ const Scenario = struct {
     fn serverTask(self: *Scenario) void {
         self.record("dusty_http.server.listen_start", .{});
         const address: http.Address = .{
-            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+            .ip = Io.net.IpAddress.parseIp4("10.0.0.1", 4580) catch unreachable,
         };
         self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
         self.server.run() catch |err| switch (err) {
@@ -280,7 +282,7 @@ const LargeTransferScenario = struct {
     fn serverTask(self: *LargeTransferScenario) void {
         self.record("dusty_large.server.listen_start", .{});
         const address: http.Address = .{
-            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+            .ip = Io.net.IpAddress.parseIp4("10.0.0.1", 4580) catch unreachable,
         };
         self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
         self.server.run() catch |err| switch (err) {
@@ -445,7 +447,7 @@ pub fn runLargeTransferScenario(allocator: std.mem.Allocator, seed: u64) !LargeT
         .download_status = scenario.download_status,
         .download_len = scenario.download_len,
         .download_pattern_ok = scenario.download_pattern_ok,
-        .deliver_count = std.mem.count(u8, trace, "io.net.deliver "),
+        .deliver_count = std.mem.count(u8, trace, "net.deliver pkt="),
         .connect_count = std.mem.count(u8, trace, "io.net.connect handle="),
         .graceful_shutdown = scenario.graceful_shutdown,
     };
@@ -475,7 +477,7 @@ const PoolScenario = struct {
     fn serverTask(self: *PoolScenario) void {
         self.record("dusty_pool.server.listen_start", .{});
         const address: http.Address = .{
-            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+            .ip = Io.net.IpAddress.parseIp4("10.0.0.1", 4580) catch unreachable,
         };
         self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
         self.server.run() catch |err| switch (err) {
@@ -573,7 +575,7 @@ const PoolCrashScenario = struct {
     fn serverTask(self: *PoolCrashScenario) void {
         self.record("dusty_pool_crash.server.listen_start", .{});
         const address: http.Address = .{
-            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+            .ip = Io.net.IpAddress.parseIp4("10.0.0.1", 4580) catch unreachable,
         };
         self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
         self.server.run() catch |err| {
@@ -585,7 +587,7 @@ const PoolCrashScenario = struct {
     fn restartedServerTask(self: *PoolCrashScenario) void {
         self.record("dusty_pool_crash.server.restart_listen_start", .{});
         const address: http.Address = .{
-            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+            .ip = Io.net.IpAddress.parseIp4("10.0.0.1", 4580) catch unreachable,
         };
         self.restarted_server.?.config.listen = &.{.{ .address = address, .acceptors = 1 }};
         self.restarted_server.?.run() catch |err| {
@@ -737,7 +739,7 @@ const FaultScenario = struct {
     fn serverTask(self: *FaultScenario) void {
         self.record("dusty_fault.server.listen_start", .{});
         const address: http.Address = .{
-            .ip = Io.net.IpAddress.parseIp4("127.0.0.1", 4580) catch unreachable,
+            .ip = Io.net.IpAddress.parseIp4("10.0.0.1", 4580) catch unreachable,
         };
         self.server.config.listen = &.{.{ .address = address, .acceptors = 1 }};
         self.server.run() catch |err| switch (err) {
@@ -781,9 +783,11 @@ const FaultScenario = struct {
     }
 
     fn firstFetch(self: *FaultScenario) void {
+        // The client's own deadline ends a fetch the partition silences.
         var client = http.Client.init(self.allocator, self.client_io, .{
             .max_idle_connections = 0,
             .max_response_size = total_chunks * chunk_len + 1024,
+            .timeout = first_fetch_timeout,
         });
         defer client.deinit();
 
@@ -1359,13 +1363,13 @@ fn runFaultScenario(
 fn expectMidResponseNetworkOracle(trace: []const u8) !void {
     const partition = std.mem.indexOf(u8, trace, "dusty_fault.partition") orelse return error.PartitionTraceMissing;
     const heal = std.mem.indexOfPos(u8, trace, partition, "dusty_fault.heal") orelse return error.HealTraceMissing;
-    if (!traceLineContainsAll(trace, 0, partition, &.{ "network.send", "from=0", "to=1" })) {
+    if (!traceLineContainsAll(trace, 0, partition, &.{ "net.send", "from=0", "to=1" })) {
         return error.PreCutResponseSendMissing;
     }
 
-    // Observed simulator contract for a queued response frame made unreachable
-    // by the structural partition.
-    if (!traceLineContainsAll(trace, partition, heal, &.{ "network.drop", "from=0", "to=1", "reason=link_disabled" })) {
+    // Response segments that reach the cut vanish; the partition itself
+    // produces only silence.
+    if (!traceLineContainsAll(trace, partition, heal, &.{ "net.drop", "from=0", "to=1", "reason=fault", "mode=drop" })) {
         return error.PartitionDropMissing;
     }
 }
@@ -1378,17 +1382,16 @@ fn expectBeforeResponseNetworkOracle(trace: []const u8) !void {
         return error.ReadDidNotFailUnderPartition;
 
     // The held handler writes its response only after the cut, so the server's
-    // send must be dropped by the partition and surface as the client's read
-    // failure. Dusty closes failed connections directly; it no longer calls
-    // shutdown(.both), so there is no `io.net.shutdown` to pin here.
-    if (!traceLineContainsAll(trace, partition, failure, &.{ "network.send", "from=0", "to=1" })) {
+    // send is dropped by the partition and the client hears nothing; its own
+    // fetch deadline ends the wait.
+    if (!traceLineContainsAll(trace, partition, failure, &.{ "net.send", "from=0", "to=1" })) {
         return error.HeldResponseSendMissing;
     }
-    if (!traceLineContainsAll(trace, partition, failure, &.{ "network.drop", "from=0", "to=1", "reason=link_disabled" })) {
+    if (!traceLineContainsAll(trace, partition, failure, &.{ "net.drop", "from=0", "to=1", "reason=fault", "mode=drop" })) {
         return error.PartitionDropMissing;
     }
-    if (!traceLineContainsAll(trace, partition, failure, &.{ "io.net.delivery_error", "from=0", "to=1", "error=ConnectionTimedOut" })) {
-        return error.DeliveryErrorMissing;
+    if (traceLineContainsAll(trace, partition, failure, &.{"tcp.error"})) {
+        return error.NetworkInventedAnError;
     }
 }
 
@@ -1479,8 +1482,8 @@ test "dusty HTTP partition before response fails deterministically and retry con
     try std.testing.expectEqualStrings(hello_body, outcome.final_body);
     try std.testing.expect(outcome.retry_attempts >= 1);
     try std.testing.expect(outcome.shutdown_ok);
-    // dusty's observed contract under a severed link before response bytes.
-    try std.testing.expectEqualStrings("ConnectionTimedOut", outcome.first_error_name);
+    // The network stays silent; dusty's own fetch deadline fails the request.
+    try std.testing.expectEqualStrings("Timeout", outcome.first_error_name);
     try mar.expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
     try mar.expectTraceContains(outcome.trace, "dusty_fault.heal");
 
@@ -1507,8 +1510,8 @@ test "dusty HTTP partition mid-response never yields a short success" {
     try expectLargeBody(outcome.final_body);
     try std.testing.expect(outcome.retry_attempts >= 1);
     try std.testing.expect(outcome.shutdown_ok);
-    // dusty's observed contract under a severed link.
-    try std.testing.expectEqualStrings("ConnectionTimedOut", outcome.first_error_name);
+    // The network stays silent; dusty's own fetch deadline fails the request.
+    try std.testing.expectEqualStrings("Timeout", outcome.first_error_name);
     try mar.expectTraceContains(outcome.trace, "dusty_fault.client.fetch_error");
     try expectMidResponseNetworkOracle(outcome.trace);
 }

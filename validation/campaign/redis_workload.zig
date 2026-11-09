@@ -12,7 +12,7 @@ const mar = @import("marionette");
 const redis = @import("redis");
 const Io = std.Io;
 
-const address = Io.net.IpAddress.parseIp4("127.0.0.1", 6379) catch unreachable;
+const address = Io.net.IpAddress.parseIp4("10.0.0.1", 6379) catch unreachable;
 const incr = "*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n";
 const ping = "*1\r\n$4\r\nPING\r\n";
 const max_incrs = 4;
@@ -127,7 +127,7 @@ pub const App = struct {
 
     fn connectClient(self: *App) !void {
         while (self.ready == 0) try self.server_io.futexWait(u32, &self.ready, 0);
-        self.client = try redis.Client.init(self.allocator, self.client_io, "127.0.0.1:6379", .{ .retry_attempts = 2 });
+        self.client = try redis.Client.init(self.allocator, self.client_io, "10.0.0.1:6379", .{ .retry_attempts = 2 });
     }
 };
 

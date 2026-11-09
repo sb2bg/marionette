@@ -2638,7 +2638,7 @@ fn runNetworkFaultTrace(allocator: std.mem.Allocator, seed: u64, kind: NetScenar
         runtime_allocator.destroy(scheduler);
     }
 
-    const network_control = try network_module.internal.initSimControl(world, .{ .nodes = 2 });
+    const network_control = try network_module.internal.initSimControl(world, .{ .semantics = .legacy_v0, .nodes = 2 });
     switch (kind) {
         .latency, .latency_close => try network_control.setLatency(.{ .min_latency_ns = 30 }),
         .drop => {},
@@ -2720,7 +2720,7 @@ fn runNetworkPartitionTrace(allocator: std.mem.Allocator, seed: u64) ![]u8 {
         runtime_allocator.destroy(scheduler);
     }
 
-    const network_control = try network_module.internal.initSimControl(world, .{ .nodes = 2 });
+    const network_control = try network_module.internal.initSimControl(world, .{ .semantics = .legacy_v0, .nodes = 2 });
     try network_control.setLatency(.{ .min_latency_ns = 30 });
 
     var io_runtime: io_internal.ProcessRuntime = undefined;
@@ -2837,7 +2837,7 @@ test "TaskScheduler: std.Io.net retries ready delivery after inbox allocation fa
     var world = try World.init(std.testing.allocator, .{ .seed = 0xAACE9D, .tick_ns = 10 });
     defer world.deinit();
 
-    const network_control = try network_module.internal.initSimControl(&world, .{ .nodes = 2 });
+    const network_control = try network_module.internal.initSimControl(&world, .{ .semantics = .legacy_v0, .nodes = 2 });
     var io_runtime: io_internal.ProcessRuntime = undefined;
     try io_runtime.init(std.testing.allocator, &world, disk_module.Disk.unavailable(), 4096, 2);
     defer io_runtime.deinit();

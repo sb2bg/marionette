@@ -1050,6 +1050,7 @@ fn simulateAllocationFailureSweep(allocator: std.mem.Allocator) !void {
 
     _ = try world.simulate(.{
         .network = .{
+            .semantics = .legacy_v0,
             .nodes = 2,
             .path_capacity = 4,
         },
@@ -1074,7 +1075,7 @@ test "world: failed simulation construction leaves the world retryable" {
     const event_checkpoint = world.nextEventIndex();
     try std.testing.expectError(
         error.InvalidNode,
-        world.simulate(.{ .network = .{ .nodes = 0 } }),
+        world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 0 } }),
     );
     try std.testing.expectEqual(teardown_checkpoint, world.teardowns.items.len);
     try std.testing.expect(!world.simulation_created);
