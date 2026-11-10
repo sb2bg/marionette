@@ -358,13 +358,13 @@ const DurableBroadcast = struct {
             var progressed = false;
 
             for (self.replica_endpoints, 0..) |endpoint, replica_index| {
-                while (try endpoint.receive()) |envelope| {
+                while (try endpoint.awaitDelivery()) |envelope| {
                     progressed = true;
                     try self.apply(@intCast(replica_index), envelope, acked);
                 }
             }
 
-            while (try self.client.receive()) |envelope| {
+            while (try self.client.awaitDelivery()) |envelope| {
                 progressed = true;
                 try self.apply(client_node_id, envelope, acked);
             }

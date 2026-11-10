@@ -262,7 +262,7 @@ const Replicas = struct {
             var progressed = false;
 
             for (self.replicas, 0..) |endpoint, replica_index| {
-                while (try endpoint.receive()) |envelope| {
+                while (try endpoint.awaitDelivery()) |envelope| {
                     progressed = true;
                     const accepted = try self.apply(replica_index, envelope);
                     if (accepted) {

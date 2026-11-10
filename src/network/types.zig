@@ -36,7 +36,8 @@ pub const NetworkError = error{
 pub const Semantics = enum {
     /// The pre-0.9 pull model: delivery waits for readers, faults become
     /// immediate errors, and close and kill reach peers through shared state.
-    /// Retained so recorded evidence and unported harnesses keep running.
+    /// Deprecated: retained for one release so recorded evidence and unported
+    /// harnesses keep running; 0.10 removes it.
     legacy_v0,
     /// TCP-lite over a push-based fabric: handshake, cumulative ACKs,
     /// receive windows, timed retransmission with backoff, and FIN and RST on

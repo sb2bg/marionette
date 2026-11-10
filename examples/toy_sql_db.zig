@@ -113,7 +113,7 @@ const Server = struct {
 
     /// Handle the next pending request, if any. Returns whether one arrived.
     fn step(self: *Server) !bool {
-        const envelope = (try self.endpoint.receive()) orelse return false;
+        const envelope = (try self.endpoint.awaitDelivery()) orelse return false;
 
         const request = try decodeRequest(try envelope.message.bytes());
         const response = self.db.execute(request);
@@ -146,7 +146,7 @@ fn roundTrip(server: *Server, client: mar.Endpoint(WireMessage), request: Reques
     try client.send(server_node, encodeRequest(request));
     if (!try server.step()) return error.MissingRequest;
 
-    const envelope = (try client.receive()) orelse return error.MissingResponse;
+    const envelope = (try client.awaitDelivery()) orelse return error.MissingResponse;
 
     return try decodeResponse(try envelope.message.bytes());
 }

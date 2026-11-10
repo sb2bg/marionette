@@ -71,10 +71,21 @@ no longer read each other's state.
   and their oracles assert fault drops. All characterization probes have a
   `tcp_v1` counterpart with Linux expectations in `tests/network_tcp.zig`;
   the `legacy_v0` probes remain as the legacy contract.
-- `Endpoint(Message)` stays experimental and obeys the fault handles. The
-  [network model](docs/network.md#typed-endpoints) documents the migration path
-  to `std.Io.net`.
 - The baseline (`zig build baseline`) measures a lossy `tcp_v1` transfer.
+- **`Endpoint(Message)` contract.** Typed endpoints stay experimental under a
+  declared delivery and ownership contract (at most once, no duplication,
+  ordered by delivery time then send order, traced loss reasons). Adds
+  `Endpoint.poll`, which never advances virtual time, and `awaitDelivery`,
+  which advances only to this endpoint's own next delivery.
+  **Breaking:** `sim.endpoint` rejects payload types containing pointers or
+  slices at compile time; `sim.borrowedEndpoint` is the explicit opt-in.
+  `Endpoint.receive`, which could advance time to any endpoint's delivery, is
+  deprecated and will be removed in 0.10. The examples use `awaitDelivery`.
+  The [network model](docs/network.md#typed-endpoints) documents the contract
+  and the migration path to `std.Io.net`.
+- **Deprecated:** `semantics = .legacy_v0`. Under the one-release policy for
+  replaced models, 0.10 removes it; its capsules replay on 0.9 or earlier
+  pinned builds.
 
 ## v0.8.3 - 2026-11-11
 

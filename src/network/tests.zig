@@ -640,3 +640,63 @@ test "network: disabled loss consumes no decision for typed and stream sends" {
     _ = try sendStreamBytesFromControl(sim.control.network, 0, 1, 1, "hello", 0);
     try std.testing.expectEqual(before, world.decisions.recorded.items.len);
 }
+
+test "endpoint: poll never advances virtual time" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+    const node_0 = try sim.endpoint(TestPayload, 0);
+    const node_1 = try sim.endpoint(TestPayload, 1);
+
+    try node_0.send(1, .{ .value = 7 });
+    const sent_at = world.now();
+    try std.testing.expect(try node_1.poll() == null);
+    try std.testing.expectEqual(sent_at, world.now());
+
+    try sim.control.runFor(30);
+    const envelope = (try node_1.poll()).?;
+    try std.testing.expectEqual(@as(u64, 7), envelope.message.value);
+    try std.testing.expect(try node_1.poll() == null);
+}
+
+test "endpoint: awaitDelivery advances only to this endpoint's own delivery" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3, .path_capacity = 4 } });
+    try sim.control.network.setLatency(.{ .min_latency_ns = 20 });
+    const node_0 = try sim.endpoint(TestPayload, 0);
+    const node_1 = try sim.endpoint(TestPayload, 1);
+    const node_2 = try sim.endpoint(TestPayload, 2);
+
+    // Nothing in flight to node 2: no time passes even though node 1 has mail.
+    try node_0.send(1, .{ .value = 1 });
+    const start = world.now();
+    try std.testing.expect(try node_2.awaitDelivery() == null);
+    try std.testing.expectEqual(start, world.now());
+
+    const envelope = (try node_1.awaitDelivery()).?;
+    try std.testing.expectEqual(@as(u64, 1), envelope.message.value);
+    try std.testing.expectEqual(start + 20, world.now());
+}
+
+test "endpoint: payloads with pointers or slices need the borrowed opt-in" {
+    try std.testing.expect(!endpoint_module.containsBorrowedMemory(TestPayload));
+    try std.testing.expect(!endpoint_module.containsBorrowedMemory(struct { bytes: [8]u8, tag: ?enum { a, b }, callback: *const fn () void }));
+    try std.testing.expect(endpoint_module.containsBorrowedMemory(struct { bytes: []const u8 }));
+    try std.testing.expect(endpoint_module.containsBorrowedMemory(union(enum) { none, owner: *u64 }));
+    try std.testing.expect(endpoint_module.containsBorrowedMemory(?[*]const u8));
+
+    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .path_capacity = 4 } });
+    const Borrowed = struct { name: []const u8 };
+    // `sim.endpoint(Borrowed, 0)` is a compile error; the opt-in is explicit.
+    const sender = try sim.borrowedEndpoint(Borrowed, 0);
+    const receiver = try sim.borrowedEndpoint(Borrowed, 1);
+    try sender.send(1, .{ .name = "static" });
+    const envelope = (try receiver.awaitDelivery()).?;
+    try std.testing.expectEqualStrings("static", envelope.message.name);
+}

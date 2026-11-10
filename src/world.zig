@@ -363,7 +363,17 @@ pub const World = struct {
 
         /// Open one typed simulated endpoint on `node`. Requires a
         /// configured network (`error.NetworkUnavailable` otherwise).
+        /// `Payload` is copied by value, so a payload type that contains
+        /// pointers or slices is a compile error; see `borrowedEndpoint`.
         pub fn endpoint(self: Simulation, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
+            comptime network_module.requireValuePayload(Payload);
+            return try network_module.internal.endpointFromControl(Payload, self.control.network, node);
+        }
+
+        /// Open a typed endpoint whose payload borrows memory: the explicit
+        /// opt-in for pointer and slice payloads. Referenced storage must
+        /// remain valid and immutable for the simulation lifetime.
+        pub fn borrowedEndpoint(self: Simulation, comptime Payload: type, node: network_module.NodeId) !network_module.Endpoint(Payload) {
             return try network_module.internal.endpointFromControl(Payload, self.control.network, node);
         }
 

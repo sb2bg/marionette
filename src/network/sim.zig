@@ -1526,6 +1526,39 @@ fn TypedRuntime(comptime Payload: type) type {
             }
         }
 
+        fn poll(self: *Self, node: NodeId) !?Envelope {
+            try self.shared.validateNode(node);
+            try self.shared.expireDeterministicFaults();
+            const packet = (try self.popReadyFor(node)) orelse return null;
+            return .{ .from = packet.from, .message = packet.payload };
+        }
+
+        fn awaitDelivery(self: *Self, node: NodeId) !?Envelope {
+            try self.shared.validateNode(node);
+            while (true) {
+                try self.shared.expireDeterministicFaults();
+                if (try self.popReadyFor(node)) |packet| {
+                    return .{ .from = packet.from, .message = packet.payload };
+                }
+                const deliver_at = self.nextDeliveryAtFor(node) orelse return null;
+                const now_ns = self.shared.world.now();
+                // Due but undeliverable now (dropped on pop) leaves nothing.
+                if (deliver_at <= now_ns) return null;
+                try self.runForDeterministicFaults(deliver_at - now_ns);
+            }
+        }
+
+        fn nextDeliveryAtFor(self: *const Self, node: NodeId) ?clock_module.Timestamp {
+            var best: ?clock_module.Timestamp = null;
+            for (self.queues, 0..) |queue, index| {
+                const packet = if (queue.items.len == 0) continue else queue.items[0];
+                if (packet.to != node) continue;
+                const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
+                if (best == null or ready_at < best.?) best = ready_at;
+            }
+            return best;
+        }
+
         fn popReadyFor(self: *Self, node: NodeId) !?Packet {
             while (true) {
                 const link_index = self.nextReadyLinkIndexFor(node) orelse return null;
@@ -1618,9 +1651,19 @@ fn TypedRuntime(comptime Payload: type) type {
             return try fromOpaque(ptr).receive(node);
         }
 
+        fn vtablePoll(ptr: *anyopaque, node: NodeId) anyerror!?Envelope {
+            return try fromOpaque(ptr).poll(node);
+        }
+
+        fn vtableAwaitDelivery(ptr: *anyopaque, node: NodeId) anyerror!?Envelope {
+            return try fromOpaque(ptr).awaitDelivery(node);
+        }
+
         const vtable: Handle.VTable = .{
             .send = vtableSend,
             .receive = vtableReceive,
+            .poll = vtablePoll,
+            .await_delivery = vtableAwaitDelivery,
         };
     };
 }

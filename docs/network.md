@@ -20,8 +20,8 @@ record it, so a run always replays under the model it was recorded with.
 | `tcp_v1` | yes, since 0.9 | TCP-lite over a push-based packet fabric. Faults produce silence; errors come from Linux-shaped mechanisms. |
 | `legacy_v0` | before 0.9 | The pull model: delivery waits for readers, faults become immediate errors, and close and kill reach peers through shared state. |
 
-`legacy_v0` is retained so recorded evidence and unported harnesses keep
-running. Capsules written before 0.9 name no model and decode as `legacy_v0`.
+`legacy_v0` is deprecated: it is retained for one release so recorded
+evidence and unported harnesses keep running, and 0.10 removes it. Capsules written before 0.9 name no model and decode as `legacy_v0`.
 A `tcp_v1` capsule carries `model_version`
 (`network_semantic_version`); replay rejects a capsule from another version with
 `error.IncompatibleNetworkModel`.
@@ -214,14 +214,35 @@ asked. `control.network.recordNetstat(reason)` records one on demand.
 `Endpoint(Message)` stays experimental. It sends typed values over per-path
 queues and obeys the same fault handles (`drop` and `reject` discard, clogs
 delay), but it has no wire, no flow control, and no connection lifecycle. raftz
-builds cluster tests on it; it is not promoted to a stable surface.
+builds cluster tests on it; it is not promoted to a stable surface. Retaining
+it requires the contract below.
+
+Delivery: each send is delivered at most once and never duplicated. Loss can
+happen at send (configured loss, a down source) or when the message becomes due
+(a down destination, a disabled link, a dropping or rejecting fault), and every
+loss records `network.drop` with its reason. Ready messages are delivered by
+delivery time, then send order, so latency can reorder messages on different
+paths but never on one path. A full path returns `error.EventQueueFull`.
+
+Ownership: `send` copies the message by value and the receiver owns its copy.
+`sim.endpoint(Message, node)` rejects at compile time a `Message` containing
+pointers or slices, since nothing would keep the referenced storage alive or
+unchanged. `sim.borrowedEndpoint(Message, node)` is the explicit opt-in; its
+referenced storage must stay valid and immutable for the simulation.
+
+Time: `poll()` returns a message ready now, or null, and never advances
+virtual time. `awaitDelivery()` is the explicit harness-driver operation: it
+advances time to this endpoint's own next delivery, or returns null without
+advancing when nothing is in flight to it. `receive()`, which could advance
+time to a delivery for any endpoint on the bus, is deprecated and will be
+removed in 0.10.
 
 Migration path: keep the protocol's state machine and its message type, add a
 codec, and carry the encoded messages over `std.Io.net` streams between
 `hostIp4` addresses. The codec and framing then run in production too, and
 partitions, slow links, and restarts exercise the application's real timeouts
 and reconnects. A future datagram transport will rebuild `Endpoint(Message)`
-under a declared delivery contract once a pinned workload needs UDP.
+under the same delivery contract once a pinned workload needs UDP.
 
 ## Limits
 
