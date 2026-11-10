@@ -32,6 +32,59 @@ fn kv(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
     return report;
 }
 
+const net_samples = 1_000;
+const net_transfer_bytes = 64 * 1024;
+
+const NetApp = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const server_io = (try case.sim.envForNode(0)).io();
+        const client_io = (try case.sim.envForNode(1)).io();
+        try case.control().network.setLatency(.{ .min_latency_ns = 1_000_000, .latency_jitter_ns = 1_000_000 });
+        try case.control().network.setLossiness(.{ .drop_rate = .percent(1) });
+        const address = mar.AnyNetworkControl.hostIp4(0, 9000);
+        var listener = try address.listen(server_io, .{});
+        defer listener.deinit(server_io);
+        const client = try address.connect(client_io, .{ .mode = .stream });
+        defer client.close(client_io);
+        const server = try listener.accept(server_io);
+        defer server.close(server_io);
+
+        var payload: [net_transfer_bytes]u8 = undefined;
+        for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
+        var writer = client.writer(client_io, &.{});
+        var sender = try std.Io.concurrent(client_io, sendAll, .{ &writer, &payload });
+        defer sender.cancel(client_io) catch {};
+        var received: [net_transfer_bytes]u8 = undefined;
+        var reader = server.reader(server_io, &.{});
+        try reader.interface.readSliceAll(&received);
+        try sender.await(client_io);
+        if (!std.mem.eql(u8, &payload, &received)) return error.CorruptTransfer;
+    }
+
+    fn sendAll(writer: *std.Io.net.Stream.Writer, bytes: []const u8) !void {
+        try writer.interface.writeAll(bytes);
+    }
+};
+
+fn net(allocator: std.mem.Allocator, seed: u64) !mar.RunReport {
+    var report = try mar.runSimCase(.{
+        .allocator = allocator,
+        .seed = seed,
+        .tick_ns = 1_000_000,
+        .name = "baseline.net",
+        .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2 } },
+        .init = NetApp.init,
+        .scenario = NetApp.scenario,
+    });
+    errdefer report.deinit();
+    if (report != .passed) return error.UnexpectedBaselineFailure;
+    return report;
+}
+
 pub fn main(init: std.process.Init) !void {
     // Warm both code paths; compilation, warmup, and output are not timed.
     var warm_run = try kv(init.gpa, first_seed);
@@ -61,6 +114,17 @@ pub fn main(init: std.process.Init) !void {
         attempts += result.attempts;
     }
     const reduction_ns = std.Io.Clock.awake.now(init.io).nanoseconds - reduction_start;
+
+    var warm_net = try net(init.gpa, first_seed);
+    warm_net.deinit();
+    var net_runs: Totals = .{};
+    const net_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    for (0..net_samples) |index| {
+        var report = try net(init.gpa, first_seed + index);
+        net_runs.add(&report);
+        report.deinit();
+    }
+    const net_ns = std.Io.Clock.awake.now(init.io).nanoseconds - net_start;
     const bytes = try std.json.Stringify.valueAlloc(init.gpa, .{
         .zig = builtin.zig_version_string,
         .target = @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag),
@@ -69,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
         .first_seed = first_seed,
         .kv = .{ .elapsed_ns = run_ns, .totals = runs },
         .reduction = .{ .elapsed_ns = reduction_ns, .max_attempts = (mar.ReductionOptions{}).max_attempts, .attempts = attempts, .original = originals, .minimized = minimized },
+        .net = .{ .samples = net_samples, .transfer_bytes = net_transfer_bytes, .elapsed_ns = net_ns, .totals = net_runs },
     }, .{});
     defer init.gpa.free(bytes);
     try std.Io.File.stdout().writeStreamingAll(init.io, bytes);
