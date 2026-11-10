@@ -166,6 +166,46 @@ Rules:
   `network.liveness_restore` with `core_count`, `restored_links`,
   `cleared_clogs`, and `revived_nodes` fields.
 
+## Network Events Under `tcp_v1`
+
+`tcp_v1` (0.9) adds these events without changing the line grammar. Addresses
+print as `10.0.0.1:7000` or `[fd00::1]:7000`.
+
+- `network.model semantics=tcp_v1 address_model=<shared_v0|per_host_v1>
+  timing=<linux|compressed> mss=<u64> send_buffer=<u64> receive_buffer=<u64>`
+  once, when the network is composed.
+- `net.send pkt=<u64> from=<node> to=<node> src=<addr> dst=<addr>
+  flags=<S|A|F|R...> seq=<u64> ack=<u64> len=<u64> wnd=<u64>
+  deliver_at=<ns>`; a segment lost at send omits `deliver_at` and is followed by
+  its `net.drop`.
+- `net.drop pkt=<u64> from=<node> to=<node> reason=<loss|fault|source_down|destination_down|hold_overflow>`,
+  with `fault=<id> mode=<drop|reject|slow>` for fault drops and `roll=<u32>` for
+  seeded losses.
+- `net.hold pkt=<u64> fault=<id>` and `net.release pkt=<u64>` around a `hold`
+  fault.
+- `net.deliver pkt=<u64> from=<node> to=<node>` with `conn=<id>`,
+  `sock=<listener id>`, or `socket=none` (answered with an `RST`).
+- `net.unreachable pkt=<u64> fault=<id> conn=<id|none>` when a `reject`
+  fault's signal reaches the sender.
+- `tcp.listen`, `tcp.listen_close`, `tcp.connect`, `tcp.accept`,
+  `tcp.state conn=<id> host=<node> state=<SYN_SENT|SYN_RECV|ESTABLISHED|FIN_WAIT1|FIN_WAIT2|CLOSING|TIME_WAIT|CLOSE_WAIT|LAST_ACK|CLOSED>`,
+  `tcp.retransmit conn=<id> seq=<u64> attempt=<u8> rto_ns=<ns>`,
+  `tcp.fast_retransmit`, `tcp.window_probe`, `tcp.syn_drop`, `tcp.reset
+  reason=<text>`, `tcp.error error=<refused|reset|timed_out|host_unreachable|...>`,
+  `tcp.timeout`, `tcp.fin_wait2_timeout`, and `tcp.machine_crash host=<node>`.
+- `network.fault fault=<id> kind=<partition|isolate|cut|degrade|link|clog|auto_partition|auto_clog>
+  mode=<drop|hold|slow|reject> paths=<u64> delay_ns=<ns> until_ns=<ns|0>`,
+  `network.fault_heal fault=<id> reason=<healed|expired|link_enabled|unclog|unclog_all|auto_heal|replaced>`,
+  and `network.fault_heal_all faults=<u64>` (with `scope=links` from
+  `healLinks`). Under `legacy_v0`, `partition` records only its
+  `network.partition` event.
+- `netstat.begin reason=<deadlock|check_failed|scenario_error|watchdog|...>`,
+  `netstat.listen`, `netstat.tcp`, `netstat.fault`, and `netstat.end`. A
+  watchdog failure's table carries `derived=trace`.
+- `io.net.lookup ... node=<node>` for a simulated host name, and
+  `io.net.connect_timeout handle=<id> conn=<id>` when a `connect` deadline
+  abandons an attempt.
+
 ## What Goes In
 
 Record data that explains simulator decisions and user-visible simulated

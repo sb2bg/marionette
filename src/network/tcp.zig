@@ -1359,7 +1359,12 @@ pub const Engine = struct {
     }
 
     fn processData(self: *Engine, conn: *Connection, segment: *const Segment) void {
-        if (segment.payload.len == 0 and !segment.flags.fin) return;
+        if (segment.payload.len == 0 and !segment.flags.fin) {
+            // A segment below the receive window (a window probe or a stray
+            // duplicate) is answered with the current ACK and window.
+            if (segment.seq < conn.rcv_nxt) self.sendAck(conn);
+            return;
+        }
         switch (conn.state) {
             .established, .fin_wait_1, .fin_wait_2 => {},
             else => {

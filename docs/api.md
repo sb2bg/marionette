@@ -162,7 +162,8 @@ Traced harness/model randomness uses `World.randomU64`, `World.randomBool`,
   the simulation value.
 
 `World.SimulateOptions` configures allocation faults, disk geometry/latency,
-optional network topology, task stacks, start jitter, fiber overflow
+optional network topology and model (`semantics`, `address_model`, `timing`,
+and `tcp` buffers), task stacks, start jitter, fiber overflow
 diagnostics, and an optional deterministic `step_budget` (see
 [Step Budget](run.md#step-budget)).
 
@@ -179,7 +180,9 @@ the current entries, `cloneDecisionTape` returns owned storage, and
 
 - `allocation`: fault configuration and address-free statistics;
 - `disk`: crash/restart and disk-fault controls;
-- `network`: loss, latency, clogs, partitions, link and node state;
+- `network`: loss, latency, clogs, link and node state, and fault handles
+  (`partition`, `isolate`, `cut`, `degrade`, `healFault`), the simulated DNS
+  (`addHostName`), and `recordNetstat`; see [Network Model](network.md);
 - `process`: process crash/restart dynamics;
 - `tasks`: cooperative scheduler inspection;
 - `tick`, `runFor`, and `runTasksUntilIdle` for virtual-time execution.
@@ -226,7 +229,9 @@ literals. Prefer narrow pattern allowlists to whole-file exemptions.
 ## Persistent Replay
 
 `ReplayIdentity` identifies the pinned build, workload/SUT, toolchain, target,
-optimization mode, and disk model. `ReplayCapsule.encode` returns caller-owned
+optimization mode, and disk model. The capsule's simulation options carry the
+network semantics and model version; decode rejects a `tcp_v1` capsule from
+another model version with `error.IncompatibleNetworkModel`. `ReplayCapsule.encode` returns caller-owned
 JSON bytes from a complete reproducible report; the report retains the simulation
 options actually used.
 `ReplayCapsule.decode` owns the parsed artifact; call `deinit` after use.

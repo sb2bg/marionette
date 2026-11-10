@@ -10,76 +10,14 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.9: Honest Network
+## Next: 0.10: Harness And Diagnostics
 
-0.8 delivered dependable campaigns: bounded runs that survive bad cases,
-deterministic step budgets, deduplicated and reduced evidence, resume after a
-kill, fresh-process replay and reduction, fault coverage, and an end-to-end
-validation on pinned storage and network workloads
-(`zig build validate-campaigns`). 0.8.1 made reduction strip faults instead of
-injecting them, added crash-point sweeps, and recorded today's network behavior
-as characterization tests. 0.8.2 fixed terminal future awaits, scoped sweep
-accounting, and reduction of automatic fault schedules. 0.8.3 replaced the disk
-contract with `portable_v2`, which keeps data and namespace durability separate,
-and added named crash profiles, effect requirements, and paired missing-sync
-workloads; see `CHANGELOG.md`.
-
-The network turns faults into immediate, invented errors and lets endpoints read
-each other's state, so the bugs partitions really cause (hangs, half-open
-connections, late replies, ambiguous retries) cannot happen in simulation.
-Connecting into a partition fails at once even with a 10 s timeout, a peer's
-close or kill reaches it across a partition with no delay, and 1% loss kills a
-stream. Two pinned validations (`std_io_net_kv` and dusty's partition scenarios)
-pass only because the simulator invents a timeout error for clients that set
-none.
-That is a trustworthy-models defect, and fixing it changes network semantics and
-API, so it lands before the stabilization candidates start.
-
-- **Hosts own addresses.** Per-host IPv4 and IPv6 addresses, port tables, and
-  ephemeral ranges; binding another host's address fails with
-  `AddressUnavailable`; `accept` reports the client's real address; a simulated
-  DNS resolves host names. Behind `address_model = .per_host_v1`.
-- **A push-based fabric.** Directed links with latency and loss policies, one
-  network event queue the scheduler waits on, and per-socket buffers, so
-  delivery no longer waits for readers and one stalled connection cannot starve
-  another.
-- **TCP-lite.** Handshake, cumulative ACKs, receive windows, timed
-  retransmission with backoff, and FIN and RST on the wire. A fault by itself
-  produces silence; errors come only from mechanisms with Linux-shaped timing:
-  refusal, retry exhaustion, keepalive, or an explicit reject fault. Behind
-  `semantics = .tcp_v1`, with `.linux` and `.compressed` timing profiles.
-- **Faults as handles.** `partition`, `isolate`, `cut`, and `degrade` return
-  faults with ids, a disruption mode (drop, hold, slow, reject), an optional
-  duration, and one composition rule; healing one fault leaves the others.
-  Include isolate-one and partial partitions, which failure studies show
-  trigger most partition bugs. Today's calls map onto these.
-- **Explain every packet's fate.** Trace sends, drops, holds, and deliveries with
-  their reason and fault id, and print a `netstat` table of sockets and active
-  faults on deadlock, watchdog, and check failures. Use the common diagnostic
-  vocabulary developed through 0.10.
-- **Versioned semantics.** Capsules record the network model and replay rejects
-  a mismatch. Convert validations that relied on invented errors to real
-  application timeouts, then flip the defaults with a changelog entry.
-- **Decide `Endpoint(Message)`.** raftz builds its cluster tests on it: promote a
-  small stable subset or document a migration path to `std.Io.net`. Retention
-  requires a declared delivery/ownership contract, non-advancing polling, and
-  rejection of pointer/slice payloads by default; any borrowed-memory behavior
-  must be an explicit opt-in.
-
-Land the model through three acceptance gates:
-
-1. Host-owned addresses and binds, correct accepted-peer identities, and buffer
-   isolation between unrelated connections.
-2. Scheduler-driven packet delivery, composable directed faults, and a traced
-   explanation for each packet's fate.
-3. TCP silence, retry, flow control, and teardown behavior, with explicit
-   application timeouts in the pinned validations.
-
-Exit when the characterization probes behave as Linux TCP would under `tcp_v1`,
-every pinned validation passes without invented errors, a missing application
-timeout surfaces as a reported deadlock, and the performance baseline holds.
-
-## 0.10: Harness And Diagnostics
+0.8.3 corrected storage durability with `portable_v2`. 0.9 made the network
+honest: TCP-lite over a push-based fabric, hosts that own their addresses,
+faults as handles that produce silence, every packet's fate in the trace,
+`netstat` on failure, and versioned semantics with `tcp_v1` as the default.
+`Endpoint(Message)` stays experimental under a declared delivery and
+ownership contract; see `CHANGELOG.md`.
 
 The runner works, but the pinned real-world workloads do not use it: 9 of the 11
 files in `validation/` call `World.init` directly and compare traces by hand, so
@@ -122,9 +60,9 @@ test. Final API freeze follows 0.11's host-storage integration.
 
 ### Diagnostics Deliverables
 
-Land independent reporting improvements during 0.9; 0.10 closes the complete
-diagnostic workflow. 0.8.3 already separates crash injections, eligible
-pending state, and crash effects in sweep results.
+0.10 closes the complete diagnostic workflow. 0.8.3 already separates crash
+injections, eligible pending state, and crash effects in sweep results, and
+0.9 traces each packet's fate and prints `netstat` on failure.
 
 - **Explain the failure boundary.** Determinism mismatches show the first
   differing events from both traces; scenario failures include a bounded tail.
@@ -169,7 +107,7 @@ remain deferred.
 
 ## Stabilization And 1.0 Acceptance
 
-With 0.8.3's storage gaps closed, once 0.9 flips the network defaults and 0.10
+With 0.8.3's storage gaps closed and 0.9's network defaults flipped, once 0.10
 and 0.11 settle the workflow and host-storage APIs, a release-candidate phase
 should close the following evidence gates. 1.0 commits to the documented
 deterministic `std.Io` subset and testing workflow.
@@ -226,6 +164,8 @@ workload evidence. They are not prerequisites for a narrow, dependable 1.0.
   than relying on regeneration after a nondeterminism failure.
 - Build a network nemesis, per-seed swarm fault profiles, and targeted packet
   rules on 0.9's fault handles.
+- Model TCP keepalive, congestion control, and Nagle's algorithm in a later
+  `tcp_v2` once a pinned workload depends on them.
 - Add datagrams, and rebuild `Endpoint(Message)` on them under a declared
   delivery contract, once a pinned workload needs UDP.
 - Let `std.testing.fuzz` input drive simulator decisions, so coverage-guided
@@ -244,8 +184,10 @@ bus. Harness fault powers stay out of application handles.
 
 `std.Io.net` tests codecs, framing, partial I/O, stream lifecycle, and transport
 glue. `Endpoint(Message)` explores protocol/state-machine behavior above the
-wire. It is not a promise of production transport parity. 0.9 decides its
-long-term status.
+wire. It is not a promise of production transport parity. 0.9 kept it
+experimental under a declared delivery and ownership contract and documented
+the migration path to `std.Io.net`; it will be rebuilt on datagrams once a
+pinned workload needs UDP.
 
 ### Breadth Is SUT-Driven
 

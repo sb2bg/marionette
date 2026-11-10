@@ -16,7 +16,7 @@ fn init(sim: mar.Sim) !Service {
 
 fn scenario(case: *Case) !void {
     try case.app.request();
-    try case.control().network.partition(&.{0}, &.{1});
+    _ = try case.control().network.partition(&.{0}, &.{1}, .{});
     try case.control().tick();
 }
 

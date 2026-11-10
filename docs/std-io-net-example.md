@@ -38,8 +38,9 @@ The second mode is planted test code. It is not an external bug report.
 creates two simulated nodes and three cooperative tasks:
 
 1. The server accepts TCP-like streams and processes requests.
-2. The client sends a PUT, observes a terminal stream timeout, reconnects,
-   retries the same request ID, then reads the key.
+2. The client sends a PUT with a 1 ms response deadline (`operateTimeout`
+   around each read), gives up when the deadline passes, reconnects, retries
+   the same request ID, then reads the key.
 3. The fault controller partitions the server and client after the first
    response is queued, waits for the timeout, heals the link, and releases the
    retry.
@@ -81,15 +82,18 @@ Two runs at seed `12648430` must produce byte-identical traces.
 
 ## Trace
 
-The correct run records the fault at the stream and application altitudes:
+The correct run records the fault at the packet and application altitudes.
+The partition only drops the reply and its `FIN`; the client's own deadline
+ends the wait:
 
 ```text
 network.partition left_count=1 right_count=1
-network.drop id=2 from=0 to=1 reason=link_disabled
-io.net.delivery_error from=0 to=1 handle=1001 reason=link_disabled error=Timeout
+network.fault fault=1 kind=partition mode=drop paths=2 delay_ns=0 until_ns=0
+net.drop pkt=4 from=0 to=1 reason=fault fault=1 mode=drop
+net.drop pkt=5 from=0 to=1 reason=fault fault=1 mode=drop
 std_io_net_kv.client.timeout request_id=7
 network.heal disabled_count=2 down_count=0 clogged_count=0
-network.send id=3 from=1 to=0 deliver_at=120 latency_ns=30
+network.fault_heal_all faults=1
 std_io_net_kv.client.reconnected
 std_io_net_kv.client.retry request_id=7 revision=1 duplicate=true
 std_io_net_kv.check retry_idempotent=ok value=41 revision=1 applied_puts=1
@@ -117,8 +121,9 @@ Two scenarios cut the server/client link at structural points:
 - before the held handler writes any response bytes;
 - mid-response after a configured number of chunked body chunks.
 
-Both cuts use futex handshakes rather than tick counts or sleeps. Under the
-severed link, dusty surfaces the first failed fetch as `error.Timeout`. After
+Both cuts use futex handshakes rather than tick counts or sleeps. The severed
+link only drops packets; dusty's own 5 ms fetch deadline fails the first fetch
+with `error.Timeout`. After
 the harness heals the link, a fresh dusty client retries and must receive the
 exact response: `hello from the simulation` for the held route and the full
 64 KiB chunked body for the large route.
@@ -126,46 +131,33 @@ exact response: `hello from the simulation` for the held route and the full
 The mid-response oracle is intentionally strict. A first fetch that returns a
 short or different body is `error.ShortSuccess`; partial response bytes must
 not be accepted as a complete HTTP response. The trace also pins the network
-shape: at least one response frame is sent before `dusty_fault.partition`, and
-a queued response frame is later dropped with `reason=link_disabled` before
-`dusty_fault.heal`.
+shape: at least one response segment is sent before `dusty_fault.partition`, a
+later one is dropped with `reason=fault mode=drop` before `dusty_fault.heal`,
+and the network itself reports no error.
 
 ## Stream Semantics
 
-The current simulated stream subset supports:
+Streams run TCP-lite (`semantics = .tcp_v1`): a handshake, cumulative ACKs,
+receive windows, retransmission with backoff, and `FIN` and `RST` on the wire.
+Bytes arrive in order and exactly once across loss and reordering. A partition
+produces silence, so a client needs its own deadline; without one, a read that
+can never complete surfaces as a scheduler deadlock with a `netstat` table.
+See [Network Model](network.md).
 
-- IPv4 listen and connect inside the closed simulation;
-- scheduler-backed blocking `accept` and `read`;
-- stream reads, writes, shutdown, and close;
-- deterministic latency and send-time loss;
-- delivery-time manual partitions surfaced as `error.Timeout`;
-- terminal receive failure after stream loss, followed by deterministic
-  reconnect and retry after healing;
-- early `unclog`/`heal` wakeup for queued scheduler-backed stream traffic;
-- in-order bytes within each connection;
-- graceful close after queued delayed bytes have drained.
+Each node owns its address: node 0 is `10.0.0.1`, and
+`AnyNetworkControl.hostIp4(node, port)` names it. `127.0.0.1` reaches only the
+caller's own host. The simulated DNS resolves `nodeN` and names registered
+with `addHostName`, so an unmodified `std.http.Client` can fetch
+`http://node0:<port>/`. Real DNS, `/etc/hosts`, and search domains are host
+state and fail with `error.UnknownHostName`.
 
-Marionette does not reorder bytes within a stream. The modeled transport is
-TCP-like, so intra-stream reordering would violate the application-facing
-contract. Message reordering remains available through
-`Endpoint(Message)`, where independent message boundaries exist.
+The boundary does not include datagrams, Unix sockets, external host access,
+TLS, `sendmsg` / `recvmsg`, or preemptive OS-thread scheduling. Unsupported
+vtable regions fail closed rather than silently using host I/O.
 
-Host-name lookup resolves address literals only: `netLookup` handles
-IPv4/IPv6 literals and RFC 6761 `localhost` names deterministically (trace
-event `io.net.lookup`), which is enough to run an unmodified
-`std.http.Client` against a simulated server via `http://127.0.0.1:<port>/`
-or `http://localhost:<port>/`. Real DNS, `/etc/hosts`, and search domains
-are host state and fail with `error.UnknownHostName`.
-
-The current boundary does not include real DNS, datagrams, Unix sockets,
-external host access, TLS, `sendmsg` / `recvmsg`, full connection-reset
-behavior, or preemptive OS-thread scheduling. Unsupported vtable regions fail
-closed rather than silently using host I/O.
-
-Listener and connection allocation is process-scoped rather than
-socket-scoped. Use `sim.envForNode(node).io()` to give each server or client a
-stable simulated process identity; reconnect loops create new socket handles
-under that process without consuming additional topology nodes.
+Use `sim.envForNode(node).io()` to give each server or client its host
+identity; reconnect loops create new sockets on that host without consuming
+additional topology nodes.
 
 ## What This Proves
 
@@ -174,7 +166,7 @@ can:
 
 - suspend and resume on simulated socket operations;
 - receive deterministic network latency and partition faults;
-- retry after a stream-visible timeout;
+- retry after its own response deadline passes;
 - reproduce a failure from a seed and byte-identical trace;
 - be checked against an application-level invariant without importing
   Marionette.

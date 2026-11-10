@@ -10,17 +10,14 @@ findings and the additional self-review fixes are described in `CHANGELOG.md`.
 
 ## Open
 
-Network probe letters refer to `tests/network_characterization.zig`, which
-records the current behavior on Zig 0.17 so 0.9 changes each expectation
-deliberately. The 0.8.3 storage findings (rename committing unsynced data and
-empty creation lost after a directory sync) are fixed by `portable_v2`; their
-regressions are in `tests/storage_083.zig`.
-
-| Severity | Target | Finding | Primary location |
-| --- | --- | --- | --- |
-| Medium | 0.9 | One world-global pool of 64 stream buffers couples connections: once a reader that never reads fills it, unrelated connections cannot send data (probe G). Connects no longer need a buffer since 0.8.1. | `src/message_pool.zig`, `src/io/net.zig` |
-| High | 0.9 | Network faults become immediate errors, and close and kill reach peers through shared state even across a partition: connect into a partition fails in 0 ms despite a 10 s timeout, a reply sent during a partition becomes `ConnectionTimedOut` 1 ms later, and 1% loss kills a stream (probes A to E). | `src/io/net.zig` (`simNetConnectIp`, `drainNetworkReady`), `src/io/backend.zig` (`closeConnectionState`) |
-| Medium | 0.9 | One port namespace for the whole world: only one node can bind `0.0.0.0:7000`, any node can bind any IP, and accepted peers report the destination IP (probe F). | `src/io/backend.zig` (`ProcessRegistry`), `src/io/net.zig` (`simNetLookup`) |
+No open findings target the default network model. The 0.9 network findings
+(probes A to G in `tests/network_characterization.zig`: invented errors, close
+and kill crossing partitions, loss killing a stream, one world-global stream
+buffer pool, and one port namespace) are fixed under `semantics = .tcp_v1`,
+with regressions in `tests/network_tcp.zig`. They remain the documented
+behavior of `legacy_v0`. The 0.8.3 storage findings (rename committing
+unsynced data and empty creation lost after a directory sync) are fixed by
+`portable_v2`, with regressions in `tests/storage_083.zig`.
 
 ## Later Or Scope-Dependent
 
@@ -30,9 +27,8 @@ regressions are in `tests/storage_083.zig`.
 
 ## Standing Model Decisions
 
-- The stream backpressure wake key is world-global because the byte pool is
-  world-global. Extra wakeups are a performance tradeoff; the pool's coupling of
-  unrelated connections is an open finding above.
+- Under `legacy_v0`, the stream backpressure wake key is world-global because
+  the byte pool is world-global. `tcp_v1` sockets have their own buffers.
 - `portable_v1`, through 0.8.2, committed pending writes at `setLength`,
   delete, and rename. `portable_v2` keeps that data pending on the file's
   identity; older artifacts retain their pinned-build interpretation and are

@@ -66,7 +66,7 @@ test "tcp_v1: connect, exchange, and close over a real handshake" {
     try sim.control.checkResources();
 }
 
-test "tcp_v1: hosts own addresses and port tables" {
+test "tcp_v1 probe F: hosts own addresses and port tables" {
     var world = try newWorld(2);
     defer world.deinit();
     const sim = try tcpSim(&world, 3);
@@ -82,7 +82,7 @@ test "tcp_v1: hosts own addresses and port tables" {
     try std.testing.expectError(error.NetworkUnreachable, unknown.connect(io[2], .{ .mode = .stream }));
 }
 
-test "tcp_v1: connect into a partition blocks until the caller's timeout" {
+test "tcp_v1 probe A: connect into a partition blocks until the caller's timeout" {
     var world = try newWorld(3);
     defer world.deinit();
     const sim = try tcpSim(&world, 2);
@@ -588,4 +588,43 @@ test "tcp_v1: a deadlock records a netstat table of sockets and faults" {
     try std.testing.expect(std.mem.indexOf(u8, trace, "netstat.fault fault=1 kind=partition mode=drop paths=2") != null);
     pair.client.close(pair.client_io);
     future.cancel(pair.client_io);
+}
+
+test "tcp_v1: a window probe recovers a lost window update" {
+    if (!fibers) return error.SkipZigTest;
+    var world = try newWorld(0x97);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{
+        .nodes = 2,
+        .timing = .compressed,
+        .tcp = .{ .send_buffer_bytes = 8 * 1024, .receive_buffer_bytes = 8 * 1024 },
+    });
+    defer pair.listener.deinit(pair.server_io);
+    defer pair.client.close(pair.client_io);
+    defer pair.server.close(pair.server_io);
+
+    var flood: Flood = .{ .io = pair.client_io, .stream = pair.client };
+    var future = try std.Io.concurrent(pair.client_io, Flood.run, .{&flood});
+    // Both buffers fill and the client's view of the window drops to zero.
+    try std.Io.sleep(pair.harness_io, .fromNanoseconds(100 * ms), .awake);
+
+    // Every window update the reader sends while draining its full buffer is
+    // lost, so only a window probe can tell the writer the window reopened.
+    const cut = try pair.sim.control.network.cut(0, 1, .{});
+    var buffer: [4096]u8 = undefined;
+    var received: usize = 0;
+    while (received < 8 * 1024) received += try read(pair.server_io, pair.server, &buffer);
+    // Faults are judged when a packet arrives; keep the cut until it has.
+    try std.Io.sleep(pair.harness_io, .fromNanoseconds(5 * ms), .awake);
+    try pair.sim.control.network.healFault(cut);
+
+    while (true) {
+        const count = try read(pair.server_io, pair.server, &buffer);
+        if (count == 0) break;
+        received += count;
+    }
+    future.await(pair.client_io);
+    try std.testing.expectEqual(@as(?anyerror, null), flood.write_error);
+    try std.testing.expectEqual(@as(usize, Flood.total), received);
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "tcp.window_probe conn=2") != null);
 }

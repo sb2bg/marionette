@@ -121,10 +121,10 @@ including application random bytes, for a pinned build and workload.
 
 ## Install
 
-Marionette v0.8.3 requires Zig 0.17.x:
+Marionette v0.9.0 requires Zig 0.17.x:
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.8.3.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.9.0.tar.gz
 ```
 
 For Zig 0.16.x, use v0.7.2 instead.
@@ -151,8 +151,11 @@ const mar = @import("marionette");
   and byte-identical structured traces.
 - A directory-aware `std.Io.File` / `Dir` subset with lost, torn, reordered,
   corrupt, and failed disk operations.
-- Scheduler-backed `std.Io.net` streams with latency, timeouts, loss,
-  partitions, healing, and process lifecycle events.
+- `std.Io.net` streams over TCP-lite: hosts own their addresses, a push-based
+  fabric carries handshakes, ACKs, windows, retransmissions, `FIN`, and `RST`,
+  and partitions, isolated nodes, cut and degraded links, holds, and rejects are
+  fault handles that produce silence rather than invented errors. Every
+  packet's fate is in the trace, and failures end with a `netstat` table.
 - Cooperative `std.Io` tasks, groups, cancellation, and futex waits used by
   `Mutex` / `Condition` code.
 - Structured deadlock and scheduler failures with compact wait-state traces,

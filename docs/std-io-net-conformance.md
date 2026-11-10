@@ -11,38 +11,58 @@ This ledger classifies Marionette's simulated `std.Io.net` surface against Zig
 - **Divergent:** intentional behavior differs from the host contract and is
   stated here.
 
-## IP Streams
+## IP Streams Under `tcp_v1`
+
+`tcp_v1` is the default since 0.9. See [Network Model](network.md#tcp-lite) for
+the protocol and its error mechanisms.
 
 | Surface | Classification | Simulated contract |
 | --- | --- | --- |
 | IPv4 and IPv6 literal lookup | Exact | Returns the parsed address without host DNS state. |
 | `localhost` lookup | Abstracted | Deterministically returns IPv6 then IPv4 loopback. |
+| Simulated host names | Abstracted | `nodeN` and names added with `addHostName` resolve to that host's IPv4 then IPv6 address. |
 | Other hostname lookup | Unsupported | Returns `error.UnknownHostName`; DNS and host files are ambient host state. |
-| `listen` mode `.stream`, protocol `.tcp` | Exact | Creates a process-scoped listener. |
-| Listen address scope | Abstracted | An unspecified IPv4 or IPv6 listener matches same-family literal destinations and conflicts with active wildcard or exact binds on that port. Address identity is not tied to modeled host interfaces, and IPv4/IPv6 remain separate families. |
-| Other listen modes or protocols | Unsupported | Returns the corresponding mode/protocol error. |
-| `listen.kernel_backlog` | Abstracted | Bounds pending, unaccepted connections; excess connects are refused deterministically. |
-| `listen.reuse_address = true` | Abstracted | Accepted, while active-bind exclusivity remains enforced. The simulator has no kernel `TIME_WAIT` state to bypass. |
-| Listen port `0` | Exact | Assigns a deterministic port from the IANA dynamic port range. |
-| `connect` mode `.stream`, protocol `.tcp` | Abstracted | Queues establishment through the deterministic network, assigns a deterministic client port, observes latency, and rejects a down source, down destination, disabled link, or full backlog before publishing either endpoint. |
-| `connect.timeout` duration or deadline | Exact | Bounds queued establishment in simulated time and returns `error.Timeout`; failure rolls back the probe and unpublished socket state. |
-| Connect cancellation | Exact | Cancellation at entry or while establishment is queued returns `error.Canceled` and rolls back the attempt. |
-| `accept` | Abstracted | Blocks cancelably and returns deterministic peer metadata. The port comes from a rotating simulated client ephemeral-port cursor and may be reused after the modeled range wraps; active peer-tuple uniqueness is not modeled. The family matches the connect destination. Nodes do not model source interfaces, so the peer IP is copied from the connect destination rather than representing a genuine client source address. |
-| Stream read/write ordering | Abstracted | Writes are segmented into ordered frames. Readers receive only a contiguous prefix. Loss terminally fails that receive stream; later frames are discarded. |
-| Partial write progress | Exact | Once a write prefix is accepted, a later cancellation, reset, or resource failure returns the accepted byte count. |
+| `listen` mode `.stream`, protocol `.tcp` | Exact | Creates a listener in the host's own port table. |
+| Listen address scope | Exact | A host may bind the unspecified address, loopback, or its own address; any other address returns `error.AddressUnavailable`. Wildcard and exact binds conflict per host and per family. IPv4 and IPv6 are separate families (as with `IPV6_V6ONLY`). |
+| `listen.kernel_backlog` | Exact | Bounds established, unaccepted connections. A `SYN` arriving while the queue is full is dropped and the client retransmits, as on Linux. |
+| `listen.reuse_address` | Abstracted | Accepted. `TIME_WAIT` never blocks a bind, as if `SO_REUSEADDR` were always set. |
+| Listen port `0` | Exact | Assigns a port from the host's ephemeral range, 32768 to 60999. |
+| `connect` mode `.stream`, protocol `.tcp` | Exact | A three-way handshake over the fabric. Refusal is an `RST` one round trip later; silence retransmits the `SYN` at 1, 2, 4, ... s and times out after 127 s under `.linux`. Unroutable addresses fail with `NetworkUnreachable` at once; absent in-subnet hosts with `HostUnreachable` after an ARP timeout. |
+| `connect.timeout` duration or deadline | Exact | Bounds establishment in simulated time and returns `error.Timeout`, abandoning the attempt. |
+| Connect cancellation | Exact | Returns `error.Canceled` and abandons the attempt. |
+| `accept` | Exact | Blocks cancelably and returns the client's real address and ephemeral port. A connection reset before `accept` is still returned; its first read reports the reset. |
+| Stream read/write ordering | Exact | Bytes arrive in order, exactly once, across loss, reordering, and duplication. |
+| Write flow control | Exact | A write copies what fits in the bounded send buffer and blocks while it is full; the peer's receive window limits what is in flight. |
+| Partial write progress | Exact | A write returns the bytes it accepted. |
+| `operateTimeout` and `Batch` | Exact | Read and write readiness are real; `awaitConcurrent` honors its timeout with `error.Timeout`. |
 | Stream read metadata | Exact | Reads report byte count, zero ancillary bytes, and no control truncation. |
 | Ancillary writes | Unsupported | Nonempty control data returns `error.Unexpected` before sending payload bytes. |
-| Stream timeout errors | Abstracted | A partition or unavailable synchronous read reports `error.ConnectionTimedOut`; connect deadlines still report `error.Timeout`. |
+| Stream errors | Exact | `ConnectionResetByPeer` after an `RST`, `ConnectionTimedOut` after retransmissions or window probes run out. A read reports an error once, then end of stream; writes keep reporting it. |
 | Read/write cancellation | Exact | Armed cancellation is delivered at entry and at blocking waits. |
-| `shutdown(.recv)` | Abstracted | Discards inbound bytes and makes later reads return EOF. The opposite direction remains usable. |
-| `shutdown(.send)` | Abstracted | Makes local writes fail and makes the peer observe EOF after accepted bytes. The opposite direction remains usable. |
-| `shutdown(.both)` | Abstracted | Applies both directional shutdowns without closing the socket handle. |
-| `close` | Abstracted | Releases local state and queued capacity. A process reset discards that endpoint's delayed outbound frames and terminally surfaces `error.ConnectionResetByPeer`; graceful close preserves already accepted bytes before EOF. |
+| `shutdown(.recv)` | Abstracted | Later reads return end of stream; arriving data is acknowledged and discarded. |
+| `shutdown(.send)` | Exact | Sends a `FIN` after buffered data; later writes fail; the peer reads end of stream. |
+| `shutdown(.both)` | Exact | Both of the above without closing the handle. |
+| `close` | Exact | Sends buffered data and a `FIN`, or an `RST` over unread data. The kernel finishes the connection after the handle is gone. |
+| Process kill | Exact | The host's kernel closes each socket as `close` does. |
+| Disk crash | Abstracted | A machine crash: sockets vanish silently and peers learn by sending. |
+
+## IP Streams Under `legacy_v0`
+
+| Surface | Classification | Simulated contract |
+| --- | --- | --- |
+| Listen address scope | Divergent | One port namespace for the whole world; any node may bind any address. |
+| `listen.kernel_backlog` | Divergent | Excess connects are refused at once. |
+| `connect` | Divergent | A down destination, disabled link, or partition fails the connect at once, even with a timeout. |
+| `accept` | Divergent | The peer IP is the connect destination, not the client's address. |
+| Stream ordering | Divergent | Loss terminally fails the receive stream with `ConnectionTimedOut`. |
+| Stream timeout errors | Divergent | A partition or unavailable read reports `error.ConnectionTimedOut` without an application timeout. |
+| `close` and process kill | Divergent | Reach the peer at once through shared state, even across a partition. |
+| `Batch` | Abstracted | Ready operations complete; waiting on more than one unready stream reports `ConcurrencyUnavailable`. |
 
 ## Explicit Scope
 
-UDP, Unix-domain sockets, non-literal DNS, broader socket-option parity, and
-kernel-specific readiness behavior are unsupported. They should be added only
+UDP, Unix-domain sockets, real DNS, keepalive, congestion control, Nagle's
+algorithm, urgent data, and broader socket-option parity are unsupported. They should be added only
 when a pinned system under test requires them. Binding a datagram socket
 returns `ProtocolUnsupportedBySystem`, and Unix-domain listen and connect return
 `AddressFamilyUnsupported`. Sending a file to a stream returns `Unimplemented`

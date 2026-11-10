@@ -1,5 +1,81 @@
 # Changelog
 
+## v0.9.0 - Unreleased
+
+The honest network. Faults no longer turn into invented errors, and endpoints
+no longer read each other's state.
+
+- **Network semantics change: `tcp_v1` is the default.** New simulations run
+  TCP-lite over a push-based fabric: a three-way handshake, cumulative and
+  delayed ACKs, an out-of-order queue, receive windows over bounded per-socket
+  buffers, window probes, timed retransmission with exponential backoff, RTT
+  estimation, fast retransmit, and `FIN` and `RST` on the wire. A fault by
+  itself produces silence. Errors come only from Linux-shaped mechanisms:
+  refusal by `RST`, SYN or data retransmission exhaustion, an ARP timeout for
+  an absent host, or an explicit `reject` fault. `timing = .linux` uses Linux
+  defaults (connect gives up after 127 s, data after 15 retransmissions);
+  `.compressed` divides every interval by 100. Set
+  `SimNetworkOptions.semantics = .legacy_v0` to keep the previous model, which
+  remains fully supported and replays unchanged.
+- **Hosts own addresses** (`address_model = .per_host_v1`, the `tcp_v1`
+  default). Node N owns `10.0.0.(N + 1)` and `fd00::(N + 1)`, its own loopback,
+  port table, and ephemeral range (32768 to 60999). Every node can listen on
+  the same port; binding another host's address fails with
+  `AddressUnavailable`; `accept` reports the client's real address. A simulated
+  DNS resolves `nodeN` and names added with `control.network.addHostName`.
+  `AnyNetworkControl.hostIp4(node, port)` and `hostIp6` name the addresses.
+  **Migration:** a client that reached another node at `127.0.0.1` must use the
+  server's address, or select `address_model = .shared_v0`, which `tcp_v1`
+  also supports.
+- **The scheduler waits on the network.** Packet arrivals and protocol timers
+  sit in one event queue; virtual time advances to them even when every task is
+  blocked without a deadline, so delivery never waits for a reader and one
+  stalled connection cannot starve another (probe G). A read that can never
+  complete because the application set no timeout is reported as a deadlock.
+- **Faults are handles.** `partition(left, right, options)`, `isolate(node,
+  options)`, `cut(from, to, options)`, and `degrade(from, to, options)` return a
+  `NetworkFault` with an id, a disruption mode (`drop`, `hold`, `slow`, or
+  `reject`), and an optional `duration_ns`. One composition rule decides a
+  packet's fate: `drop` before `reject` before `hold`, with `slow` delays added.
+  `healFault` heals one fault and leaves the others; `heal()` still heals
+  everything. Partial partitions (nodes in neither group reach both sides) and
+  isolate-one partitions are first class. `setLink`, `clog`, automatic
+  partitions, and automatic clogs are faults with handles too.
+  **Breaking:** `partition` takes options and returns its fault:
+  `_ = try control.network.partition(&a, &b, .{});`.
+- **Every packet's fate is in the trace**: `net.send`, `net.deliver`,
+  `net.drop` (with `reason=loss|fault|source_down|destination_down` and the
+  fault id), `net.hold`, `net.release`, and `net.unreachable`, plus `tcp.*`
+  socket events and `network.fault` / `network.fault_heal`. A deadlock, a failed
+  scenario, and a failed check record a `netstat` table of listeners,
+  connections, queues, windows, retries, and active faults; a watchdog failure
+  appends one reconstructed from its trace. `control.network.recordNetstat`
+  records one on demand. Trace summaries and fault coverage count the new
+  events.
+- **Real application timeouts.** `io.operateTimeout` and `Batch` awaits now work
+  in simulation, with true read and write readiness under `tcp_v1`, so a client
+  can bound a read the production way. The KV example's client gained a
+  response timeout built this way.
+- **Versioned semantics.** Capsules record the network semantics, address model,
+  timing, buffers, and `model_version`; decode rejects a `tcp_v1` capsule from
+  another model version with `IncompatibleNetworkModel`. Capsules written
+  before 0.9 decode as `legacy_v0` and keep their bytes.
+- Under `legacy_v0`, a partition is now a fault handle too, so
+  `setLink(from, to, true)` no longer undoes one; heal its fault, or call
+  `heal` or `healLinks`.
+- Process kill closes the host's sockets the way a kernel does: buffered data
+  and a `FIN`, or an `RST` over unread data, crossing the fabric like any
+  packet. A disk crash is a machine crash: sockets vanish without a packet.
+- The pinned validations run on `tcp_v1` and no longer rely on invented errors:
+  the KV client and dusty's fetch use their own deadlines across partitions,
+  and their oracles assert fault drops. All characterization probes have a
+  `tcp_v1` counterpart with Linux expectations in `tests/network_tcp.zig`;
+  the `legacy_v0` probes remain as the legacy contract.
+- `Endpoint(Message)` stays experimental and obeys the fault handles. The
+  [network model](docs/network.md#typed-endpoints) documents the migration path
+  to `std.Io.net`.
+- The baseline (`zig build baseline`) measures a lossy `tcp_v1` transfer.
+
 ## v0.8.3 - 2026-11-11
 
 Storage correctness. The disk contract is now `portable_v2` (disk model

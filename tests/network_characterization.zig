@@ -1,8 +1,8 @@
-//! Network characterization: how today's stream model reacts to partitions,
-//! closes, kills, loss, and binds. These tests record current behavior, not
-//! the goal. Each one notes what Linux TCP does instead; 0.9 (see ROADMAP.md)
-//! changes the model so each expectation changes deliberately rather than by
-//! accident. Probe letters match SIMULATOR_FINDINGS.md.
+//! Network characterization under `legacy_v0`: how the pre-0.9 stream model
+//! reacts to partitions, closes, kills, loss, and binds. Each test notes what
+//! Linux TCP does instead. `tcp_v1`, the default since 0.9, behaves as Linux
+//! does; its counterparts live in `tests/network_tcp.zig`. Probe letters
+//! match the 0.9 changelog.
 const std = @import("std");
 const builtin = @import("builtin");
 const mar = @import("marionette");

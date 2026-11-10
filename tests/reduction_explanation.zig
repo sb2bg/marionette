@@ -100,7 +100,10 @@ fn reduceAllocationCase(allocator: std.mem.Allocator) !void {
 }
 
 test "reduction: all allocation failures release original and candidate reports" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, reduceAllocationCase, .{});
+    // SafeAllocator may remap a growing buffer in place depending on heap
+    // layout. Make growth allocate so every failure pass has the same count.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), reduceAllocationCase, .{});
 }
 
 test "artifacts: runner writes owned replayable directory and refuses overwrite" {
