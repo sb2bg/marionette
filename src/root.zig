@@ -403,6 +403,11 @@ pub const ManagedProcess = @import("world.zig").ManagedProcess;
 // Grouped namespaces (0.10). Prefer these over the flat names above, which
 // remain as aliases until the first stabilization candidate.
 
+/// One typed harness built from an app, scenario, checks, and default
+/// simulation options; drives run, fuzz, replay, reduction, campaigns, and
+/// crash-point sweeps. See `src/harness.zig`.
+pub const Harness = @import("harness.zig").Harness;
+
 /// Disk capabilities, models, options, and errors.
 pub const disk = struct {
     pub const Disk = disk_module.Disk;

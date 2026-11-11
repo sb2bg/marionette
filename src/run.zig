@@ -503,7 +503,7 @@ fn splitmix64(input: u64) u64 {
     return z ^ (z >> 31);
 }
 
-fn appTypeFromSimInit(comptime init_app: anytype) type {
+pub fn appTypeFromSimInit(comptime init_app: anytype) type {
     const Return = simInitReturnType(init_app);
     return switch (@typeInfo(Return)) {
         .error_union => |error_union| error_union.payload,

@@ -171,3 +171,61 @@ test "harness: grouped namespaces name the same types as the flat exports" {
     try std.testing.expect(mar.process.Control == mar.ProcessControl);
     try std.testing.expect(mar.trace.Recorder == mar.Recorder);
 }
+
+const Counter = struct {
+    value: u8 = 0,
+
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        case.app.value = try case.control().chooseIntLessThan("counter.value", u8, 8);
+        case.control().record("counter.value value={}", .{case.app.value});
+    }
+
+    fn belowSix(case: *const mar.SimCase(@This())) !void {
+        if (case.app.value >= 6) return error.CounterTooLarge;
+    }
+
+    const checks = [_]mar.StateCheck(mar.SimCase(@This())){
+        .{ .name = "counter.below_six", .check = belowSix },
+    };
+};
+
+const CounterHarness = mar.Harness(.{
+    .init = Counter.init,
+    .scenario = Counter.scenario,
+    .checks = &Counter.checks,
+    .name = "counter",
+});
+
+test "harness: one typed harness runs, replays, and reduces with the same checks" {
+    var seed: u64 = 0;
+    var failing: ?mar.RunReport = null;
+    while (seed < 64) : (seed += 1) {
+        var report = try CounterHarness.run(std.testing.allocator, .{ .seed = seed });
+        if (report == .failed) {
+            failing = report;
+            break;
+        }
+        report.deinit();
+    }
+    var report = failing orelse return error.NoFailingSeed;
+    defer report.deinit();
+    try std.testing.expectEqualStrings("counter.below_six", report.failed.check_name.?);
+    try mar.expectTraceContains(report.failed.first_trace, "run.name value=counter");
+
+    const identity: mar.ReplayIdentity = .{ .build = "harness", .sut = "counter" };
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    var replayed = try CounterHarness.replay(std.testing.allocator, &capsule, identity);
+    defer replayed.deinit();
+    try std.testing.expectEqualStrings("counter.below_six", replayed.failed.check_name.?);
+
+    try CounterHarness.expectFailure(std.testing.allocator, .{ .seed = seed }, .{ .kind = .check_failed, .check_name = "counter.below_six" });
+    var reduced = try CounterHarness.reduce(std.testing.allocator, .{ .seed = seed }, .{ .max_attempts = 4 });
+    defer reduced.deinit();
+}
