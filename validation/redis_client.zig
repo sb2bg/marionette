@@ -12,7 +12,7 @@ const ping = "*1\r\n$4\r\nPING\r\n";
 
 const Scenario = struct {
     allocator: std.mem.Allocator,
-    world: *mar.World,
+    control: mar.Control,
     server_io: Io,
     client_io: Io,
     mode: Mode,
@@ -54,7 +54,7 @@ const Scenario = struct {
         if (first) {
             try expectCommand(r, incr);
             self.executed += 1;
-            try self.world.record("redis.peer.executed count={d}", .{self.executed});
+            self.control.record("redis.peer.executed count={d}", .{self.executed});
             switch (self.mode) {
                 .lost_reply, .no_retry => return, // Applied, but no response reaches the caller.
                 .pipeline_cut => {
@@ -71,7 +71,7 @@ const Scenario = struct {
         } else if (self.mode == .lost_reply) {
             try expectCommand(r, incr);
             self.executed += 1;
-            try self.world.record("redis.peer.executed count={d}", .{self.executed});
+            self.control.record("redis.peer.executed count={d}", .{self.executed});
             try self.send(w, ":2\r\n");
         }
         try expectCommand(r, ping);
@@ -118,43 +118,74 @@ const Scenario = struct {
             },
         }
         try client.ping();
-        try self.world.record("redis.client.recovered", .{});
+        self.control.record("redis.client.recovered", .{});
         self.client_completed = true;
     }
 };
 
-fn run(allocator: std.mem.Allocator, seed: u64, mode: Mode) ![]u8 {
-    var world = try mar.World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
-    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 } });
-    const server_io = (try sim.envForNode(0)).io();
-    const client_io = (try sim.envForNode(1)).io();
-    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
-    var scenario: Scenario = .{ .allocator = allocator, .world = &world, .server_io = server_io, .client_io = client_io, .mode = mode };
-    var server = try Io.concurrent(server_io, Scenario.server, .{&scenario});
-    defer server.cancel(server_io) catch {};
-    var client = try Io.concurrent(client_io, Scenario.clientTask, .{&scenario});
-    defer client.cancel(client_io) catch {};
-    try client.await(client_io);
-    try server.await(server_io);
-    try std.testing.expect(scenario.client_completed);
-    try std.testing.expect(scenario.server_completed);
-    const interrupted = mode == .lost_reply or mode == .no_retry or mode == .pipeline_cut;
-    try std.testing.expectEqual(@as(u32, if (interrupted) 2 else 1), scenario.connections);
-    try std.testing.expectEqual(@as(u32, if (mode == .lost_reply or mode == .pipeline_cut) 2 else 1), scenario.executed);
-    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-    try sim.control.checkResources();
-    return allocator.dupe(u8, world.traceBytes());
+fn App(comptime mode: Mode) type {
+    return struct {
+        const Self = @This();
+        const Case = mar.SimCase(Self);
+
+        scenario: Scenario,
+
+        fn init(sim: mar.Sim) !Self {
+            try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+            return .{ .scenario = .{
+                .allocator = sim.control.harnessAllocator(),
+                .control = sim.control,
+                .server_io = (try sim.envForNode(0)).io(),
+                .client_io = (try sim.envForNode(1)).io(),
+                .mode = mode,
+            } };
+        }
+
+        fn run(case: *Case) !void {
+            const scenario = &case.app.scenario;
+            var server = try Io.concurrent(scenario.server_io, Scenario.server, .{scenario});
+            defer server.cancel(scenario.server_io) catch {};
+            var client = try Io.concurrent(scenario.client_io, Scenario.clientTask, .{scenario});
+            defer client.cancel(scenario.client_io) catch {};
+            try client.await(scenario.client_io);
+            try server.await(scenario.server_io);
+            if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+        }
+
+        fn completed(case: *const Case) !void {
+            if (!case.app.scenario.client_completed) return error.ClientDidNotComplete;
+            if (!case.app.scenario.server_completed) return error.ServerDidNotComplete;
+        }
+
+        /// An interrupted exchange redials once; a lost or cut reply makes
+        /// the client reexecute its increment.
+        fn connectionsAndExecutions(case: *const Case) !void {
+            const interrupted = mode == .lost_reply or mode == .no_retry or mode == .pipeline_cut;
+            if (case.app.scenario.connections != @as(u32, if (interrupted) 2 else 1)) return error.UnexpectedConnectionCount;
+            if (case.app.scenario.executed != @as(u32, if (mode == .lost_reply or mode == .pipeline_cut) 2 else 1)) return error.UnexpectedExecutionCount;
+        }
+
+        const checks = [_]mar.StateCheck(Case){
+            .{ .name = "redis.completed", .check = completed, .phase = .after_scenario },
+            .{ .name = "redis.connections_and_executions", .check = connectionsAndExecutions, .phase = .after_scenario },
+        };
+    };
 }
 
-fn expectReplay(mode: Mode) !void {
-    for (0..4) |seed| {
-        const first = try run(std.testing.allocator, seed, mode);
-        defer std.testing.allocator.free(first);
-        const second = try run(std.testing.allocator, seed, mode);
-        defer std.testing.allocator.free(second);
-        try std.testing.expectEqualStrings(first, second);
-    }
+fn RedisHarness(comptime mode: Mode) type {
+    return mar.Harness(.{
+        .init = App(mode).init,
+        .scenario = App(mode).run,
+        .checks = &App(mode).checks,
+        .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 } },
+        .name = "redis." ++ @tagName(mode),
+    });
+}
+
+/// Four seeds, each executed twice by the runner and compared exactly, with
+/// leaked simulated handles failing the run.
+fn expectReplay(comptime mode: Mode) !void {
+    try RedisHarness(mode).fuzz(std.testing.allocator, .{ .tick_ns = 10, .check_resources = true }, .{ .seeds = 4 });
 }
 
 test "redis command errors preserve a healthy pooled connection" {

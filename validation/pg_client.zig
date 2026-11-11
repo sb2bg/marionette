@@ -12,7 +12,7 @@ const Mode = enum { normal, fragmented, truncated };
 
 const Scenario = struct {
     allocator: std.mem.Allocator,
-    world: *mar.World,
+    control: mar.Control,
     server_io: Io,
     client_io: Io,
     mode: Mode,
@@ -73,13 +73,13 @@ const Scenario = struct {
         try expectMessage(r, 'p', "secret\x00");
         try self.send(w, 'R', &.{ 0, 0, 0, 0 });
         try self.send(w, 'Z', "I");
-        try self.world.record("pg.server.authenticated", .{});
+        self.control.record("pg.server.authenticated", .{});
         try expectMessage(r, 'Q', "update items set value = 7\x00");
         if (self.mode == .truncated) {
             // CommandComplete advertises nine body bytes but closes after two.
             try w.writeAll("C\x00\x00\x00\x0dUP");
             try w.flush();
-            try self.world.record("pg.server.truncated", .{});
+            self.control.record("pg.server.truncated", .{});
             return;
         }
         try self.send(w, 'C', "UPDATE 3\x00");
@@ -104,7 +104,7 @@ const Scenario = struct {
         defer conn.deinit();
         if (self.mode == .truncated) {
             try std.testing.expectError(error.EndOfStream, conn.exec("update items set value = 7", .{}));
-            try self.world.record("pg.client.interrupted", .{});
+            self.control.record("pg.client.interrupted", .{});
             return;
         }
         try std.testing.expectEqual(@as(?i64, 3), try conn.exec("update items set value = 7", .{}));
@@ -112,44 +112,52 @@ const Scenario = struct {
         try std.testing.expect(conn.err != null);
         try std.testing.expectEqualStrings("42601", conn.err.?.code);
         try std.testing.expectEqual(@as(?i64, 2), try conn.exec("delete from items", .{}));
-        try self.world.record("pg.client.recovered affected=2", .{});
+        self.control.record("pg.client.recovered affected=2", .{});
     }
 };
 
-fn run(allocator: std.mem.Allocator, seed: u64, mode: Mode) ![]u8 {
-    var world = try mar.World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
-    const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 },
-    });
-    const server_io = (try sim.envForNode(0)).io();
-    const client_io = (try sim.envForNode(1)).io();
-    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
-    var scenario: Scenario = .{
-        .allocator = allocator,
-        .world = &world,
-        .server_io = server_io,
-        .client_io = client_io,
-        .mode = mode,
+fn App(comptime mode: Mode) type {
+    return struct {
+        scenario: Scenario,
+
+        fn init(sim: mar.Sim) !@This() {
+            try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+            return .{ .scenario = .{
+                .allocator = sim.control.harnessAllocator(),
+                .control = sim.control,
+                .server_io = (try sim.envForNode(0)).io(),
+                .client_io = (try sim.envForNode(1)).io(),
+                .mode = mode,
+            } };
+        }
+
+        /// Both tasks return their errors through their futures, so a
+        /// protocol mismatch fails the run with a report, not a panic.
+        fn run(case: *mar.SimCase(@This())) !void {
+            const scenario = &case.app.scenario;
+            var server = try Io.concurrent(scenario.server_io, Scenario.server, .{scenario});
+            defer server.cancel(scenario.server_io) catch {};
+            var client = try Io.concurrent(scenario.client_io, Scenario.client, .{scenario});
+            defer client.cancel(scenario.client_io) catch {};
+            try client.await(scenario.client_io);
+            try server.await(scenario.server_io);
+            if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+        }
     };
-    var server = try Io.concurrent(server_io, Scenario.server, .{&scenario});
-    defer server.cancel(server_io) catch {};
-    var client = try Io.concurrent(client_io, Scenario.client, .{&scenario});
-    defer client.cancel(client_io) catch {};
-    try client.await(client_io);
-    try server.await(server_io);
-    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-    return allocator.dupe(u8, world.traceBytes());
 }
 
-fn expectReplay(mode: Mode) !void {
-    for (0..4) |seed| {
-        const first = try run(std.testing.allocator, seed, mode);
-        defer std.testing.allocator.free(first);
-        const second = try run(std.testing.allocator, seed, mode);
-        defer std.testing.allocator.free(second);
-        try std.testing.expectEqualStrings(first, second);
-    }
+fn PgHarness(comptime mode: Mode) type {
+    return mar.Harness(.{
+        .init = App(mode).init,
+        .scenario = App(mode).run,
+        .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 } },
+        .name = "pg." ++ @tagName(mode),
+    });
+}
+
+/// Four seeds, each executed twice by the runner and compared exactly.
+fn expectReplay(comptime mode: Mode) !void {
+    try PgHarness(mode).fuzz(std.testing.allocator, .{ .tick_ns = 10 }, .{ .seeds = 4 });
 }
 
 test "pg authentication, affected counts, and SQL error recovery replay exactly" {
