@@ -6,8 +6,8 @@
 //! that demonstrates deterministic lost-wakeup/deadlock detection.
 //!
 //! Scenario tasks use only `std.Io` (`Io.async`, `Io.Mutex`/`Io.Condition`,
-//! `Io.sleep`); Marionette appears as the harness: world construction,
-//! `sim.control.runTasksUntilIdle` for deadlock detection, and traces.
+//! `Io.sleep`); Marionette appears as the harness: a `mar.Harness` per
+//! scenario, `runTasksUntilIdle` for deadlock detection, and traces.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -46,14 +46,14 @@ const BoundedQueue = struct {
         };
     }
 
-    fn push(self: *BoundedQueue, value: Item) void {
+    fn push(self: *BoundedQueue, value: Item) error{Closed}!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         while (self.count == queue_capacity and !self.closed) {
             self.not_full.waitUncancelable(self.io, &self.mutex);
         }
-        if (self.closed) @panic("push after close");
+        if (self.closed) return error.Closed;
 
         self.buffer[self.tail] = value;
         self.tail = (self.tail + 1) % queue_capacity;
@@ -110,7 +110,7 @@ const ConsumerArg = struct {
 };
 
 const QueueScenario = struct {
-    world: *mar.World,
+    control: mar.Control,
     queue: BoundedQueue,
     producers: [producer_count]ProducerArg = undefined,
     consumers: [consumer_count]ConsumerArg = undefined,
@@ -124,25 +124,25 @@ const QueueScenario = struct {
     close_only_started: usize = 0,
     close_only_exited: usize = 0,
 
-    fn init(world: *mar.World, io: Io, close_mode: CloseMode) QueueScenario {
+    fn init(control: mar.Control, io: Io, close_mode: CloseMode) QueueScenario {
         return .{
-            .world = world,
+            .control = control,
             .queue = BoundedQueue.init(io, close_mode),
         };
     }
 
     fn record(self: *QueueScenario, comptime fmt: []const u8, args: anytype) void {
-        self.world.record(fmt, args) catch @panic("failed to record queue trace event");
+        self.control.record(fmt, args);
     }
 
     fn appendAccepted(self: *QueueScenario, item: Item) void {
-        if (self.accepted_count >= self.accepted.len) @panic("accepted model overflow");
+        if (self.accepted_count >= self.accepted.len) return self.control.failRun(error.AcceptedModelOverflow);
         self.accepted[self.accepted_count] = item;
         self.accepted_count += 1;
     }
 
     fn appendConsumed(self: *QueueScenario, item: Item) void {
-        if (self.consumed_count >= self.consumed.len) @panic("consumed model overflow");
+        if (self.consumed_count >= self.consumed.len) return self.control.failRun(error.ConsumedModelOverflow);
         self.consumed[self.consumed_count] = item;
         self.consumed_count += 1;
     }
@@ -153,9 +153,9 @@ const QueueScenario = struct {
         for (0..producer_arg.items) |i| {
             // One-tick sleep between pushes widens the interleaving window
             // the seeded scheduler explores, like the yield it replaces.
-            Io.sleep(scenario.queue.io, .fromNanoseconds(10), .awake) catch unreachable;
+            Io.sleep(scenario.queue.io, .fromNanoseconds(10), .awake) catch return;
             const item: Item = @intCast((producer_arg.id + 1) * 1000 + i);
-            scenario.queue.push(item);
+            scenario.queue.push(item) catch |err| return scenario.control.failRun(err);
             scenario.appendAccepted(item);
             scenario.record("bounded_queue.push producer={} value={}", .{ producer_arg.id, item });
         }
@@ -187,7 +187,7 @@ const QueueScenario = struct {
             consumer_arg.id,
             scenario.close_only_started,
         });
-        if (scenario.queue.pop() != null) @panic("close-only consumer unexpectedly received an item");
+        if (scenario.queue.pop() != null) return scenario.control.failRun(error.CloseOnlyConsumerReceivedItem);
         scenario.close_only_exited += 1;
         scenario.record("bounded_queue.close_only_exited consumer={} exited={}", .{
             consumer_arg.id,
@@ -199,9 +199,9 @@ const QueueScenario = struct {
         // Sleep one tick before closing: simulated time only advances once
         // every non-timed task has parked, so all close-only consumers are
         // guaranteed to be blocked inside `pop()` when the close fires.
-        Io.sleep(scenario.queue.io, .fromNanoseconds(10), .awake) catch unreachable;
+        Io.sleep(scenario.queue.io, .fromNanoseconds(10), .awake) catch return;
         if (scenario.close_only_started != close_only_consumers) {
-            @panic("close-only consumers did not all start before the close");
+            return scenario.control.failRun(error.CloseOnlyConsumersNotStarted);
         }
         scenario.record("bounded_queue.close mode={s} reason=close_only", .{
             switch (scenario.queue.close_mode) {
@@ -223,153 +223,138 @@ const QueueScenario = struct {
     }
 };
 
-const TraceResult = struct {
-    bytes: []u8,
-    deadlocked: bool,
+const ModelApp = struct {
+    scenario: QueueScenario,
 
-    fn deinit(self: TraceResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
+    fn init(sim: mar.Sim) ModelApp {
+        return .{ .scenario = QueueScenario.init(sim.control, sim.env.io(), .broadcast) };
     }
+
+    fn run(case: *mar.SimCase(ModelApp)) !void {
+        const scenario = &case.app.scenario;
+        const io = scenario.queue.io;
+        for (0..producer_count) |i| {
+            const extra = try case.control().chooseIntLessThan("bounded_queue.extra_items", usize, max_items_per_producer);
+            scenario.producers[i] = .{ .scenario = scenario, .id = i, .items = 1 + extra };
+            _ = try Io.concurrent(io, QueueScenario.producer, .{&scenario.producers[i]});
+        }
+        for (0..consumer_count) |i| {
+            scenario.consumers[i] = .{ .scenario = scenario, .id = i };
+            _ = try Io.concurrent(io, QueueScenario.consumer, .{&scenario.consumers[i]});
+        }
+        try case.control().runTasksUntilIdle();
+        if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+    }
+
+    fn fifo(case: *const mar.SimCase(ModelApp)) !void {
+        try case.app.scenario.verify();
+    }
+
+    const checks = [_]mar.StateCheck(mar.SimCase(ModelApp)){
+        .{ .name = "bounded_queue.fifo_model", .check = fifo, .phase = .after_scenario },
+    };
 };
 
-fn runModelTrace(allocator: std.mem.Allocator, seed: u64) !TraceResult {
-    var world = try mar.World.init(std.testing.allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
+const ModelHarness = mar.Harness(.{
+    .init = ModelApp.init,
+    .scenario = ModelApp.run,
+    .checks = &ModelApp.checks,
+    .name = "bounded_queue.model",
+});
 
-    const sim = try world.simulate(.{});
-    const io = sim.env.io();
+fn CloseOnlyApp(comptime close_mode: CloseMode) type {
+    return struct {
+        const Self = @This();
 
-    var scenario = QueueScenario.init(&world, io, .broadcast);
+        scenario: QueueScenario,
 
-    for (0..producer_count) |i| {
-        const extra = try world.randomIntLessThan(usize, max_items_per_producer);
-        scenario.producers[i] = .{
-            .scenario = &scenario,
-            .id = i,
-            .items = 1 + extra,
-        };
-        _ = try Io.concurrent(io, QueueScenario.producer, .{&scenario.producers[i]});
-    }
+        fn init(sim: mar.Sim) Self {
+            return .{ .scenario = QueueScenario.init(sim.control, sim.env.io(), close_mode) };
+        }
 
-    for (0..consumer_count) |i| {
-        scenario.consumers[i] = .{
-            .scenario = &scenario,
-            .id = i,
-        };
-        _ = try Io.concurrent(io, QueueScenario.consumer, .{&scenario.consumers[i]});
-    }
+        /// The broadcast close must release every waiter. The planted
+        /// signal-one close must strand two consumers in a detected deadlock.
+        fn run(case: *mar.SimCase(Self)) !void {
+            const scenario = &case.app.scenario;
+            const io = scenario.queue.io;
+            for (0..close_only_consumers) |i| {
+                scenario.close_only[i] = .{ .scenario = scenario, .id = i };
+                _ = try Io.concurrent(io, QueueScenario.closeOnlyConsumer, .{&scenario.close_only[i]});
+            }
+            _ = try Io.concurrent(io, QueueScenario.closeOnlyCloser, .{scenario});
 
-    const run_result = sim.control.runTasksUntilIdle();
-    const deadlocked = if (run_result) false else |err| switch (err) {
-        error.Deadlock => true,
-        else => return err,
-    };
-    try std.testing.expect(!deadlocked);
-    try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-    try scenario.verify();
-
-    return .{
-        .bytes = try allocator.dupe(u8, world.traceBytes()),
-        .deadlocked = deadlocked,
+            const deadlocked = if (case.control().runTasksUntilIdle()) false else |err| switch (err) {
+                error.Deadlock => true,
+                else => return err,
+            };
+            if (scenario.close_only_started != close_only_consumers) return error.ConsumersDidNotStart;
+            switch (close_mode) {
+                .broadcast => {
+                    if (deadlocked) return error.UnexpectedDeadlock;
+                    if (scenario.close_only_exited != close_only_consumers) return error.ConsumersStranded;
+                    if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+                },
+                .signal_one => {
+                    if (!deadlocked) return error.LostWakeupNotDetected;
+                    if (scenario.close_only_exited != 1) return error.UnexpectedExits;
+                    if (case.control().blockedTaskCount() == 0) return error.NoStrandedConsumers;
+                },
+            }
+        }
     };
 }
 
-fn runCloseOnlyTrace(allocator: std.mem.Allocator, seed: u64, close_mode: CloseMode) !TraceResult {
-    var world = try mar.World.init(std.testing.allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
+fn CloseOnlyHarness(comptime close_mode: CloseMode) type {
+    return mar.Harness(.{
+        .init = CloseOnlyApp(close_mode).init,
+        .scenario = CloseOnlyApp(close_mode).run,
+        .name = "bounded_queue.close_" ++ @tagName(close_mode),
+    });
+}
 
-    const sim = try world.simulate(.{});
-    const io = sim.env.io();
-
-    var scenario = QueueScenario.init(&world, io, close_mode);
-
-    for (0..close_only_consumers) |i| {
-        scenario.close_only[i] = .{
-            .scenario = &scenario,
-            .id = i,
-        };
-        _ = try Io.concurrent(io, QueueScenario.closeOnlyConsumer, .{&scenario.close_only[i]});
-    }
-    _ = try Io.concurrent(io, QueueScenario.closeOnlyCloser, .{&scenario});
-
-    const run_result = sim.control.runTasksUntilIdle();
-    const deadlocked = if (run_result) false else |err| switch (err) {
-        error.Deadlock => true,
-        else => return err,
-    };
-
-    switch (close_mode) {
-        .broadcast => {
-            try std.testing.expect(!deadlocked);
-            try std.testing.expectEqual(close_only_consumers, scenario.close_only_started);
-            try std.testing.expectEqual(close_only_consumers, scenario.close_only_exited);
-            try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
-        },
-        .signal_one => {
-            try std.testing.expect(deadlocked);
-            try std.testing.expectEqual(close_only_consumers, scenario.close_only_started);
-            try std.testing.expectEqual(@as(usize, 1), scenario.close_only_exited);
-            try std.testing.expect(sim.control.blockedTaskCount() > 0);
+fn passingTrace(comptime H: type, seed: u64) ![]u8 {
+    var report = try H.run(std.testing.allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer report.deinit();
+    switch (report) {
+        .passed => |passed| return std.testing.allocator.dupe(u8, passed.trace),
+        .failed => |failure| {
+            failure.print();
+            return error.ScenarioFailed;
         },
     }
-
-    return .{
-        .bytes = try allocator.dupe(u8, world.traceBytes()),
-        .deadlocked = deadlocked,
-    };
 }
 
 test "bounded queue model oracle replays deterministically" {
-    const first = try runModelTrace(std.testing.allocator, 0xB011D);
-    defer first.deinit(std.testing.allocator);
-    const second = try runModelTrace(std.testing.allocator, 0xB011D);
-    defer second.deinit(std.testing.allocator);
-
-    try std.testing.expect(!first.deadlocked);
-    try std.testing.expectEqualStrings(first.bytes, second.bytes);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "bounded_queue.push") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "bounded_queue.pop") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "scheduler.block") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "scheduler.idle") != null);
+    const trace = try passingTrace(ModelHarness, 0xB011D);
+    defer std.testing.allocator.free(trace);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.push") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.pop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "scheduler.block") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "scheduler.idle") != null);
 }
 
 test "bounded queue model oracle survives seed sweep" {
-    for (0..256) |i| {
-        const trace = try runModelTrace(std.testing.allocator, 0xB011D_0000 + i);
-        try std.testing.expect(!trace.deadlocked);
-        trace.deinit(std.testing.allocator);
-    }
+    try ModelHarness.fuzz(std.testing.allocator, .{ .seed = 0xB011D_0000, .tick_ns = 10 }, .{ .seeds = 256 });
 }
 
 test "bounded queue close broadcasts to all waiting consumers" {
-    const trace = try runCloseOnlyTrace(std.testing.allocator, 0xB011D_C105E, .broadcast);
-    defer trace.deinit(std.testing.allocator);
-
-    try std.testing.expect(!trace.deadlocked);
-    try std.testing.expect(std.mem.indexOf(u8, trace.bytes, "bounded_queue.close mode=broadcast") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trace.bytes, "bounded_queue.close_only_started consumer=2 started=3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trace.bytes, "bounded_queue.close_only_exited consumer=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trace.bytes, "scheduler.deadlock") == null);
+    const trace = try passingTrace(CloseOnlyHarness(.broadcast), 0xB011D_C105E);
+    defer std.testing.allocator.free(trace);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.close mode=broadcast") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.close_only_started consumer=2 started=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.close_only_exited consumer=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "scheduler.deadlock") == null);
 }
 
 test "bounded queue close broadcast survives same close-path seed sweep" {
-    for (0..256) |i| {
-        const trace = try runCloseOnlyTrace(std.testing.allocator, 0xB011D_C105E_0000 + i, .broadcast);
-        try std.testing.expect(!trace.deadlocked);
-        trace.deinit(std.testing.allocator);
-    }
+    try CloseOnlyHarness(.broadcast).fuzz(std.testing.allocator, .{ .seed = 0xB011D_C105E_0000, .tick_ns = 10 }, .{ .seeds = 256 });
 }
 
 test "buggy bounded queue close loses wakeup and deadlocks deterministically" {
-    const first = try runCloseOnlyTrace(std.testing.allocator, 0xB011D_BAD, .signal_one);
-    defer first.deinit(std.testing.allocator);
-    const second = try runCloseOnlyTrace(std.testing.allocator, 0xB011D_BAD, .signal_one);
-    defer second.deinit(std.testing.allocator);
-
-    try std.testing.expect(first.deadlocked);
-    try std.testing.expectEqualStrings(first.bytes, second.bytes);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "bounded_queue.close mode=signal_one") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "bounded_queue.close_only_started consumer=2 started=3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "bounded_queue.close_only_exited consumer=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "scheduler.deadlock") != null);
+    const trace = try passingTrace(CloseOnlyHarness(.signal_one), 0xB011D_BAD);
+    defer std.testing.allocator.free(trace);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.close mode=signal_one") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.close_only_started consumer=2 started=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "bounded_queue.close_only_exited consumer=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "scheduler.deadlock") != null);
 }
