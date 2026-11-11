@@ -484,6 +484,13 @@ pub const SimControl = struct {
         try self.world.randomBytes(buffer);
     }
 
+    /// The runner's allocator, for harness-owned state such as servers and
+    /// outcome copies. It is untraced and never faulted; SUT code under test
+    /// should allocate through `Env.allocator()` instead.
+    pub fn harnessAllocator(self: SimControl) std.mem.Allocator {
+        return self.world.allocator;
+    }
+
     /// Current simulated time in nanoseconds.
     pub fn now(self: SimControl) clock_module.Timestamp {
         return self.world.now();
