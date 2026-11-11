@@ -28,7 +28,7 @@ const App = struct {
 
     fn noise(case: *mar.SimCase(@This())) !void {
         case.app.noise_count += 1;
-        try case.env().record("app.noise count={}", .{case.app.noise_count});
+        case.env().record("app.noise count={}", .{case.app.noise_count});
     }
 
     fn spin(case: *mar.SimCase(@This())) !void {

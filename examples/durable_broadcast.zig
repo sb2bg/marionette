@@ -256,7 +256,7 @@ const DurableBroadcast = struct {
 
     fn broadcastRecovered(self: *DurableBroadcast, retry_limit: u8) !void {
         const op = self.durable_op orelse {
-            try self.env.record("durable.broadcast.skip reason=no_recovered_op", .{});
+            self.env.record("durable.broadcast.skip reason=no_recovered_op", .{});
             return;
         };
         try self.broadcast(op, retry_limit);
@@ -279,7 +279,7 @@ const DurableBroadcast = struct {
             self.durable_op = op;
         }
 
-        try self.env.record(
+        self.env.record(
             "durable.append op={} value={} offset={} sync={s}",
             .{ op.id, op.value, offset, @tagName(sync_mode) },
         );
@@ -299,19 +299,19 @@ const DurableBroadcast = struct {
             });
 
             const op = decodeRecord(&bytes) orelse {
-                try self.env.record("durable.recover.reject offset={}", .{offset});
+                self.env.record("durable.recover.reject offset={}", .{offset});
                 break;
             };
 
             self.durable_op = op;
             self.next_offset = offset + record_size;
-            try self.env.record("durable.recover.record offset={} op={} value={}", .{ offset, op.id, op.value });
+            self.env.record("durable.recover.record offset={} op={} value={}", .{ offset, op.id, op.value });
         }
     }
 
     fn broadcast(self: *DurableBroadcast, op: Op, retry_limit: u8) !void {
         var acked: [replica_count]bool = @splat(false);
-        try self.env.record(
+        self.env.record(
             "durable.broadcast.start op={} value={} retry_limit={}",
             .{ op.id, op.value, retry_limit },
         );
@@ -319,7 +319,7 @@ const DurableBroadcast = struct {
         for (0..retry_limit) |attempt| {
             if (countTrue(&acked) >= quorum) break;
 
-            try self.env.record("durable.broadcast.attempt index={}", .{attempt});
+            self.env.record("durable.broadcast.attempt index={}", .{attempt});
             for (0..replica_count) |replica_index| {
                 if (acked[replica_index]) continue;
                 try self.send(client_node_id, @intCast(replica_index), .{
@@ -334,9 +334,9 @@ const DurableBroadcast = struct {
         const ack_count = countTrue(&acked);
         if (ack_count >= quorum) {
             self.last_quorum_op = op;
-            try self.env.record("durable.broadcast.quorum op={} value={} acks={}", .{ op.id, op.value, ack_count });
+            self.env.record("durable.broadcast.quorum op={} value={} acks={}", .{ op.id, op.value, ack_count });
         } else {
-            try self.env.record("durable.broadcast.no_quorum op={} value={} acks={}", .{ op.id, op.value, ack_count });
+            self.env.record("durable.broadcast.no_quorum op={} value={} acks={}", .{ op.id, op.value, ack_count });
         }
     }
 
@@ -347,7 +347,7 @@ const DurableBroadcast = struct {
             const replica_index: usize = @intCast(from);
             try self.replica_endpoints[replica_index].send(to, payload);
         }
-        try self.env.record(
+        self.env.record(
             "durable.message kind={s} from={} to={} op={} value={}",
             .{ @tagName(payload.kind), from, to, payload.op_id, payload.value },
         );
@@ -383,7 +383,7 @@ const DurableBroadcast = struct {
                     .id = envelope.message.op_id,
                     .value = envelope.message.value,
                 });
-                try self.env.record(
+                self.env.record(
                     "durable.replica_accept replica={} op={} value={} accepted={}",
                     .{ to, envelope.message.op_id, envelope.message.value, accepted },
                 );
@@ -400,7 +400,7 @@ const DurableBroadcast = struct {
                 if (to != client_node_id or envelope.from >= replica_count) return;
                 const replica_index: usize = @intCast(envelope.from);
                 acked[replica_index] = true;
-                try self.env.record(
+                self.env.record(
                     "durable.ack replica={} op={} value={}",
                     .{ envelope.from, envelope.message.op_id, envelope.message.value },
                 );
@@ -416,7 +416,7 @@ fn quorumAcknowledgementsAreDurable(case: *const Case) !void {
 fn durableServiceIsSafe(service: *const DurableBroadcast) !void {
     if (service.last_quorum_op) |op| {
         if (!sameOp(service.durable_op, op)) {
-            try service.env.record(
+            service.env.record(
                 "durable.invariant_violation reason=quorum_without_durable op={} value={} durable_present={}",
                 .{ op.id, op.value, service.durable_op != null },
             );
@@ -430,7 +430,7 @@ fn durableServiceIsSafe(service: *const DurableBroadcast) !void {
         accepted_count += 1;
 
         if (!sameOp(service.durable_op, accepted)) {
-            try service.env.record(
+            service.env.record(
                 "durable.invariant_violation reason=replica_without_durable replica={} op={} value={} durable_present={}",
                 .{ replica_index, accepted.id, accepted.value, service.durable_op != null },
             );
@@ -438,7 +438,7 @@ fn durableServiceIsSafe(service: *const DurableBroadcast) !void {
         }
     }
 
-    try service.env.record(
+    service.env.record(
         "durable.check quorum_durable=ok accepted_count={} durable_present={}",
         .{ accepted_count, service.durable_op != null },
     );

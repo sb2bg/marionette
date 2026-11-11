@@ -57,4 +57,5 @@ test {
 
 test {
     _ = @import("network_deadlines_090.zig");
+    _ = @import("harness_api.zig");
 }

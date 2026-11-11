@@ -130,16 +130,16 @@ fn recoveredStateIsSafe(case: *const Case) !void {
     const store = &case.app;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
-        try store.recorder.record("kv.invariant_violation reason=committed_missing_or_wrong", .{});
+        store.recorder.record("kv.invariant_violation reason=committed_missing_or_wrong", .{});
         return error.CommittedRecordNotRecovered;
     }
 
     if (store.countKey(volatile_key) != 0) {
-        try store.recorder.record("kv.invariant_violation reason=unsynced_record_recovered", .{});
+        store.recorder.record("kv.invariant_violation reason=unsynced_record_recovered", .{});
         return error.UnsyncedRecordRecovered;
     }
 
-    try store.recorder.record(
+    store.recorder.record(
         "kv.check recovery=ok committed_key={} committed_value={} recovered_records={}",
         .{ committed_key, committed_value, store.recovered_count },
     );
@@ -149,22 +149,22 @@ fn recoveredStateIsWithinWindow(case: *const Case) !void {
     const store = &case.app;
 
     if (store.countKey(committed_key) != 1 or store.valueFor(committed_key) != committed_value) {
-        try store.recorder.record("kv.invariant_violation reason=durable_truth_lost", .{});
+        store.recorder.record("kv.invariant_violation reason=durable_truth_lost", .{});
         return error.DurableTruthLost;
     }
 
     const volatile_count = store.countKey(volatile_key);
     if (volatile_count > 1) {
-        try store.recorder.record("kv.invariant_violation reason=duplicate_recovered", .{});
+        store.recorder.record("kv.invariant_violation reason=duplicate_recovered", .{});
         return error.DuplicateRecovered;
     }
     const volatile_survived = volatile_count == 1;
     if (volatile_survived and store.valueFor(volatile_key) != volatile_value) {
-        try store.recorder.record("kv.invariant_violation reason=damaged_record_accepted", .{});
+        store.recorder.record("kv.invariant_violation reason=damaged_record_accepted", .{});
         return error.DamagedRecordAccepted;
     }
 
-    try store.recorder.record(
+    store.recorder.record(
         "kv.check recovery_window=ok committed_recovered=true volatile_survived={}",
         .{volatile_survived},
     );
@@ -231,7 +231,7 @@ const KVStore = struct {
     fn reopen(self: *KVStore) !void {
         self.wal.close(self.io);
         self.wal = try self.root.openFile(self.io, wal_path, .{ .mode = .read_write });
-        try self.recorder.record("kv.reopen path={s}", .{wal_path});
+        self.recorder.record("kv.reopen path={s}", .{wal_path});
     }
 
     fn put(self: *KVStore, key: u32, value: u32, sync_mode: SyncMode) !void {
@@ -248,7 +248,7 @@ const KVStore = struct {
             try self.wal.sync(self.io);
         }
 
-        try self.recorder.record(
+        self.recorder.record(
             "kv.put key={} value={} offset={} sync={s}",
             .{ key, value, offset, @tagName(sync_mode) },
         );
@@ -267,13 +267,13 @@ const KVStore = struct {
             }
 
             const decoded = decodeRecord(&bytes, mode) orelse {
-                try self.recorder.record("kv.recover.reject offset={} mode={s}", .{ offset, @tagName(mode) });
+                self.recorder.record("kv.recover.reject offset={} mode={s}", .{ offset, @tagName(mode) });
                 break;
             };
 
             self.recovered[self.recovered_count] = decoded;
             self.recovered_count += 1;
-            try self.recorder.record(
+            self.recorder.record(
                 "kv.recover.record offset={} key={} value={} mode={s}",
                 .{ offset, decoded.key, decoded.value, @tagName(mode) },
             );

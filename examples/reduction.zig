@@ -6,11 +6,11 @@ const Service = struct {
     recorder: mar.Recorder,
     applied: u32 = 0,
     fn apply(self: *@This()) !void {
-        var operation = try self.recorder.beginOperation("apply.request", null);
+        var operation = self.recorder.beginOperation("apply.request", null);
         // Planted bug: the repeated request is applied a second time.
         self.applied += 1;
-        _ = try operation.event("service.applied", &.{mar.traceField("count", .{ .uint = self.applied })});
-        try operation.end();
+        _ = operation.event("service.applied", &.{mar.traceField("count", .{ .uint = self.applied })});
+        operation.end();
     }
 };
 const Case = mar.SimCase(Service);
@@ -18,7 +18,7 @@ fn init(sim: mar.Sim) Service {
     return .{ .recorder = sim.env.recorder() };
 }
 fn telemetry(case: *Case) !void {
-    try case.env().record("service.telemetry", .{});
+    case.env().record("service.telemetry", .{});
 }
 fn apply(case: *Case) !void {
     try case.app.apply();

@@ -351,6 +351,14 @@ pub const RunFailureKind = enum(u8) {
     /// still runnable or pending. Unlike a watchdog `livelock`, the decision
     /// tape is complete, so the failure replays exactly and can be reduced.
     step_budget_exceeded,
+    /// A task or the scenario failed the run with `Control.failRun`. The
+    /// scheduler stopped at that point; `error_name` names the error. The
+    /// decision tape is complete, so the failure replays and reduces.
+    task_failed,
+    /// An app-facing `Recorder` or `Env.record` call failed: an invalid
+    /// event, a bad causal reference, or exhausted memory. Recording never
+    /// fails at the call site; the runner reports it at the next boundary.
+    recording_failed,
 };
 
 /// Optional identity constraints for `expectSimFailure`.

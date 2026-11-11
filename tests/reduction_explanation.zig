@@ -9,7 +9,7 @@ const App = struct {
     fn noise(case: *mar.SimCase(@This())) !void {
         var bytes: [8]u8 = undefined;
         try case.control().world.randomBytes(&bytes);
-        try case.env().record("app.noise", .{});
+        case.env().record("app.noise", .{});
     }
     fn bug(case: *mar.SimCase(@This())) !void {
         case.app.broken = true;
@@ -145,17 +145,22 @@ test "explanation: causal IDs and spans are replay stable and reject future pare
     var world = try mar.World.init(std.testing.allocator, .{ .seed = 1 });
     defer world.deinit();
     const recorder = mar.Recorder.fromWorld(&world);
-    const cause = try recorder.event("app.request", &.{}, null);
-    var operation = try recorder.beginOperation("request.commit", cause);
-    const event_id = try operation.event("app.persist", &.{});
+    const cause = recorder.event("app.request", &.{}, null);
+    var operation = recorder.beginOperation("request.commit", cause);
+    const event_id = operation.event("app.persist", &.{});
     try std.testing.expect(event_id.? > operation.start.?);
-    try operation.end();
-    try std.testing.expectError(error.OperationEnded, operation.end());
+    operation.end();
+    try std.testing.expectEqual(@as(?anyerror, null), world.recordingFailure());
+    // Misuse never fails at the call site; the first one is latched for the
+    // runner to report.
+    operation.end();
+    try std.testing.expectEqual(@as(?anyerror, error.OperationEnded), world.recordingFailure());
     const count = world.nextEventIndex();
-    try std.testing.expectError(error.InvalidCausalEvent, recorder.event("app.invalid", &.{}, count));
+    try std.testing.expectEqual(@as(?u64, null), recorder.event("app.invalid", &.{}, count));
     try std.testing.expectEqual(count, world.nextEventIndex());
-    var disabled = try mar.Recorder.none().beginOperation("disabled", null);
-    try disabled.end();
+    try std.testing.expectEqual(@as(?anyerror, error.OperationEnded), world.recordingFailure());
+    var disabled = mar.Recorder.none().beginOperation("disabled", null);
+    disabled.end();
     try std.testing.expect(disabled.start == null);
 }
 
@@ -169,12 +174,12 @@ const ProcessApp = struct {
         const io = env.io();
         const file = try std.Io.Dir.cwd().createFile(io, "state", .{ .truncate = false, .read = true });
         errdefer file.close(io);
-        try env.record("process.opened", .{});
+        env.record("process.opened", .{});
         return .{ .io = io, .file = file, .recorder = env.recorder() };
     }
     pub fn deinit(self: *@This()) void {
         self.file.close(self.io);
-        self.recorder.record("process.closed", .{}) catch {};
+        self.recorder.record("process.closed", .{});
     }
 };
 
@@ -274,10 +279,12 @@ fn causalAllocationCase(allocator: std.mem.Allocator) !void {
     var world = try mar.World.init(allocator, .{ .seed = 1 });
     defer world.deinit();
     const recorder = mar.Recorder.fromWorld(&world);
-    const cause = try recorder.event("app.request", &.{}, null);
-    var operation = try recorder.beginOperation("commit", cause);
-    _ = try operation.event("app.persist", &.{});
-    try operation.end();
+    const cause = recorder.event("app.request", &.{}, null);
+    var operation = recorder.beginOperation("commit", cause);
+    _ = operation.event("app.persist", &.{});
+    operation.end();
+    // Recording latches its first failure instead of returning it.
+    if (world.recordingFailure()) |err| return err;
 }
 
 test "explanation: causal event allocation failures release temporary fields" {

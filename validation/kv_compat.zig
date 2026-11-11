@@ -189,10 +189,10 @@ pub fn recoveryWindowCrashPointSweep(case: *Case) !void {
         phase_count + 1,
     ));
     if (choice == 0) {
-        try store.recorder.record("kv_compat.sweep crash_point=no_compaction", .{});
+        store.recorder.record("kv_compat.sweep crash_point=no_compaction", .{});
     } else {
         const phase: CompactPhase = @fromBackingInt(@intCast(choice - 1));
-        try store.recorder.record("kv_compat.sweep crash_point={s}", .{@tagName(phase)});
+        store.recorder.record("kv_compat.sweep crash_point={s}", .{@tagName(phase)});
         try store.compactUntil(phase);
     }
 
@@ -270,12 +270,12 @@ const CompatStore = struct {
         try self.wal.writePositionalAll(self.io, &bytes, self.wal_len);
         self.wal_len += record_size;
         self.table[@intCast(key)] = value;
-        try self.recorder.record("kv_compat.put key={} value={}", .{ key, value });
+        self.recorder.record("kv_compat.put key={} value={}", .{ key, value });
     }
 
     fn commit(self: *CompatStore) !void {
         try self.wal.sync(self.io);
-        try self.recorder.record("kv_compat.commit wal_len={}", .{self.wal_len});
+        self.recorder.record("kv_compat.commit wal_len={}", .{self.wal_len});
     }
 
     fn reopen(self: *CompatStore) !void {
@@ -301,21 +301,21 @@ const CompatStore = struct {
             try tmp.writePositionalAll(self.io, &bytes, offset);
             offset += record_size;
         }
-        try self.recorder.record("kv_compat.compact phase=tmp_written", .{});
+        self.recorder.record("kv_compat.compact phase=tmp_written", .{});
         if (phase == .tmp_written) return;
 
         try tmp.sync(self.io);
-        try self.recorder.record("kv_compat.compact phase=tmp_synced", .{});
+        self.recorder.record("kv_compat.compact phase=tmp_synced", .{});
         tmp.close(self.io);
         tmp_closed = true;
         if (phase == .tmp_synced) return;
 
         try Io.Dir.cwd().rename(tmp_path, Io.Dir.cwd(), table_path, self.io);
-        try self.recorder.record("kv_compat.compact phase=renamed", .{});
+        self.recorder.record("kv_compat.compact phase=renamed", .{});
         if (phase == .renamed) return;
 
         try self.syncDirKvc();
-        try self.recorder.record("kv_compat.compact phase=dir_synced", .{});
+        self.recorder.record("kv_compat.compact phase=dir_synced", .{});
         if (phase == .dir_synced) return;
 
         self.wal.close(self.io);
@@ -323,11 +323,11 @@ const CompatStore = struct {
         self.wal = try Io.Dir.cwd().createFile(self.io, wal_path, .{ .read = true });
         try self.wal.sync(self.io);
         self.wal_len = 0;
-        try self.recorder.record("kv_compat.compact phase=wal_cleared_unsynced", .{});
+        self.recorder.record("kv_compat.compact phase=wal_cleared_unsynced", .{});
         if (phase == .wal_cleared_unsynced) return;
 
         try self.syncDirKvc();
-        try self.recorder.record("kv_compat.compact phase=wal_cleared", .{});
+        self.recorder.record("kv_compat.compact phase=wal_cleared", .{});
     }
 
     fn recover(self: *CompatStore) !void {
@@ -339,11 +339,11 @@ const CompatStore = struct {
         if (deleteIfExists(self.io, tmp_path)) |deleted| {
             if (deleted) {
                 try self.syncDirKvc();
-                try self.recorder.record("kv_compat.recover dropped_tmp=true", .{});
+                self.recorder.record("kv_compat.recover dropped_tmp=true", .{});
             }
         } else |err| return err;
 
-        try self.recorder.record(
+        self.recorder.record(
             "kv_compat.recover table_records={} wal_records={}",
             .{ table_records, wal_records },
         );

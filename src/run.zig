@@ -848,7 +848,8 @@ fn runOnceWithSimCase(
         }
         const scheduler_failure = state.control().tasks.failure();
         const property_failure = state.property_failure;
-        if (scheduler_failure != null or property_failure != null or scenario_error != null) {
+        const recording_failure = world.recordingFailure();
+        if (scheduler_failure != null or property_failure != null or scenario_error != null or recording_failure != null) {
             // Explain the network at the failure: sockets, queues, and the
             // faults still active. A deadlock already recorded its own.
             if (scheduler_failure == null) {
@@ -862,6 +863,7 @@ fn runOnceWithSimCase(
             try finishManagedProcesses(sim);
             if (property_failure) |failure| return try failureFromWorld(allocator, options, .check_failed, &world, failure.err, failure.name);
             if (scheduler_failure) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
+            if (recording_failure) |err| return try failureFromWorld(allocator, options, .recording_failed, &world, err, null);
             return try failureFromWorld(allocator, options, .scenario_error, &world, scenario_error.?, null);
         }
     }
@@ -873,6 +875,7 @@ fn runOnceWithSimCase(
     // Application cleanup still schedules work: a budget or deadlock reached
     // there fails the run instead of passing with the failure in its trace.
     if (sim.control.tasks.failure()) |failure| return try schedulerFailureFromWorld(allocator, options, &world, failure);
+    if (world.recordingFailure()) |err| return try failureFromWorld(allocator, options, .recording_failed, &world, err, null);
     if (options.check_resources) {
         sim.control.checkResources() catch |err| switch (err) {
             error.ResourceLeak => return try failureFromWorld(
@@ -965,6 +968,14 @@ fn schedulerFailureFromWorld(
             .step_budget_exceeded,
             world,
             "StepBudgetExceeded",
+            null,
+        ),
+        .task_failed => |error_name| failureFromWorldName(
+            allocator,
+            options,
+            .task_failed,
+            world,
+            error_name,
             null,
         ),
         .scheduler_error => |error_name| failureFromWorldName(
@@ -1332,12 +1343,12 @@ fn simCaseScenario(case: *SimCase(SimCaseApp)) !void {
     _ = (try case.sim.envForNode(0)).io();
     _ = try case.sim.endpoint(u8, 0);
     try case.control().tick();
-    try case.env().record("simcase.value value={}", .{case.app.value});
+    case.env().record("simcase.value value={}", .{case.app.value});
 }
 
 fn simCaseCheck(case: *const SimCase(SimCaseApp)) !void {
     if (case.app.value != 1) return error.BadSimCaseState;
-    try case.env().record("simcase.check value={}", .{case.app.value});
+    case.env().record("simcase.check value={}", .{case.app.value});
 }
 
 test "runSimCase: initializes app from simulation and deinitializes each replay" {
@@ -1441,7 +1452,7 @@ const TeardownTraceApp = struct {
 
     pub fn deinit(self: *TeardownTraceApp) void {
         teardown_trace_count += 1;
-        self.env.record("app.deinit count={}", .{teardown_trace_count}) catch unreachable;
+        self.env.record("app.deinit count={}", .{teardown_trace_count});
     }
 };
 
@@ -1516,7 +1527,7 @@ test "expectSimFuzz rejects zero-run campaigns" {
 }
 
 fn failingSimCaseCheck(case: *const SimCase(SimCaseApp)) !void {
-    try case.env().record("simcase.check.fail value={}", .{case.app.value});
+    case.env().record("simcase.check.fail value={}", .{case.app.value});
     return error.SimCaseInvariantBroken;
 }
 
@@ -1643,7 +1654,7 @@ fn awaitNonYieldingTask(case: *SimCase(DeadlockApp)) !void {
 }
 
 fn runNonYieldingOnMain(case: *SimCase(DeadlockApp)) !void {
-    try case.env().record("app.progress event=payload", .{});
+    case.env().record("app.progress event=payload", .{});
     nonYieldingTask();
 }
 

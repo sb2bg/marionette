@@ -168,6 +168,9 @@ pub const World = struct {
     /// Simulator resources owned by the world and torn down in reverse order.
     teardowns: std.ArrayList(Teardown),
     execution_observer: ?ExecutionObserver = null,
+    /// First failure of an app-facing recording call. Recording never fails at
+    /// the call site; the runner fails the run at its next boundary.
+    recording_failure: ?anyerror = null,
 
     /// Destructor signature for world-owned simulator resources.
     pub const TeardownFn = *const fn (*anyopaque, std.mem.Allocator) void;
@@ -229,6 +232,16 @@ pub const World = struct {
         }
 
         return world;
+    }
+
+    /// Latch the first app-facing recording failure.
+    pub fn latchRecordingFailure(self: *World, err: anyerror) void {
+        if (self.recording_failure == null) self.recording_failure = err;
+    }
+
+    /// The first app-facing recording failure, if any.
+    pub fn recordingFailure(self: *const World) ?anyerror {
+        return self.recording_failure;
     }
 
     fn recordInit(self: *World, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {

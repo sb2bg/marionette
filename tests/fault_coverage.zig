@@ -193,7 +193,7 @@ const Wide = struct {
         const field_count = 33;
         comptime var format: []const u8 = "app.wide";
         inline for (0..field_count) |index| format = format ++ std.fmt.comptimePrint(" k{}=1", .{index});
-        try case.env().record(format, .{});
+        case.env().record(format, .{});
     }
 };
 

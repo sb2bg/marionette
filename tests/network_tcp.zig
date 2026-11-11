@@ -458,7 +458,7 @@ const CapsuleApp = struct {
         try writeAll(client_io, client, "capsule");
         var buffer: [16]u8 = undefined;
         const count = try read(server_io, server, &buffer);
-        try case.env().record("app.read len={}", .{count});
+        case.env().record("app.read len={}", .{count});
     }
 };
 

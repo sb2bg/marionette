@@ -31,7 +31,7 @@ pub fn scenario(case: *Case) !void {
     const reuse_request_id = try env.buggify(.reuse_request_id_across_accounts, .oneIn(8));
     const bob_request_id = if (reuse_request_id) alice_request_id else alice_request_id + 1;
 
-    try env.record(
+    env.record(
         "idempotency.requests alice_id={} bob_id={} reused={}",
         .{ alice_request_id, bob_request_id, reuse_request_id },
     );
@@ -44,14 +44,14 @@ fn balancesAreSafe(case: *const Case) !void {
     const service = &case.app;
 
     if (service.balance(.alice) != deposit_cents or service.balance(.bob) != deposit_cents) {
-        try service.env.record(
+        service.env.record(
             "idempotency.invariant_violation alice_balance={} bob_balance={} last_request_id={?}",
             .{ service.balance(.alice), service.balance(.bob), service.last_request_id },
         );
         return error.AccountDepositLost;
     }
 
-    try service.env.record(
+    service.env.record(
         "idempotency.check balances=ok alice_balance={} bob_balance={}",
         .{ service.balance(.alice), service.balance(.bob) },
     );
@@ -71,7 +71,7 @@ const PaymentService = struct {
     fn deposit(self: *PaymentService, account: Account, request_id: u32, cents: u32) !void {
         // Bug: request IDs are account-local, but this cache is global.
         if (self.last_request_id == request_id) {
-            try self.env.record(
+            self.env.record(
                 "idempotency.deposit account={s} request_id={} cents={} accepted=false reason=global_duplicate",
                 .{ @tagName(account), request_id, cents },
             );
@@ -84,7 +84,7 @@ const PaymentService = struct {
             .bob => self.bob_balance += cents,
         }
 
-        try self.env.record(
+        self.env.record(
             "idempotency.deposit account={s} request_id={} cents={} accepted=true",
             .{ @tagName(account), request_id, cents },
         );

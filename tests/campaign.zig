@@ -358,7 +358,7 @@ const Noisy = struct {
     }
     fn addNoise(case: *mar.SimCase(@This())) !void {
         case.app.noise += 1;
-        try case.env().record("app.noise count={}", .{case.app.noise});
+        case.env().record("app.noise count={}", .{case.app.noise});
     }
     fn scenario(case: *mar.SimCase(@This())) !void {
         try case.action("noise.before", addNoise);
@@ -478,7 +478,7 @@ const Sleepy = struct {
         while (true) std.Io.sleep(io, .fromNanoseconds(10), .awake) catch return;
     }
     fn noise(case: *mar.SimCase(@This())) !void {
-        try case.env().record("app.noise", .{});
+        case.env().record("app.noise", .{});
     }
     fn scenario(case: *mar.SimCase(@This())) !void {
         try case.action("noise", noise);

@@ -38,6 +38,8 @@ pub const TaskSchedulerError = error{
     TaskNotRunning,
     TaskSuspendedWithoutYield,
     StepBudgetExceeded,
+    /// A task or the scenario called `failRun`.
+    RunFailedFromTask,
 } || fiber.Error || std.mem.Allocator.Error || world_module.TraceError || world_module.DecisionError;
 
 /// Opaque wait-set key. Futexes will key this by address; timers and I/O can
@@ -676,6 +678,7 @@ pub const TaskScheduler = struct {
     // optimized callers must treat the switch as a control-flow discontinuity.
     noinline fn stepOnce(self: *Self) TaskSchedulerError!StepOutcome {
         var scheduler = self;
+        if (scheduler.failure) |failure| if (failure == .task_failed) return error.RunFailedFromTask;
         if (scheduler.ready.items.len == 0) return .idle;
         try scheduler.consumeStep();
 
@@ -1203,6 +1206,17 @@ pub const TaskScheduler = struct {
         try self.recordCensus("scheduler.deadlock");
     }
 
+    /// Latch a harness-requested run failure. Records which task asked.
+    pub fn failRun(self: *Self, err: anyerror) void {
+        if (self.failure != null) return;
+        self.failure = .{ .task_failed = @errorName(err) };
+        const task: world_module.TraceValue = if (self.current) |current| .{ .uint = current.id } else .{ .literal = "main" };
+        self.world.recordFields("run.task_failure", &.{
+            traceField("task", task),
+            traceField("error", .{ .text = @errorName(err) }),
+        }) catch {};
+    }
+
     fn latchSchedulerError(self: *Self, err: anyerror) void {
         if (self.failure != null) return;
         self.failure = .{ .scheduler_error = @errorName(err) };
@@ -1391,11 +1405,17 @@ fn taskControlInvoke(ptr: *anyopaque, entry: *const fn (*anyopaque) void, arg: *
     if (!boundary.completed) return error.SchedulerFailed;
 }
 
+fn taskControlFailRun(ptr: *anyopaque, err: anyerror) void {
+    const scheduler: *TaskScheduler = @ptrCast(@alignCast(ptr));
+    scheduler.failRun(err);
+}
+
 const task_control_vtable: io_internal.TaskControl.VTable = .{
     .run_until_idle = taskControlRunUntilIdle,
     .blocked_count = taskControlBlockedCount,
     .failure = taskControlFailure,
     .invoke = taskControlInvoke,
+    .fail_run = taskControlFailRun,
 };
 
 fn processTaskControlKillProcess(ptr: *anyopaque, process_id: io_internal.ProcessId) void {

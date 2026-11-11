@@ -35,7 +35,6 @@ fn runPressureScenario(case: *Case, mode: PutMode) !void {
     try case.control().allocation.setFaults(.{ .fail_after = 0 });
     table.put(2, valueFor(2, &buffer), mode) catch |err| switch (err) {
         error.OutOfMemory => {},
-        else => return err,
     };
 
     try case.control().allocation.setFaults(.{});
@@ -52,7 +51,6 @@ fn buggifyScenario(case: *Case) !void {
     while (key <= buggify_put_count) : (key += 1) {
         table.put(key, valueFor(key, &buffer), .strict) catch |err| switch (err) {
             error.OutOfMemory => {},
-            else => return err,
         };
     }
 
@@ -63,7 +61,7 @@ fn commitIntegrity(case: *const Case) !void {
     const table = &case.app;
 
     if (table.committed_count != table.entries.items.len) {
-        try table.env.record(
+        table.env.record(
             "memtable.invariant_violation reason=phantom_commit committed={} entries={}",
             .{ table.committed_count, table.entries.items.len },
         );
@@ -74,7 +72,7 @@ fn commitIntegrity(case: *const Case) !void {
     for (table.entries.items, 0..) |entry, index| {
         for (table.entries.items[0..index]) |earlier| {
             if (earlier.key == entry.key) {
-                try table.env.record(
+                table.env.record(
                     "memtable.invariant_violation reason=duplicate_key key={}",
                     .{entry.key},
                 );
@@ -82,7 +80,7 @@ fn commitIntegrity(case: *const Case) !void {
             }
         }
         if (!std.mem.eql(u8, entry.value, valueFor(entry.key, &buffer))) {
-            try table.env.record(
+            table.env.record(
                 "memtable.invariant_violation reason=corrupt_entry key={}",
                 .{entry.key},
             );
@@ -90,7 +88,7 @@ fn commitIntegrity(case: *const Case) !void {
         }
     }
 
-    try table.env.record(
+    table.env.record(
         "memtable.check commit_integrity=ok committed={} rejected={}",
         .{ table.committed_count, table.rejected_count },
     );
@@ -145,7 +143,7 @@ const Memtable = struct {
         };
 
         if (mode == .strict) self.committed_count += 1;
-        try self.env.record(
+        self.env.record(
             "memtable.put key={} accepted=true committed={}",
             .{ key, self.committed_count },
         );
@@ -153,7 +151,7 @@ const Memtable = struct {
 
     fn recordRejected(self: *Memtable, key: u32) !void {
         self.rejected_count += 1;
-        try self.env.record(
+        self.env.record(
             "memtable.put key={} accepted=false reason=allocation_rejected committed={}",
             .{ key, self.committed_count },
         );

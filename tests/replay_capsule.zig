@@ -9,7 +9,7 @@ const App = struct {
         _ = try case.control().world.chooseBool("workload.flip");
         var bytes: [256]u8 = undefined;
         case.env().io().random(&bytes);
-        try case.env().record("app.digest value={}", .{std.hash.Wyhash.hash(0, &bytes)});
+        case.env().record("app.digest value={}", .{std.hash.Wyhash.hash(0, &bytes)});
     }
     fn fail(case: *mar.SimCase(@This())) !void {
         try scenario(case);
@@ -189,7 +189,7 @@ const PropertyApp = struct {
     }
     fn scenario(case: *mar.SimCase(@This())) !void {
         case.app.value = 1;
-        try case.env().record("property.scenario", .{});
+        case.env().record("property.scenario", .{});
     }
     fn brokenScenario(case: *mar.SimCase(@This())) !void {
         try scenario(case);
@@ -197,20 +197,20 @@ const PropertyApp = struct {
     }
     fn initial(case: *const mar.SimCase(@This())) !void {
         if (case.app.value != 0) return error.BadInitialState;
-        try case.env().record("property.initial", .{});
+        case.env().record("property.initial", .{});
     }
     fn final(case: *const mar.SimCase(@This())) !void {
         if (case.app.value != 1) return error.BadFinalState;
-        try case.env().record("property.final", .{});
+        case.env().record("property.final", .{});
     }
     fn invariant(case: *const mar.SimCase(@This())) !void {
-        try case.env().record("property.invariant value={}", .{case.app.value});
+        case.env().record("property.invariant value={}", .{case.app.value});
     }
     fn fail(_: *const mar.SimCase(@This())) !void {
         return error.InvariantBroken;
     }
     pub fn deinit(self: *@This()) void {
-        self.sim.env.record("property.cleanup", .{}) catch {};
+        self.sim.env.record("property.cleanup", .{});
     }
 };
 

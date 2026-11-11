@@ -206,7 +206,7 @@ const Replicas = struct {
         std.debug.assert(options.retry_limit > 0);
 
         var acked: [replica_count]bool = @splat(false);
-        try self.env.record(
+        self.env.record(
             "register.write.start version={} value={} retry_limit={}",
             .{ options.version, options.value, options.retry_limit },
         );
@@ -214,7 +214,7 @@ const Replicas = struct {
         for (0..options.retry_limit) |attempt| {
             if (countTrue(&acked) >= quorum) break;
 
-            try self.env.record("register.write.attempt index={}", .{attempt});
+            self.env.record("register.write.attempt index={}", .{attempt});
             for (0..replica_count) |replica_index| {
                 if (acked[replica_index]) continue;
                 try self.send(@intCast(replica_index), .{
@@ -228,14 +228,14 @@ const Replicas = struct {
 
         const ack_count = countTrue(&acked);
         if (ack_count < quorum) {
-            try self.env.record(
+            self.env.record(
                 "register.write.no_quorum version={} acks={}",
                 .{ options.version, ack_count },
             );
             return;
         }
 
-        try self.env.record(
+        self.env.record(
             "register.write.quorum version={} value={} acks={}",
             .{ options.version, options.value, ack_count },
         );
@@ -251,7 +251,7 @@ const Replicas = struct {
 
     fn send(self: *Replicas, to: mar.NodeId, payload: MessagePayload) !void {
         try self.client.send(to, payload);
-        try self.env.record(
+        self.env.record(
             "register.message kind={s} to={} version={} value={}",
             .{ @tagName(payload.kind), to, payload.version, payload.value },
         );
@@ -282,7 +282,7 @@ const Replicas = struct {
         switch (envelope.message.kind) {
             .propose => {
                 const accepted = self.state[replica_index].accept(envelope.message.version, envelope.message.value);
-                try self.env.record(
+                self.env.record(
                     "replica.accept replica={} version={} value={} accepted={}",
                     .{ replica_node, envelope.message.version, envelope.message.value, accepted },
                 );
@@ -290,7 +290,7 @@ const Replicas = struct {
             },
             .commit => {
                 const committed = self.state[replica_index].commit(envelope.message.version, envelope.message.value);
-                try self.env.record(
+                self.env.record(
                     "replica.commit replica={} version={} value={} committed={}",
                     .{ replica_node, envelope.message.version, envelope.message.value, committed },
                 );
@@ -301,7 +301,7 @@ const Replicas = struct {
 
     fn forceCommit(self: *Replicas, replica_index: usize, version: u64, value: u64) !void {
         self.state[replica_index].committed = .{ .version = version, .value = value };
-        try self.env.record(
+        self.env.record(
             "replica.commit replica={} version={} value={} forced=true",
             .{ replica_index, version, value },
         );
@@ -324,7 +324,7 @@ fn checkCommittedAgreement(replicas: *const Replicas) !void {
         if (committed.version != expected.?.version or
             committed.value != expected.?.value)
         {
-            try replicas.env.record(
+            replicas.env.record(
                 "register.invariant_violation kind=committed_divergence replica={} expected_version={} expected_value={} actual_version={} actual_value={}",
                 .{
                     replica_index,
@@ -338,7 +338,7 @@ fn checkCommittedAgreement(replicas: *const Replicas) !void {
         }
     }
 
-    try replicas.env.record(
+    replicas.env.record(
         "register.check committed_agreement=ok committed_count={}",
         .{committed_count},
     );
@@ -350,7 +350,7 @@ fn checkCommittedQuorumAccepted(replicas: *const Replicas) !void {
 
         const accepted_count = countAccepted(replicas, committed.version, committed.value);
         if (accepted_count < quorum) {
-            try replicas.env.record(
+            replicas.env.record(
                 "register.invariant_violation kind=commit_without_accepted_quorum replica={} version={} value={} accepted_count={}",
                 .{ replica_index, committed.version, committed.value, accepted_count },
             );
@@ -358,7 +358,7 @@ fn checkCommittedQuorumAccepted(replicas: *const Replicas) !void {
         }
     }
 
-    try replicas.env.record("register.check committed_quorum=ok", .{});
+    replicas.env.record("register.check committed_quorum=ok", .{});
 }
 
 fn checkReplicaCommitted(
@@ -370,7 +370,7 @@ fn checkReplicaCommitted(
     const replica_index: usize = @intCast(replica_id);
     const replica = replicas.state[replica_index];
     const committed = replica.committed orelse {
-        try replicas.env.record(
+        replicas.env.record(
             "register.invariant_violation kind=replica_not_committed replica={} expected_version={} expected_value={} actual_version=null actual_value=null",
             .{ replica_id, version, value },
         );
@@ -378,14 +378,14 @@ fn checkReplicaCommitted(
     };
 
     if (committed.version != version or committed.value != value) {
-        try replicas.env.record(
+        replicas.env.record(
             "register.invariant_violation kind=replica_not_committed replica={} expected_version={} expected_value={} actual_version={} actual_value={}",
             .{ replica_id, version, value, committed.version, committed.value },
         );
         return error.ReplicaNotCommitted;
     }
 
-    try replicas.env.record(
+    replicas.env.record(
         "register.check replica_committed=ok replica={} version={} value={}",
         .{ replica_id, version, value },
     );

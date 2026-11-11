@@ -157,6 +157,8 @@ pub const TaskControl = struct {
         /// The simulation's deterministic step budget ran out.
         step_budget_exceeded,
         scheduler_error: []const u8,
+        /// `failRun` stopped the run; the payload is the error name.
+        task_failed: []const u8,
     };
 
     pub const VTable = struct {
@@ -164,7 +166,16 @@ pub const TaskControl = struct {
         blocked_count: *const fn (ptr: *const anyopaque) usize,
         failure: *const fn (ptr: *const anyopaque) ?Failure,
         invoke: ?*const fn (ptr: *anyopaque, entry: *const fn (*anyopaque) void, arg: *anyopaque) CallbackError!void = null,
+        fail_run: ?*const fn (ptr: *anyopaque, err: anyerror) void = null,
     };
+
+    /// Fail the run from the current task or the scenario. The first terminal
+    /// failure wins; the scheduler dispatches nothing more, and the runner
+    /// reports `task_failed` with the error's name. Return promptly after
+    /// calling this.
+    pub fn failRun(self: TaskControl, err: anyerror) void {
+        if (self.vtable.fail_run) |fail_run| fail_run(self.ptr, err);
+    }
 
     pub fn runUntilIdle(self: TaskControl) !void {
         try self.vtable.run_until_idle(self.ptr);

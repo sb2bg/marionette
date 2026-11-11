@@ -111,14 +111,14 @@ fn jobCompletedAtMostOnce(case: *const Case) !void {
     const queue = &case.app;
 
     if (queue.completion_count > 1) {
-        try queue.env.record(
+        queue.env.record(
             "queue.invariant_violation job={} completions={}",
             .{ queue.job_id, queue.completion_count },
         );
         return error.JobCompletedTwice;
     }
 
-    try queue.env.record(
+    queue.env.record(
         "queue.check completed_at_most_once=ok job={} completions={}",
         .{ queue.job_id, queue.completion_count },
     );
@@ -150,12 +150,12 @@ const RetryQueue = struct {
             .job_id = job_id,
             .state = .ready,
         };
-        try self.env.record("queue.job_ready job={}", .{job_id});
+        self.env.record("queue.job_ready job={}", .{job_id});
     }
 
     fn lease(self: *RetryQueue, worker: u8, duration_ns: mar.Duration) !bool {
         if (self.state != .ready) {
-            try self.env.record(
+            self.env.record(
                 "queue.lease_denied job={} worker={} state={s}",
                 .{ self.job_id, worker, @tagName(self.state) },
             );
@@ -165,7 +165,7 @@ const RetryQueue = struct {
         self.state = .leased;
         self.lease_owner = worker;
         self.lease_deadline_ns = now(self.env.io()) + duration_ns;
-        try self.env.record(
+        self.env.record(
             "queue.lease job={} worker={} deadline_ns={}",
             .{ self.job_id, worker, self.lease_deadline_ns },
         );
@@ -179,7 +179,7 @@ const RetryQueue = struct {
         self.state = .ready;
         self.lease_owner = 0;
         self.lease_deadline_ns = 0;
-        try self.env.record(
+        self.env.record(
             "queue.timeout job={} worker={} now_ns={}",
             .{ self.job_id, previous_owner, now(self.env.io()) },
         );
@@ -189,14 +189,14 @@ const RetryQueue = struct {
         if (self.state == .leased and self.lease_owner == worker) {
             self.state = .completed;
             self.completion_count += 1;
-            try self.env.record(
+            self.env.record(
                 "queue.complete job={} worker={} accepted=true reason=current_lease completions={}",
                 .{ self.job_id, worker, self.completion_count },
             );
             return;
         }
 
-        try self.env.record(
+        self.env.record(
             "queue.complete job={} worker={} accepted=false reason=stale_ack completions={}",
             .{ self.job_id, worker, self.completion_count },
         );
@@ -204,7 +204,7 @@ const RetryQueue = struct {
 
     fn completeBuggy(self: *RetryQueue, worker: u8) !void {
         if (self.state != .leased) {
-            try self.env.record(
+            self.env.record(
                 "queue.complete job={} worker={} accepted=false reason=not_leased completions={}",
                 .{ self.job_id, worker, self.completion_count },
             );
@@ -215,7 +215,7 @@ const RetryQueue = struct {
         self.completion_count += 1;
         if (owner_matches) self.state = .completed;
 
-        try self.env.record(
+        self.env.record(
             "queue.complete job={} worker={} accepted=true reason={s} completions={}",
             .{
                 self.job_id,

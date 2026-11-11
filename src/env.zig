@@ -15,8 +15,6 @@ const network_module = @import("network/root.zig");
 const world_module = @import("world.zig");
 const World = world_module.World;
 
-const RecorderError = std.mem.Allocator.Error || world_module.TraceError;
-
 pub const BuggifyError = fault_module.BuggifyError;
 pub const BuggifyRate = fault_module.BuggifyRate;
 pub const AllocationFaultOptions = allocation_module.FaultOptions;
@@ -40,13 +38,30 @@ pub const ProcessDynamicsOptions = struct {
 };
 
 /// Narrow app-facing trace capability. Simulation recorders append to the
-/// world's deterministic trace; production recorders may be disabled.
+/// world's deterministic trace; production recorders write to a caller sink or
+/// drop everything.
+///
+/// Recording never fails at the call site. In simulation the first recording
+/// failure (an invalid event, a bad causal reference, or exhausted memory) is
+/// latched on the world, and the runner fails the run with
+/// `recording_failed` at its next boundary. A production sink owns its own
+/// failures.
 pub const Recorder = struct {
-    world: ?*World,
+    world: ?*World = null,
+    sink: ?Sink = null,
+
+    /// A production destination for formatted event lines (no newline).
+    pub const Sink = struct {
+        ptr: *anyopaque,
+        write: *const fn (ptr: *anyopaque, line: []const u8) void,
+    };
+
+    /// Longest line a sink receives; longer events are truncated.
+    pub const max_sink_line = 1024;
 
     /// A recorder that drops everything.
     pub fn none() Recorder {
-        return .{ .world = null };
+        return .{};
     }
 
     /// Build a recorder over a world's byte trace.
@@ -54,10 +69,28 @@ pub const Recorder = struct {
         return .{ .world = world };
     }
 
-    /// Record an event with an optional earlier causal event ID. The returned
-    /// ID is world-global; disabled production recorders return null.
-    pub fn event(self: Recorder, name: []const u8, fields: []const world_module.TraceField, cause: ?u64) !?u64 {
-        const world = self.world orelse return null;
+    /// Build a production recorder that hands each formatted line to `sink`.
+    pub fn fromSink(sink: Sink) Recorder {
+        return .{ .sink = sink };
+    }
+
+    /// Record an event with an optional earlier causal event ID. Returns the
+    /// world-global ID in simulation and null in production or on failure.
+    pub fn event(self: Recorder, name: []const u8, fields: []const world_module.TraceField, cause: ?u64) ?u64 {
+        if (self.world) |world| return eventInWorld(world, name, fields, cause) catch |err| {
+            world.latchRecordingFailure(err);
+            return null;
+        };
+        if (self.sink) |sink| {
+            var buffer: [max_sink_line]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            writeSinkEvent(&writer, name, fields, cause) catch {};
+            sink.write(sink.ptr, writer.buffered());
+        }
+        return null;
+    }
+
+    fn eventInWorld(world: *World, name: []const u8, fields: []const world_module.TraceField, cause: ?u64) !u64 {
         const id = world.nextEventIndex();
         if (cause) |parent| {
             if (parent >= id) return error.InvalidCausalEvent;
@@ -75,14 +108,43 @@ pub const Recorder = struct {
         return id;
     }
 
+    fn writeSinkEvent(writer: *std.Io.Writer, name: []const u8, fields: []const world_module.TraceField, cause: ?u64) !void {
+        try writer.writeAll(name);
+        for (fields) |field| {
+            try writer.print(" {s}=", .{field.key});
+            switch (field.value) {
+                .literal => |literal| try writer.writeAll(literal),
+                .text => |text| world_module.writeEscapedTraceText(writer, text, true) catch {},
+                .typed_text => |typed| {
+                    try writer.print("{s}:", .{typed.type_name});
+                    world_module.writeEscapedTraceText(writer, typed.value, true) catch {};
+                },
+                .int => |int| try writer.print("{}", .{int}),
+                .uint => |uint| try writer.print("{}", .{uint}),
+                .boolean => |boolean| try writer.print("{}", .{boolean}),
+                .float => |float| try writer.print("{d}", .{float}),
+            }
+        }
+        if (cause) |parent| try writer.print(" cause={}", .{parent});
+    }
+
     /// Start an operation span. Move the returned value; end it exactly once.
-    pub fn beginOperation(self: Recorder, name: []const u8, cause: ?u64) !Operation {
-        return .{ .recorder = self, .start = try self.event("operation.begin", &.{world_module.traceField("name", .{ .text = name })}, cause) };
+    pub fn beginOperation(self: Recorder, name: []const u8, cause: ?u64) Operation {
+        return .{ .recorder = self, .start = self.event("operation.begin", &.{world_module.traceField("name", .{ .text = name })}, cause) };
     }
 
     /// Format and append one user trace event.
-    pub fn record(self: Recorder, comptime fmt: []const u8, args: anytype) RecorderError!void {
-        if (self.world) |world| try world.record(fmt, args);
+    pub fn record(self: Recorder, comptime fmt: []const u8, args: anytype) void {
+        if (self.world) |world| {
+            world.record(fmt, args) catch |err| world.latchRecordingFailure(err);
+            return;
+        }
+        if (self.sink) |sink| {
+            var buffer: [max_sink_line]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            writer.print(fmt, args) catch {};
+            sink.write(sink.ptr, writer.buffered());
+        }
     }
 };
 
@@ -92,13 +154,19 @@ pub const Operation = struct {
     start: ?u64,
     ended: bool = false,
 
-    pub fn event(self: *const Operation, name: []const u8, fields: []const world_module.TraceField) !?u64 {
-        if (self.ended) return error.OperationEnded;
+    pub fn event(self: *const Operation, name: []const u8, fields: []const world_module.TraceField) ?u64 {
+        if (self.ended) {
+            if (self.recorder.world) |world| world.latchRecordingFailure(error.OperationEnded);
+            return null;
+        }
         return self.recorder.event(name, fields, self.start);
     }
-    pub fn end(self: *Operation) !void {
-        if (self.ended) return error.OperationEnded;
-        _ = try self.recorder.event("operation.end", &.{}, self.start);
+    pub fn end(self: *Operation) void {
+        if (self.ended) {
+            if (self.recorder.world) |world| world.latchRecordingFailure(error.OperationEnded);
+            return;
+        }
+        _ = self.recorder.event("operation.end", &.{}, self.start);
         self.ended = true;
     }
 };
@@ -134,8 +202,9 @@ pub const Env = struct {
         return self.trace;
     }
 
-    pub fn record(self: Env, comptime fmt: []const u8, args: anytype) !void {
-        try self.recorder().record(fmt, args);
+    /// Record one event. Never fails at the call site; see `Recorder`.
+    pub fn record(self: Env, comptime fmt: []const u8, args: anytype) void {
+        self.recorder().record(fmt, args);
     }
 
     /// Draw and trace a simulation-only fault hook.
@@ -162,7 +231,7 @@ pub const Env = struct {
             rate.denominator,
         ));
         const fired = rate.fires(roll);
-        try self.record(
+        self.record(
             "buggify hook={s} rate={}/{} roll={} fired={}",
             .{ hookName(hook), rate.numerator, rate.denominator, roll, fired },
         );
@@ -392,6 +461,14 @@ pub const SimControl = struct {
         try self.tasks.runUntilIdle();
     }
 
+    /// Fail the run from a task or the scenario with `err`. The scheduler
+    /// stops dispatching; the runner reports `task_failed` with the error
+    /// name and the complete tape, so the failure replays and reduces. Use
+    /// it where a task would otherwise panic. Return after calling it.
+    pub fn failRun(self: SimControl, err: anyerror) void {
+        self.tasks.failRun(err);
+    }
+
     /// Count of scheduler tasks currently blocked on a wait key or timer.
     pub fn blockedTaskCount(self: SimControl) usize {
         return self.tasks.blockedCount();
@@ -553,7 +630,7 @@ test "env: recorder is a narrow trace capability" {
     const sim = try world.simulate(.{});
     const recorder = sim.env.recorder();
 
-    try recorder.record("recorder.message value={}", .{42});
+    recorder.record("recorder.message value={}", .{42});
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "recorder.message value=42") != null);
 }
 
