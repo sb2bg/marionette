@@ -5,7 +5,7 @@
 //! against the injectable `std.Io` interface: `IpAddress.resolve` +
 //! `connect`, stream reader/writer adapters, `Io.Mutex` locking, and
 //! `shutdown(.both)` on disconnect. Marionette owns the harness side:
-//! world, seed, simulated network, a minimal in-memory beanstalkd server
+//! runner, seed, simulated network, a minimal in-memory beanstalkd server
 //! speaking the text protocol, and the job-payload oracle.
 //!
 //! Scenario coverage:
@@ -17,10 +17,15 @@
 //!   observe FIFO order;
 //! - a blocking `reserve-with-timeout` that parks the client in a stream
 //!   read across a virtual-time gap until a delayed producer publishes;
-//! - a server-process crash while the client is parked in reserve: the
-//!   surviving peer wakes with a reset that surfaces as the pinned
-//!   `error.CommunicationFailure`, and a registered process restart brings
-//!   up a fresh, empty server incarnation for recovery.
+//! - a server-process crash while the client is parked in reserve: the dead
+//!   server's kernel closes the stream, which the client surfaces as the
+//!   pinned `error.CommunicationFailure`, and a registered process restart
+//!   brings up a fresh, empty server incarnation for recovery.
+//!
+//! Every scenario is a `mar.Harness`: tasks fail the run with
+//! `Control.failRun` instead of panicking, outcomes are named checks, and
+//! the runner's exact second execution replaces hand-compared traces, so a
+//! failure leaves a capsule that replays and reduces.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -54,7 +59,7 @@ const ServerJob = struct {
 /// harness-owned arena so a killed server process leaks nothing.
 const QueueServer = struct {
     arena: std.mem.Allocator,
-    world: *mar.World,
+    control: mar.Control,
     io: Io,
     expected_connections: usize,
     next_id: u32 = 1,
@@ -73,7 +78,7 @@ const QueueServer = struct {
     };
 
     fn record(self: *QueueServer, comptime fmt: []const u8, args: anytype) void {
-        self.world.record(fmt, args) catch @panic("beanstalkz trace record failed");
+        self.control.record(fmt, args);
     }
 
     fn signalReady(self: *QueueServer) void {
@@ -83,18 +88,15 @@ const QueueServer = struct {
 
     /// Clients wait on the server process's futex namespace, so waits use
     /// the server io handle (same pattern as the dusty validation).
-    fn waitReady(self: *QueueServer) void {
+    fn waitReady(self: *QueueServer) std.Io.Cancelable!void {
         while (self.ready_flag == 0) {
-            self.io.futexWait(u32, &self.ready_flag, 0) catch
-                @panic("beanstalkz ready wait failed");
+            try self.io.futexWait(u32, &self.ready_flag, 0);
         }
     }
 
     fn acceptTask(self: *QueueServer) void {
         const address = Io.net.IpAddress.parseIp4(server_addr, server_port) catch unreachable;
-        var listener = address.listen(self.io, .{}) catch |err| {
-            std.debug.panic("beanstalkz listen failed: {}", .{err});
-        };
+        var listener = address.listen(self.io, .{}) catch |err| return self.control.failRun(err);
         defer listener.deinit(self.io);
         self.record("beanstalkz.server.listening port={}", .{server_port});
         self.signalReady();
@@ -105,13 +107,9 @@ const QueueServer = struct {
         };
 
         for (0..self.expected_connections) |index| {
-            const stream = listener.accept(self.io) catch |err| {
-                std.debug.panic("beanstalkz accept failed: {}", .{err});
-            };
+            const stream = listener.accept(self.io) catch |err| return self.control.failRun(err);
             self.record("beanstalkz.server.accepted connection={}", .{index});
-            handlers[index] = Io.concurrent(self.io, connectionTask, .{ self, stream }) catch |err| {
-                std.debug.panic("beanstalkz handler spawn failed: {}", .{err});
-            };
+            handlers[index] = Io.concurrent(self.io, connectionTask, .{ self, stream }) catch |err| return self.control.failRun(err);
         }
     }
 
@@ -335,28 +333,51 @@ fn readLine(reader: *Io.Reader, buffer: []u8) ![]const u8 {
     return error.StreamTooLong;
 }
 
-// --- Round trip -------------------------------------------------------------
-
-pub const RoundTripOutcome = struct {
-    allocator: std.mem.Allocator,
-    trace: []u8,
-    reserved_ids: [3]u32,
-    bodies_exact: bool,
-    buried_state_seen: bool,
-    kicked_state_seen: bool,
-    empty_reserve_timed_out: bool,
-
-    pub fn deinit(self: *RoundTripOutcome) void {
-        self.allocator.free(self.trace);
-        self.* = undefined;
-    }
+/// Every scenario: two nodes (server on node 0, clients on node 1), 30 ns
+/// links, 10 ns ticks, and a harness-owned arena for server state.
+const simulate: mar.World.SimulateOptions = .{
+    .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 },
 };
+const tick_ns = 10;
+
+/// Shared per-run state: the arena, the simulated server, and the client Io.
+fn Base(comptime Self: type) type {
+    return struct {
+        fn initBase(sim: mar.Sim, expected_connections: usize) !Self {
+            var self: Self = .{
+                .control = sim.control,
+                // Server state lives in node 0's simulated memory and is
+                // freed by `deinit`.
+                .arena_state = std.heap.ArenaAllocator.init((try sim.envForNode(0)).allocator()),
+                .client_io = (try sim.envForNode(1)).io(),
+                // The SUT allocates through the simulation's authority.
+                .allocator = (try sim.envForNode(1)).allocator(),
+                .server = undefined,
+            };
+            self.server = .{
+                .arena = undefined,
+                .control = sim.control,
+                .io = (try sim.envForNode(0)).io(),
+                .expected_connections = expected_connections,
+            };
+            try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+            return self;
+        }
+    };
+}
+
+fn fail(control: mar.Control, err: anyerror) void {
+    control.failRun(err);
+}
+
+// --- Round trip -------------------------------------------------------------
 
 const round_trip_bodies = [_][]const u8{ "job-alpha", "job-bravo", "job-charlie" };
 
 const RoundTrip = struct {
-    world: *mar.World,
-    server: *QueueServer,
+    control: mar.Control,
+    arena_state: std.heap.ArenaAllocator,
+    server: QueueServer,
     client_io: Io,
     allocator: std.mem.Allocator,
     produced: u32 = 0,
@@ -366,269 +387,206 @@ const RoundTrip = struct {
     kicked_state_seen: bool = false,
     empty_reserve_timed_out: bool = false,
 
+    fn init(sim: mar.Sim) !RoundTrip {
+        return Base(RoundTrip).initBase(sim, 2);
+    }
+
+    pub fn deinit(self: *RoundTrip) void {
+        self.arena_state.deinit();
+    }
+
+    fn scenario(case: *mar.SimCase(RoundTrip)) !void {
+        const self = &case.app;
+        self.server.arena = self.arena_state.allocator();
+        var server_future = try Io.concurrent(self.server.io, QueueServer.acceptTask, .{&self.server});
+        var producer_future = try Io.concurrent(self.client_io, producerTask, .{self});
+        var consumer_future = try Io.concurrent(self.client_io, consumerTask, .{self});
+        producer_future.await(self.client_io);
+        consumer_future.await(self.client_io);
+        server_future.await(self.server.io);
+        if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+    }
+
     fn producerTask(self: *RoundTrip) void {
-        self.server.waitReady();
+        self.server.waitReady() catch return;
         var client = Client.init(self.allocator, self.client_io);
         defer client.disconnect();
 
-        client.connect(server_addr, server_port) catch |err| {
-            std.debug.panic("beanstalkz producer connect failed: {}", .{err});
-        };
-        client.use(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz use failed: {}", .{err});
-        };
+        client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
+        client.use(orders_tube) catch |err| return fail(self.control, err);
         for (round_trip_bodies) |body| {
-            const id = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, body) catch |err| {
-                std.debug.panic("beanstalkz put failed: {}", .{err});
-            };
-            self.world.record("beanstalkz.client.put id={} bytes={}", .{ id, body.len }) catch
-                @panic("trace failed");
+            const id = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, body) catch |err| return fail(self.control, err);
+            self.control.record("beanstalkz.client.put id={} bytes={}", .{ id, body.len });
         }
         self.produced = 1;
         self.client_io.futexWake(u32, &self.produced, 1);
     }
 
     fn consumerTask(self: *RoundTrip) void {
-        self.server.waitReady();
+        self.server.waitReady() catch return;
         while (self.produced == 0) {
-            self.client_io.futexWait(u32, &self.produced, 0) catch
-                @panic("beanstalkz produced wait failed");
+            self.client_io.futexWait(u32, &self.produced, 0) catch return;
         }
 
         var client = Client.init(self.allocator, self.client_io);
         defer client.disconnect();
-        client.connect(server_addr, server_port) catch |err| {
-            std.debug.panic("beanstalkz consumer connect failed: {}", .{err});
-        };
+        client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
 
-        const watching = client.watch(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz watch failed: {}", .{err});
-        };
-        std.debug.assert(watching == 2);
-        _ = client.ignore("default") catch |err| {
-            std.debug.panic("beanstalkz ignore failed: {}", .{err});
-        };
+        const watching = client.watch(orders_tube) catch |err| return fail(self.control, err);
+        if (watching != 2) return fail(self.control, error.UnexpectedWatchCount);
+        _ = client.ignore("default") catch |err| return fail(self.control, err);
 
         var job: Job = .{};
-        job.init(self.allocator) catch unreachable;
+        job.init(self.allocator) catch |err| return fail(self.control, err);
         defer job.deinit();
 
         for (round_trip_bodies, 0..) |expected_body, index| {
-            client.reserve(5, &job) catch |err| {
-                std.debug.panic("beanstalkz reserve failed: {}", .{err});
-            };
-            const id = job.id() orelse @panic("reserved job without id");
+            client.reserve(5, &job) catch |err| return fail(self.control, err);
+            const id = job.id() orelse return fail(self.control, error.JobWithoutId);
             self.reserved_ids[index] = id;
             if (!std.mem.eql(u8, job.body() orelse "", expected_body)) {
                 self.bodies_exact = false;
             }
-            self.world.record("beanstalkz.client.reserved id={} bytes={}", .{ id, job.actual_len }) catch
-                @panic("trace failed");
+            self.control.record("beanstalkz.client.reserved id={} bytes={}", .{ id, job.actual_len });
 
             if (index == 1) {
                 // Exercise the failure-state transitions on the middle job.
-                client.bury(id, bean.DefaultPriority) catch |err| {
-                    std.debug.panic("beanstalkz bury failed: {}", .{err});
-                };
-                const buried = client.state(id) catch |err| {
-                    std.debug.panic("beanstalkz stats-job failed: {}", .{err});
-                };
+                client.bury(id, bean.DefaultPriority) catch |err| return fail(self.control, err);
+                const buried = client.state(id) catch |err| return fail(self.control, err);
                 self.buried_state_seen = buried == .buried;
-                client.kick_job(id) catch |err| {
-                    std.debug.panic("beanstalkz kick failed: {}", .{err});
-                };
-                const kicked = client.state(id) catch |err| {
-                    std.debug.panic("beanstalkz stats-job failed: {}", .{err});
-                };
+                client.kick_job(id) catch |err| return fail(self.control, err);
+                const kicked = client.state(id) catch |err| return fail(self.control, err);
                 self.kicked_state_seen = kicked == .ready;
                 // Take it back out of the ready queue before moving on.
-                client.reserve(5, &job) catch |err| {
-                    std.debug.panic("beanstalkz re-reserve failed: {}", .{err});
-                };
+                client.reserve(5, &job) catch |err| return fail(self.control, err);
             }
-            client.delete(id) catch |err| {
-                std.debug.panic("beanstalkz delete failed: {}", .{err});
-            };
+            client.delete(id) catch |err| return fail(self.control, err);
         }
 
         // Pinned contract: reserving from a drained queue surfaces the
         // protocol TIMED_OUT response as `error.Timeout`.
         if (client.reserve(1, &job)) |_| {
-            @panic("beanstalkz reserve on empty queue unexpectedly succeeded");
+            return fail(self.control, error.EmptyReserveSucceeded);
         } else |err| {
             self.empty_reserve_timed_out = err == bean.ReturnedError.Timeout;
         }
     }
+
+    fn fifoIds(case: *const mar.SimCase(RoundTrip)) !void {
+        if (!std.mem.eql(u32, &case.app.reserved_ids, &.{ 1, 2, 3 })) return error.ReservedOutOfOrder;
+        if (!case.app.bodies_exact) return error.BodyMismatch;
+    }
+
+    fn buryKick(case: *const mar.SimCase(RoundTrip)) !void {
+        if (!case.app.buried_state_seen) return error.BuriedStateMissing;
+        if (!case.app.kicked_state_seen) return error.KickedStateMissing;
+    }
+
+    fn emptyReserve(case: *const mar.SimCase(RoundTrip)) !void {
+        if (!case.app.empty_reserve_timed_out) return error.EmptyReserveDidNotTimeOut;
+    }
+
+    const checks = [_]mar.StateCheck(mar.SimCase(RoundTrip)){
+        .{ .name = "beanstalkz.fifo_exact", .check = fifoIds, .phase = .after_scenario },
+        .{ .name = "beanstalkz.bury_kick", .check = buryKick, .phase = .after_scenario },
+        .{ .name = "beanstalkz.empty_reserve_timeout", .check = emptyReserve, .phase = .after_scenario },
+    };
 };
 
-pub fn runRoundTrip(allocator: std.mem.Allocator, seed: u64) !RoundTripOutcome {
-    var world = try mar.World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
-
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-
-    const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 },
-    });
-    const server_io = (try sim.envForNode(0)).io();
-    const client_io = (try sim.envForNode(1)).io();
-    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
-
-    var server: QueueServer = .{
-        .arena = arena_state.allocator(),
-        .world = &world,
-        .io = server_io,
-        .expected_connections = 2,
-    };
-    var scenario: RoundTrip = .{
-        .world = &world,
-        .server = &server,
-        .client_io = client_io,
-        .allocator = allocator,
-    };
-
-    var server_future = try Io.concurrent(server_io, QueueServer.acceptTask, .{&server});
-    var producer_future = try Io.concurrent(client_io, RoundTrip.producerTask, .{&scenario});
-    var consumer_future = try Io.concurrent(client_io, RoundTrip.consumerTask, .{&scenario});
-
-    producer_future.await(client_io);
-    consumer_future.await(client_io);
-    server_future.await(server_io);
-    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
-
-    const trace = try allocator.dupe(u8, world.traceBytes());
-    return .{
-        .allocator = allocator,
-        .trace = trace,
-        .reserved_ids = scenario.reserved_ids,
-        .bodies_exact = scenario.bodies_exact,
-        .buried_state_seen = scenario.buried_state_seen,
-        .kicked_state_seen = scenario.kicked_state_seen,
-        .empty_reserve_timed_out = scenario.empty_reserve_timed_out,
-    };
-}
+pub const RoundTripHarness = mar.Harness(.{
+    .init = RoundTrip.init,
+    .scenario = RoundTrip.scenario,
+    .checks = &RoundTrip.checks,
+    .simulate = simulate,
+    .name = "beanstalkz.round_trip",
+});
 
 // --- Connection churn --------------------------------------------------------
 
 const churn_producer_count = 4;
 
 const Churn = struct {
-    world: *mar.World,
-    server: *QueueServer,
+    control: mar.Control,
+    arena_state: std.heap.ArenaAllocator,
+    server: QueueServer,
     client_io: Io,
     allocator: std.mem.Allocator,
     drained_ids: [churn_producer_count]u32 = @splat(0),
     drained_exact: bool = true,
 
+    fn init(sim: mar.Sim) !Churn {
+        return Base(Churn).initBase(sim, churn_producer_count + 1);
+    }
+
+    pub fn deinit(self: *Churn) void {
+        self.arena_state.deinit();
+    }
+
+    fn scenario(case: *mar.SimCase(Churn)) !void {
+        const self = &case.app;
+        self.server.arena = self.arena_state.allocator();
+        var server_future = try Io.concurrent(self.server.io, QueueServer.acceptTask, .{&self.server});
+        var client_future = try Io.concurrent(self.client_io, runTask, .{self});
+        client_future.await(self.client_io);
+        server_future.await(self.server.io);
+        if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+    }
+
     fn runTask(self: *Churn) void {
-        self.server.waitReady();
+        self.server.waitReady() catch return;
 
         // Fresh connection per job: connect, put, quit + shutdown + close.
         for (0..churn_producer_count) |index| {
             var client = Client.init(self.allocator, self.client_io);
-            client.connect(server_addr, server_port) catch |err| {
-                std.debug.panic("beanstalkz churn connect {} failed: {}", .{ index, err });
-            };
-            client.use(orders_tube) catch |err| {
-                std.debug.panic("beanstalkz churn use failed: {}", .{err});
-            };
+            client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
+            client.use(orders_tube) catch |err| return fail(self.control, err);
             var body_buffer: [16]u8 = undefined;
             const body = std.fmt.bufPrint(&body_buffer, "churn-{}", .{index}) catch unreachable;
-            _ = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, body) catch |err| {
-                std.debug.panic("beanstalkz churn put failed: {}", .{err});
-            };
+            _ = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, body) catch |err| return fail(self.control, err);
             client.disconnect();
-            self.world.record("beanstalkz.client.churn_cycle index={}", .{index}) catch
-                @panic("trace failed");
+            self.control.record("beanstalkz.client.churn_cycle index={}", .{index});
         }
 
         // One consumer connection drains everything in FIFO id order.
         var client = Client.init(self.allocator, self.client_io);
         defer client.disconnect();
-        client.connect(server_addr, server_port) catch |err| {
-            std.debug.panic("beanstalkz drain connect failed: {}", .{err});
-        };
-        _ = client.watch(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz drain watch failed: {}", .{err});
-        };
+        client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
+        _ = client.watch(orders_tube) catch |err| return fail(self.control, err);
 
         var job: Job = .{};
-        job.init(self.allocator) catch unreachable;
+        job.init(self.allocator) catch |err| return fail(self.control, err);
         defer job.deinit();
 
         for (0..churn_producer_count) |index| {
-            client.reserve(5, &job) catch |err| {
-                std.debug.panic("beanstalkz drain reserve failed: {}", .{err});
-            };
-            const id = job.id() orelse @panic("drained job without id");
+            client.reserve(5, &job) catch |err| return fail(self.control, err);
+            const id = job.id() orelse return fail(self.control, error.JobWithoutId);
             self.drained_ids[index] = id;
             var expected_buffer: [16]u8 = undefined;
             const expected = std.fmt.bufPrint(&expected_buffer, "churn-{}", .{index}) catch unreachable;
             if (!std.mem.eql(u8, job.body() orelse "", expected)) {
                 self.drained_exact = false;
             }
-            client.delete(id) catch |err| {
-                std.debug.panic("beanstalkz drain delete failed: {}", .{err});
-            };
+            client.delete(id) catch |err| return fail(self.control, err);
         }
     }
-};
 
-pub const ChurnOutcome = struct {
-    allocator: std.mem.Allocator,
-    trace: []u8,
-    drained_ids: [churn_producer_count]u32,
-    drained_exact: bool,
-
-    pub fn deinit(self: *ChurnOutcome) void {
-        self.allocator.free(self.trace);
-        self.* = undefined;
+    fn fifoDrain(case: *const mar.SimCase(Churn)) !void {
+        if (!std.mem.eql(u32, &case.app.drained_ids, &.{ 1, 2, 3, 4 })) return error.DrainOutOfOrder;
+        if (!case.app.drained_exact) return error.BodyMismatch;
     }
+
+    const checks = [_]mar.StateCheck(mar.SimCase(Churn)){
+        .{ .name = "beanstalkz.churn_fifo_drain", .check = fifoDrain, .phase = .after_scenario },
+    };
 };
 
-pub fn runChurn(allocator: std.mem.Allocator, seed: u64) !ChurnOutcome {
-    var world = try mar.World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
-
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-
-    const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 },
-    });
-    const server_io = (try sim.envForNode(0)).io();
-    const client_io = (try sim.envForNode(1)).io();
-    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
-
-    var server: QueueServer = .{
-        .arena = arena_state.allocator(),
-        .world = &world,
-        .io = server_io,
-        .expected_connections = churn_producer_count + 1,
-    };
-    var scenario: Churn = .{
-        .world = &world,
-        .server = &server,
-        .client_io = client_io,
-        .allocator = allocator,
-    };
-
-    var server_future = try Io.concurrent(server_io, QueueServer.acceptTask, .{&server});
-    var client_future = try Io.concurrent(client_io, Churn.runTask, .{&scenario});
-
-    client_future.await(client_io);
-    server_future.await(server_io);
-    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
-
-    const trace = try allocator.dupe(u8, world.traceBytes());
-    return .{
-        .allocator = allocator,
-        .trace = trace,
-        .drained_ids = scenario.drained_ids,
-        .drained_exact = scenario.drained_exact,
-    };
-}
+pub const ChurnHarness = mar.Harness(.{
+    .init = Churn.init,
+    .scenario = Churn.scenario,
+    .checks = &Churn.checks,
+    .simulate = simulate,
+    .name = "beanstalkz.churn",
+});
 
 // --- Blocking reserve across virtual time -------------------------------------
 
@@ -636,185 +594,196 @@ const delayed_body = "published-after-five-seconds";
 const publish_delay_ns = 5_000_000_000; // 5 virtual seconds
 
 const DelayedPublish = struct {
-    world: *mar.World,
-    server: *QueueServer,
+    control: mar.Control,
+    arena_state: std.heap.ArenaAllocator,
+    server: QueueServer,
     client_io: Io,
     allocator: std.mem.Allocator,
     reserved_body_exact: bool = false,
+    elapsed_ns: u64 = 0,
+
+    fn init(sim: mar.Sim) !DelayedPublish {
+        return Base(DelayedPublish).initBase(sim, 2);
+    }
+
+    pub fn deinit(self: *DelayedPublish) void {
+        self.arena_state.deinit();
+    }
+
+    fn scenario(case: *mar.SimCase(DelayedPublish)) !void {
+        const self = &case.app;
+        self.server.arena = self.arena_state.allocator();
+        var server_future = try Io.concurrent(self.server.io, QueueServer.acceptTask, .{&self.server});
+        var producer_future = try Io.concurrent(self.client_io, producerTask, .{self});
+        var consumer_future = try Io.concurrent(self.client_io, consumerTask, .{self});
+        producer_future.await(self.client_io);
+        consumer_future.await(self.client_io);
+        server_future.await(self.server.io);
+        self.elapsed_ns = case.control().now();
+        if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+    }
 
     fn producerTask(self: *DelayedPublish) void {
-        self.server.waitReady();
-        Io.sleep(self.client_io, .fromNanoseconds(publish_delay_ns), .awake) catch
-            @panic("beanstalkz delayed sleep failed");
+        self.server.waitReady() catch return;
+        Io.sleep(self.client_io, .fromNanoseconds(publish_delay_ns), .awake) catch return;
 
         var client = Client.init(self.allocator, self.client_io);
         defer client.disconnect();
-        client.connect(server_addr, server_port) catch |err| {
-            std.debug.panic("beanstalkz delayed connect failed: {}", .{err});
-        };
-        client.use(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz delayed use failed: {}", .{err});
-        };
-        _ = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, delayed_body) catch |err| {
-            std.debug.panic("beanstalkz delayed put failed: {}", .{err});
-        };
+        client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
+        client.use(orders_tube) catch |err| return fail(self.control, err);
+        _ = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, delayed_body) catch |err| return fail(self.control, err);
     }
 
     fn consumerTask(self: *DelayedPublish) void {
-        self.server.waitReady();
+        self.server.waitReady() catch return;
         var client = Client.init(self.allocator, self.client_io);
         defer client.disconnect();
-        client.connect(server_addr, server_port) catch |err| {
-            std.debug.panic("beanstalkz waiting connect failed: {}", .{err});
-        };
-        _ = client.watch(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz waiting watch failed: {}", .{err});
-        };
+        client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
+        _ = client.watch(orders_tube) catch |err| return fail(self.control, err);
 
         var job: Job = .{};
-        job.init(self.allocator) catch unreachable;
+        job.init(self.allocator) catch |err| return fail(self.control, err);
         defer job.deinit();
 
         // Parks in the response read while virtual time crosses the
         // producer's five-second publish delay.
-        client.reserve(30, &job) catch |err| {
-            std.debug.panic("beanstalkz blocking reserve failed: {}", .{err});
-        };
+        client.reserve(30, &job) catch |err| return fail(self.control, err);
         self.reserved_body_exact = std.mem.eql(u8, job.body() orelse "", delayed_body);
-        client.delete(job.id() orelse @panic("job without id")) catch |err| {
-            std.debug.panic("beanstalkz delayed delete failed: {}", .{err});
-        };
+        client.delete(job.id() orelse return fail(self.control, error.JobWithoutId)) catch |err| return fail(self.control, err);
     }
+
+    fn reservedAfterDelay(case: *const mar.SimCase(DelayedPublish)) !void {
+        if (!case.app.reserved_body_exact) return error.BodyMismatch;
+        if (case.app.elapsed_ns < publish_delay_ns) return error.ReservedBeforePublish;
+    }
+
+    const checks = [_]mar.StateCheck(mar.SimCase(DelayedPublish)){
+        .{ .name = "beanstalkz.reserve_crosses_delay", .check = reservedAfterDelay, .phase = .after_scenario },
+    };
 };
 
-pub const DelayedOutcome = struct {
-    allocator: std.mem.Allocator,
-    trace: []u8,
-    reserved_body_exact: bool,
-    elapsed_ns: u64,
-
-    pub fn deinit(self: *DelayedOutcome) void {
-        self.allocator.free(self.trace);
-        self.* = undefined;
-    }
-};
-
-pub fn runDelayedPublish(allocator: std.mem.Allocator, seed: u64) !DelayedOutcome {
-    var world = try mar.World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
-
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-
-    const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 },
-    });
-    const server_io = (try sim.envForNode(0)).io();
-    const client_io = (try sim.envForNode(1)).io();
-    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
-
-    var server: QueueServer = .{
-        .arena = arena_state.allocator(),
-        .world = &world,
-        .io = server_io,
-        .expected_connections = 2,
-    };
-    var scenario: DelayedPublish = .{
-        .world = &world,
-        .server = &server,
-        .client_io = client_io,
-        .allocator = allocator,
-    };
-
-    var server_future = try Io.concurrent(server_io, QueueServer.acceptTask, .{&server});
-    var producer_future = try Io.concurrent(client_io, DelayedPublish.producerTask, .{&scenario});
-    var consumer_future = try Io.concurrent(client_io, DelayedPublish.consumerTask, .{&scenario});
-
-    producer_future.await(client_io);
-    consumer_future.await(client_io);
-    server_future.await(server_io);
-    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
-
-    const trace = try allocator.dupe(u8, world.traceBytes());
-    return .{
-        .allocator = allocator,
-        .trace = trace,
-        .reserved_body_exact = scenario.reserved_body_exact,
-        .elapsed_ns = world.now(),
-    };
-}
+pub const DelayedPublishHarness = mar.Harness(.{
+    .init = DelayedPublish.init,
+    .scenario = DelayedPublish.scenario,
+    .checks = &DelayedPublish.checks,
+    .simulate = simulate,
+    .name = "beanstalkz.delayed_publish",
+});
 
 // --- Server crash during a parked reserve -------------------------------------
 
 const recovery_body = "job-after-restart";
 
 const CrashRecovery = struct {
-    world: *mar.World,
-    server: *QueueServer,
+    control: mar.Control,
+    arena_state: std.heap.ArenaAllocator,
+    server: QueueServer,
     client_io: Io,
     allocator: std.mem.Allocator,
+    lifecycle: ServerLifecycle = undefined,
     parked: u32 = 0,
-    reserve_error_name: []const u8 = "",
+    reserve_error: ?anyerror = null,
     recovered_body_exact: bool = false,
 
+    fn init(sim: mar.Sim) !CrashRecovery {
+        return Base(CrashRecovery).initBase(sim, 1);
+    }
+
+    pub fn deinit(self: *CrashRecovery) void {
+        self.arena_state.deinit();
+    }
+
+    fn scenario(case: *mar.SimCase(CrashRecovery)) !void {
+        const self = &case.app;
+        const control = case.control();
+        self.server.arena = self.arena_state.allocator();
+        self.lifecycle = .{ .server = &self.server };
+        try case.sim.registerProcess(0, .{
+            .ptr = &self.lifecycle,
+            .on_kill = ServerLifecycle.onKill,
+            .restart = ServerLifecycle.restart,
+        });
+
+        _ = try Io.concurrent(self.server.io, QueueServer.acceptTaskDetached, .{&self.server});
+        var victim_future = try Io.concurrent(self.client_io, victimTask, .{self});
+
+        // Let the victim connect and park in its reserve read.
+        while (self.parked == 0) {
+            self.client_io.futexWait(u32, &self.parked, 0) catch break;
+        }
+        try control.runFor(1_000_000);
+
+        // Crash the server process: its listener, accept task, and handler
+        // die; the kernel's FIN reaches the parked client.
+        try control.process.kill(0);
+        victim_future.await(self.client_io);
+
+        // Restart through the registered lifecycle and prove recovery works
+        // against the fresh incarnation.
+        try control.process.restart(0);
+        var recovery_future = try Io.concurrent(self.client_io, recoveryTask, .{self});
+        recovery_future.await(self.client_io);
+        try control.runTasksUntilIdle();
+        if (control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+    }
+
     fn victimTask(self: *CrashRecovery) void {
-        self.server.waitReady();
+        self.server.waitReady() catch return;
         var client = Client.init(self.allocator, self.client_io);
         defer client.disconnect();
-        client.connect(server_addr, server_port) catch |err| {
-            std.debug.panic("beanstalkz victim connect failed: {}", .{err});
-        };
-        _ = client.watch(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz victim watch failed: {}", .{err});
-        };
+        client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
+        _ = client.watch(orders_tube) catch |err| return fail(self.control, err);
 
         var job: Job = .{};
-        job.init(self.allocator) catch unreachable;
+        job.init(self.allocator) catch |err| return fail(self.control, err);
         defer job.deinit();
 
         self.parked = 1;
         self.client_io.futexWake(u32, &self.parked, 1);
 
         // The queue is empty, so this parks in the stream read until the
-        // harness kills the server process; the surviving peer wakes with a
-        // reset that beanstalkz surfaces as CommunicationFailure.
+        // harness kills the server process; the client then reads the end of
+        // the stream that the dead server's kernel closed.
         if (client.reserve(60, &job)) |_| {
-            @panic("beanstalkz reserve against a crashing server succeeded");
+            return fail(self.control, error.ReserveAgainstCrashedServerSucceeded);
         } else |err| {
-            self.reserve_error_name = @errorName(err);
+            self.reserve_error = err;
         }
-        self.world.record("beanstalkz.client.reserve_interrupted error={s}", .{self.reserve_error_name}) catch
-            @panic("trace failed");
+        self.control.record("beanstalkz.client.reserve_interrupted error={s}", .{@errorName(self.reserve_error.?)});
     }
 
     fn recoveryTask(self: *CrashRecovery) void {
-        self.server.waitReady();
+        self.server.waitReady() catch return;
         var client = Client.init(self.allocator, self.client_io);
         defer client.disconnect();
-        client.connect(server_addr, server_port) catch |err| {
-            std.debug.panic("beanstalkz recovery connect failed: {}", .{err});
-        };
-        client.use(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz recovery use failed: {}", .{err});
-        };
-        _ = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, recovery_body) catch |err| {
-            std.debug.panic("beanstalkz recovery put failed: {}", .{err});
-        };
-        _ = client.watch(orders_tube) catch |err| {
-            std.debug.panic("beanstalkz recovery watch failed: {}", .{err});
-        };
+        client.connect(server_addr, server_port) catch |err| return fail(self.control, err);
+        client.use(orders_tube) catch |err| return fail(self.control, err);
+        _ = client.put(bean.DefaultPriority, 0, bean.DefaultTTR, recovery_body) catch |err| return fail(self.control, err);
+        _ = client.watch(orders_tube) catch |err| return fail(self.control, err);
 
         var job: Job = .{};
-        job.init(self.allocator) catch unreachable;
+        job.init(self.allocator) catch |err| return fail(self.control, err);
         defer job.deinit();
-        client.reserve(5, &job) catch |err| {
-            std.debug.panic("beanstalkz recovery reserve failed: {}", .{err});
-        };
+        client.reserve(5, &job) catch |err| return fail(self.control, err);
         self.recovered_body_exact = std.mem.eql(u8, job.body() orelse "", recovery_body);
-        client.delete(job.id() orelse @panic("job without id")) catch |err| {
-            std.debug.panic("beanstalkz recovery delete failed: {}", .{err});
-        };
+        client.delete(job.id() orelse return fail(self.control, error.JobWithoutId)) catch |err| return fail(self.control, err);
     }
+
+    /// Pinned contract: a server death under a parked reserve surfaces as
+    /// beanstalkz's CommunicationFailure, not a hang or a success.
+    fn interruptedReserve(case: *const mar.SimCase(CrashRecovery)) !void {
+        const err = case.app.reserve_error orelse return error.ReserveNotInterrupted;
+        if (err != error.CommunicationFailure) return error.UnexpectedReserveError;
+    }
+
+    fn recovered(case: *const mar.SimCase(CrashRecovery)) !void {
+        if (!case.app.recovered_body_exact) return error.RecoveryFailed;
+    }
+
+    const checks = [_]mar.StateCheck(mar.SimCase(CrashRecovery)){
+        .{ .name = "beanstalkz.crash_interrupts_reserve", .check = interruptedReserve, .phase = .after_scenario },
+        .{ .name = "beanstalkz.restart_recovers", .check = recovered, .phase = .after_scenario },
+    };
 };
 
 const ServerLifecycle = struct {
@@ -835,144 +804,61 @@ const ServerLifecycle = struct {
     }
 };
 
-pub const CrashOutcome = struct {
-    allocator: std.mem.Allocator,
-    trace: []u8,
-    reserve_error_name: []u8,
-    recovered_body_exact: bool,
-
-    pub fn deinit(self: *CrashOutcome) void {
-        self.allocator.free(self.trace);
-        self.allocator.free(self.reserve_error_name);
-        self.* = undefined;
-    }
-};
-
-pub fn runCrashRecovery(allocator: std.mem.Allocator, seed: u64) !CrashOutcome {
-    var world = try mar.World.init(allocator, .{ .seed = seed, .tick_ns = 10 });
-    defer world.deinit();
-
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-
-    const sim = try world.simulate(.{
-        .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 32 },
-    });
-    const server_io = (try sim.envForNode(0)).io();
-    const client_io = (try sim.envForNode(1)).io();
-    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
-
-    var server: QueueServer = .{
-        .arena = arena_state.allocator(),
-        .world = &world,
-        .io = server_io,
-        .expected_connections = 1,
-    };
-    var scenario: CrashRecovery = .{
-        .world = &world,
-        .server = &server,
-        .client_io = client_io,
-        .allocator = allocator,
-    };
-    var lifecycle: ServerLifecycle = .{ .server = &server };
-    try sim.registerProcess(0, .{
-        .ptr = &lifecycle,
-        .on_kill = ServerLifecycle.onKill,
-        .restart = ServerLifecycle.restart,
-    });
-
-    _ = try Io.concurrent(server_io, QueueServer.acceptTaskDetached, .{&server});
-    var victim_future = try Io.concurrent(client_io, CrashRecovery.victimTask, .{&scenario});
-
-    // Let the victim connect and park in its reserve read.
-    while (scenario.parked == 0) {
-        client_io.futexWait(u32, &scenario.parked, 0) catch break;
-    }
-    try sim.control.runFor(1_000_000);
-
-    // Crash the server process: its listener, accept task, and handler die;
-    // the surviving client peer wakes with a reset.
-    try sim.control.process.kill(0);
-    victim_future.await(client_io);
-
-    // Restart through the registered lifecycle and prove recovery works
-    // against the fresh incarnation.
-    try sim.control.process.restart(0);
-    var recovery_future = try Io.concurrent(client_io, CrashRecovery.recoveryTask, .{&scenario});
-    recovery_future.await(client_io);
-    try sim.control.runTasksUntilIdle();
-    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
-
-    const trace = try allocator.dupe(u8, world.traceBytes());
-    errdefer allocator.free(trace);
-    const error_name = try allocator.dupe(u8, scenario.reserve_error_name);
-    return .{
-        .allocator = allocator,
-        .trace = trace,
-        .reserve_error_name = error_name,
-        .recovered_body_exact = scenario.recovered_body_exact,
-    };
-}
+pub const CrashRecoveryHarness = mar.Harness(.{
+    .init = CrashRecovery.init,
+    .scenario = CrashRecovery.scenario,
+    .checks = &CrashRecovery.checks,
+    .simulate = simulate,
+    .name = "beanstalkz.crash_recovery",
+});
 
 // --- Tests --------------------------------------------------------------------
+// Every run executes twice and compares traces, so passing runs also prove
+// byte-identical replay; no test compares traces by hand.
 
 test "beanstalkz produce/consume round trip over concurrent connections" {
-    var outcome = try runRoundTrip(std.testing.allocator, 0xBEA0);
-    defer outcome.deinit();
-
-    try std.testing.expectEqual([3]u32{ 1, 2, 3 }, outcome.reserved_ids);
-    try std.testing.expect(outcome.bodies_exact);
-    try std.testing.expect(outcome.buried_state_seen);
-    try std.testing.expect(outcome.kicked_state_seen);
-    try std.testing.expect(outcome.empty_reserve_timed_out);
-    try std.testing.expect(std.mem.indexOf(u8, outcome.trace, "beanstalkz.server.put id=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, outcome.trace, "beanstalkz.client.reserved id=3") != null);
-}
-
-test "beanstalkz round trip replays byte-identically from the same seed" {
-    var first = try runRoundTrip(std.testing.allocator, 0xBEA1);
-    defer first.deinit();
-    var second = try runRoundTrip(std.testing.allocator, 0xBEA1);
-    defer second.deinit();
-    try std.testing.expectEqualStrings(first.trace, second.trace);
+    var report = try RoundTripHarness.run(std.testing.allocator, .{ .seed = 0xBEA0, .tick_ns = tick_ns });
+    defer report.deinit();
+    if (report == .failed) report.failed.print();
+    try std.testing.expect(report == .passed);
+    try mar.expectTraceContains(report.passed.trace, "beanstalkz.server.put id=1");
+    try mar.expectTraceContains(report.passed.trace, "beanstalkz.client.reserved id=3");
 }
 
 test "beanstalkz sequential connection churn drains in FIFO order" {
-    var outcome = try runChurn(std.testing.allocator, 0xBEA2);
-    defer outcome.deinit();
-
-    try std.testing.expectEqual([churn_producer_count]u32{ 1, 2, 3, 4 }, outcome.drained_ids);
-    try std.testing.expect(outcome.drained_exact);
+    var report = try ChurnHarness.run(std.testing.allocator, .{ .seed = 0xBEA2, .tick_ns = tick_ns });
+    defer report.deinit();
+    if (report == .failed) report.failed.print();
+    try std.testing.expect(report == .passed);
     try std.testing.expectEqual(
         @as(usize, churn_producer_count),
-        std.mem.count(u8, outcome.trace, "beanstalkz.client.churn_cycle"),
+        std.mem.count(u8, report.passed.trace, "beanstalkz.client.churn_cycle"),
     );
 }
 
 test "beanstalkz blocking reserve crosses the virtual publish delay" {
-    var outcome = try runDelayedPublish(std.testing.allocator, 0xBEA3);
-    defer outcome.deinit();
-
-    try std.testing.expect(outcome.reserved_body_exact);
-    try std.testing.expect(outcome.elapsed_ns >= publish_delay_ns);
+    try DelayedPublishHarness.expectPass(std.testing.allocator, .{ .seed = 0xBEA3, .tick_ns = tick_ns });
 }
 
 test "beanstalkz server crash interrupts a parked reserve and restart recovers" {
-    var outcome = try runCrashRecovery(std.testing.allocator, 0xBEA4);
-    defer outcome.deinit();
-
-    // Pinned contract: a server death under a parked reserve surfaces as
-    // beanstalkz's CommunicationFailure, not a hang or a success.
-    try std.testing.expectEqualStrings("CommunicationFailure", outcome.reserve_error_name);
-    try std.testing.expect(outcome.recovered_body_exact);
-    try std.testing.expect(std.mem.indexOf(u8, outcome.trace, "process.kill node=0 reason=manual") != null);
-    try std.testing.expect(std.mem.indexOf(u8, outcome.trace, "process.restart node=0") != null);
+    var report = try CrashRecoveryHarness.run(std.testing.allocator, .{ .seed = 0xBEA4, .tick_ns = tick_ns });
+    defer report.deinit();
+    if (report == .failed) report.failed.print();
+    try std.testing.expect(report == .passed);
+    try mar.expectTraceContains(report.passed.trace, "process.kill node=0 reason=manual");
+    try mar.expectTraceContains(report.passed.trace, "process.restart node=0");
 }
 
-test "beanstalkz crash recovery replays byte-identically from the same seed" {
-    var first = try runCrashRecovery(std.testing.allocator, 0xBEA5);
-    defer first.deinit();
-    var second = try runCrashRecovery(std.testing.allocator, 0xBEA5);
-    defer second.deinit();
-    try std.testing.expectEqualStrings(first.trace, second.trace);
+test "beanstalkz validations fuzz across seeds and replay from capsules" {
+    try RoundTripHarness.fuzz(std.testing.allocator, .{ .seed = 0xBEA6, .tick_ns = tick_ns }, .{ .seeds = 8 });
+    var report = try CrashRecoveryHarness.run(std.testing.allocator, .{ .seed = 0xBEA5, .tick_ns = tick_ns });
+    defer report.deinit();
+    const identity: mar.ReplayIdentity = .{ .build = "beanstalkz-validation", .sut = "beanstalkz@d8ac61183d80b4cf0e15c52ab4edaea69cb3a56c" };
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    var replayed = try CrashRecoveryHarness.replay(std.testing.allocator, &capsule, identity);
+    defer replayed.deinit();
+    try std.testing.expect(replayed == .passed);
 }
