@@ -304,3 +304,39 @@ test "harness: capture returns the scenario's outcome with the report" {
     const outcome = captured.outcome.?;
     try std.testing.expect(std.mem.startsWith(u8, outcome.label, "value-"));
 }
+
+const Sized = struct {
+    const Input = struct { size: u32, label: []const u8 };
+
+    size: u32 = 0,
+
+    fn init(_: mar.Sim) @This() {
+        return .{ .size = SizedHarness.input().size };
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const input = SizedHarness.input();
+        case.control().record("sized.input size={} label={s}", .{ case.app.size, input.label });
+        if (input.size > 10) return error.TooLarge;
+    }
+};
+
+const SizedHarness = mar.Harness(.{ .init = Sized.init, .scenario = Sized.scenario, .Input = Sized.Input });
+
+test "harness: typed inputs reach the run and replay from the capsule" {
+    var report = try SizedHarness.run(std.testing.allocator, .{ .input = .{ .size = 12, .label = "big" } });
+    defer report.deinit();
+    try std.testing.expectEqualStrings("TooLarge", report.failed.error_name.?);
+    try mar.expectTraceContains(report.failed.first_trace, "sized.input size=12 label=big");
+    try mar.expectTraceContains(report.failed.first_trace, "run.attribute key=harness.input");
+
+    const identity: mar.ReplayIdentity = .{ .build = "harness", .sut = "sized" };
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    var replayed = try SizedHarness.replay(std.testing.allocator, &capsule, identity);
+    defer replayed.deinit();
+    try std.testing.expectEqualStrings("TooLarge", replayed.failed.error_name.?);
+    try std.testing.expectError(error.HarnessInputRequired, SizedHarness.run(std.testing.allocator, .{}));
+}

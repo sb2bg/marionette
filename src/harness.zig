@@ -31,7 +31,8 @@ pub fn Harness(comptime spec: anytype) type {
         for (std.meta.fieldNames(Spec)) |name| {
             const known = std.mem.eql(u8, name, "init") or std.mem.eql(u8, name, "scenario") or
                 std.mem.eql(u8, name, "checks") or std.mem.eql(u8, name, "simulate") or
-                std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "capture");
+                std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "capture") or
+                std.mem.eql(u8, name, "Input");
             if (!known) @compileError("Harness spec has unknown field `" ++ name ++ "`");
         }
     }
@@ -63,8 +64,28 @@ pub fn Harness(comptime spec: anytype) type {
         }
     };
     const scenario_fn = if (has_capture) Capturing.scenario else spec.scenario;
+    const Input = if (@hasField(Spec, "Input")) spec.Input else void;
+    const has_input = Input != void;
+
+    const Inputs = struct {
+        threadlocal var current: ?Input = null;
+    };
 
     return struct {
+        /// The typed per-run input, or `void` without one.
+        pub const InputType = Input;
+
+        /// Attribute key that carries the JSON-encoded input in traces and
+        /// capsules.
+        pub const input_attribute = "harness.input";
+
+        /// The current run's input. Call from `init`, the scenario, checks,
+        /// or `capture`; the input is set for every execution and replay.
+        pub fn input() Input {
+            if (!has_input) @compileError("input() requires an `Input` type in the Harness spec");
+            return Inputs.current orelse @panic("Harness.input() called outside a run of this harness");
+        }
+
         /// What `capture` returns, or `void` without one.
         pub const CapturedOutcome = Outcome;
 
@@ -125,6 +146,10 @@ pub fn Harness(comptime spec: anytype) type {
             check_resources: bool = false,
             /// Overrides the harness's simulation options for this run.
             simulate: ?World.SimulateOptions = null,
+            /// The run's typed input (required when the spec has `Input`).
+            /// It is recorded as the `harness.input` attribute, so a capsule
+            /// replays with the same input.
+            input: if (has_input) ?Input else void = if (has_input) null else {},
         };
 
         fn config(allocator: std.mem.Allocator, options: Options) Config {
@@ -179,17 +204,76 @@ pub fn Harness(comptime spec: anytype) type {
         };
 
         /// Run once (with its exact second execution) and return the report.
-        pub fn run(allocator: std.mem.Allocator, options: Options) run_module.RunError!run_types.RunReport {
-            return run_module.runSimCase(config(allocator, options));
+        pub fn run(allocator: std.mem.Allocator, options: Options) !run_types.RunReport {
+            if (!has_input) return run_module.runSimCase(config(allocator, options));
+            var scope = try InputScope.begin(allocator, options);
+            defer scope.end();
+            return run_module.runSimCase(config(allocator, scope.options));
         }
+
+        /// Sets the current input and appends its attribute for one call.
+        const InputScope = struct {
+            allocator: std.mem.Allocator,
+            options: Options,
+            json: []u8 = &.{},
+            attributes: []run_types.RunAttribute = &.{},
+
+            fn begin(allocator: std.mem.Allocator, options: Options) !InputScope {
+                const value = options.input orelse return error.HarnessInputRequired;
+                const json = std.json.Stringify.valueAlloc(allocator, value, .{}) catch return error.OutOfMemory;
+                errdefer allocator.free(json);
+                const attributes = try allocator.alloc(run_types.RunAttribute, options.attributes.len + 1);
+                @memcpy(attributes[0..options.attributes.len], options.attributes);
+                attributes[options.attributes.len] = run_types.runAttribute(input_attribute, @as([]const u8, json));
+                var scoped = options;
+                scoped.attributes = attributes;
+                Inputs.current = value;
+                return .{ .allocator = allocator, .options = scoped, .json = json, .attributes = attributes };
+            }
+
+            fn end(self: *InputScope) void {
+                Inputs.current = null;
+                self.allocator.free(self.attributes);
+                self.allocator.free(self.json);
+            }
+        };
+
+        /// Decode a capsule's recorded input and make it current for replay.
+        const ReplayInput = struct {
+            parsed: ?std.json.Parsed(Input) = null,
+
+            fn begin(allocator: std.mem.Allocator, capsule: *const replay_module.Capsule) !ReplayInput {
+                if (!has_input) return .{};
+                for (capsule.options().attributes) |attribute| {
+                    if (!std.mem.eql(u8, attribute.key, input_attribute)) continue;
+                    const json = switch (attribute.value) {
+                        .string => |text| text,
+                        else => return error.InvalidHarnessInput,
+                    };
+                    const parsed = std.json.parseFromSlice(Input, allocator, json, .{ .allocate = .alloc_always }) catch
+                        return error.InvalidHarnessInput;
+                    Inputs.current = parsed.value;
+                    return .{ .parsed = parsed };
+                }
+                return error.HarnessInputRequired;
+            }
+
+            fn end(self: *ReplayInput) void {
+                if (!has_input) return;
+                Inputs.current = null;
+                if (self.parsed) |*parsed| parsed.deinit();
+            }
+        };
 
         /// Run and write replayable artifacts for a failure.
         pub fn runWithArtifacts(
             allocator: std.mem.Allocator,
             options: Options,
             artifacts: @import("artifact.zig").Options,
-        ) run_module.RunError!run_types.RunReport {
-            const base = config(allocator, options);
+        ) !run_types.RunReport {
+            var scope: ?InputScope = if (has_input) try InputScope.begin(allocator, options) else null;
+            defer if (scope) |*active| active.end();
+            const base = config(allocator, if (scope) |active| active.options else options);
             const with: ArtifactConfig = .{
                 .allocator = base.allocator,
                 .simulate = base.simulate,
@@ -208,8 +292,16 @@ pub fn Harness(comptime spec: anytype) type {
         }
 
         /// Expect the run to pass; prints the failure summary otherwise.
-        pub fn expectPass(allocator: std.mem.Allocator, options: Options) run_module.ExpectRunError!void {
-            return run_module.expectSimPass(config(allocator, options));
+        pub fn expectPass(allocator: std.mem.Allocator, options: Options) !void {
+            var report = try run(allocator, options);
+            defer report.deinit();
+            switch (report) {
+                .passed => {},
+                .failed => |failure| {
+                    failure.print();
+                    return error.ExpectedRunPass;
+                },
+            }
         }
 
         /// Expect the run to fail as `expectation` describes.
@@ -217,7 +309,7 @@ pub fn Harness(comptime spec: anytype) type {
             allocator: std.mem.Allocator,
             options: Options,
             expectation: run_types.FailureExpectation,
-        ) run_module.ExpectRunError!void {
+        ) !void {
             var report = try run(allocator, options);
             defer report.deinit();
             switch (report) {
@@ -239,7 +331,7 @@ pub fn Harness(comptime spec: anytype) type {
 
         /// Run many deterministic seeds, or rerun one. A failure prints its
         /// summary and the build option that reruns it.
-        pub fn fuzz(allocator: std.mem.Allocator, options: Options, fuzz_options: FuzzOptions) run_module.ExpectRunError!void {
+        pub fn fuzz(allocator: std.mem.Allocator, options: Options, fuzz_options: FuzzOptions) !void {
             if (fuzz_options.rerun) |seed| {
                 var rerun_options = options;
                 rerun_options.seed = seed;
@@ -272,6 +364,8 @@ pub fn Harness(comptime spec: anytype) type {
             capsule: *const replay_module.Capsule,
             identity: replay_module.Identity,
         ) !run_types.RunReport {
+            var replay_input = try ReplayInput.begin(allocator, capsule);
+            defer replay_input.end();
             return run_module.replaySimCase(.{
                 .allocator = allocator,
                 .init = spec.init,
@@ -286,7 +380,10 @@ pub fn Harness(comptime spec: anytype) type {
             options: Options,
             reduction: reduce_module.Options,
         ) !reduce_module.Result {
-            return reduce_module.reduceSimCase(config(allocator, options), reduction);
+            if (!has_input) return reduce_module.reduceSimCase(config(allocator, options), reduction);
+            var scope = try InputScope.begin(allocator, options);
+            defer scope.end();
+            return reduce_module.reduceSimCase(config(allocator, scope.options), reduction);
         }
 
         /// Reduce a retained capsule in this process.
@@ -296,6 +393,8 @@ pub fn Harness(comptime spec: anytype) type {
             identity: replay_module.Identity,
             reduction: reduce_module.Options,
         ) !reduce_module.Result {
+            var replay_input = try ReplayInput.begin(allocator, capsule);
+            defer replay_input.end();
             return reduce_module.reduceCapsule(.{
                 .allocator = allocator,
                 .init = spec.init,
@@ -309,8 +408,11 @@ pub fn Harness(comptime spec: anytype) type {
             allocator: std.mem.Allocator,
             options: Options,
             campaign_options: campaign_module.Options,
-        ) campaign_module.Error!campaign_module.Summary {
-            return campaign_module.runCampaign(config(allocator, options), campaign_options);
+        ) !campaign_module.Summary {
+            if (!has_input) return campaign_module.runCampaign(config(allocator, options), campaign_options);
+            var scope = try InputScope.begin(allocator, options);
+            defer scope.end();
+            return campaign_module.runCampaign(config(allocator, scope.options), campaign_options);
         }
 
         /// Sweep disk crash points across the scenario's armed region.
@@ -318,8 +420,11 @@ pub fn Harness(comptime spec: anytype) type {
             allocator: std.mem.Allocator,
             options: Options,
             sweep: crash_points_module.Options,
-        ) crash_points_module.Error!crash_points_module.Result {
-            return crash_points_module.sweepCrashPoints(config(allocator, options), sweep);
+        ) !crash_points_module.Result {
+            if (!has_input) return crash_points_module.sweepCrashPoints(config(allocator, options), sweep);
+            var scope = try InputScope.begin(allocator, options);
+            defer scope.end();
+            return crash_points_module.sweepCrashPoints(config(allocator, scope.options), sweep);
         }
 
         /// Expect every crash point to pass.
@@ -328,7 +433,12 @@ pub fn Harness(comptime spec: anytype) type {
             options: Options,
             sweep: crash_points_module.Options,
         ) !void {
-            return crash_points_module.expectCrashPointsPass(config(allocator, options), sweep);
+            var result = try sweepCrashPoints(allocator, options, sweep);
+            defer result.deinit();
+            if (result.failure) |failure| {
+                failure.failed.print();
+                return error.ExpectedRunPass;
+            }
         }
     };
 }
