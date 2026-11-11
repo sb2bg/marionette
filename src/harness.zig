@@ -31,15 +31,80 @@ pub fn Harness(comptime spec: anytype) type {
         for (std.meta.fieldNames(Spec)) |name| {
             const known = std.mem.eql(u8, name, "init") or std.mem.eql(u8, name, "scenario") or
                 std.mem.eql(u8, name, "checks") or std.mem.eql(u8, name, "simulate") or
-                std.mem.eql(u8, name, "name");
+                std.mem.eql(u8, name, "name") or std.mem.eql(u8, name, "capture");
             if (!known) @compileError("Harness spec has unknown field `" ++ name ++ "`");
         }
     }
     const App = run_module.appTypeFromSimInit(spec.init);
     const Case = run_module.SimCase(App);
     const Check = run_module.StateCheck(Case);
+    const has_capture = @hasField(Spec, "capture");
+    const Outcome = if (has_capture) CaptureOutcome(spec.capture) else void;
+    const outcome_has_deinit = if (has_capture) std.meta.hasMethod(Outcome, "deinit") else false;
+
+    const Capturing = struct {
+        threadlocal var allocator: ?std.mem.Allocator = null;
+        threadlocal var slot: ?Outcome = null;
+
+        fn release() void {
+            if (slot) |*outcome| {
+                if (comptime outcome_has_deinit) outcome.deinit();
+                slot = null;
+            }
+        }
+
+        fn scenario(case: *Case) anyerror!void {
+            const Return = @typeInfo(@TypeOf(spec.scenario)).@"fn".return_type.?;
+            if (comptime @typeInfo(Return) == .error_union) try spec.scenario(case) else spec.scenario(case);
+            const capture_allocator = allocator orelse return;
+            // The runner executes twice; keep the latest outcome.
+            release();
+            slot = try spec.capture(case, capture_allocator);
+        }
+    };
+    const scenario_fn = if (has_capture) Capturing.scenario else spec.scenario;
 
     return struct {
+        /// What `capture` returns, or `void` without one.
+        pub const CapturedOutcome = Outcome;
+
+        /// A report plus the outcome `capture` extracted from the app state
+        /// at the end of the scenario. The outcome is null when the scenario
+        /// failed or ran in a watchdog worker. Call `deinit`.
+        pub const Captured = struct {
+            report: run_types.RunReport,
+            outcome: ?Outcome,
+
+            pub fn deinit(self: *Captured) void {
+                self.report.deinit();
+                if (self.outcome) |*outcome| {
+                    if (comptime outcome_has_deinit) outcome.deinit();
+                }
+                self.* = undefined;
+            }
+        };
+
+        /// Run once and return the report with the captured outcome. The
+        /// harness spec must define `capture: fn (*SimCase(App),
+        /// std.mem.Allocator) !Outcome`; an outcome with `deinit` owns its
+        /// allocations.
+        pub fn runCapture(allocator: std.mem.Allocator, options: Options) !Captured {
+            if (!has_capture) @compileError("runCapture requires a `capture` field in the Harness spec");
+            Capturing.allocator = allocator;
+            defer Capturing.allocator = null;
+            errdefer Capturing.release();
+            const report = try run(allocator, options);
+            const outcome = Capturing.slot;
+            Capturing.slot = null;
+            return .{ .report = report, .outcome = if (report == .passed) outcome else blk: {
+                if (outcome) |value| {
+                    var owned = value;
+                    if (comptime outcome_has_deinit) owned.deinit();
+                }
+                break :blk null;
+            } };
+        }
+
         pub const AppType = App;
         pub const CaseType = Case;
         pub const checks: []const Check = if (@hasField(Spec, "checks")) spec.checks else &.{};
@@ -82,7 +147,7 @@ pub fn Harness(comptime spec: anytype) type {
             allocator: std.mem.Allocator,
             simulate: World.SimulateOptions,
             comptime init: @TypeOf(spec.init) = spec.init,
-            comptime scenario: @TypeOf(spec.scenario) = spec.scenario,
+            comptime scenario: @TypeOf(scenario_fn) = scenario_fn,
             comptime checks: []const Check = checks,
             seed: u64,
             seed_schedule: []const seed_module.SeedCutover,
@@ -99,7 +164,7 @@ pub fn Harness(comptime spec: anytype) type {
             allocator: std.mem.Allocator,
             simulate: World.SimulateOptions,
             comptime init: @TypeOf(spec.init) = spec.init,
-            comptime scenario: @TypeOf(spec.scenario) = spec.scenario,
+            comptime scenario: @TypeOf(scenario_fn) = scenario_fn,
             comptime checks: []const Check = checks,
             seed: u64,
             seed_schedule: []const seed_module.SeedCutover,
@@ -210,7 +275,7 @@ pub fn Harness(comptime spec: anytype) type {
             return run_module.replaySimCase(.{
                 .allocator = allocator,
                 .init = spec.init,
-                .scenario = spec.scenario,
+                .scenario = scenario_fn,
                 .checks = checks,
             }, capsule, identity);
         }
@@ -234,7 +299,7 @@ pub fn Harness(comptime spec: anytype) type {
             return reduce_module.reduceCapsule(.{
                 .allocator = allocator,
                 .init = spec.init,
-                .scenario = spec.scenario,
+                .scenario = scenario_fn,
                 .checks = checks,
             }, capsule, identity, reduction);
         }
@@ -265,5 +330,13 @@ pub fn Harness(comptime spec: anytype) type {
         ) !void {
             return crash_points_module.expectCrashPointsPass(config(allocator, options), sweep);
         }
+    };
+}
+
+fn CaptureOutcome(comptime capture: anytype) type {
+    const Return = @typeInfo(@TypeOf(capture)).@"fn".return_type.?;
+    return switch (@typeInfo(Return)) {
+        .error_union => |info| info.payload,
+        else => Return,
     };
 }

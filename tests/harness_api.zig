@@ -277,3 +277,30 @@ test "harness: the cli reruns, replays, and reduces without code changes" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "check=counter.below_six") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "marionette.reduce attempts=") != null);
 }
+
+const CapturedCounter = mar.Harness(.{
+    .init = Counter.init,
+    .scenario = Counter.scenario,
+    .capture = captureCounter,
+});
+
+const CounterOutcome = struct {
+    allocator: std.mem.Allocator,
+    label: []u8,
+
+    pub fn deinit(self: *CounterOutcome) void {
+        self.allocator.free(self.label);
+    }
+};
+
+fn captureCounter(case: *mar.SimCase(Counter), allocator: std.mem.Allocator) !CounterOutcome {
+    return .{ .allocator = allocator, .label = try std.fmt.allocPrint(allocator, "value-{}", .{case.app.value}) };
+}
+
+test "harness: capture returns the scenario's outcome with the report" {
+    var captured = try CapturedCounter.runCapture(std.testing.allocator, .{ .seed = 9 });
+    defer captured.deinit();
+    try std.testing.expect(captured.report == .passed);
+    const outcome = captured.outcome.?;
+    try std.testing.expect(std.mem.startsWith(u8, outcome.label, "value-"));
+}
