@@ -187,8 +187,8 @@ best accepted report; ordinary reports retain their existing ownership rules.
 
 ```zig
 const process = try sim.manageProcess(Service, node, Service.open);
-try sim.killProcess(node);
-try sim.restartProcess(node);
+try sim.control.process.kill(node);
+try sim.control.process.restart(node);
 const reopened = process.state() orelse return error.ProcessUnavailable;
 ```
 

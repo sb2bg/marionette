@@ -204,7 +204,7 @@ test "Ochi storage survives flush, crash, and reopen under Marionette" {
     });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 
     case.app = try OchiApp.init(sim);
     app_live = true;

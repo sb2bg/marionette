@@ -191,18 +191,18 @@ test "managed processes: kill, durable reopen, failed reopen, and retry" {
     try std.testing.expectError(error.ProcessAlreadyRegistered, sim.manageProcess(ProcessApp, 0, ProcessApp.init));
     try managed.state().?.file.writeStreamingAll(managed.state().?.io, "durable");
     try managed.state().?.file.sync(managed.state().?.io);
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
     try std.testing.expect(managed.state() == null);
     ProcessApp.fail_reopen = true;
     defer ProcessApp.fail_reopen = false;
-    try std.testing.expectError(error.ReopenFailed, sim.restartProcess(0));
+    try std.testing.expectError(error.ReopenFailed, sim.control.process.restart(0));
     try std.testing.expect(managed.state() == null);
     ProcessApp.fail_reopen = false;
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     var buffer: [7]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 7), try managed.state().?.file.readPositionalAll(managed.state().?.io, &buffer, 0));
     try std.testing.expectEqualStrings("durable", &buffer);
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
     try sim.control.checkResources();
 }
 

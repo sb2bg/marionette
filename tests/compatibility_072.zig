@@ -36,12 +36,12 @@ const App = struct {
         return .{};
     }
     pub fn scenario(case: *mar.SimCase(@This())) !void {
-        try case.sim.killProcess(0);
-        try case.sim.restartProcess(0);
+        try case.sim.control.process.kill(0);
+        try case.sim.control.process.restart(0);
         try case.control().disk.crash();
         try case.control().disk.restart();
-        try case.sim.restartProcess(0);
-        try case.sim.restartProcess(1);
+        try case.sim.control.process.restart(0);
+        try case.sim.control.process.restart(1);
         try case.control().process.setDynamics(1, .{
             .crash_rate = .{ .numerator = 1, .denominator = 2 },
             .restart_rate = .always(),

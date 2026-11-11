@@ -432,6 +432,9 @@ pub const FaultEvolutionControl = struct {
 /// Harness-facing simulator controls: time movement plus the fault
 /// authorities for allocation, disk, network, processes, and tasks.
 /// Application code receives `Env` instead and never sees this.
+///
+/// `world` is the engine behind these controls. Harnesses should not need it:
+/// decisions, recording, time, and traces are available here directly.
 pub const SimControl = struct {
     allocation: allocation_module.Control,
     disk: disk_module.DiskControl,
@@ -459,6 +462,42 @@ pub const SimControl = struct {
     /// this instead of awaiting a future the scenario expects to strand.
     pub fn runTasksUntilIdle(self: SimControl) !void {
         try self.tasks.runUntilIdle();
+    }
+
+    /// Draw a traced, replayed boolean at a stable semantic site.
+    pub fn chooseBool(self: SimControl, comptime site_id: []const u8) !bool {
+        return self.world.chooseBool(site_id);
+    }
+
+    /// Draw a traced, replayed integer in `[0, less_than)` at a stable site.
+    pub fn chooseIntLessThan(self: SimControl, comptime site_id: []const u8, comptime T: type, less_than: T) !T {
+        return self.world.chooseIntLessThan(site_id, T, less_than);
+    }
+
+    /// Draw a traced, replayed `u64` at a stable semantic site.
+    pub fn chooseU64(self: SimControl, comptime site_id: []const u8) !u64 {
+        return self.world.chooseU64(site_id);
+    }
+
+    /// Fill `buffer` with traced, replayed random bytes.
+    pub fn randomBytes(self: SimControl, buffer: []u8) !void {
+        try self.world.randomBytes(buffer);
+    }
+
+    /// Current simulated time in nanoseconds.
+    pub fn now(self: SimControl) clock_module.Timestamp {
+        return self.world.now();
+    }
+
+    /// Record one harness event. Never fails at the call site: the first
+    /// failure is latched and the runner reports `recording_failed`.
+    pub fn record(self: SimControl, comptime fmt: []const u8, args: anytype) void {
+        self.world.record(fmt, args) catch |err| self.world.latchRecordingFailure(err);
+    }
+
+    /// The harness trace recorded so far. Invalidated by later events.
+    pub fn traceBytes(self: SimControl) []const u8 {
+        return self.world.traceBytes();
     }
 
     /// Fail the run from a task or the scenario with `err`. The scheduler
@@ -590,7 +629,7 @@ test "env: killed node clock rejects sleep through stale capability" {
 
     const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     const node_env = try sim.envForNode(1);
-    try sim.killProcess(1);
+    try sim.control.process.kill(1);
 
     try std.testing.expectError(
         error.Canceled,

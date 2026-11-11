@@ -43,7 +43,7 @@ const data_probe_value: [4096]u8 = @splat('d');
 
 fn restartAfterDiskCrash(sim: mar.Sim) !void {
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 }
 
 const Value = union(enum) {

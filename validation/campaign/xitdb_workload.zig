@@ -158,7 +158,7 @@ pub fn scenario(case: *Case) !void {
     if (app.victim_completed) try app.acknowledge(&app.victim);
 
     try case.control().disk.restart();
-    try case.sim.restartProcess(0);
+    try case.sim.control.process.restart(0);
     const file = try std.Io.Dir.cwd().openFile(app.io, db_path, .{ .mode = .read_write });
     app.recovered_file = file;
     app.recovered = try DB.init(.{ .io = app.io, .file = file });

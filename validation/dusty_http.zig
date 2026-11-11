@@ -1130,12 +1130,12 @@ pub fn runPoolCrashScenario(allocator: std.mem.Allocator, seed: u64) !PoolCrashO
 
     // Crash the server: its listener, accept task, and the keep-alive
     // handler parked on the pooled connection die with the process.
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 
     var poisoned_future = try Io.concurrent(client_io, PoolCrashScenario.poisonedAttemptsTask, .{&scenario});
     poisoned_future.await(client_io);
 
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     var post_restart_future = try Io.concurrent(client_io, PoolCrashScenario.postRestartTask, .{&scenario});
     post_restart_future.await(client_io);
 
@@ -1145,7 +1145,7 @@ pub fn runPoolCrashScenario(allocator: std.mem.Allocator, seed: u64) !PoolCrashO
     }
     // Tear the restarted incarnation down through the same process lifecycle
     // used to create it, keeping this crash scenario independent of shutdown.
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
     try sim.control.runTasksUntilIdle();
     if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
 

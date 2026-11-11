@@ -67,7 +67,7 @@ const Faulty = struct {
         const disk = case.env().disk;
         const control = case.control();
         // Before the crash, which restarts every process itself.
-        try case.sim.killProcess(1);
+        try case.sim.control.process.kill(1);
         try control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
         try disk.write(.{ .path = "wal", .offset = 0, .bytes = "abcd" });
         try control.disk.crash();

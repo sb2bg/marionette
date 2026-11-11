@@ -221,7 +221,7 @@ test "tcp_v1 probe D: a killed peer's FIN waits behind the partition too" {
 
     const fault = try pair.sim.control.network.partition(&.{0}, &.{1}, .{});
     const start = world.now();
-    try pair.sim.killProcess(0);
+    try pair.sim.control.process.kill(0);
     // Node 0 hosts the default harness Io and is dead; heal from node 1.
     var healer: Healer = .{ .control = pair.sim.control, .io = pair.client_io, .after_ns = 2 * s, .fault = fault, .world = &world };
     var future = try std.Io.concurrent(pair.client_io, Healer.run, .{&healer});

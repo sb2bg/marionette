@@ -422,20 +422,6 @@ pub const World = struct {
             try self.processSupervisor().registerProcess(node, lifecycle);
         }
 
-        /// Kill one logical process: cancel its scheduler tasks, close its
-        /// process-local handles, and run its `on_kill` callback once.
-        pub fn killProcess(self: Simulation, node: network_module.NodeId) !void {
-            try self.processSupervisor().killProcess(node);
-        }
-
-        /// Restart one logical process by rerunning its registered initializer.
-        ///
-        /// If the process is still alive, it is killed first so restart always
-        /// creates a fresh incarnation.
-        pub fn restartProcess(self: Simulation, node: network_module.NodeId) !void {
-            try self.processSupervisor().restartProcess(node);
-        }
-
         /// One-shot transition into liveness mode, following the VOPR
         /// `transition_to_liveness_mode` shape: zero every probabilistic
         /// simulator fault rate, restore links, clogs, and node state

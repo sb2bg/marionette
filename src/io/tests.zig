@@ -366,7 +366,7 @@ test "io: process kill completes owned task groups" {
     var completed = false;
     var group: Io.Group = .init;
     try group.concurrent(io, Helper.delayedWrite, .{ io, &completed });
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
     try group.await(io);
     try std.testing.expect(!completed);
     const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
@@ -394,7 +394,7 @@ test "io: process kill retires task closures before futures are collected" {
     try std.testing.expectEqual(@as(usize, 1), backend.async_closures.items.len);
     try std.testing.expectEqual(@as(usize, 1), backend.async_futures.items.len);
 
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 
     try std.testing.expect(!ran);
     try std.testing.expectEqual(@as(usize, 0), backend.async_closures.items.len);
@@ -428,7 +428,7 @@ test "io: process kill sweeps disk op scratch from killed tasks" {
             const backend = world_module.internal.ioRuntime(self.sim).backendForNode(0) catch
                 @panic("missing process backend");
             self.scratch_before_kill = backend.op_scratch.items.len;
-            self.sim.killProcess(0) catch @panic("process kill failed");
+            self.sim.control.process.kill(0) catch @panic("process kill failed");
             self.scratch_after_kill = backend.op_scratch.items.len;
         }
     };
@@ -482,7 +482,7 @@ test "io: process kill releases shared pathname reservations" {
         node_zero_io.futexWait(u32, &scenario.reserved, 0) catch unreachable;
     }
 
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
     reserver.await(node_zero_io);
     try node_one_backend.acquireFilePathLease("held");
     node_one_backend.releaseFilePathLease("held");
@@ -512,7 +512,7 @@ test "io: process kill aborts main-context pathname waits" {
             while (self.held == 0) {
                 self.io.futexWait(u32, &self.held, 0) catch unreachable;
             }
-            self.sim.killProcess(0) catch @panic("process kill failed");
+            self.sim.control.process.kill(0) catch @panic("process kill failed");
         }
     };
 
@@ -1180,7 +1180,7 @@ test "io: process kill reclaims an in-flight connect probe without running task 
         try network_module.internal.streamQueuedPacketsFromControl(sim.control.network),
     );
 
-    try sim.killProcess(1);
+    try sim.control.process.kill(1);
     connect_future.await(server_io);
     const client_backend = try world_module.internal.ioRuntime(sim).backendForNode(1);
     try std.testing.expectEqual(@as(usize, 0), client_backend.connect_probes.items.len);
@@ -1190,7 +1190,7 @@ test "io: process kill reclaims an in-flight connect probe without running task 
     );
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
 
-    try sim.restartProcess(1);
+    try sim.control.process.restart(1);
     try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
     const restarted_io = (try sim.envForNode(1)).io();
     const client = try address.connect(restarted_io, .{ .mode = .stream, .protocol = .tcp });
@@ -1977,7 +1977,7 @@ test "io: process kill retires futex keys for killed waiters" {
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
     try std.testing.expectEqual(@as(usize, 1), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
 
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
     future.await(io);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
     try std.testing.expectEqual(@as(usize, 0), world_module.internal.ioRuntime(sim).registry.futex_keys.items.len);
@@ -2288,7 +2288,7 @@ test "io: process kill cancels owned tasks and resets peers" {
     Scenario.waitFor(server_io, &scenario.accepted);
     Scenario.waitFor(client_io, &scenario.read_started);
 
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 
     client_future.await(client_io);
     server_future.await(server_io);
@@ -2375,7 +2375,7 @@ test "io: process reset discards delayed outbound frames terminally" {
             waitFor(self.client_io, &self.read_started);
             Io.sleep(self.client_io, .fromNanoseconds(10), .awake) catch
                 @panic("reset test killer sleep failed");
-            self.sim.killProcess(0) catch @panic("reset test process kill failed");
+            self.sim.control.process.kill(0) catch @panic("reset test process kill failed");
         }
     };
 
@@ -2437,7 +2437,7 @@ test "io: cross-process await releases the spawning backend closure" {
     try std.testing.expectEqual(@as(usize, 0), server_backend.async_closures.items.len);
     try std.testing.expectEqual(@as(usize, 0), client_backend.async_closures.items.len);
 
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 }
 
 test "io: process kill from inside owned task completes as killed" {
@@ -2449,7 +2449,7 @@ test "io: process kill from inside owned task completes as killed" {
         gate_rejected: bool = false,
 
         fn task(self: *@This()) void {
-            self.sim.killProcess(0) catch @panic("self kill failed");
+            self.sim.control.process.kill(0) catch @panic("self kill failed");
             self.after_kill_call = true;
             const backend = world_module.internal.ioRuntime(self.sim).backendForNode(0) catch
                 @panic("missing process backend");
@@ -2524,8 +2524,8 @@ test "io: process restart reruns registered initializer against durable state" {
         .restart = State.restart,
     });
 
-    try sim.killProcess(0);
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
+    try sim.control.process.kill(0);
     try std.testing.expectEqual(@as(u32, 1), state.kills);
     try std.testing.expectEqual(@as(u32, 0), state.volatile_value);
     try std.testing.expectEqual(
@@ -2533,13 +2533,13 @@ test "io: process restart reruns registered initializer against durable state" {
         countOccurrences(world.traceBytes(), "process.kill node=0 reason=manual"),
     );
 
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     try std.testing.expectEqual(@as(u32, 1), state.starts);
     try std.testing.expectEqual(@as(u32, 1), state.kills);
     try std.testing.expectEqual(@as(u32, 7), state.volatile_value);
     try std.testing.expectEqualStrings("live", &state.last_bytes);
 
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     try std.testing.expectEqual(@as(u32, 2), state.starts);
     try std.testing.expectEqual(@as(u32, 2), state.kills);
     try std.testing.expectEqual(@as(u32, 7), state.volatile_value);
@@ -2564,7 +2564,7 @@ test "io: killed processes reject saved node capabilities until restart" {
     const saved_io = saved_env.io();
     try registerNoopProcess(sim, 0);
 
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 
     try std.testing.expectError(error.ProcessKilled, sim.envForNode(0));
     try std.testing.expectError(
@@ -2578,7 +2578,7 @@ test "io: killed processes reject saved node capabilities until restart" {
     const address = Io.net.IpAddress.parseIp4("127.0.0.1", 0) catch unreachable;
     try std.testing.expectError(error.NetworkDown, address.listen(saved_io, .{}));
 
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     var file = try Io.Dir.cwd().createFile(saved_io, "after-restart", .{});
     file.close(saved_io);
     var listener = try address.listen(saved_io, .{});
@@ -2613,14 +2613,14 @@ test "io: manual restart invalidates process-local file metadata" {
 
     var state: State = .{};
     try sim.registerProcess(0, .{ .ptr = &state, .restart = State.restart });
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 
     var updater = try Io.Dir.cwd().openFile(node_one_io, "shared", .{ .mode = .read_write });
     try updater.writePositionalAll(node_one_io, "new!", 4);
     try updater.sync(node_one_io);
     updater.close(node_one_io);
 
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     try std.testing.expectEqual(@as(u64, 8), state.observed_len);
 }
 
@@ -2659,8 +2659,8 @@ test "io: failed restart rolls back partial process resources" {
         .restart = State.restart,
     });
 
-    try sim.killProcess(0);
-    try std.testing.expectError(error.RestartFailed, sim.restartProcess(0));
+    try sim.control.process.kill(0);
+    try std.testing.expectError(error.RestartFailed, sim.control.process.restart(0));
 
     const backend = try world_module.internal.ioRuntime(sim).backendForNode(0);
     try std.testing.expectEqual(@as(usize, 0), backend.handles.items.len);
@@ -2672,7 +2672,7 @@ test "io: failed restart rolls back partial process resources" {
     );
 
     state.fail = false;
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     try std.testing.expectEqual(@as(u32, 1), state.starts);
 }
 
@@ -2699,7 +2699,7 @@ test "io: restarting an unregistered process revives only its I/O" {
 
     const sim = try world.simulate(.{});
     // No lifecycle: a fresh incarnation with nothing to rerun.
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "process.kill node=0 reason=restart"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "process.restart node=0 automatic=false"));
 
@@ -2710,7 +2710,7 @@ test "io: restarting an unregistered process revives only its I/O" {
         .restart = State.restart,
     });
 
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     try std.testing.expectEqual(@as(u32, 1), state.starts);
     try std.testing.expectEqual(@as(u32, 1), state.kills);
 }
@@ -3852,7 +3852,7 @@ test "io: process kill releases a group whose awaiter is suspended" {
     try std.testing.expectEqual(@as(usize, 1), backend.group_states.items.len);
     try std.testing.expectEqual(@as(usize, 1), backend.group_closures.items.len);
 
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 
     try std.testing.expectEqual(@as(usize, 0), backend.group_states.items.len);
     try std.testing.expectEqual(@as(usize, 0), backend.group_closures.items.len);
@@ -4381,7 +4381,7 @@ test "io: simulation streaming writes use disk pending-write crash semantics" {
     try sim.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 
     // The crash killed the simulated process: the old handle is dead and the
     // file must be reopened, like a real restart.
@@ -4419,7 +4419,7 @@ test "io: file lengths re-derive from disk truth after a crash" {
     try sim.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 
     // Before the crash-observer fix, the stale cached length (8) survived
     // the crash and reads exposed zero-filled phantom bytes.
@@ -4483,7 +4483,7 @@ test "io: crash rediscovery reports the surviving file, not the rolled-back repl
     });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 
     // Stat is the first touch, so it alone must re-derive the metadata.
     const recovered = try cwd.statFile(io, "config", .{});
@@ -4520,7 +4520,7 @@ test "io: crash rolls back unsynced deletion and preserves timestamps" {
     try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 
     // The unsynced deletion was rolled back: the file is resurrected with
     // its durable contents and its pre-crash timestamp, not mtime zero.
@@ -4707,7 +4707,7 @@ test "io: atomic replace preserves logical length across crash" {
     try sim.env.disk.syncDir(.{ .path = "." });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 
     var reopened = try cwd.openFile(io, "catalog.json", .{ .mode = .read_only });
     defer reopened.close(io);
@@ -4851,7 +4851,7 @@ test "io: directories are shared across processes and obey metadata durability" 
     try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(1);
+    try sim.control.process.restart(1);
 
     try std.testing.expectError(
         error.FileNotFound,
@@ -4874,7 +4874,7 @@ test "io: directory iteration excludes crash-lost file metadata" {
     try sim.control.disk.setFaults(.{ .crash_lost_metadata_rate = .always() });
     try sim.control.disk.crash();
     try sim.control.disk.restart();
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
 
     var root = try Io.Dir.cwd().openDir(io, "root", .{ .iterate = true });
     defer root.close(io);
@@ -5441,7 +5441,7 @@ test "io: process kill retires blocked file lock waiters" {
     try std.testing.expectError(error.Deadlock, sim.control.runTasksUntilIdle());
     try std.testing.expectEqual(@as(usize, 1), sim.control.blockedTaskCount());
 
-    try sim.killProcess(1);
+    try sim.control.process.kill(1);
     waiter.await(node_zero_io);
     holder.close(node_zero_io);
     try std.testing.expectEqual(@as(usize, 0), sim.control.blockedTaskCount());
@@ -5820,8 +5820,8 @@ test "io: transitionToLiveness restores the core and leaves non-core failures pe
     try sim.control.disk.setFaults(.{ .read_error_rate = .percent(10) });
     try sim.control.allocation.setFaults(.{ .buggify_rate = .percent(10) });
 
-    try sim.killProcess(0);
-    try sim.killProcess(2);
+    try sim.control.process.kill(0);
+    try sim.control.process.kill(2);
     _ = try sim.control.network.partition(&.{0}, &.{ 1, 2 }, .{});
     try sim.control.network.setNode(0, false);
     try sim.control.network.clog(1, 0, 1_000);
@@ -5933,8 +5933,8 @@ test "io: transitionToLiveness preflight failures leave the transition retryable
     const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 2 } });
     var state: State = .{};
     try sim.registerProcess(0, .{ .ptr = &state, .restart = State.restart });
-    try sim.killProcess(0);
-    try sim.killProcess(1);
+    try sim.control.process.kill(0);
+    try sim.control.process.kill(1);
 
     try std.testing.expectError(error.InvalidNode, sim.transitionToLiveness(&.{ 0, 7 }));
     // The failed call consumed nothing and mutated no fault state.
@@ -5966,7 +5966,7 @@ test "io: transitionToLiveness remains retryable after lifecycle failure" {
     const sim = try world.simulate(.{});
     var state: State = .{};
     try sim.registerProcess(0, .{ .ptr = &state, .restart = State.restart });
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
 
     try std.testing.expectError(error.RestartFailed, sim.transitionToLiveness(&.{0}));
     try std.testing.expectEqual(@as(u32, 1), state.attempts);
@@ -6229,7 +6229,7 @@ const BackpressureTeardown = struct {
         if (!self.kill_server_process) return;
         Io.sleep(self.client_io, .fromNanoseconds(2000), .awake) catch
             @panic("teardown killer sleep failed");
-        self.sim.killProcess(0) catch @panic("teardown process kill failed");
+        self.sim.control.process.kill(0) catch @panic("teardown process kill failed");
     }
 
     fn clientTask(self: *BackpressureTeardown) void {

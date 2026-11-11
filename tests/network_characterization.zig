@@ -123,7 +123,7 @@ test "network probe D: a peer's death crosses a partition at once" {
 
     _ = try pair.sim.control.network.partition(&.{0}, &.{1}, .{});
     const start = world.now();
-    try pair.sim.killProcess(0);
+    try pair.sim.control.process.kill(0);
     var buffer: [16]u8 = undefined;
     try std.testing.expectError(error.ConnectionResetByPeer, read(pair.client_io, pair.client, &buffer));
     try std.testing.expectEqual(start, world.now());

@@ -82,11 +82,11 @@ const LineSink = struct {
     lens: [4]usize = @splat(0),
     count: usize = 0,
 
-    fn write(ptr: *anyopaque, line: []const u8) void {
+    fn write(ptr: *anyopaque, bytes: []const u8) void {
         const self: *LineSink = @ptrCast(@alignCast(ptr));
         if (self.count == self.lines.len) return;
-        const len = @min(line.len, 64);
-        @memcpy(self.lines[self.count][0..len], line[0..len]);
+        const len = @min(bytes.len, 64);
+        @memcpy(self.lines[self.count][0..len], bytes[0..len]);
         self.lens[self.count] = len;
         self.count += 1;
     }
@@ -130,4 +130,44 @@ test "harness: a failed app recording fails the run at the next boundary" {
     try std.testing.expectEqual(mar.RunFailureKind.recording_failed, report.failed.kind);
     try std.testing.expectEqualStrings("InvalidTracePayload", report.failed.error_name.?);
     try mar.expectTraceContains(report.failed.first_trace, "app.after value=1");
+}
+
+const Helpers = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const control = case.control();
+        const flip = try control.chooseBool("harness.flip");
+        const pick = try control.chooseIntLessThan("harness.pick", u8, 4);
+        var bytes: [4]u8 = undefined;
+        try control.randomBytes(&bytes);
+        control.record("harness.drawn flip={} pick={} now_ns={}", .{ flip, pick, control.now() });
+        try std.testing.expect(std.mem.indexOf(u8, control.traceBytes(), "harness.drawn") != null);
+        // The single process-control surface.
+        try control.process.kill(0);
+        try control.process.restart(0);
+    }
+};
+
+test "harness: Control carries decisions, recording, time, and process control" {
+    var report = try mar.runSimCase(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{},
+        .init = Helpers.init,
+        .scenario = Helpers.scenario,
+    });
+    defer report.deinit();
+    try std.testing.expect(report == .passed);
+    try mar.expectTraceContains(report.passed.trace, "harness.drawn flip=");
+    try mar.expectTraceContains(report.passed.trace, "process.kill node=0");
+}
+
+test "harness: grouped namespaces name the same types as the flat exports" {
+    try std.testing.expect(mar.net.Fault == mar.NetworkFault);
+    try std.testing.expect(mar.replay.Capsule == mar.ReplayCapsule);
+    try std.testing.expect(mar.disk.Control == mar.DiskControl);
+    try std.testing.expect(mar.process.Control == mar.ProcessControl);
+    try std.testing.expect(mar.trace.Recorder == mar.Recorder);
 }

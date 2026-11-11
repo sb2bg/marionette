@@ -398,3 +398,147 @@ pub const crash_profile_attribute = @import("run.zig").crash_profile_attribute;
 
 /// World-owned volatile state for one logical process, reopened on restart.
 pub const ManagedProcess = @import("world.zig").ManagedProcess;
+
+// ---------------------------------------------------------------------------
+// Grouped namespaces (0.10). Prefer these over the flat names above, which
+// remain as aliases until the first stabilization candidate.
+
+/// Disk capabilities, models, options, and errors.
+pub const disk = struct {
+    pub const Disk = disk_module.Disk;
+    pub const Control = disk_module.DiskControl;
+    pub const Sim = disk_module.SimDisk;
+    pub const Real = disk_module.RealDisk;
+    pub const Options = disk_module.DiskOptions;
+    pub const FaultOptions = disk_module.DiskFaultOptions;
+    pub const Error = disk_module.DiskError;
+    pub const SemanticContract = disk_module.DiskSemanticContract;
+    pub const semantic_contract = disk_module.disk_semantic_contract;
+    pub const semantic_version = disk_module.disk_semantic_version;
+};
+
+/// Network topology, model, fault handles, and typed endpoints.
+pub const net = struct {
+    pub const NodeId = network_module.NodeId;
+    pub const Error = network_module.NetworkError;
+    pub const Control = network_module.AnyNetworkControl;
+    pub const Options = network_module.SimNetworkOptions;
+    pub const LossOptions = network_module.NetworkLossOptions;
+    pub const LatencyOptions = network_module.NetworkLatencyOptions;
+    pub const ClogOptions = network_module.NetworkClogOptions;
+    pub const PartitionDynamicsOptions = network_module.NetworkPartitionDynamicsOptions;
+    pub const Semantics = network_module.Semantics;
+    pub const AddressModel = network_module.AddressModel;
+    pub const TimingProfile = network_module.TimingProfile;
+    pub const TcpOptions = network_module.TcpOptions;
+    pub const Fault = network_module.Fault;
+    pub const FaultMode = network_module.FaultMode;
+    pub const FaultKind = network_module.FaultKind;
+    pub const FaultOptions = network_module.FaultOptions;
+    pub const DegradeOptions = network_module.DegradeOptions;
+    pub const Endpoint = network_module.Endpoint;
+    pub const semantic_version = network_module.network_semantic_version;
+    pub const hostIp4 = network_module.AnyNetworkControl.hostIp4;
+    pub const hostIp6 = network_module.AnyNetworkControl.hostIp6;
+};
+
+/// Durable evidence: capsules, identities, replay, reduction, and artifacts.
+pub const replay = struct {
+    pub const Capsule = @import("replay.zig").Capsule;
+    pub const Identity = @import("replay.zig").Identity;
+    pub const run = run_module.replaySimCase;
+    pub const reduce = @import("reduce.zig").reduceSimCase;
+    pub const reduceCapsule = @import("reduce.zig").reduceCapsule;
+    pub const ReductionOptions = @import("reduce.zig").Options;
+    pub const ReductionResult = @import("reduce.zig").Result;
+    pub const FailureFingerprint = @import("reduce.zig").FailureFingerprint;
+    pub const ArtifactOptions = @import("artifact.zig").Options;
+    pub const writeArtifacts = @import("artifact.zig").write;
+};
+
+/// Semantic decisions and their tapes.
+pub const decision = struct {
+    pub const Decision = decision_module.Decision;
+    pub const Request = decision_module.Request;
+    pub const Alternatives = decision_module.Alternatives;
+    pub const Mode = decision_module.Mode;
+    pub const Tape = decision_module.Tape;
+    pub const Divergence = decision_module.Divergence;
+    pub const DivergenceKind = decision_module.DivergenceKind;
+    pub const Error = decision_module.Error;
+    pub const format_version = decision_module.format_version;
+};
+
+/// Trace recording, fields, summaries, and fault coverage.
+pub const trace = struct {
+    pub const Recorder = env_module.Recorder;
+    pub const Operation = env_module.Operation;
+    pub const EventId = u64;
+    pub const Field = @import("world.zig").TraceField;
+    pub const Value = @import("world.zig").TraceValue;
+    pub const field = @import("world.zig").traceField;
+    pub const Error = run_module.TraceError;
+    pub const Summary = trace_summary_module.Summary;
+    pub const SummaryError = trace_summary_module.TraceSummaryError;
+    pub const summarize = trace_summary_module.summarize;
+    pub const FaultCoverage = trace_summary_module.FaultCoverage;
+    pub const faultCoverage = trace_summary_module.faultCoverage;
+};
+
+/// Unattended seed campaigns.
+pub const campaign = struct {
+    pub const run = @import("campaign.zig").runCampaign;
+    pub const Options = @import("campaign.zig").Options;
+    pub const Artifacts = @import("campaign.zig").Artifacts;
+    pub const Summary = @import("campaign.zig").Summary;
+    pub const StopReason = @import("campaign.zig").StopReason;
+    pub const Failure = @import("campaign.zig").DistinctFailure;
+    pub const CaseError = @import("campaign.zig").CaseError;
+    pub const CasePhase = @import("campaign.zig").CasePhase;
+    pub const Reduction = @import("campaign.zig").Reduction;
+    pub const Metrics = @import("campaign.zig").Metrics;
+    pub const loadSummary = @import("campaign.zig").loadSummary;
+};
+
+/// Crash-point sweeps.
+pub const crash = struct {
+    pub const sweep = @import("crash_points.zig").sweepCrashPoints;
+    pub const expectPass = @import("crash_points.zig").expectCrashPointsPass;
+    pub const SweepOptions = @import("crash_points.zig").Options;
+    pub const SweepResult = @import("crash_points.zig").Result;
+    pub const point_attribute = @import("run.zig").crash_point_attribute;
+};
+
+/// Logical processes: the one control surface and managed ownership.
+pub const process = struct {
+    pub const Control = env_module.ProcessControl;
+    pub const DynamicsOptions = env_module.ProcessDynamicsOptions;
+    pub const Lifecycle = @import("world.zig").ProcessLifecycle;
+    pub const Managed = @import("world.zig").ManagedProcess;
+};
+
+/// Allocation faults.
+pub const alloc = struct {
+    pub const FaultOptions = env_module.AllocationFaultOptions;
+    pub const Stats = env_module.AllocationStats;
+    pub const Control = env_module.AllocationControl;
+};
+
+/// Seeds and seed schedules.
+pub const seed = struct {
+    pub const DecisionPoint = seed_module.DecisionPoint;
+    pub const Cutover = seed_module.SeedCutover;
+    pub const Schedule = seed_module.SeedSchedule;
+    pub const ScheduleError = seed_module.SeedScheduleError;
+    pub const validateSchedule = seed_module.validateSeedSchedule;
+    pub const ParseError = seed_module.SeedParseError;
+    pub const parse = seed_module.parseSeed;
+};
+
+test "namespaces resolve every grouped declaration" {
+    inline for (.{ disk, net, replay, decision, trace, campaign, crash, process, alloc, seed }) |namespace| {
+        inline for (comptime std.meta.declarations(namespace)) |name| {
+            _ = @field(namespace, name);
+        }
+    }
+}

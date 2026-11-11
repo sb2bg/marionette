@@ -892,12 +892,12 @@ pub fn runCrashRecovery(allocator: std.mem.Allocator, seed: u64) !CrashOutcome {
 
     // Crash the server process: its listener, accept task, and handler die;
     // the surviving client peer wakes with a reset.
-    try sim.killProcess(0);
+    try sim.control.process.kill(0);
     victim_future.await(client_io);
 
     // Restart through the registered lifecycle and prove recovery works
     // against the fresh incarnation.
-    try sim.restartProcess(0);
+    try sim.control.process.restart(0);
     var recovery_future = try Io.concurrent(client_io, CrashRecovery.recoveryTask, .{&scenario});
     recovery_future.await(client_io);
     try sim.control.runTasksUntilIdle();
