@@ -1,8 +1,9 @@
-//! External-style validation for the `std.Io.net` KV example.
+//! External-style validation for the `std.Io.net` KV example, run through
+//! `mar.Harness`: the runner executes every seed twice and compares traces.
 //!
 //! The SUT imports only `std`. Scenario tasks also use only `std.Io`:
 //! `Io.async` for task structure and futex flags for the fault-injection
-//! handshake. Marionette owns the harness side: world, network control,
+//! handshake. Marionette owns the harness side: runner, network control,
 //! seed, trace, and the exact retry/idempotency oracle.
 
 const std = @import("std");
@@ -41,10 +42,9 @@ const Scenario = struct {
     server_io: Io,
     client_io: Io,
     harness_io: Io,
-    world: *mar.World,
     control: mar.Control,
     address: Io.net.IpAddress,
-    listener: Io.net.Server,
+    listener: Io.net.Server = undefined,
     mode: ScenarioMode,
     server: sut.Server,
     first_response_timed_out: bool = false,
@@ -73,7 +73,7 @@ const Scenario = struct {
 
     fn waitFor(self: *Scenario, flag: *u32) void {
         while (flag.* == 0) {
-            self.harness_io.futexWait(u32, flag, 0) catch @panic("handshake wait failed");
+            self.harness_io.futexWait(u32, flag, 0) catch return;
         }
     }
 
@@ -84,12 +84,12 @@ const Scenario = struct {
         self.signal(&self.accept_waiting);
         var request_index: usize = 0;
         while (request_index < self.requestLimit()) {
-            const stream = self.listener.accept(self.server_io) catch @panic("std_io_net_kv accept failed");
+            const stream = self.listener.accept(self.server_io) catch |err| return self.control.failRun(err);
             self.record("std_io_net_kv.server.accepted", .{});
 
             const connection_limit: usize = if (self.faulted() and request_index == 0) 1 else self.requestLimit() - request_index;
             for (0..connection_limit) |_| {
-                self.server.serveOne(self.server_io, stream) catch @panic("std_io_net_kv serve failed");
+                self.server.serveOne(self.server_io, stream) catch |err| return self.control.failRun(err);
                 self.record(
                     "std_io_net_kv.server.response request_index={} revision={} applied_puts={}",
                     .{ request_index, self.server.revision, self.server.applied_puts },
@@ -103,13 +103,13 @@ const Scenario = struct {
 
     fn clientTask(self: *Scenario) void {
         self.waitFor(&self.accept_waiting);
-        var client = sut.Client.connectWith(self.client_io, self.address, client_options) catch @panic("std_io_net_kv connect failed");
+        var client = sut.Client.connectWith(self.client_io, self.address, client_options) catch |err| return self.control.failRun(err);
         defer client.deinit();
         self.record("std_io_net_kv.client.connected", .{});
 
         switch (self.mode) {
             .happy => {
-                const put_response = client.put(1, 11, 41) catch @panic("happy PUT failed");
+                const put_response = client.put(1, 11, 41) catch |err| return self.control.failRun(err);
                 self.record(
                     "std_io_net_kv.client.put request_id=1 revision={} duplicate={}",
                     .{ put_response.revision, put_response.duplicate },
@@ -125,15 +125,15 @@ const Scenario = struct {
                         self.signal(&self.client_timed_out);
                         self.waitFor(&self.network_healed);
                         client.deinit();
-                        client = sut.Client.connectWith(self.client_io, self.address, client_options) catch
-                            @panic("std_io_net_kv reconnect failed");
+                        client = sut.Client.connectWith(self.client_io, self.address, client_options) catch |reconnect_err|
+                            return self.control.failRun(reconnect_err);
                         self.record("std_io_net_kv.client.reconnected", .{});
                     },
-                    else => @panic("unexpected first PUT error"),
+                    else => return self.control.failRun(err),
                 };
-                if (!self.first_response_timed_out) @panic("faulted PUT unexpectedly returned");
+                if (!self.first_response_timed_out) return self.control.failRun(error.FaultedPutReturned);
 
-                const retry_response = client.put(7, 11, 41) catch @panic("retry PUT failed");
+                const retry_response = client.put(7, 11, 41) catch |err| return self.control.failRun(err);
                 self.record(
                     "std_io_net_kv.client.retry request_id=7 revision={} duplicate={}",
                     .{ retry_response.revision, retry_response.duplicate },
@@ -141,7 +141,7 @@ const Scenario = struct {
             },
         }
 
-        const get_response = client.get(8, 11) catch @panic("GET failed");
+        const get_response = client.get(8, 11) catch |err| return self.control.failRun(err);
         self.record(
             "std_io_net_kv.client.get key=11 value={} revision={}",
             .{ get_response.value, get_response.revision },
@@ -153,115 +153,138 @@ const Scenario = struct {
 
         const server_side = [_]mar.NodeId{0};
         const client_side = [_]mar.NodeId{1};
-        _ = self.control.network.partition(&server_side, &client_side, .{}) catch @panic("partition failed");
+        _ = self.control.network.partition(&server_side, &client_side, .{}) catch |err| return self.control.failRun(err);
         self.record("std_io_net_kv.fault partitioned=true", .{});
 
         self.waitFor(&self.client_timed_out);
-        self.control.network.heal() catch @panic("heal failed");
+        self.control.network.heal() catch |err| return self.control.failRun(err);
         self.record("std_io_net_kv.fault healed=true", .{});
         self.signal(&self.network_healed);
     }
 
     fn record(self: *Scenario, comptime fmt: []const u8, args: anytype) void {
-        self.world.record(fmt, args) catch @panic("std_io_net_kv trace record failed");
+        self.control.record(fmt, args);
     }
 };
 
+fn App(comptime mode: ScenarioMode) type {
+    return struct {
+        const Self = @This();
+        const Case = mar.SimCase(Self);
+
+        scenario: Scenario,
+
+        fn init(sim: mar.Sim) !Self {
+            try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
+            const server_mode: sut.ServerMode = switch (mode) {
+                .happy, .retry_safe => .deduplicate,
+                .retry_buggy => .apply_every_put,
+            };
+            return .{
+                .scenario = .{
+                    .server_io = (try sim.envForNode(0)).io(),
+                    .client_io = (try sim.envForNode(1)).io(),
+                    .harness_io = sim.env.io(),
+                    .control = sim.control,
+                    // Node 0 owns its address; the client reaches it across the fabric.
+                    .address = mar.AnyNetworkControl.hostIp4(0, 4570),
+                    .mode = mode,
+                    .server = sut.Server.init(server_mode),
+                },
+            };
+        }
+
+        fn run(case: *Case) !void {
+            const scenario = &case.app.scenario;
+            scenario.listener = try scenario.address.listen(scenario.server_io, .{});
+            defer scenario.listener.deinit(scenario.server_io);
+
+            var server_future = Io.async(scenario.server_io, Scenario.serverTask, .{scenario});
+            var client_future = Io.async(scenario.client_io, Scenario.clientTask, .{scenario});
+            var controller_future: ?Io.Future(void) = if (mode != .happy)
+                Io.async(scenario.harness_io, Scenario.faultController, .{scenario})
+            else
+                null;
+
+            server_future.await(scenario.server_io);
+            client_future.await(scenario.client_io);
+            if (controller_future) |*future| future.await(scenario.harness_io);
+            if (case.control().blockedTaskCount() != 0) return error.ScenarioDeadlocked;
+
+            const final_value = scenario.server.get(11);
+            const invariant_violated =
+                final_value != 41 or
+                scenario.server.revision != 1 or
+                scenario.server.applied_puts != 1;
+            if (invariant_violated) {
+                case.control().record(
+                    "std_io_net_kv.invariant_violation expected_value=41 actual_value={?} expected_revision=1 actual_revision={} expected_applied_puts=1 actual_applied_puts={}",
+                    .{ final_value, scenario.server.revision, scenario.server.applied_puts },
+                );
+            } else {
+                case.control().record("std_io_net_kv.check retry_idempotent=ok value=41 revision=1 applied_puts=1", .{});
+            }
+        }
+
+        fn capture(case: *Case, allocator: std.mem.Allocator) !Outcome {
+            const scenario = &case.app.scenario;
+            const final_value = scenario.server.get(11);
+            return .{
+                .allocator = allocator,
+                .trace = &.{},
+                .first_response_timed_out = scenario.first_response_timed_out,
+                .final_value = final_value,
+                .revision = scenario.server.revision,
+                .applied_puts = scenario.server.applied_puts,
+                .invariant_violated = final_value != 41 or scenario.server.revision != 1 or scenario.server.applied_puts != 1,
+            };
+        }
+    };
+}
+
+pub fn ScenarioHarness(comptime mode: ScenarioMode) type {
+    return mar.Harness(.{
+        .init = App(mode).init,
+        .scenario = App(mode).run,
+        .capture = App(mode).capture,
+        .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2, .service_nodes = 1, .path_capacity = 16 } },
+        .name = "std_io_net_kv." ++ @tagName(mode),
+    });
+}
+
+/// Run one scenario through its harness. The runner has already executed it
+/// twice and compared the traces.
 pub fn runScenario(
     allocator: std.mem.Allocator,
     seed: u64,
     mode: ScenarioMode,
 ) !Outcome {
-    var world = try mar.World.init(allocator, .{
-        .seed = seed,
-        .tick_ns = 10,
-    });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .network = .{
-        .nodes = 2,
-        .service_nodes = 1,
-        .path_capacity = 16,
-    } });
-    const server_env = try sim.envForNode(0);
-    const client_env = try sim.envForNode(1);
-    const server_io = server_env.io();
-    const client_io = client_env.io();
-    const harness_io = sim.env.io();
-
-    try sim.control.network.setLatency(.{ .min_latency_ns = 30 });
-
-    // Node 0 owns its address; the client reaches it across the fabric.
-    const address = mar.AnyNetworkControl.hostIp4(0, 4570);
-    var listener = try address.listen(server_io, .{});
-    defer listener.deinit(server_io);
-
-    const server_mode: sut.ServerMode = switch (mode) {
-        .happy, .retry_safe => .deduplicate,
-        .retry_buggy => .apply_every_put,
+    return switch (mode) {
+        inline else => |comptime_mode| runHarness(ScenarioHarness(comptime_mode), allocator, seed),
     };
-    var scenario = Scenario{
-        .server_io = server_io,
-        .client_io = client_io,
-        .harness_io = harness_io,
-        .world = &world,
-        .control = sim.control,
-        .address = address,
-        .listener = listener,
-        .mode = mode,
-        .server = sut.Server.init(server_mode),
-    };
+}
 
-    var server_future = Io.async(server_io, Scenario.serverTask, .{&scenario});
-    var client_future = Io.async(client_io, Scenario.clientTask, .{&scenario});
-    var controller_future = if (mode != .happy)
-        Io.async(harness_io, Scenario.faultController, .{&scenario})
-    else
-        null;
-
-    server_future.await(server_io);
-    client_future.await(client_io);
-    if (controller_future) |*future| future.await(harness_io);
-    if (sim.control.blockedTaskCount() != 0) return error.ScenarioDeadlocked;
-
-    const final_value = scenario.server.get(11);
-    const invariant_violated =
-        final_value != 41 or
-        scenario.server.revision != 1 or
-        scenario.server.applied_puts != 1;
-
-    if (invariant_violated) {
-        try world.record(
-            "std_io_net_kv.invariant_violation expected_value=41 actual_value={?} expected_revision=1 actual_revision={} expected_applied_puts=1 actual_applied_puts={}",
-            .{ final_value, scenario.server.revision, scenario.server.applied_puts },
-        );
-    } else {
-        try world.record(
-            "std_io_net_kv.check retry_idempotent=ok value=41 revision=1 applied_puts=1",
-            .{},
-        );
+fn runHarness(comptime H: type, allocator: std.mem.Allocator, seed: u64) !Outcome {
+    var captured = try H.runCapture(allocator, .{ .seed = seed, .tick_ns = 10 });
+    defer captured.deinit();
+    switch (captured.report) {
+        .passed => |passed| {
+            var outcome = captured.outcome orelse return error.OutcomeNotCaptured;
+            captured.outcome = null;
+            outcome.trace = try allocator.dupe(u8, passed.trace);
+            return outcome;
+        },
+        .failed => |failure| {
+            failure.print();
+            return error.ScenarioFailed;
+        },
     }
-
-    const trace = try allocator.dupe(u8, world.traceBytes());
-
-    return .{
-        .allocator = allocator,
-        .trace = trace,
-        .first_response_timed_out = scenario.first_response_timed_out,
-        .final_value = final_value,
-        .revision = scenario.server.revision,
-        .applied_puts = scenario.server.applied_puts,
-        .invariant_violated = invariant_violated,
-    };
 }
 
 test "std Io net KV happy path replays byte-identically" {
     var first = try runScenario(std.testing.allocator, 0xC0FFEE, .happy);
     defer first.deinit();
-    var second = try runScenario(std.testing.allocator, 0xC0FFEE, .happy);
-    defer second.deinit();
 
-    try std.testing.expectEqualStrings(first.trace, second.trace);
     try std.testing.expect(!first.first_response_timed_out);
     try std.testing.expect(!first.invariant_violated);
     try std.testing.expectEqual(@as(?i64, 41), first.final_value);
@@ -277,10 +300,7 @@ test "std Io net KV happy path replays byte-identically" {
 test "std Io net KV retry remains idempotent across partition and heal" {
     var first = try runScenario(std.testing.allocator, 0xC0FFEE, .retry_safe);
     defer first.deinit();
-    var second = try runScenario(std.testing.allocator, 0xC0FFEE, .retry_safe);
-    defer second.deinit();
 
-    try std.testing.expectEqualStrings(first.trace, second.trace);
     try std.testing.expect(first.first_response_timed_out);
     try std.testing.expect(!first.invariant_violated);
     try std.testing.expectEqual(@as(u64, 1), first.revision);
@@ -294,10 +314,7 @@ test "std Io net KV retry remains idempotent across partition and heal" {
 test "std Io net KV planted retry bug is replayable and detected" {
     var first = try runScenario(std.testing.allocator, 0xC0FFEE, .retry_buggy);
     defer first.deinit();
-    var second = try runScenario(std.testing.allocator, 0xC0FFEE, .retry_buggy);
-    defer second.deinit();
 
-    try std.testing.expectEqualStrings(first.trace, second.trace);
     try std.testing.expect(first.first_response_timed_out);
     try std.testing.expect(first.invariant_violated);
     try std.testing.expectEqual(@as(u64, 2), first.revision);
