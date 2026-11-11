@@ -164,26 +164,40 @@ pub fn Harness(comptime spec: anytype) type {
             }
         }
 
-        /// Run `seeds` deterministic seeds starting at `options.seed`.
-        pub fn fuzz(allocator: std.mem.Allocator, options: Options, seeds: usize) run_module.ExpectRunError!void {
-            const base = config(allocator, options);
-            return run_module.expectSimFuzz(.{
-                .allocator = base.allocator,
-                .simulate = base.simulate,
-                .init = spec.init,
-                .scenario = spec.scenario,
-                .checks = checks,
-                .seed = base.seed,
-                .seed_schedule = base.seed_schedule,
-                .start_ns = base.start_ns,
-                .tick_ns = base.tick_ns,
-                .name = base.name,
-                .tags = base.tags,
-                .attributes = base.attributes,
-                .watchdog = base.watchdog,
-                .check_resources = base.check_resources,
-                .seeds = seeds,
-            });
+        pub const FuzzOptions = struct {
+            /// Deterministic seeds derived from `Options.seed`.
+            seeds: usize,
+            /// Run exactly this seed instead, as a failure reported it.
+            /// Wire it to `-Dmarionette-seed` with `addReproOptions`.
+            rerun: ?u64 = null,
+        };
+
+        /// Run many deterministic seeds, or rerun one. A failure prints its
+        /// summary and the build option that reruns it.
+        pub fn fuzz(allocator: std.mem.Allocator, options: Options, fuzz_options: FuzzOptions) run_module.ExpectRunError!void {
+            if (fuzz_options.rerun) |seed| {
+                var rerun_options = options;
+                rerun_options.seed = seed;
+                return expectPass(allocator, rerun_options);
+            }
+            if (fuzz_options.seeds == 0) return error.InvalidSeedCount;
+            for (0..fuzz_options.seeds) |iteration| {
+                var iteration_options = options;
+                iteration_options.seed = run_module.fuzzSeed(options.seed, iteration);
+                var report = try run(allocator, iteration_options);
+                defer report.deinit();
+                switch (report) {
+                    .passed => {},
+                    .failed => |failure| {
+                        std.debug.print(
+                            "marionette harness fuzz failure: seed={} iteration={}; rerun with -Dmarionette-seed={}\n",
+                            .{ iteration_options.seed, iteration, iteration_options.seed },
+                        );
+                        failure.print();
+                        return error.ExpectedRunPass;
+                    },
+                }
+            }
         }
 
         /// Replay a capsule against this harness's initializer, scenario,

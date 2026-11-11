@@ -32,6 +32,38 @@ pub fn addTidyStep(
     );
 }
 
+/// Build options that let a consumer reproduce failures without editing
+/// code. Add the returned options to a test or harness module:
+///
+/// ```zig
+/// const repro = @import("marionette").reproOptions(b);
+/// tests_module.addOptions("marionette_repro", repro);
+/// ```
+///
+/// It declares `-Dmarionette-seed=<u64>` (rerun one fuzz or campaign seed)
+/// and `-Dmarionette-capsule=<path>`, and records the consumer's Git revision
+/// as `build_id` (with `-dirty` for uncommitted changes) for
+/// `mar.repro.identity`. Call it once per build.
+pub fn reproOptions(b: *std.Build) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption(?u64, "seed", b.option(u64, "marionette-seed", "Rerun one Marionette fuzz or campaign seed"));
+    options.addOption(?[]const u8, "capsule", b.option([]const u8, "marionette-capsule", "Marionette replay capsule to replay"));
+    options.addOption([]const u8, "build_id", buildId(b));
+    return options;
+}
+
+fn buildId(b: *std.Build) []const u8 {
+    const base = b.root.root_dir.path orelse ".";
+    const root = if (b.root.sub_path.len == 0) base else b.pathJoin(&.{ base, b.root.sub_path });
+    var code: u8 = 0;
+    const head = b.runAllowFail(&.{ "git", "-C", root, "rev-parse", "HEAD" }, &code, .ignore) catch
+        return "unversioned";
+    const revision = std.mem.trim(u8, head, " \n\r\t");
+    const status = b.runAllowFail(&.{ "git", "-C", root, "status", "--porcelain", "--untracked-files=no" }, &code, .ignore) catch "";
+    if (std.mem.trim(u8, status, " \n\r\t").len != 0) return b.fmt("{s}-dirty", .{revision});
+    return revision;
+}
+
 fn addValidation(
     b: *std.Build,
     module: *std.Build.Module,
@@ -378,6 +410,7 @@ pub fn build(b: *std.Build) void {
     });
     tests_mod.addImport("marionette", mod);
     tests_mod.addImport("examples", examples_mod);
+    tests_mod.addOptions("marionette_repro", reproOptions(b));
 
     const tests = b.addTest(.{ .root_module = tests_mod });
     const run_tests = b.addRunArtifact(tests);

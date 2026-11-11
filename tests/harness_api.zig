@@ -229,3 +229,51 @@ test "harness: one typed harness runs, replays, and reduces with the same checks
     var reduced = try CounterHarness.reduce(std.testing.allocator, .{ .seed = seed }, .{ .max_attempts = 4 });
     defer reduced.deinit();
 }
+
+const repro_options = @import("marionette_repro");
+
+test "harness: build reproduction options name the build and an optional rerun" {
+    const identity = mar.repro.identity(repro_options, "counter");
+    try std.testing.expect(identity.build.len > 0);
+    try std.testing.expectEqualStrings("counter", identity.sut);
+    // A failing fuzz prints the seed; `-Dmarionette-seed` reruns exactly it.
+    try CounterHarness.fuzz(std.testing.allocator, .{ .seed = 3 }, .{ .seeds = 1, .rerun = mar.repro.rerunSeed(repro_options) orelse passingSeed() });
+}
+
+fn passingSeed() u64 {
+    var seed: u64 = 0;
+    while (true) : (seed += 1) {
+        var report = CounterHarness.run(std.testing.allocator, .{ .seed = seed }) catch unreachable;
+        defer report.deinit();
+        if (report == .passed) return seed;
+    }
+}
+
+test "harness: the cli reruns, replays, and reduces without code changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var seed: u64 = 0;
+    var report = while (true) : (seed += 1) {
+        var candidate = try CounterHarness.run(std.testing.allocator, .{ .seed = seed });
+        if (candidate == .failed) break candidate;
+        candidate.deinit();
+    };
+    defer report.deinit();
+    const identity = mar.repro.identity(repro_options, "counter");
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "replay.json", .data = bytes });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "replay.json", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var seed_text: [24]u8 = undefined;
+    const seed_arg = try std.fmt.bufPrint(&seed_text, "{}", .{seed});
+    try std.testing.expectEqual(@as(u8, 1), try mar.cli.run(CounterHarness, std.testing.allocator, std.testing.io, &.{ "rerun", seed_arg }, identity, &output.writer));
+    try std.testing.expectEqual(@as(u8, 0), try mar.cli.run(CounterHarness, std.testing.allocator, std.testing.io, &.{ "replay", path }, identity, &output.writer));
+    try std.testing.expectEqual(@as(u8, 0), try mar.cli.run(CounterHarness, std.testing.allocator, std.testing.io, &.{ "reduce", path, "--attempts", "4" }, identity, &output.writer));
+    try std.testing.expectEqual(@as(u8, 2), try mar.cli.run(CounterHarness, std.testing.allocator, std.testing.io, &.{"bogus"}, identity, &output.writer));
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "check=counter.below_six") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "marionette.reduce attempts=") != null);
+}

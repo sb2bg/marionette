@@ -408,6 +408,13 @@ pub const ManagedProcess = @import("world.zig").ManagedProcess;
 /// crash-point sweeps. See `src/harness.zig`.
 pub const Harness = @import("harness.zig").Harness;
 
+/// Rerun, replay, and reduce from a downstream harness executable.
+pub const cli = @import("cli.zig");
+
+/// Reproduction inputs from the build: rerun seed, capsule path, and a
+/// replay identity from the consumer's Git revision.
+pub const repro = @import("repro.zig");
+
 /// Disk capabilities, models, options, and errors.
 pub const disk = struct {
     pub const Disk = disk_module.Disk;

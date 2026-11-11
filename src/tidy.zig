@@ -86,6 +86,7 @@ pub const default_allowed = [_]Allow{
     .{ .path = "src/main_tidy.zig", .needle = "std.process.exit" },
     .{ .path = "src/main_tidy.zig", .needle = "std.debug.print" },
     .{ .path = "src/run.zig", .needle = "std.debug.print" },
+    .{ .path = "src/harness.zig", .needle = "std.debug.print" },
     // Runner regression tests verify behavior with inherited SIGCHLD handlers.
     .{ .path = "src/run.zig", .needle = "std.posix" },
     // Deliberately terminate the isolated child to test watchdog crash reporting.

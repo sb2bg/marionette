@@ -492,7 +492,7 @@ fn fieldOrDefault(config: anytype, comptime name: []const u8, default: anytype) 
 /// bits cover identical seed sets, and `splitmix64(base + iteration)` makes
 /// adjacent bases overlap by all but one seed. Hashing the iteration before
 /// mixing makes cross-base collisions birthday-bound instead of structural.
-fn fuzzSeed(base_seed: u64, iteration: u64) u64 {
+pub fn fuzzSeed(base_seed: u64, iteration: u64) u64 {
     return splitmix64(base_seed ^ splitmix64(iteration));
 }
 
