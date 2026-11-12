@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.10.0 - Unreleased
+
+The harness API, settled before the first stabilization candidate, with
+the pinned validations as its acceptance test.
+
+- **One typed harness.** `mar.Harness(.{ .init, .scenario, .checks,
+  .simulate, .name, .capture, .Input })` is built once and drives `run`,
+  `runWithArtifacts`, `runCapture`, `expectPass`, `expectFailure`, `fuzz`,
+  `replay`, `reduce`, `reduceCapsule`, `campaign`, `sweepCrashPoints`, and
+  `expectCrashPointsPass`. Replay always uses the harness's own checks, and
+  simulation options default to the harness's or to `.{}`. The `anytype`
+  config entry points remain for now.
+- **Outcome assertions.** A harness `capture(case, allocator)` returns an
+  outcome from the app state when the scenario returns; `runCapture` hands it
+  back with the report.
+- **Typed inputs.** A harness `Input` type makes a scenario parameterized:
+  `Options.input` supplies it, `H.input()` reads it, and it is recorded as the
+  `harness.input` run attribute, so replay and capsule reduction decode the
+  same input.
+- **Fail a run from a task.** `Control.failRun(err)` fails the run from any
+  task or the scenario. The scheduler stops dispatching and records
+  `run.task_failure`; the runner reports the new `task_failed` kind with the
+  error name and a complete tape, so the failure replays and reduces instead
+  of crashing the worker with a panic. Error-returning `std.Io` futures awaited
+  by the scenario fail it with `scenario_error`.
+- **Breaking: infallible recording.** `Recorder.record`, `Recorder.event`,
+  `Recorder.beginOperation`, `Operation.event`, `Operation.end`, and
+  `Env.record` no longer return errors; drop the `try`. In simulation the
+  first recording failure is latched on the world and the runner fails the
+  run with the new `recording_failed` kind at its next boundary.
+  `Recorder.fromSink` gives production code a destination for formatted
+  event lines.
+- **`Control` carries what harnesses need.** `chooseBool`,
+  `chooseIntLessThan`, `chooseU64`, `randomBytes`, `now`, an infallible
+  `record`, `traceBytes`, and `harnessAllocator` (the runner's untraced
+  allocator for harness-owned state). `World` stays an engine detail.
+- **Breaking: one process-control surface.** `control.process` (`kill`,
+  `restart`, `setDynamics`) is the only way to drive process faults;
+  `Simulation.killProcess` and `restartProcess` are removed. Managed
+  ownership stays on `sim.manageProcess`.
+- **Grouped namespaces.** `mar.disk`, `mar.net`, `mar.replay`,
+  `mar.decision`, `mar.trace`, `mar.campaign`, `mar.crash`, `mar.process`,
+  `mar.alloc`, and `mar.seed`. The flat names remain as aliases until the
+  first stabilization candidate.
+- **Reproduce without editing code.** `reproOptions(b)` in `build.zig`
+  declares `-Dmarionette-seed` and `-Dmarionette-capsule` and records the
+  consumer's Git revision (with `-dirty`); `mar.repro.identity` fills a
+  `ReplayIdentity` from it, and `Harness.fuzz` reruns exactly the requested
+  seed. A fuzz failure prints the option that reruns it. `mar.cli.run`
+  gives a downstream harness executable `rerun`, `replay`, and `reduce`
+  commands over a seed or a retained capsule.
+- **Precise errors.** Network control returns `ControlError` instead of
+  `anyerror`.
+- **The validations run through the runner.** beanstalkz, dusty, pg.zig,
+  redis.zig, mailbox, xitdb, the std.Io.net KV example, and the bounded-queue
+  scenarios are `mar.Harness` values: no `World.init`, no task panics, and no
+  hand-compared traces; the runner's exact second execution proves replay, and
+  failures leave capsules. The Ochi harness is unchanged until it builds on
+  Zig 0.17 again.
+
 ## v0.9.0 - 2026-11-12
 
 The honest network. Faults no longer turn into invented errors, and endpoints

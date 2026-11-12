@@ -34,7 +34,14 @@ matching harness with retained artifacts; see [Decision Tapes](decision-tapes.md
 
 ## Simulation Runner
 
-`runSimCase` is the primary runner. It creates a world, constructs the
+`mar.Harness(spec)` is the typed entry point: build it once from `init`,
+`scenario`, optional `checks`, `simulate`, `name`, `capture`, and `Input`,
+then call `run`, `runWithArtifacts`, `runCapture`, `expectPass`,
+`expectFailure`, `fuzz`, `replay`, `reduce`, `reduceCapsule`, `campaign`,
+`sweepCrashPoints`, or `expectCrashPointsPass`. See
+[One Typed Harness](run.md#one-typed-harness).
+
+`runSimCase` is the underlying runner. It creates a world, constructs the
 simulation, initializes application state, runs the scenario and configured properties,
 then repeats the execution using the first execution's semantic decision tape
 and compares traces.
@@ -132,11 +139,15 @@ See [Property Lifecycle](run.md#property-lifecycle) for ordering and cleanup.
   I/O in production;
 - `allocator()` returns the configured application allocator;
 - `recorder()` returns a narrow `Recorder`;
-- `record` writes one structured trace event;
+- `record` writes one structured trace event and never fails at the call
+  site;
 - `buggify` evaluates a named simulation-only fault hook.
 
-`Recorder.none()` drops events. Simulation environments return a recorder
-backed by the world's trace. Production-shaped libraries should usually accept
+`Recorder.none()` drops events, and `Recorder.fromSink(sink)` hands each
+formatted line to a production sink. Simulation environments return a recorder
+backed by the world's trace. Recording is infallible at the call site: in
+simulation the first failure is latched and the runner reports
+`recording_failed` at its next boundary. Production-shaped libraries should usually accept
 `std.Io`, `std.Io.Dir`, and `Recorder` rather than all of `Env`.
 
 `Production.init` combines caller-owned host I/O, a root directory, an
@@ -183,9 +194,24 @@ the current entries, `cloneDecisionTape` returns owned storage, and
 - `network`: loss, latency, clogs, link and node state, and fault handles
   (`partition`, `isolate`, `cut`, `degrade`, `healFault`), the simulated DNS
   (`addHostName`), and `recordNetstat`; see [Network Model](network.md);
-- `process`: process crash/restart dynamics;
+- `process`: the one process-control surface (`kill`, `restart`,
+  `setDynamics`);
 - `tasks`: cooperative scheduler inspection;
-- `tick`, `runFor`, and `runTasksUntilIdle` for virtual-time execution.
+- `tick`, `runFor`, and `runTasksUntilIdle` for virtual-time execution;
+- `failRun` to fail the run from a task or the scenario;
+- `chooseBool`, `chooseIntLessThan`, `chooseU64`, and `randomBytes` for traced
+  harness decisions, `now`, an infallible `record`, `traceBytes`, and
+  `harnessAllocator` for harness-owned state.
+
+`Control.world` is the engine behind these controls; harnesses should not
+need it.
+
+## Namespaces
+
+Root exports are grouped as `mar.disk`, `mar.net`, `mar.replay`,
+`mar.decision`, `mar.trace`, `mar.campaign`, `mar.crash`, `mar.process`,
+`mar.alloc`, and `mar.seed`, plus `mar.Harness`, `mar.cli`, and `mar.repro`.
+The flat names remain as aliases until the first stabilization candidate.
 
 Harness authority must not be stored in production application state.
 

@@ -121,10 +121,10 @@ including application random bytes, for a pinned build and workload.
 
 ## Install
 
-Marionette v0.9.0 requires Zig 0.17.x:
+Marionette v0.10.0 requires Zig 0.17.x:
 
 ```sh
-zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.9.0.tar.gz
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.10.0.tar.gz
 ```
 
 For Zig 0.16.x, use v0.7.2 instead.

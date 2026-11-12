@@ -46,6 +46,58 @@ var report = try mar.runSimCase(.{
 defer report.deinit();
 ```
 
+## One Typed Harness
+
+`mar.Harness` builds the configuration once, so every entry point uses the same
+initializer, scenario, and checks:
+
+```zig
+const H = mar.Harness(.{
+    .init = init,
+    .scenario = scenario,
+    .checks = &checks,
+    .simulate = mar.World.SimulateOptions{ .network = .{ .nodes = 2 } },
+    .name = "partition",
+});
+
+var report = try H.run(allocator, .{ .seed = seed });
+try H.fuzz(allocator, .{ .seed = base }, .{ .seeds = 256 });
+var replayed = try H.replay(allocator, &capsule, identity);
+var reduced = try H.reduce(allocator, .{ .seed = seed }, .{});
+```
+
+Optional spec fields:
+
+- `capture: fn (*SimCase(App), std.mem.Allocator) !Outcome` extracts an
+  outcome from the app state when the scenario returns. `H.runCapture` returns
+  the report and the outcome; an outcome with `deinit` owns its allocations.
+- `Input: type` makes the scenario parameterized. Pass `.input` in the run
+  options and read it with `H.input()` from `init`, the scenario, checks, or
+  `capture`. It is recorded as the `harness.input` run attribute, so replay and
+  capsule reduction decode the same input.
+
+### Failing From A Task
+
+A task that finds a violation calls `case.control().failRun(err)` (or any
+`Control` it holds) and returns. The scheduler stops dispatching, records
+`run.task_failure`, and the runner reports `task_failed` with the error name
+and a complete tape, so the failure replays and reduces. Tasks that return an
+error through a future the scenario awaits fail it with `scenario_error`.
+
+### Reproducing Without Editing Code
+
+In `build.zig`, add Marionette's reproduction options to the test module:
+
+```zig
+tests.root_module.addOptions("marionette_repro", @import("marionette").reproOptions(b));
+```
+
+Then `H.fuzz(allocator, options, .{ .seeds = n, .rerun = mar.repro.rerunSeed(repro) })`
+reruns exactly the seed passed as `zig build test -Dmarionette-seed=<seed>`,
+and `mar.repro.identity(repro, sut)` builds a `ReplayIdentity` from the
+consumer's Git revision. A small executable around `mar.cli.run(H, ...)` gives
+`rerun <seed>`, `replay <capsule.json>`, and `reduce <capsule.json>` commands.
+
 The runner owns world and application cleanup. If the app type defines
 `deinit`, it runs before each world is destroyed and remains part of replay
 comparison.
