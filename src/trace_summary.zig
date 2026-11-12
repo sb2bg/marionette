@@ -220,6 +220,9 @@ fn requiredU64(event: ParsedEvent, key: []const u8) TraceSummaryError!u64 {
 pub const Summary = struct {
     allocator: std.mem.Allocator,
     total_events: u64 = 0,
+    /// Scheduler wakes that found nothing to run. Counted here and left out
+    /// of the event and subsystem counters; the raw trace keeps them.
+    empty_wakes: u64 = 0,
     final_timestamp: ?u64 = null,
     name: ?[]u8 = null,
     tags: std.ArrayList([]u8) = .empty,
@@ -252,7 +255,7 @@ pub const Summary = struct {
 
     /// Write a stable, grep-friendly summary.
     pub fn writeSummary(self: Summary, writer: anytype) !void {
-        try writer.print("trace.events total={}", .{self.total_events});
+        try writer.print("trace.events total={} empty_wakes={}", .{ self.total_events, self.empty_wakes });
         if (self.final_timestamp) |timestamp| {
             try writer.print(" final_time_ns={}", .{timestamp});
         }
@@ -308,6 +311,10 @@ pub fn summarize(allocator: std.mem.Allocator, trace_bytes: []const u8) !Summary
         if (event.index != summary.total_events) return error.InvalidTraceEvent;
 
         summary.total_events += 1;
+        if (std.mem.eql(u8, event.name, "scheduler.wake_empty")) {
+            summary.empty_wakes += 1;
+            continue;
+        }
         try incrementCounter(allocator, &summary.event_counts, event.name);
         try incrementCounter(allocator, &summary.subsystem_counts, subsystemName(event.name));
         try recordRunContext(&summary, event);
@@ -529,7 +536,7 @@ test "trace summary: summarizes run context and network events" {
     const output = writer.buffered();
 
     try std.testing.expectEqualStrings(
-        \\trace.events total=9 final_time_ns=10
+        \\trace.events total=9 empty_wakes=0 final_time_ns=10
         \\trace.run name=smoke
         \\trace.run tag=example:replicated_register
         \\trace.run attribute.replicas=uint:3

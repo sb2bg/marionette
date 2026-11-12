@@ -366,6 +366,14 @@ pub const Engine = struct {
         }
     }
 
+    /// Number of decisions made so far in this execution.
+    pub fn position(self: *const Engine) usize {
+        return switch (self.mode) {
+            .record, .reduce => self.recorded.items.len,
+            .replay => self.replay_index,
+        };
+    }
+
     pub fn entries(self: *const Engine) []const Decision {
         return switch (self.mode) {
             .record, .reduce => self.recorded.items,

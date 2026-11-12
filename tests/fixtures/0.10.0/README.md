@@ -1,0 +1,12 @@
+# 0.10.0 compatibility evidence
+
+The scenarios in `tests/compatibility_072.zig`, recaptured with trace format
+version 5, which adds `site=<choice site>` to every `world.random_*`
+decision event. The tests compare every byte of both artifact sets, and check
+that removing the site fields and restoring the version header reproduces
+`../0.8.3` exactly.
+
+Identity fields hold synthetic labels, so these are wire-format fixtures, not
+executable cross-build replay capsules. Do not regenerate them to make a
+refactor pass; a semantic or format change needs its own planned
+compatibility change and new fixtures.

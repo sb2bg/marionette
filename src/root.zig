@@ -311,6 +311,15 @@ pub const FaultCoverage = trace_summary_module.FaultCoverage;
 /// Count injected faults in trace bytes without allocating.
 pub const faultCoverage = trace_summary_module.faultCoverage;
 
+/// Focused trace history selector: a node, disk operation, path, or fault.
+pub const TraceFocus = @import("diagnosis.zig").Focus;
+/// Write every event that names a focus.
+pub const writeTraceHistory = @import("diagnosis.zig").writeHistory;
+/// Write a bounded tail of a trace without empty scheduler wakes.
+pub const writeTraceTail = @import("diagnosis.zig").writeTail;
+/// The first event at which two traces differ.
+pub const firstTraceDifference = @import("diagnosis.zig").firstDifference;
+
 /// Crash injections, their eligibility, and their data and namespace effects.
 pub const CrashEffects = trace_summary_module.CrashEffects;
 
@@ -347,6 +356,7 @@ test {
     _ = @import("disk/root.zig");
     _ = @import("decision.zig");
     _ = @import("record_format.zig");
+    _ = @import("diagnosis.zig");
     _ = @import("env.zig");
     _ = @import("message_pool.zig");
     _ = @import("network/root.zig");

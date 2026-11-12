@@ -1518,6 +1518,7 @@ pub const SimDisk = struct {
         } else {
             try self.world.recordFields("disk.crash", &crash_fields);
         }
+        const crash_event = self.world.event_index - 1;
 
         if (self.crash_observer) |observer| try observer.prepare(observer.ptr);
 
@@ -1527,6 +1528,8 @@ pub const SimDisk = struct {
         // Publish the firing outcome only after every fallible part of the
         // landing succeeded, and before the observer can retire task stacks.
         if (trigger) |tracked| tracked.fired = true;
+        // Later DiskCrashed errors are effects of this crash.
+        self.world.last_fault = .{ .event = crash_event, .decision = null };
         self.armed_crash_budget = null;
         self.armed_crash_trigger = null;
         self.crashed = true;
@@ -1694,6 +1697,7 @@ pub const SimDisk = struct {
             traceField("roll", .{ .uint = roll }),
             traceField("fired", .{ .literal = if (fired) "true" else "false" }),
         });
+        if (fired) self.world.noteFault(true);
 
         return fired;
     }

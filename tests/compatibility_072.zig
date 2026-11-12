@@ -2,7 +2,9 @@
 //! cleanup under the `portable_v1` disk contract and is kept unchanged as
 //! historical evidence; `fixtures/0.8.3` is the same scenarios under
 //! `portable_v2` revision 2. `fixtures/0.8.3-revision3` preserves those
-//! scenarios under the corrected crash ordering. Every difference between
+//! scenarios under the corrected crash ordering. `fixtures/0.10.0` uses
+//! trace format version 5, whose decision events name their choice site.
+//! Every difference between
 //! consecutive sets is classified below.
 const std = @import("std");
 const mar = @import("marionette");
@@ -52,7 +54,7 @@ const App = struct {
 };
 
 fn fixture(comptime name: []const u8, actual: []const u8) !void {
-    try std.testing.expectEqualStrings(@embedFile("fixtures/0.8.3-revision3/" ++ name), actual);
+    try std.testing.expectEqualStrings(@embedFile("fixtures/0.10.0/" ++ name), actual);
 }
 
 fn compareArtifacts(comptime name: []const u8, report: *const mar.RunReport) !void {
@@ -166,14 +168,59 @@ test "0.8.3 compatibility: portable_v2 changes only classified 0.7.1 expectation
 }
 
 test "0.8.3 compatibility: a portable_v1 capsule is rejected, not reinterpreted" {
-    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, @embedFile("fixtures/0.7.1/process-replay.json"));
-    defer capsule.deinit();
-    var current = identity;
-    current.disk_version = mar.disk_semantic_version;
-    try std.testing.expectError(error.IncompatibleDiskModel, capsule.validateIdentity(current));
-    var pinned = current;
-    pinned.disk_version = 1;
-    try capsule.validateIdentity(pinned);
+    // The 0.7.1 capsule's trace format version is older too, so decoding
+    // already rejects it; the disk-version rejection itself is covered by
+    // `replay_capsule.zig`.
+    try std.testing.expectError(
+        error.UnsupportedReplayVersion,
+        mar.ReplayCapsule.decode(std.testing.allocator, @embedFile("fixtures/0.7.1/process-replay.json")),
+    );
+}
+
+/// 0.10 changes only the trace format: version 5 adds `site=<choice site>`
+/// as the first field of every `world.random_*` decision event. Removing that
+/// field and restoring the version 4 header must give the 0.8.3 bytes.
+fn expectOnlySiteFields(comptime file: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const old = @embedFile("fixtures/0.8.3/" ++ file);
+    const new = @embedFile("fixtures/0.10.0/" ++ file);
+    var stripped: std.ArrayList(u8) = .empty;
+    defer stripped.deinit(allocator);
+    var sites: usize = 0;
+    var index: usize = 0;
+    while (index < new.len) {
+        if (std.mem.startsWith(u8, new[index..], "version=5")) {
+            try stripped.appendSlice(allocator, "version=4");
+            index += "version=5".len;
+            continue;
+        }
+        // A site field follows a decision event name, in text or JSON-escaped text.
+        if (std.mem.startsWith(u8, new[index..], " site=")) {
+            const before = stripped.items;
+            if (std.mem.endsWith(u8, before, "world.random_int_less_than") or
+                std.mem.endsWith(u8, before, "world.random_u64") or
+                std.mem.endsWith(u8, before, "world.random_bool"))
+            {
+                var end = index + " site=".len;
+                while (end < new.len and new[end] != ' ' and new[end] != '\n' and new[end] != '\\') end += 1;
+                sites += 1;
+                index = end;
+                continue;
+            }
+        }
+        try stripped.append(allocator, new[index]);
+        index += 1;
+    }
+    try std.testing.expectEqualStrings(old, stripped.items);
+    if (std.mem.indexOf(u8, old, "world.random_") != null) try std.testing.expect(sites > 0);
+}
+
+test "0.10 compatibility: trace version 5 changes only decision site fields" {
+    inline for (.{ "process", "reduced" }) |name| {
+        inline for (.{ "-trace.txt", "-replay.json", "-manifest.json" }) |suffix| {
+            try expectOnlySiteFields(name ++ suffix);
+        }
+    }
 }
 
 test "0.8.3 compatibility: unchanged workloads differ only in disk revision" {

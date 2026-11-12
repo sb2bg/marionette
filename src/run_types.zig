@@ -359,6 +359,10 @@ pub const RunFailureKind = enum(u8) {
     /// event, a bad causal reference, or exhausted memory. Recording never
     /// fails at the call site; the runner reports it at the next boundary.
     recording_failed,
+    /// Under `SimulateOptions.strict_capabilities`, application code touched
+    /// an operation the simulator does not model. `error_name` names it. The
+    /// run's result says nothing about the application.
+    unsupported_operation,
 };
 
 /// Optional identity constraints for `expectSimFailure`.
@@ -519,6 +523,25 @@ pub const RunFailure = struct {
         try writer.writeByte('\n');
     }
 
+    /// Explain the failure boundary after the summary: where two executions
+    /// first differed, the fault effects the application observed, and a
+    /// bounded tail of the failing execution.
+    pub fn writeDiagnosis(self: RunFailure, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const diagnosis = @import("diagnosis.zig");
+        if (self.second_trace.len != 0) {
+            if (diagnosis.firstDifference(self.first_trace, self.second_trace)) |difference| {
+                try writer.print("first difference at event {}:\n", .{difference.position});
+                try writer.print("  first:  {s}\n", .{difference.first orelse "<end of trace>"});
+                try writer.print("  second: {s}\n", .{difference.second orelse "<end of trace>"});
+            }
+        }
+        try diagnosis.writeFaultEffects(writer, self.first_trace, 8);
+        try diagnosis.writeTail(writer, self.first_trace, diagnosis_tail_events);
+    }
+
+    /// Events of the failing execution shown by `writeDiagnosis`.
+    pub const diagnosis_tail_events = 16;
+
     /// Transfer ownership of the recorded semantic choices to the caller.
     pub fn takeDecisionTape(self: *RunFailure) decision_module.Tape {
         const tape = self.decision_tape;
@@ -533,6 +556,7 @@ pub const RunFailure = struct {
         const stderr = std.debug.lockStderr(&buffer);
         defer std.debug.unlockStderr();
         self.writeSummary(&stderr.file_writer.interface) catch {};
+        self.writeDiagnosis(&stderr.file_writer.interface) catch {};
     }
 };
 

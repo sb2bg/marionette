@@ -259,7 +259,7 @@ test "properties: lifecycle order, default phase, and capsule replay" {
         .scenario = PropertyApp.scenario,
         .checks = &invalid,
     }, &capsule, identity));
-    const legacy = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "version=4", "version=3");
+    const legacy = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "version=5", "version=4");
     defer std.testing.allocator.free(legacy);
     try std.testing.expectError(error.UnsupportedReplayVersion, mar.ReplayCapsule.decode(std.testing.allocator, legacy));
 }

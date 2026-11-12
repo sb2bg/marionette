@@ -124,7 +124,7 @@ pub fn Ops(comptime Backend: type) type {
             if (state.closed) return error.AccessDenied;
             if (Backend.fileDirectoryPath(state)) |path| {
                 if (backend.fileDirectoryRemoved(state)) return;
-                backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
+                backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return backend.faultEffect("set_permissions", err, errors.mapDiskSetPermissionsError(err));
                 return;
             }
             if (backend.fileMeta(state).deleted) return error.AccessDenied;
@@ -134,7 +134,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.Canceled => return error.Canceled,
             };
             defer lease.deinit();
-            backend.disk.setMode(.{ .path = lease.path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
+            backend.disk.setMode(.{ .path = lease.path, .mode = modeOf(permissions) }) catch |err| return backend.faultEffect("set_permissions", err, errors.mapDiskSetPermissionsError(err));
         }
 
         pub fn simDirSetPermissions(userdata: ?*anyopaque, dir: Io.Dir, permissions: Io.Dir.Permissions) Io.Dir.SetPermissionsError!void {
@@ -145,7 +145,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.FileNotFound, error.SystemResources => return error.Unexpected,
             };
             defer backend.freeOpScratch(path);
-            backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
+            backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return backend.faultEffect("set_permissions", err, errors.mapDiskSetPermissionsError(err));
         }
 
         pub fn simDirSetFilePermissions(
@@ -168,7 +168,7 @@ pub fn Ops(comptime Backend: type) type {
                 else => return error.Unexpected,
             };
             defer backend.releaseFilePathLease(path);
-            backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return errors.mapDiskSetPermissionsError(err);
+            backend.disk.setMode(.{ .path = path, .mode = modeOf(permissions) }) catch |err| return backend.faultEffect("set_permissions", err, errors.mapDiskSetPermissionsError(err));
         }
 
         pub fn simDirCreateDirPathOpen(
@@ -220,7 +220,7 @@ pub fn Ops(comptime Backend: type) type {
             if (backend.directoryExists(path) catch |err| return mapDiskOpenError(err)) return error.IsDir;
             try requireParentDirectory(backend, path);
             const existing_index = findOrDiscoverFileMeta(backend, path) catch |err| {
-                return errors.mapDiskOpenError(err);
+                return backend.faultEffect("open", err, errors.mapDiskOpenError(err));
             };
             const file_index = if (existing_index) |index| {
                 if (options.exclusive) return error.PathAlreadyExists;
@@ -253,7 +253,7 @@ pub fn Ops(comptime Backend: type) type {
                         .len = 0,
                     }) catch |err| switch (err) {
                         error.FileNotFound => {},
-                        else => return errors.mapDiskOpenError(err),
+                        else => return backend.faultEffect("open", err, errors.mapDiskOpenError(err)),
                     };
                     meta.len = 0;
                     if (old_len != 0) meta.mtime = backend.nowTimestamp();
@@ -261,17 +261,17 @@ pub fn Ops(comptime Backend: type) type {
                 return file;
             } else b: {
                 backend.disk.write(.{ .path = path, .offset = 0, .bytes = &.{} }) catch |err| {
-                    return errors.mapDiskOpenError(err);
+                    return backend.faultEffect("open", err, errors.mapDiskOpenError(err));
                 };
                 if (options.permissions != Io.File.Permissions.default_file) {
                     backend.disk.setMode(.{ .path = path, .mode = modeOf(options.permissions) }) catch |err| {
-                        return errors.mapDiskOpenError(err);
+                        return backend.faultEffect("open", err, errors.mapDiskOpenError(err));
                     };
                 }
                 const index = backend.createFileMeta(path) catch return error.SystemResources;
                 const stat_result = backend.disk.stat(.{ .path = path }) catch |err| {
                     backend.discardFileMeta(index);
-                    return errors.mapDiskOpenError(err);
+                    return backend.faultEffect("open", err, errors.mapDiskOpenError(err));
                 };
                 backend.fileStore().files.items[index].len = stat_result.size;
                 backend.fileStore().files.items[index].inode = stat_result.inode;
@@ -317,7 +317,7 @@ pub fn Ops(comptime Backend: type) type {
                 return backend.openDirectoryFileHandle(path, stat.inode) catch return error.SystemResources;
             }
             const file_index = (findOrDiscoverFileMeta(backend, path) catch |err| {
-                return errors.mapDiskOpenError(err);
+                return backend.faultEffect("open", err, errors.mapDiskOpenError(err));
             }) orelse return error.FileNotFound;
             backend.releaseFilePathLease(path);
             path_leased = false;
@@ -491,11 +491,11 @@ pub fn Ops(comptime Backend: type) type {
                 else => return error.FileNotFound,
             }) return error.IsDir;
             const index = (findOrDiscoverFileMeta(backend, path) catch |err| {
-                return errors.mapDiskDeleteError(err);
+                return backend.faultEffect("delete_file", err, errors.mapDiskDeleteError(err));
             }) orelse return error.FileNotFound;
             backend.disk.delete(.{ .path = path }) catch |err| switch (err) {
                 error.FileNotFound => {},
-                else => return errors.mapDiskDeleteError(err),
+                else => return backend.faultEffect("delete_file", err, errors.mapDiskDeleteError(err)),
             };
 
             backend.discardFileIdentity(index);
@@ -515,7 +515,7 @@ pub fn Ops(comptime Backend: type) type {
                 else => return error.SystemResources,
             };
             defer backend.releaseFileMutationPaths(path, null);
-            backend.disk.deleteDir(.{ .path = path }) catch |err| return errors.mapDiskDeleteDirError(err);
+            backend.disk.deleteDir(.{ .path = path }) catch |err| return backend.faultEffect("delete_dir", err, errors.mapDiskDeleteDirError(err));
         }
 
         pub fn simDirRename(
@@ -585,10 +585,10 @@ pub fn Ops(comptime Backend: type) type {
                 return error.FileNotFound;
             }
             const old_index = (findOrDiscoverFileMeta(backend, old_path) catch |err| {
-                return errors.mapDiskRenameError(err);
+                return backend.faultEffect("rename", err, errors.mapDiskRenameError(err));
             }) orelse return error.FileNotFound;
             if (preserve) {
-                const existing = findOrDiscoverFileMeta(backend, new_path) catch |err| return errors.mapDiskRenameError(err);
+                const existing = findOrDiscoverFileMeta(backend, new_path) catch |err| return backend.faultEffect("rename", err, errors.mapDiskRenameError(err));
                 if (existing != null) return error.PathAlreadyExists;
             }
             if (std.mem.eql(u8, old_path, new_path)) return;
@@ -606,7 +606,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.FileNotFound => {
                     if (backend.fileStore().files.items[old_index].len != 0) return error.FileNotFound;
                 },
-                else => return errors.mapDiskRenameError(err),
+                else => return backend.faultEffect("rename", err, errors.mapDiskRenameError(err)),
             };
 
             backend.commitFileMetaRename(new_path, &prepared_meta);
@@ -755,7 +755,7 @@ pub fn Ops(comptime Backend: type) type {
                 if (cursor >= meta.len) break;
                 const available = @min(@as(u64, @intCast(buffer.len)), meta.len - cursor);
                 const read_len: usize = @intCast(available);
-                readDiskBytes(backend, lease.path, buffer[0..read_len], cursor) catch |err| return errors.mapDiskReadError(err);
+                readDiskBytes(backend, lease.path, buffer[0..read_len], cursor) catch |err| return backend.faultEffect("read", err, errors.mapDiskReadError(err));
                 cursor += read_len;
                 total += read_len;
                 if (read_len < buffer.len) break;
@@ -787,14 +787,14 @@ pub fn Ops(comptime Backend: type) type {
             var cursor = offset;
             var total: usize = 0;
 
-            writePart(backend, meta, lease.path, header, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
+            writePart(backend, meta, lease.path, header, &cursor, &total) catch |err| return backend.faultEffect("write", err, errors.mapDiskWriteError(err));
             if (data.len > 0) {
                 for (data[0 .. data.len - 1]) |bytes| {
-                    writePart(backend, meta, lease.path, bytes, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
+                    writePart(backend, meta, lease.path, bytes, &cursor, &total) catch |err| return backend.faultEffect("write", err, errors.mapDiskWriteError(err));
                 }
                 const pattern = data[data.len - 1];
                 for (0..splat) |_| {
-                    writePart(backend, meta, lease.path, pattern, &cursor, &total) catch |err| return errors.mapDiskWriteError(err);
+                    writePart(backend, meta, lease.path, pattern, &cursor, &total) catch |err| return backend.faultEffect("write", err, errors.mapDiskWriteError(err));
                 }
             }
             if (total != 0) meta.mtime = backend.nowTimestamp();
@@ -925,42 +925,51 @@ pub fn Ops(comptime Backend: type) type {
             return if (index != null) error.NotLink else error.FileNotFound;
         }
 
-        pub fn simDirSymLink(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []const u8, _: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
+        pub fn simDirSymLink(userdata: ?*anyopaque, _: Io.Dir, _: []const u8, _: []const u8, _: Io.Dir.SymLinkFlags) Io.Dir.SymLinkError!void {
+            backendFromUserdata(userdata).unmodeled("sym_link");
             // What Linux reports on a filesystem without symbolic links.
             return error.PermissionDenied;
         }
 
-        pub fn simDirHardLink(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8, _: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
+        pub fn simDirHardLink(userdata: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir, _: []const u8, _: Io.Dir.HardLinkOptions) Io.Dir.HardLinkError!void {
+            backendFromUserdata(userdata).unmodeled("hard_link");
             return error.OperationUnsupported;
         }
 
-        pub fn simFileHardLink(_: ?*anyopaque, _: Io.File, _: Io.Dir, _: []const u8, _: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
+        pub fn simFileHardLink(userdata: ?*anyopaque, _: Io.File, _: Io.Dir, _: []const u8, _: Io.File.HardLinkOptions) Io.File.HardLinkError!void {
+            backendFromUserdata(userdata).unmodeled("hard_link");
             return error.OperationUnsupported;
         }
 
-        pub fn simDirRealPath(_: ?*anyopaque, _: Io.Dir, _: []u8) Io.Dir.RealPathError!usize {
+        pub fn simDirRealPath(userdata: ?*anyopaque, _: Io.Dir, _: []u8) Io.Dir.RealPathError!usize {
+            backendFromUserdata(userdata).unmodeled("real_path");
             return error.OperationUnsupported;
         }
 
-        pub fn simDirRealPathFile(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.RealPathFileError!usize {
+        pub fn simDirRealPathFile(userdata: ?*anyopaque, _: Io.Dir, _: []const u8, _: []u8) Io.Dir.RealPathFileError!usize {
+            backendFromUserdata(userdata).unmodeled("real_path");
             return error.OperationUnsupported;
         }
 
-        pub fn simFileRealPath(_: ?*anyopaque, _: Io.File, _: []u8) Io.File.RealPathError!usize {
+        pub fn simFileRealPath(userdata: ?*anyopaque, _: Io.File, _: []u8) Io.File.RealPathError!usize {
+            backendFromUserdata(userdata).unmodeled("real_path");
             return error.OperationUnsupported;
         }
 
         // Ownership is not modeled and `stat` reports none; an unprivileged
         // process may not give files away.
-        pub fn simDirSetOwner(_: ?*anyopaque, _: Io.Dir, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
+        pub fn simDirSetOwner(userdata: ?*anyopaque, _: Io.Dir, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.Dir.SetOwnerError!void {
+            backendFromUserdata(userdata).unmodeled("set_owner");
             return error.PermissionDenied;
         }
 
-        pub fn simDirSetFileOwner(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: ?Io.File.Uid, _: ?Io.File.Gid, _: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
+        pub fn simDirSetFileOwner(userdata: ?*anyopaque, _: Io.Dir, _: []const u8, _: ?Io.File.Uid, _: ?Io.File.Gid, _: Io.Dir.SetFileOwnerOptions) Io.Dir.SetFileOwnerError!void {
+            backendFromUserdata(userdata).unmodeled("set_owner");
             return error.PermissionDenied;
         }
 
-        pub fn simFileSetOwner(_: ?*anyopaque, _: Io.File, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.File.SetOwnerError!void {
+        pub fn simFileSetOwner(userdata: ?*anyopaque, _: Io.File, _: ?Io.File.Uid, _: ?Io.File.Gid) Io.File.SetOwnerError!void {
+            backendFromUserdata(userdata).unmodeled("set_owner");
             return error.PermissionDenied;
         }
 
@@ -1009,7 +1018,7 @@ pub fn Ops(comptime Backend: type) type {
             const times = try diskTimes(backend, options.access_timestamp, options.modify_timestamp);
             if (Backend.fileDirectoryPath(state)) |path| {
                 if (backend.fileDirectoryRemoved(state)) return;
-                backend.disk.setTimes(.{ .path = path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return errors.mapDiskSetTimesError(err);
+                backend.disk.setTimes(.{ .path = path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return backend.faultEffect("set_timestamps", err, errors.mapDiskSetTimesError(err));
                 return;
             }
             if (backend.fileMeta(state).deleted) return error.AccessDenied;
@@ -1019,7 +1028,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.Canceled => return error.Canceled,
             };
             defer lease.deinit();
-            backend.disk.setTimes(.{ .path = lease.path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return errors.mapDiskSetTimesError(err);
+            backend.disk.setTimes(.{ .path = lease.path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return backend.faultEffect("set_timestamps", err, errors.mapDiskSetTimesError(err));
         }
 
         pub fn simDirSetTimestamps(
@@ -1043,7 +1052,7 @@ pub fn Ops(comptime Backend: type) type {
                 else => return error.Unexpected,
             };
             defer backend.releaseFilePathLease(path);
-            backend.disk.setTimes(.{ .path = path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return errors.mapDiskSetTimesError(err);
+            backend.disk.setTimes(.{ .path = path, .access_ns = times.access_ns, .modify_ns = times.modify_ns }) catch |err| return backend.faultEffect("set_timestamps", err, errors.mapDiskSetTimesError(err));
         }
 
         const DiskTimes = struct { access_ns: ?u64, modify_ns: ?u64 };
@@ -1071,17 +1080,17 @@ pub fn Ops(comptime Backend: type) type {
                 // Syncing a removed directory must not make its replacement's
                 // entries durable.
                 if (backend.fileDirectoryRemoved(state)) return;
-                backend.disk.syncDir(.{ .path = path }) catch |err| return errors.mapDiskSyncError(err);
+                backend.disk.syncDir(.{ .path = path }) catch |err| return backend.faultEffect("sync", err, errors.mapDiskSyncError(err));
                 return;
             }
             if (backend.fileMeta(state).deleted) return error.AccessDenied;
             var lease = acquireFilePathLease(backend, backend.fileMeta(state)) catch |err| switch (err) {
-                error.OutOfMemory => return errors.mapDiskSyncError(error.OutOfMemory),
+                error.OutOfMemory => return backend.faultEffect("sync", error.OutOfMemory, errors.mapDiskSyncError(error.OutOfMemory)),
                 error.FileDeleted => return error.AccessDenied,
                 error.Canceled => return error.Canceled,
             };
             defer lease.deinit();
-            backend.disk.sync(.{ .path = lease.path }) catch |err| return errors.mapDiskSyncError(err);
+            backend.disk.sync(.{ .path = lease.path }) catch |err| return backend.faultEffect("sync", err, errors.mapDiskSyncError(err));
         }
 
         pub fn simFileSetLength(userdata: ?*anyopaque, file: Io.File, new_length: u64) Io.File.SetLengthError!void {
@@ -1092,7 +1101,7 @@ pub fn Ops(comptime Backend: type) type {
             if (backend.fileMeta(state).deleted) return error.AccessDenied;
             const meta = backend.fileMeta(state);
             var lease = acquireFilePathLease(backend, meta) catch |err| switch (err) {
-                error.OutOfMemory => return errors.mapDiskSetLengthError(error.OutOfMemory),
+                error.OutOfMemory => return backend.faultEffect("set_length", error.OutOfMemory, errors.mapDiskSetLengthError(error.OutOfMemory)),
                 error.FileDeleted => return error.AccessDenied,
                 error.Canceled => return error.Canceled,
             };
@@ -1102,7 +1111,7 @@ pub fn Ops(comptime Backend: type) type {
                 error.FileNotFound => {
                     if (new_length != 0) return error.InputOutput;
                 },
-                else => return errors.mapDiskSetLengthError(err),
+                else => return backend.faultEffect("set_length", err, errors.mapDiskSetLengthError(err)),
             };
             meta.len = new_length;
             if (new_length != old_len) meta.mtime = backend.nowTimestamp();

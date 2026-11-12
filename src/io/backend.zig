@@ -550,6 +550,8 @@ pub const Backend = struct {
     process_registry: ?*ProcessRegistry = null,
     process_node: ?network_module.NodeId = null,
     process_alive: bool = true,
+    /// Restarts of this node's process; evidence names the incarnation.
+    incarnation: u64 = 0,
     next_network_node: network_module.NodeId = 0,
     futex_wait_set: ?FutexWaitSet = null,
     task_runtime: ?TaskRuntime = null,
@@ -754,6 +756,38 @@ pub const Backend = struct {
             if (inspect(self.disk.ptr, meta.inode)) |snapshot| return snapshot.path;
         }
         return meta.path;
+    }
+
+    /// Correlate a fault-induced disk error with the `std.Io` error the
+    /// application receives, naming the node, incarnation, operation, modeled
+    /// cause, and the fault event and decision that caused it. Errors that are
+    /// not fault effects pass through unrecorded.
+    pub fn faultEffect(
+        self: *Backend,
+        comptime operation: []const u8,
+        cause: disk_module.DiskError,
+        mapped: anytype,
+    ) @TypeOf(mapped) {
+        switch (cause) {
+            error.ReadError, error.WriteError, error.NoSpaceLeft, error.DiskCrashed => {},
+            else => return mapped,
+        }
+        const fault = self.world.last_fault;
+        self.world.recordFields("io.fault_effect", &.{
+            traceField("node", .{ .uint = self.process_node orelse 0 }),
+            traceField("incarnation", .{ .uint = self.incarnation }),
+            traceField("operation", .{ .literal = operation }),
+            traceField("cause", .{ .literal = @errorName(cause) }),
+            traceField("error", .{ .literal = @errorName(mapped) }),
+            if (fault) |ref| traceField("fault_event", .{ .uint = ref.event }) else traceField("fault_event", .{ .literal = "none" }),
+            if (fault != null and fault.?.decision != null) traceField("decision", .{ .uint = fault.?.decision.? }) else traceField("decision", .{ .literal = "none" }),
+        }) catch |err| self.world.latchRecordingFailure(err);
+        return mapped;
+    }
+
+    /// Note an operation the simulator does not model before failing it.
+    pub fn unmodeled(self: *Backend, comptime operation: []const u8) void {
+        self.world.noteUnmodeled(operation, self.process_node orelse 0, self.incarnation);
     }
 
     pub fn init(allocator: std.mem.Allocator, world: *World, disk: disk_module.Disk, sector_size: u64) Backend {
@@ -2180,6 +2214,7 @@ pub const ProcessRuntime = struct {
     pub fn revive(self: *ProcessRuntime, node: network_module.NodeId) error{InvalidNode}!void {
         const backend = try self.backendForNode(node);
         backend.process_alive = true;
+        backend.incarnation += 1;
     }
 
     pub fn processCount(self: *const ProcessRuntime) usize {
@@ -2303,15 +2338,23 @@ pub fn onProcessRuntimeDiskCrashOpaque(ptr: *anyopaque) void {
 /// Only TCP streams are modeled. Datagram sockets report an unsupported
 /// protocol and Unix-domain sockets an unsupported address family, instead
 /// of the fabricated `NetworkDown` of the standard stubs.
-fn simNetBindIp(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
+fn simFileMemoryMapCreate(userdata: ?*anyopaque, _: Io.File, _: Io.File.MemoryMap.CreateOptions) Io.File.MemoryMap.CreateError!Io.File.MemoryMap {
+    backendFromUserdata(userdata).unmodeled("memory_map");
+    return error.AccessDenied;
+}
+
+fn simNetBindIp(userdata: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
+    backendFromUserdata(userdata).unmodeled("net_bind_datagram");
     return error.ProtocolUnsupportedBySystem;
 }
 
-fn simNetListenUnix(_: ?*anyopaque, _: *const Io.net.UnixAddress, _: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
+fn simNetListenUnix(userdata: ?*anyopaque, _: *const Io.net.UnixAddress, _: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {
+    backendFromUserdata(userdata).unmodeled("net_listen_unix");
     return error.AddressFamilyUnsupported;
 }
 
-fn simNetConnectUnix(_: ?*anyopaque, _: *const Io.net.UnixAddress) Io.net.UnixAddress.ConnectError!Io.net.Socket.Handle {
+fn simNetConnectUnix(userdata: ?*anyopaque, _: *const Io.net.UnixAddress) Io.net.UnixAddress.ConnectError!Io.net.Socket.Handle {
+    backendFromUserdata(userdata).unmodeled("net_connect_unix");
     return error.AddressFamilyUnsupported;
 }
 
@@ -2407,7 +2450,7 @@ const sim_vtable: Io.VTable = .{
     .fileRealPath = file_ops.simFileRealPath,
     .fileHardLink = file_ops.simFileHardLink,
 
-    .fileMemoryMapCreate = Io.failingFileMemoryMapCreate,
+    .fileMemoryMapCreate = simFileMemoryMapCreate,
     .fileMemoryMapDestroy = Io.unreachableFileMemoryMapDestroy,
     .fileMemoryMapSetLength = Io.unreachableFileMemoryMapSetLength,
     .fileMemoryMapRead = Io.unreachableFileMemoryMapRead,

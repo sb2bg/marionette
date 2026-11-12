@@ -3003,7 +3003,7 @@ test "io: scheduler timer jumps evolve process and network faults" {
     const run_to_crash = std.mem.indexOf(u8, trace, "world.run_for start_ns=0 duration_ns=10 end_ns=10").?;
     const crash = std.mem.indexOf(u8, trace, "process.kill node=1 reason=auto_crash").?;
     const run_to_partition = std.mem.indexOf(u8, trace, "world.run_for start_ns=10 duration_ns=10 end_ns=20").?;
-    const partition = std.mem.indexOf(u8, trace, "network.auto_partition").?;
+    const partition = std.mem.indexOf(u8, trace, " network.auto_partition ").?;
     try std.testing.expect(run_to_crash < crash);
     try std.testing.expect(crash < run_to_partition);
     try std.testing.expect(run_to_partition < partition);
@@ -5864,7 +5864,7 @@ test "io: transitionToLiveness clears an automatic partition inside the core" {
         .unpartition_rate = .never(),
     });
     try sim.control.runFor(20);
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "network.auto_partition"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), " network.auto_partition "));
 
     try sim.transitionToLiveness(&.{ 0, 1 });
 
@@ -5875,7 +5875,7 @@ test "io: transitionToLiveness clears an automatic partition inside the core" {
     ) != null);
 
     try sim.control.runFor(1_000);
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), "network.auto_partition"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(world.traceBytes(), " network.auto_partition "));
 }
 
 test "io: transitionToLiveness restarts a crashed disk before reviving core processes" {

@@ -241,7 +241,7 @@ test "disk: latency jitter is deterministic and traced" {
     try disk_b.disk().write(.{ .path = "wal.log", .offset = 0, .bytes = "abcd" });
 
     try std.testing.expectEqualStrings(a.traceBytes(), b.traceBytes());
-    try std.testing.expect(std.mem.indexOf(u8, a.traceBytes(), "world.random_int_less_than type=u64 less_than=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, a.traceBytes(), "world.random_int_less_than site=disk.latency type=u64 less_than=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, a.traceBytes(), "disk.write op=0 path=wal.log offset=0 len=4 status=ok latency_ns=") != null);
 }
 

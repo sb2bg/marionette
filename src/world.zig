@@ -176,6 +176,30 @@ pub const World = struct {
     /// First failure of an app-facing recording call. Recording never fails at
     /// the call site; the runner fails the run at its next boundary.
     recording_failure: ?anyerror = null,
+    /// The most recent fired fault, so its effects can name it.
+    last_fault: ?FaultRef = null,
+    /// `SimulateOptions.strict_capabilities` for this simulation.
+    strict_capabilities: bool = false,
+    /// First unmodeled operation touched under strict capabilities.
+    unsupported_operation: ?[]const u8 = null,
+
+    /// A fired fault's trace event and, when a decision chose it, that
+    /// decision's tape index.
+    pub const FaultRef = struct {
+        event: u64,
+        decision: ?u64,
+    };
+
+    /// Mark the event just recorded as a fired fault. `chosen` says whether
+    /// the decision just made selected it.
+    pub fn noteFault(self: *World, chosen: bool) void {
+        if (self.event_index == 0) return;
+        const position = self.decisions.position();
+        self.last_fault = .{
+            .event = self.event_index - 1,
+            .decision = if (chosen and position > 0) position - 1 else null,
+        };
+    }
 
     /// Destructor signature for world-owned simulator resources.
     pub const TeardownFn = *const fn (*anyopaque, std.mem.Allocator) void;
@@ -224,7 +248,7 @@ pub const World = struct {
         };
         errdefer world.deinit();
 
-        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=4\n");
+        try world.trace_log.appendSlice(allocator, "marionette.trace format=text version=5\n");
         try world.recordInit(
             "world.init seed={} start_ns={} tick_ns={}",
             .{ options.seed, options.start_ns, options.tick_ns },
@@ -247,6 +271,19 @@ pub const World = struct {
     /// The first app-facing recording failure, if any.
     pub fn recordingFailure(self: *const World) ?anyerror {
         return self.recording_failure;
+    }
+
+    /// Record that application code touched an operation the simulator does
+    /// not model. Under strict capabilities the runner then fails the run as
+    /// `unsupported_operation`, whatever the application did with the error.
+    pub fn noteUnmodeled(self: *World, comptime operation: []const u8, node: u64, incarnation: u64) void {
+        self.recordFields("io.unmodeled", &.{
+            traceField("operation", .{ .literal = operation }),
+            traceField("node", .{ .uint = node }),
+            traceField("incarnation", .{ .uint = incarnation }),
+            traceField("strict", .{ .boolean = self.strict_capabilities }),
+        }) catch |err| self.latchRecordingFailure(err);
+        if (self.strict_capabilities and self.unsupported_operation == null) self.unsupported_operation = operation;
     }
 
     fn recordInit(self: *World, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
@@ -350,13 +387,24 @@ pub const World = struct {
         /// Code that never yields still needs the watchdog. Null (the
         /// default) leaves scheduling unbounded.
         step_budget: ?u64 = null,
+        /// Fail the run as `unsupported_operation` when application code
+        /// touches an operation the simulator does not model (symbolic and
+        /// hard links, real paths, ownership, memory maps, datagram and
+        /// Unix-domain sockets), even if the application handles the error it
+        /// returns. Off, the operation still fails as a host without the
+        /// feature would and records `io.unmodeled`, so intentional
+        /// feature-absence testing stays selectable.
+        strict_capabilities: bool = false,
 
-        /// Omit an unset step budget so artifacts without one keep the
-        /// 0.7 byte format. Parsing restores the null default.
+        /// Omit an unset step budget and default capability mode so artifacts
+        /// without them keep the earlier byte format. Parsing restores the
+        /// defaults.
         pub fn jsonStringify(self: SimulateOptions, writer: anytype) !void {
             try writer.beginObject();
             inline for (@typeInfo(SimulateOptions).@"struct".field_names) |name| {
-                if (!std.mem.eql(u8, name, "step_budget") or self.step_budget != null) {
+                const omit = (comptime std.mem.eql(u8, name, "step_budget")) and self.step_budget == null or
+                    (comptime std.mem.eql(u8, name, "strict_capabilities")) and !self.strict_capabilities;
+                if (!omit) {
                     try writer.objectField(name);
                     try writer.write(@field(self, name));
                 }
@@ -501,6 +549,7 @@ pub const World = struct {
 
         self.simulation_created = true;
         errdefer self.simulation_created = false;
+        self.strict_capabilities = options.strict_capabilities;
 
         const teardown_checkpoint = self.teardowns.items.len;
         errdefer self.rollbackTeardowns(teardown_checkpoint);
@@ -720,9 +769,9 @@ pub const World = struct {
         const request = try self.decisions.request(site_id, self.now(), self.precedingEventIndex(), alternatives);
         const selected = try self.decisions.choose(request, generated);
         switch (alternatives) {
-            .any_u64 => try self.record("world.random_u64 value={}", .{selected}),
-            .boolean => try self.record("world.random_bool value={}", .{selected != 0}),
-            .unsigned_less_than => |bounded| try self.record("world.random_int_less_than type={s} less_than={} value={}", .{ @typeName(T), bounded.less_than, selected }),
+            .any_u64 => try self.record("world.random_u64 site=" ++ site_id ++ " value={}", .{selected}),
+            .boolean => try self.record("world.random_bool site=" ++ site_id ++ " value={}", .{selected != 0}),
+            .unsigned_less_than => |bounded| try self.record("world.random_int_less_than site=" ++ site_id ++ " type={s} less_than={} value={}", .{ @typeName(T), bounded.less_than, selected }),
             .bytes => unreachable,
         }
         self.random.finishDraw();
@@ -1216,7 +1265,7 @@ test "world: trace records deterministic actions" {
     try world.record("service.allowed request_id={}", .{7});
 
     try std.testing.expectEqualStrings(
-        \\marionette.trace format=text version=4
+        \\marionette.trace format=text version=5
         \\event=0 world.init seed=12648430 start_ns=5 tick_ns=2
         \\event=1 world.tick now_ns=7
         \\event=2 world.run_for start_ns=7 duration_ns=4 end_ns=11
