@@ -24,6 +24,8 @@ An exported type is not necessarily an application capability.
 | Experimental and model | `Endpoint(Message)`, `SimDisk`, `SimClock`, direct model operations and `World` engine fields | Explore protocol models or test simulator contracts. Typed endpoints do not promise production transport parity; prefer `std.Io` for application behavior. |
 | Implementation | Source-module `internal` namespaces, supervisor wiring, I/O backend, scheduler and fiber internals | Used by simulator components and white-box tests; not a downstream integration contract. |
 
+The [Stability Ledger](stability.md) classifies each surface as a 1.0
+candidate, experimental, or deprecated, and states the deprecation rules.
 Breaking export changes are planned and documented with migration guidance.
 Pre-1.0 APIs may still change, so pin the package revision.
 

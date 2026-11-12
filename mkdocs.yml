@@ -33,6 +33,7 @@ nav:
       - Architecture: architecture.md
       - Run: run.md
       - API: api.md
+      - Stability Ledger: stability.md
       - Examples: examples.md
       - Determinism: determinism.md
       - Decision Tapes: decision-tapes.md
