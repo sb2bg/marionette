@@ -70,7 +70,6 @@ pub fn Endpoint(comptime Message: type) type {
 
         pub const VTable = struct {
             send: *const fn (*anyopaque, NodeId, NodeId, Message) anyerror!void,
-            receive: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
             poll: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
             await_delivery: *const fn (*anyopaque, NodeId) anyerror!?Envelope,
         };
@@ -104,15 +103,6 @@ pub fn Endpoint(comptime Message: type) type {
         /// clock explicitly, so tasks should poll and sleep instead.
         pub fn awaitDelivery(self: Self) !?Envelope {
             return try self.vtable.await_delivery(self.ptr, self.self_node);
-        }
-
-        /// Deprecated; removed in 0.10. Use `poll`, or `awaitDelivery` to move
-        /// time explicitly. When none is ready, this may advance virtual time
-        /// to the earliest delivery anywhere on this `Message` bus, and `null`
-        /// means only that nothing for this endpoint was ready at that
-        /// boundary.
-        pub fn receive(self: Self) !?Envelope {
-            return try self.vtable.receive(self.ptr, self.self_node);
         }
     };
 }

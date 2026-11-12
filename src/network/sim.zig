@@ -1545,25 +1545,6 @@ fn TypedRuntime(comptime Payload: type) type {
             }
         }
 
-        fn receive(self: *Self, node: NodeId) !?Envelope {
-            try self.shared.validateNode(node);
-
-            while (true) {
-                try self.shared.expireDeterministicFaults();
-                if (try self.popReadyFor(node)) |packet| {
-                    return .{
-                        .from = packet.from,
-                        .message = packet.payload,
-                    };
-                }
-
-                const deliver_at = self.nextDeliveryAt() orelse return null;
-                const now_ns = self.shared.world.now();
-                if (deliver_at <= now_ns) return null;
-                try self.runForDeterministicFaults(deliver_at - now_ns);
-            }
-        }
-
         fn poll(self: *Self, node: NodeId) !?Envelope {
             try self.shared.validateNode(node);
             try self.shared.expireDeterministicFaults();
@@ -1634,16 +1615,6 @@ fn TypedRuntime(comptime Payload: type) type {
             }
         }
 
-        fn nextDeliveryAt(self: *const Self) ?clock_module.Timestamp {
-            var best: ?clock_module.Timestamp = null;
-            for (self.queues, 0..) |queue, index| {
-                const packet = if (queue.items.len == 0) continue else queue.items[0];
-                const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
-                if (best == null or ready_at < best.?) best = ready_at;
-            }
-            return best;
-        }
-
         fn nextReadyLinkIndexFor(self: *const Self, node: NodeId) ?usize {
             var best_index: ?usize = null;
             var best_packet: Packet = undefined;
@@ -1699,10 +1670,6 @@ fn TypedRuntime(comptime Payload: type) type {
             try fromOpaque(ptr).send(from, to, payload);
         }
 
-        fn vtableReceive(ptr: *anyopaque, node: NodeId) anyerror!?Envelope {
-            return try fromOpaque(ptr).receive(node);
-        }
-
         fn vtablePoll(ptr: *anyopaque, node: NodeId) anyerror!?Envelope {
             return try fromOpaque(ptr).poll(node);
         }
@@ -1713,7 +1680,6 @@ fn TypedRuntime(comptime Payload: type) type {
 
         const vtable: Handle.VTable = .{
             .send = vtableSend,
-            .receive = vtableReceive,
             .poll = vtablePoll,
             .await_delivery = vtableAwaitDelivery,
         };

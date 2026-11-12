@@ -92,7 +92,7 @@ test "composition network: endpoints for the same payload share one runtime" {
     _ = try sim.endpoint(OtherTestPayload, 1);
 
     try node_0.send(1, .{ .value = 42 });
-    const envelope = (try node_1.receive()).?;
+    const envelope = (try node_1.awaitDelivery()).?;
     try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
     try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
 }
@@ -166,34 +166,6 @@ test "stream byte sends preserve delivery order under jitter" {
     }
 }
 
-test "composition network: receive advances only to global next delivery" {
-    var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .network = .{ .semantics = .legacy_v0, .nodes = 3, .path_capacity = 4 } });
-    const node_0 = try sim.endpoint(TestPayload, 0);
-    const node_1 = try sim.endpoint(TestPayload, 1);
-    const node_2 = try sim.endpoint(TestPayload, 2);
-
-    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
-    try node_2.send(1, .{ .value = 10 });
-    try sim.control.network.setLatency(.{ .min_latency_ns = 20 });
-    try node_2.send(0, .{ .value = 20 });
-
-    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try node_0.receive());
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
-
-    const earlier = (try node_1.receive()).?;
-    try std.testing.expectEqual(@as(NodeId, 2), earlier.from);
-    try std.testing.expectEqual(@as(u64, 10), earlier.message.value);
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 10), world.now());
-
-    const later = (try node_0.receive()).?;
-    try std.testing.expectEqual(@as(NodeId, 2), later.from);
-    try std.testing.expectEqual(@as(u64, 20), later.message.value);
-    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
-}
-
 test "composition network: successful send may be fault-dropped" {
     var world = try World.init(std.testing.allocator, .{ .seed = 1234, .tick_ns = 10 });
     defer world.deinit();
@@ -205,7 +177,7 @@ test "composition network: successful send may be fault-dropped" {
     try sim.control.network.setLossiness(.{ .drop_rate = .always() });
     try sender.send(1, .{ .value = 42 });
 
-    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try receiver.receive());
+    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try receiver.awaitDelivery());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=send_drop") != null);
 }
 
@@ -236,7 +208,7 @@ test "composition network: ready packet uses node state when consumed" {
     try sim.control.runFor(10);
     try sim.control.network.setNode(1, true);
 
-    const envelope = (try receiver.receive()).?;
+    const envelope = (try receiver.awaitDelivery()).?;
     try std.testing.expectEqual(@as(u64, 42), envelope.message.value);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.deliver") != null);
 }
@@ -474,7 +446,7 @@ test "composition network: receive jump does not strand due automatic partition"
     try sim.control.runFor(10);
 
     try node_2.send(3, .{ .value = 20 });
-    const envelope = (try node_3.receive()).?;
+    const envelope = (try node_3.awaitDelivery()).?;
     try std.testing.expectEqual(@as(u64, 20), envelope.message.value);
     try std.testing.expectEqual(@as(clock_module.Timestamp, 40), world.now());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") == null);
@@ -524,7 +496,7 @@ test "composition network: nextDelivery wait does not evolve probabilistic fault
 
     try node_0.send(1, .{ .value = 1 });
     const random_events_before = std.mem.count(u8, world.traceBytes(), "world.random_int_less_than");
-    const envelope = (try node_1.receive()).?;
+    const envelope = (try node_1.awaitDelivery()).?;
     try std.testing.expectEqual(@as(NodeId, 0), envelope.from);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_partition") == null);
     try std.testing.expectEqual(random_events_before, std.mem.count(u8, world.traceBytes(), "world.random_int_less_than"));
@@ -570,7 +542,7 @@ test "composition network: manual and automatic partitions compose" {
     try sim.control.tick();
 
     try node_1.send(2, .{ .value = 1 });
-    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try node_2.receive());
+    try std.testing.expectEqual(@as(?Endpoint(TestPayload).Envelope, null), try node_2.awaitDelivery());
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "network.auto_heal") != null);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=link_disabled") != null);
 }
@@ -608,10 +580,10 @@ test "network contract: same destination orders by delivery time then packet id 
     try second.send(2, .{ .value = 1 });
     try first.send(2, .{ .value = 2 });
     for ([_]u64{ 1, 2, 3 }) |value| {
-        try std.testing.expectEqual(value, (try receiver.receive()).?.message.value);
+        try std.testing.expectEqual(value, (try receiver.awaitDelivery()).?.message.value);
     }
     try std.testing.expectEqual(@as(u64, 20), world.now());
-    try std.testing.expect((try receiver.receive()) == null);
+    try std.testing.expect((try receiver.awaitDelivery()) == null);
 }
 
 test "network contract: clog isolation expiry explicit unclog and heal" {
@@ -626,7 +598,7 @@ test "network contract: clog isolation expiry explicit unclog and heal" {
         try sim.control.network.clog(0, 1, 30);
         try sender.send(1, .{ .value = 1 });
         try sender.send(2, .{ .value = 2 });
-        try std.testing.expectEqual(@as(u64, 2), (try other.receive()).?.message.value);
+        try std.testing.expectEqual(@as(u64, 2), (try other.awaitDelivery()).?.message.value);
         try std.testing.expectEqual(@as(u64, 10), world.now());
         switch (mode) {
             0 => {},
@@ -638,7 +610,7 @@ test "network contract: clog isolation expiry explicit unclog and heal" {
             },
             else => unreachable,
         }
-        try std.testing.expectEqual(@as(u64, 1), (try blocked.receive()).?.message.value);
+        try std.testing.expectEqual(@as(u64, 1), (try blocked.awaitDelivery()).?.message.value);
         try std.testing.expectEqual(@as(u64, if (mode == 0 or mode == 3) 30 else 10), world.now());
     }
 }
@@ -653,27 +625,27 @@ test "network contract: partition healLinks and node lifecycle retain distinct m
     const control = sim.control.network;
     _ = try control.partition(&.{0}, &.{1}, .{});
     try a.send(1, .{ .value = 1 });
-    try std.testing.expect((try b.receive()) == null);
+    try std.testing.expect((try b.awaitDelivery()) == null);
     try b.send(0, .{ .value = 2 });
-    try std.testing.expect((try a.receive()) == null);
+    try std.testing.expect((try a.awaitDelivery()) == null);
     try a.send(2, .{ .value = 3 });
-    try std.testing.expectEqual(@as(u64, 3), (try c.receive()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 3), (try c.awaitDelivery()).?.message.value);
     try control.setNode(1, false);
     try control.healLinks();
     try b.send(0, .{ .value = 4 });
-    try std.testing.expect((try a.receive()) == null); // source still down
+    try std.testing.expect((try a.awaitDelivery()) == null); // source still down
     try a.send(1, .{ .value = 5 });
-    try std.testing.expect((try b.receive()) == null); // destination still down
+    try std.testing.expect((try b.awaitDelivery()) == null); // destination still down
     try control.heal();
     try a.send(1, .{ .value = 6 });
-    try std.testing.expectEqual(@as(u64, 6), (try b.receive()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 6), (try b.awaitDelivery()).?.message.value);
     try control.setNode(1, false);
     try a.send(1, .{ .value = 7 });
     try control.setNode(1, true);
-    try std.testing.expectEqual(@as(u64, 7), (try b.receive()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 7), (try b.awaitDelivery()).?.message.value);
     try control.setLink(0, 1, false);
     try a.send(1, .{ .value = 8 });
-    try std.testing.expect((try b.receive()) == null);
+    try std.testing.expect((try b.awaitDelivery()) == null);
 }
 
 test "network: disabled loss consumes no decision for typed and stream sends" {
