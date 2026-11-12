@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.0 - Unreleased
+## v0.9.0 - 2026-11-12
 
 The honest network. Faults no longer turn into invented errors, and endpoints
 no longer read each other's state.
