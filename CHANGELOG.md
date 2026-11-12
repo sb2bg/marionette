@@ -1,9 +1,9 @@
 # Changelog
 
-## v0.8.3 - 2026-11-04
+## v0.8.3 - Unreleased
 
 Storage correctness. The disk contract is now `portable_v2` (disk model
-version 2), which separates data durability from namespace durability. Two
+revision 3), which separates data durability from namespace durability. Two
 `portable_v1` behaviors hid missing-sync bugs: rename committed unsynced
 source data, and an empty creation was a pending zero-length write that a
 lost-write crash removed even after a parent-directory sync.
@@ -18,7 +18,7 @@ lost-write crash removed even after a parent-directory sync.
   outcomes for replacement, truncation, deletion, and recreation in
   `docs/disk-fault-model.md`.
 - **Versioned semantics.** `disk_semantic_contract` is `.portable_v2` and
-  `disk_semantic_version` is 2. Replaying or reducing a capsule recorded under
+  `disk_semantic_version` is 3. Replaying or reducing a capsule recorded under
   another disk version fails with the new `error.IncompatibleDiskModel`
   instead of `IncompatibleReplay`; `portable_v1` artifacts replay only on
   their pinned build. `disk.model` reports `lifecycle=identity_pending`.
@@ -40,6 +40,20 @@ lost-write crash removed even after a parent-directory sync.
   required effects. The pinned xitdb validation adds a commit crash-point
   sweep under `lost_write`, `torn_write`, and `mixed`, with a harness mutant
   that omits the parent sync.
+
+- **Release review fixes.** Torn writes land in the same issue order as full
+  writes and length changes, unless an explicit reorder fault reverses them.
+  A pending truncation can no longer erase a later torn prefix without that
+  fault. Crash-point counts and effect requirements include only the sweep's
+  tracked requests, excluding unrelated setup, recovery, and replacement
+  crashes. Tests cover both operation orders, reorder on/off, and sweep
+  accounting with and without watchdog isolation.
+- **Candidate compatibility.** Disk revision 3 rejects earlier revision-2
+  candidate capsules with `IncompatibleDiskModel`; replay them using their
+  original pinned build. Tracked crash summaries carry the arming event id,
+  and `run.crash_point` identifies the sweep's request. The earlier
+  `tests/fixtures/0.8.3` evidence remains intact; `0.8.3-revision3` changes only
+  the disk revision for those unchanged workloads.
 
 Changed expectations, classified:
 

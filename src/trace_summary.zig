@@ -183,6 +183,28 @@ pub fn crashEffects(trace_bytes: []const u8) TraceSummaryError!CrashEffects {
     return effects;
 }
 
+/// Internal sweep evidence: only crash summaries tied to the request
+/// identified by `run.crash_point`. Manual, replaced, setup, and recovery
+/// requests have different (or absent) arming event ids.
+pub fn crashPointEffects(trace_bytes: []const u8) TraceSummaryError!CrashEffects {
+    var effects: CrashEffects = .{};
+    var armed_event: ?u64 = null;
+    var lines = std.mem.splitScalar(u8, trace_bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or std.mem.startsWith(u8, line, "marionette.trace ")) continue;
+        const event = try parseEventLine(line);
+        if (std.mem.eql(u8, event.name, "run.crash_point")) {
+            armed_event = try requiredU64(event, "armed_event");
+        } else if (std.mem.eql(u8, event.name, "disk.crash") and event.field("armed_event") != null) {
+            if (armed_event != null and armed_event.? == try requiredU64(event, "armed_event")) {
+                try effects.record(event);
+                armed_event = null;
+            }
+        }
+    }
+    return effects;
+}
+
 fn requiredU64(event: ParsedEvent, key: []const u8) TraceSummaryError!u64 {
     const value = event.field(key) orelse return error.InvalidTraceEvent;
     return std.fmt.parseInt(u64, value, 10) catch error.InvalidTraceLine;

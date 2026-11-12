@@ -143,7 +143,7 @@ Rules:
 - Logical process lifecycle records use `process.kill node=<u64> reason=<literal>`
   and `process.restart node=<u64>`.
 - Simulated disks begin with
-  `disk.model contract=portable_v2 version=2 sector_size=<u64> torn_write=sector_prefix reorder=crash_global_reverse lifecycle=identity_pending`.
+  `disk.model contract=portable_v2 version=3 sector_size=<u64> torn_write=sector_prefix reorder=crash_global_reverse lifecycle=identity_pending`.
   A disk crash publishes all fault choices, per-metadata then per-data
   classifications (`disk.crash_metadata`, then `disk.crash_write` and
   `disk.crash_set_length`), its summary, and process-kill records
@@ -154,6 +154,11 @@ Rules:
   `disk.crash_profile name=<literal> lost_write=<rate> torn_write=<rate> reordered_write=<rate> lost_metadata=<rate>`.
   A crash-point sweep's profile is also the run attribute
   `marionette.crash_profile`.
+- Arming a sweep records `run.crash_point armed_event=<u64>`, referencing the
+  `disk.fault kind=armed_crash after_ops=<u64>` event for that request. A
+  tracked request's `disk.crash` summary carries the same `armed_event`.
+  Sweep effects count only those matching summaries; unrelated crashes and
+  replacement requests cannot satisfy a sweep's effect requirement.
 - `disk.set_length`, `disk.delete`, and `disk.rename` carry no
   `committed_writes` field: under `portable_v2` they commit no data.
 - The one-shot liveness transition records `liveness.transition core_count=<u64>`

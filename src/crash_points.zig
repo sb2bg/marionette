@@ -68,7 +68,8 @@ pub const Result = struct {
     eligible: u64 = 0,
     /// Injected points whose crash changed pending data or namespace state.
     effective: u64 = 0,
-    /// Crash effects summed over every point run.
+    /// Effects of the sweep's tracked crashes, summed over every point run.
+    /// Unrelated setup, recovery, and replacement crashes are excluded.
     effects: trace_summary.CrashEffects = .{},
     /// First failing point's report. Its options carry the point, so its
     /// capsule replays that point.
@@ -82,7 +83,7 @@ pub const Result = struct {
     /// Classify one point from its trace. The runner's own trace is
     /// well-formed, so a parse failure means no crash evidence to count.
     fn record(self: *Result, trace: []const u8) void {
-        const effects = trace_summary.crashEffects(trace) catch return;
+        const effects = trace_summary.crashPointEffects(trace) catch return;
         self.effects.add(effects);
         if (effects.injected != 0) self.injected += 1;
         if (effects.eligible != 0) self.eligible += 1;

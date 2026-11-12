@@ -1425,7 +1425,7 @@ pub const SimDisk = struct {
         var torn: u64 = 0;
         var reordered: u64 = 0;
         var orphaned: u64 = 0;
-        const CrashLanding = struct { index: usize };
+        const CrashLanding = struct { index: usize, torn: bool = false };
         var landing = std.ArrayList(CrashLanding).empty;
         defer landing.deinit(self.world.allocator);
         var reorder_requested = false;
@@ -1457,9 +1457,9 @@ pub const SimDisk = struct {
                     "crash_torn_write",
                     self.faults.crash_torn_write_rate,
                 )) {
-                    try staged.applyTornWrite(pending);
-                    torn += 1;
-                    try self.recordCrashWrite(pending, "torn");
+                    // Select the outcome now, but apply it in the same
+                    // sequence as full writes and length changes.
+                    try landing.append(self.world.allocator, .{ .index = index, .torn = true });
                     continue;
                 }
             }
@@ -1477,29 +1477,30 @@ pub const SimDisk = struct {
         }
 
         const apply_reordered = reorder_requested and landing.items.len > 1;
-        if (apply_reordered) {
-            reordered = @intCast(landing.items.len);
-            var index = landing.items.len;
-            while (index > 0) {
-                index -= 1;
-                const item = landing.items[index];
-                const pending = &self.pending_writes.items[item.index];
+        for (0..landing.items.len) |order| {
+            const index = if (apply_reordered) landing.items.len - 1 - order else order;
+            const item = landing.items[index];
+            const pending = &self.pending_writes.items[item.index];
+            if (item.torn) {
+                try staged.applyTornWrite(pending);
+                torn += 1;
+                try self.recordCrashWrite(pending, "torn");
+            } else {
                 try staged.applyFullWrite(pending);
-                try self.recordCrashWrite(pending, "reordered");
-            }
-        } else {
-            landed = @intCast(landing.items.len);
-            for (landing.items) |item| {
-                const pending = &self.pending_writes.items[item.index];
-                try staged.applyFullWrite(pending);
-                try self.recordCrashWrite(pending, "landed");
+                if (apply_reordered) {
+                    reordered += 1;
+                    try self.recordCrashWrite(pending, "reordered");
+                } else {
+                    landed += 1;
+                    try self.recordCrashWrite(pending, "landed");
+                }
             }
         }
         staged.clearPendingMetadata();
         try staged.validateChangedPaths();
         try staged.prepareCommit();
 
-        try self.world.recordFields("disk.crash", &.{
+        const crash_fields = [_]world_module.TraceField{
             traceField("pending_writes", .{ .uint = @intCast(pending_count) }),
             traceField("landed", .{ .uint = landed }),
             traceField("lost", .{ .uint = lost }),
@@ -1509,7 +1510,14 @@ pub const SimDisk = struct {
             traceField("pending_metadata", .{ .uint = @intCast(pending_metadata_count) }),
             traceField("metadata_kept", .{ .uint = metadata_kept }),
             traceField("metadata_lost", .{ .uint = metadata_lost }),
-        });
+        };
+        if (trigger) |tracked| {
+            try self.world.recordFields("disk.crash", &(crash_fields ++ .{
+                traceField("armed_event", .{ .uint = tracked.armed_event.? }),
+            }));
+        } else {
+            try self.world.recordFields("disk.crash", &crash_fields);
+        }
 
         if (self.crash_observer) |observer| try observer.prepare(observer.ptr);
 
@@ -1588,7 +1596,10 @@ pub const SimDisk = struct {
         });
         self.armed_crash_budget = ops;
         self.armed_crash_trigger = trigger;
-        if (trigger) |tracked| tracked.fired = false;
+        if (trigger) |tracked| {
+            tracked.fired = false;
+            tracked.armed_event = self.world.event_index - 1;
+        }
     }
 
     fn disarmCrash(self: *Self) DiskError!bool {

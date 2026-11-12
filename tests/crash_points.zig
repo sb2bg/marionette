@@ -99,6 +99,8 @@ test "crash points: a misordered commit fails at its exact point and replays" {
     // `second` is durable after its three operations; crashing before the
     // fourth leaves it without `first`.
     try std.testing.expectEqual(@as(u64, 4), result.points);
+    try std.testing.expectEqual(@as(u64, 4), result.injected);
+    try std.testing.expectEqual(@as(u64, 4), result.effects.injected);
     try mar.expectTraceContains(failure.first_trace, "run.attribute key=marionette.crash_point value=uint:3");
 
     const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &result.failure.?, identity);
@@ -204,6 +206,69 @@ test "crash points: setup and recovery crashes do not extend the sweep" {
         defer result.deinit();
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(@as(u64, 2), result.points);
+        try std.testing.expectEqual(@as(u64, 1), result.injected);
+        try std.testing.expectEqual(@as(u64, 0), result.eligible);
+        try std.testing.expectEqual(@as(u64, 0), result.effective);
+        try std.testing.expectEqual(mar.CrashEffects{ .injected = 1 }, result.effects);
+    }
+}
+
+const UnrelatedEffects = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn loseWrite(case: *mar.SimCase(@This())) !void {
+        const disk = case.env().disk;
+        try disk.write(.{ .path = "setup", .offset = 0, .bytes = "OLD1" });
+        try disk.sync(.{ .path = "setup" });
+        try disk.syncDir(.{ .path = "." });
+        try disk.write(.{ .path = "setup", .offset = 0, .bytes = "NEW1" });
+        try case.control().disk.crashWith(.lost_write);
+        try case.control().disk.restart();
+        try case.control().process.restart(0);
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        try loseWrite(case);
+        try case.armCrashPoint();
+        _ = try case.finishCrashPoint();
+        try loseWrite(case);
+    }
+
+    fn failedScenario(case: *mar.SimCase(@This())) !void {
+        try scenario(case);
+        return error.PlantedFailure;
+    }
+};
+
+test "crash points: unrelated effects cannot satisfy the sweep requirement" {
+    inline for (watchdog_modes) |watchdog| {
+        const config = .{
+            .allocator = std.testing.allocator,
+            .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+            .init = UnrelatedEffects.init,
+            .scenario = UnrelatedEffects.scenario,
+            .watchdog = watchdog,
+        };
+        var result = try mar.sweepCrashPoints(config, .{ .profile = .clean });
+        defer result.deinit();
+        try std.testing.expectEqual(@as(u64, 1), result.points);
+        try std.testing.expectEqual(@as(u64, 0), result.injected);
+        try std.testing.expectEqual(mar.CrashEffects{}, result.effects);
+        try std.testing.expectError(error.CrashEffectRequirementUnmet, mar.sweepCrashPoints(config, .{ .profile = .clean, .require = .data }));
+
+        var failed = try mar.sweepCrashPoints(.{
+            .allocator = std.testing.allocator,
+            .simulate = config.simulate,
+            .init = UnrelatedEffects.init,
+            .scenario = UnrelatedEffects.failedScenario,
+            .watchdog = watchdog,
+        }, .{ .profile = .clean });
+        defer failed.deinit();
+        try std.testing.expectEqualStrings("PlantedFailure", failed.failure.?.failed.error_name.?);
+        try std.testing.expectEqual(@as(u64, 0), failed.injected);
+        try std.testing.expectEqual(mar.CrashEffects{}, failed.effects);
     }
 }
 

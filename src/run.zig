@@ -89,6 +89,11 @@ pub fn SimCase(comptime App: type) type {
             try self.control().disk.crashAfterOpsTracked(point, &self.crash_point_trigger);
             self.crash_point_armed = true;
             if (self.crash_point_fired == null) self.crash_point_fired = false;
+            if (self.crash_point_trigger.armed_event) |event| {
+                try self.control().world.recordFields("run.crash_point", &.{
+                    traceField("armed_event", .{ .uint = event }),
+                });
+            }
         }
 
         /// End the work under test: an armed crash that has not fired is

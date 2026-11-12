@@ -40,7 +40,7 @@ test "disk: trace names the portable v2 semantic contract" {
         disk_model.DiskSemanticContract.portable_v2,
         disk_model.disk_semantic_contract,
     );
-    try std.testing.expectEqual(@as(u32, 2), disk_model.disk_semantic_version);
+    try std.testing.expectEqual(@as(u32, 3), disk_model.disk_semantic_version);
 
     var world = try World.init(std.testing.allocator, .{ .seed = 1234 });
     defer world.deinit();
@@ -50,7 +50,7 @@ test "disk: trace names the portable v2 semantic contract" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         world.traceBytes(),
-        "disk.model contract=portable_v2 version=2 sector_size=4 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=identity_pending",
+        "disk.model contract=portable_v2 version=3 sector_size=4 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=identity_pending",
     ) != null);
 }
 

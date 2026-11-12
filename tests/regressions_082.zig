@@ -237,11 +237,20 @@ const Sweep = struct {
         try case.control().disk.restart();
         try case.control().process.restart(0);
     }
+    fn replacedTrackedCrash(case: *mar.SimCase(@This())) !void {
+        try case.armCrashPoint();
+        var replacement: mar.DiskControl.CrashTrigger = .{};
+        try case.control().disk.crashAfterOpsTracked(0, &replacement);
+        try std.testing.expectError(error.DiskCrashed, case.env().disk.write(.{ .path = "other", .offset = 0, .bytes = "DATA" }));
+        try std.testing.expect(replacement.fired);
+        try case.control().disk.restart();
+        try case.control().process.restart(0);
+    }
 };
 
 test "082: sweep outcomes belong to the sweep's particular armed crash" {
     inline for (watchdog_modes) |watchdog| {
-        inline for (.{ Sweep.rearmRecovery, Sweep.rearmOnReturn, Sweep.manualCrash, Sweep.replacedCrash }, 0..) |scenario, index| {
+        inline for (.{ Sweep.rearmRecovery, Sweep.rearmOnReturn, Sweep.manualCrash, Sweep.replacedCrash, Sweep.replacedTrackedCrash }, 0..) |scenario, index| {
             var result = try mar.sweepCrashPoints(.{
                 .allocator = std.testing.allocator,
                 .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
@@ -252,6 +261,8 @@ test "082: sweep outcomes belong to the sweep's particular armed crash" {
             defer result.deinit();
             try std.testing.expect(result.failure == null);
             try std.testing.expectEqual(@as(u64, if (index < 2) 2 else 1), result.points);
+            try std.testing.expectEqual(@as(u64, if (index < 2) 1 else 0), result.injected);
+            try std.testing.expectEqual(result.injected, result.effects.injected);
         }
     }
 }

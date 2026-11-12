@@ -17,7 +17,13 @@ pub const DiskControl = struct {
     /// Caller-owned outcome of one particular armed crash. It must outlive
     /// the request until it fires, is replaced, or is disarmed. Manual crashes
     /// do not fire it; later requests never change its outcome.
-    pub const CrashTrigger = struct { fired: bool = false };
+    pub const CrashTrigger = struct {
+        fired: bool = false,
+        /// Trace event that armed this request, assigned by the simulator.
+        /// Its crash summary references this event, even if recovery has
+        /// already armed another request by the time the caller checks it.
+        armed_event: ?u64 = null,
+    };
 
     pub const VTable = struct {
         set_faults: *const fn (*anyopaque, DiskFaultOptions) DiskError!void,

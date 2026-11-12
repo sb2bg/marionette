@@ -1,7 +1,9 @@
 //! Serialization fixtures. `fixtures/0.7.1` was captured before the 0.7.2
 //! cleanup under the `portable_v1` disk contract and is kept unchanged as
 //! historical evidence; `fixtures/0.8.3` is the same scenarios under
-//! `portable_v2`. Every difference between the two is classified below.
+//! `portable_v2` revision 2. `fixtures/0.8.3-revision3` preserves those
+//! scenarios under the corrected crash ordering. Every difference between
+//! consecutive sets is classified below.
 const std = @import("std");
 const mar = @import("marionette");
 const examples = @import("examples");
@@ -50,7 +52,7 @@ const App = struct {
 };
 
 fn fixture(comptime name: []const u8, actual: []const u8) !void {
-    try std.testing.expectEqualStrings(@embedFile("fixtures/0.8.3/" ++ name), actual);
+    try std.testing.expectEqualStrings(@embedFile("fixtures/0.8.3-revision3/" ++ name), actual);
 }
 
 fn compareArtifacts(comptime name: []const u8, report: *const mar.RunReport) !void {
@@ -172,4 +174,20 @@ test "0.8.3 compatibility: a portable_v1 capsule is rejected, not reinterpreted"
     var pinned = current;
     pinned.disk_version = 1;
     try capsule.validateIdentity(pinned);
+}
+
+test "0.8.3 compatibility: unchanged workloads differ only in disk revision" {
+    inline for (.{ "process", "reduced" }) |name| {
+        inline for (.{ "-trace.txt", "-replay.json", "-manifest.json" }) |suffix| {
+            const previous = @embedFile("fixtures/0.8.3/" ++ name ++ suffix);
+            const current = @embedFile("fixtures/0.8.3-revision3/" ++ name ++ suffix);
+            const model = try std.mem.replaceOwned(u8, std.testing.allocator, current, "contract=portable_v2 version=3", "contract=portable_v2 version=2");
+            defer std.testing.allocator.free(model);
+            const compact = try std.mem.replaceOwned(u8, std.testing.allocator, model, "\"disk_version\":3", "\"disk_version\":2");
+            defer std.testing.allocator.free(compact);
+            const pretty = try std.mem.replaceOwned(u8, std.testing.allocator, compact, "\"disk_version\": 3", "\"disk_version\": 2");
+            defer std.testing.allocator.free(pretty);
+            try std.testing.expectEqualStrings(previous, pretty);
+        }
+    }
 }

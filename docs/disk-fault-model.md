@@ -7,7 +7,7 @@ capability underneath that backend.
 
 ## Portable v2
 
-The current contract is `portable_v2`, numeric version `2`. Its constants are
+The current contract is `portable_v2`, model revision `3`. Its constants are
 `mar.disk_semantic_contract` and `mar.disk_semantic_version`. Each simulated
 disk records a `disk.model` event containing the contract, version, sector
 size, tear model, reorder model, and lifecycle policy
@@ -31,7 +31,8 @@ The contract guarantees:
 - A torn pending write lands a prefix of whole sectors, never a byte prefix.
   A pending `setLength` is never torn: it lands or is lost.
 - A successful reorder roll reverses all surviving pending data operations for
-  that crash; each is classified as `reordered`.
+  that crash, including torn prefixes. Torn writes keep their `torn`
+  classification; the other surviving operations are `reordered`.
 - Crash faults affect only pending data and namespace changes. Unrelated
   durable state remains exact.
 - `corruptSector` destructively changes existing logical media. A corrupt-read
@@ -47,6 +48,11 @@ The contract guarantees:
 
 Only successful `sync` and `syncDir` calls support a portable crash-survival
 claim. In particular, `rename` cannot stand in for a missing file sync.
+
+Revision 2 applied torn prefixes before pending length changes, which could
+erase a later write even without a reorder fault. Revision 3 preserves their
+issue order unless a reorder fault reverses the surviving operations.
+Revision-2 capsules replay only on their original pinned build.
 
 ### Crash outcomes
 
@@ -103,6 +109,10 @@ var result = try mar.sweepCrashPoints(config, .{ .profile = .lost_write, .requir
 defer result.deinit();
 // result.points, result.injected, result.eligible, result.effective, result.effects
 ```
+
+Sweep counts and requirements include only the sweep's tracked requests.
+Unrelated crashes in setup or recovery and replacement requests do not count;
+`crashEffects(trace)` still counts every crash in the supplied trace.
 
 ## Capabilities
 

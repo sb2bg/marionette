@@ -374,17 +374,19 @@ test "replay capsule: every pinned identity dimension is enforced" {
     try std.testing.expectError(error.IncompatibleDiskModel, mar.replaySimCase(config, &capsule, changed));
 }
 
-test "replay capsule: a capsule recorded under portable_v1 is rejected" {
-    const v1_identity: mar.ReplayIdentity = .{ .build = "build", .sut = "sut", .disk_version = 1 };
+test "replay capsule: earlier disk model revisions are rejected" {
     var report = try mar.runSimCase(.{ .allocator = std.testing.allocator, .simulate = mar.World.SimulateOptions{}, .init = App.init, .scenario = App.scenario });
     defer report.deinit();
-    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, v1_identity);
-    defer std.testing.allocator.free(bytes);
-    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
-    defer capsule.deinit();
     const config = .{ .allocator = std.testing.allocator, .init = App.init, .scenario = App.scenario };
-    var current = v1_identity;
-    current.disk_version = mar.disk_semantic_version;
-    try std.testing.expectError(error.IncompatibleDiskModel, mar.replaySimCase(config, &capsule, current));
-    try std.testing.expectError(error.IncompatibleDiskModel, mar.reduceCapsule(config, &capsule, current, .{}));
+    inline for (.{ 1, 2 }) |revision| {
+        const previous: mar.ReplayIdentity = .{ .build = "build", .sut = "sut", .disk_version = revision };
+        const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, previous);
+        defer std.testing.allocator.free(bytes);
+        var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+        defer capsule.deinit();
+        var current = previous;
+        current.disk_version = mar.disk_semantic_version;
+        try std.testing.expectError(error.IncompatibleDiskModel, mar.replaySimCase(config, &capsule, current));
+        try std.testing.expectError(error.IncompatibleDiskModel, mar.reduceCapsule(config, &capsule, current, .{}));
+    }
 }

@@ -270,6 +270,8 @@ A passing sweep is evidence only if crashes acted on something. The result
 counts `points`, `injected` points where the armed crash fired, `eligible`
 injected points with pending state, and `effective` points whose crash lost,
 tore, reordered, or rolled back pending state, with summed `effects`.
+Only the sweep's tracked requests count; unrelated setup, recovery, and
+replacement crashes cannot contribute effects.
 `.require = .data`, `.metadata`, or `.data_and_metadata` turns a sweep that
 passed without such effects into `error.CrashEffectRequirementUnmet`.
 

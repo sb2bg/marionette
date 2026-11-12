@@ -24,7 +24,9 @@ pub const DiskSemanticContract = enum {
 };
 
 pub const disk_semantic_contract: DiskSemanticContract = .portable_v2;
-pub const disk_semantic_version: u32 = 2;
+/// Model revision 3 preserves issue order between torn writes and length
+/// changes, and correlates tracked crash summaries with their requests.
+pub const disk_semantic_version: u32 = 3;
 
 /// Errors shared by every disk implementation and control operation.
 pub const DiskError = error{

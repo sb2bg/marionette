@@ -250,6 +250,29 @@ test "083: a lost delete restores the file with whatever of its data survives" {
     }
 }
 
+test "083: torn writes and length changes land in the selected order" {
+    inline for (.{ false, true }) |reorder| {
+        inline for (.{ false, true }) |truncate_first| {
+            var raw: Raw = undefined;
+            try raw.init();
+            defer raw.deinit();
+            try raw.durable("f", "OLD-DATA");
+            if (truncate_first) try raw.disk().setLength(.{ .path = "f", .len = 0 });
+            try raw.disk().write(.{ .path = "f", .offset = 0, .bytes = "NEW-DATA" });
+            if (!truncate_first) try raw.disk().setLength(.{ .path = "f", .len = 0 });
+            try raw.crash(.{
+                .crash_torn_write_rate = .always(),
+                .crash_reordered_write_rate = if (reorder) .always() else .never(),
+            });
+            // Four-byte sectors make the eight-byte write tear to "NEW-".
+            // A truncation applied afterward must erase that prefix.
+            try raw.expectContents("f", if (truncate_first != reorder) "NEW-" else "");
+            const effects = try mar.crashEffects(raw.world.traceBytes());
+            try std.testing.expectEqual(@as(u64, if (reorder) 2 else 1), effects.data_effects);
+        }
+    }
+}
+
 test "083: a durable delete discards the identity's pending data" {
     var raw: Raw = undefined;
     try raw.init();
