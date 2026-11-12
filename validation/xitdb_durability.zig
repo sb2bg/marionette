@@ -1,5 +1,7 @@
 //! External SUT validation for xitdb running on Marionette's deterministic
-//! `std.Io` backend.
+//! `std.Io` backend. Every scenario is a `mar.Harness`; parameterized cases
+//! carry their sector size, fault, crash budget, and plan as typed harness
+//! input, so each run replays from its capsule.
 
 const std = @import("std");
 const mar = @import("marionette");
@@ -80,15 +82,9 @@ const Transaction = struct {
 };
 
 test "xitdb randomized file workload replays deterministically on SimDisk" {
-    const allocator = std.testing.allocator;
-
-    const first = try runTrace(allocator, 0xC0FFEE, .none);
-    defer allocator.free(first);
-
-    const second = try runTrace(allocator, 0xC0FFEE, .none);
-    defer allocator.free(second);
-
-    try std.testing.expectEqualStrings(first, second);
+    // The runner executes the seed twice and compares the traces.
+    const trace = try runTrace(std.testing.allocator, 0xC0FFEE, .none);
+    defer std.testing.allocator.free(trace);
 }
 
 test "xitdb acknowledged transactions survive lost-write crash" {
@@ -101,11 +97,7 @@ test "xitdb acknowledged transactions survive lost-write crash" {
 test "xitdb acknowledged transactions survive lost-write crash seed sweep" {
     const allocator = std.testing.allocator;
 
-    for (0..SweepSeeds) |i| {
-        const seed = 0x5100_0000 + @as(u64, @intCast(i));
-        const trace = try runTrace(allocator, seed, .lost_write_crash);
-        allocator.free(trace);
-    }
+    try TraceHarness.fuzz(allocator, .{ .seed = 0x5100_0000, .input = .{ .fault_mode = .lost_write_crash } }, .{ .seeds = SweepSeeds });
 }
 
 test "xitdb data-region torn writes preserve acknowledged history at realistic sectors" {
@@ -153,32 +145,42 @@ fn committedSizeHeaderCrossesSector(sector_size: u64) bool {
     return first_sector != last_sector;
 }
 
+const MvccApp = struct {
+    fn init(_: mar.Sim) MvccApp {
+        return .{};
+    }
+
+    fn run(case: *mar.SimCase(MvccApp)) !void {
+        const allocator = case.control().harnessAllocator();
+        const io = case.env().io();
+        var file = try std.Io.Dir.cwd().createFile(io, "xit-mvcc.db", .{ .read = true, .truncate = true });
+        defer file.close(io);
+
+        var db = try DB.init(.{ .io = io, .file = file });
+        var model = std.ArrayList(Snapshot).empty;
+        defer model.deinit(allocator);
+
+        try runRandomWorkload(allocator, case.control(), &db, &model, 1);
+
+        const old_history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
+        const old_cursor = (try old_history.getCursor(0)).?;
+        const old_moment = try DB.HashMap(.read_only).init(old_cursor);
+        const old_snapshot = model.items[0];
+
+        try runRandomWorkload(allocator, case.control(), &db, &model, 8);
+        try verifyHistory(allocator, &db, model.items);
+        try verifySnapshot(allocator, old_moment, old_snapshot);
+    }
+};
+
 test "xitdb old read-only moments survive later writes" {
-    const allocator = std.testing.allocator;
-
-    var world = try mar.World.init(allocator, .{ .seed = 0x0A11_CE });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4096 } });
-    const io = sim.env.io();
-
-    var file = try std.Io.Dir.cwd().createFile(io, "xit-mvcc.db", .{ .read = true, .truncate = true });
-    defer file.close(io);
-
-    var db = try DB.init(.{ .io = io, .file = file });
-    var model = std.ArrayList(Snapshot).empty;
-    defer model.deinit(allocator);
-
-    try runRandomWorkload(allocator, &world, &db, &model, 1);
-
-    const old_history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
-    const old_cursor = (try old_history.getCursor(0)).?;
-    const old_moment = try DB.HashMap(.read_only).init(old_cursor);
-    const old_snapshot = model.items[0];
-
-    try runRandomWorkload(allocator, &world, &db, &model, 8);
-    try verifyHistory(allocator, &db, model.items);
-    try verifySnapshot(allocator, old_moment, old_snapshot);
+    const H = mar.Harness(.{
+        .init = MvccApp.init,
+        .scenario = MvccApp.run,
+        .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4096 } },
+        .name = "xitdb.mvcc",
+    });
+    try H.expectPass(std.testing.allocator, .{ .seed = 0x0A11_CE });
 }
 
 const TornOutcome = enum {
@@ -243,13 +245,90 @@ fn runDataRegionCrashSweep(comptime fault: DataRegionFault) !void {
             };
             if (outcome.unacknowledged_window) windows += 1;
             if (outcome.data_region_faulted) data_faults += 1;
-            allocator.free(outcome.trace);
         }
 
         try std.testing.expect(windows > 0);
         try std.testing.expect(data_faults > 0);
     }
 }
+
+const DataRegionInput = struct {
+    sector_size: u64,
+    fault: DataRegionFault,
+    warmup_transactions: usize,
+};
+
+const DataRegionApp = struct {
+    probe: DataRegionProbe = .{ .trace = &.{}, .unacknowledged_window = false, .data_region_faulted = false },
+
+    fn init(_: mar.Sim) DataRegionApp {
+        return .{};
+    }
+
+    fn run(case: *mar.SimCase(DataRegionApp)) !void {
+        const input = DataRegionHarness.input();
+        const control = case.control();
+        const allocator = control.harnessAllocator();
+        const io = case.env().io();
+
+        var file = try std.Io.Dir.cwd().createFile(io, "xit-data.db", .{ .read = true, .truncate = true });
+        defer file.close(io);
+
+        var db = try DB.init(.{ .io = io, .file = file });
+        var model = std.ArrayList(Snapshot).empty;
+        defer model.deinit(allocator);
+
+        try runRandomWorkload(allocator, control, &db, &model, input.warmup_transactions);
+        const grow_ops = [_]Operation{
+            .{ .put_bytes = .{ .key_index = 0, .value = data_probe_value[0..] } },
+        };
+        try applyTransaction(&db, &grow_ops);
+        try appendModelTransaction(allocator, &model, &grow_ops);
+        try verifyHistory(allocator, &db, model.items);
+
+        try control.disk.setFaults(.{ .write_error_rate = .oneIn(8) });
+        const failed = blk: {
+            const key_index = try control.chooseIntLessThan("xitdb.victim_key", usize, KeyCount);
+            const unacknowledged_ops = [_]Operation{
+                .{ .put_bytes = .{ .key_index = key_index, .value = data_probe_value[0..] } },
+            };
+            applyTransaction(&db, &unacknowledged_ops) catch break :blk true;
+            break :blk false;
+        };
+        if (!failed) return;
+
+        switch (input.fault) {
+            .torn => try control.disk.setFaults(.{ .crash_torn_write_rate = .always() }),
+            .reordered => try control.disk.setFaults(.{ .crash_reordered_write_rate = .always() }),
+        }
+        try control.disk.crash();
+        try restartAfterDiskCrash(case.sim);
+
+        // The crash killed the simulated process; reopen the database file
+        // like a restarted process before recovering.
+        var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit-data.db", .{ .mode = .read_write });
+        defer recovered_file.close(io);
+        var recovered = try DB.init(.{ .io = io, .file = recovered_file });
+        try verifyHistory(allocator, &recovered, model.items);
+
+        case.app.probe.unacknowledged_window = true;
+        case.app.probe.data_region_faulted = switch (input.fault) {
+            inline else => |fault| traceHasDataRegionFault(control.traceBytes(), input.sector_size, fault),
+        };
+    }
+
+    fn capture(case: *mar.SimCase(DataRegionApp), _: std.mem.Allocator) !DataRegionProbe {
+        return case.app.probe;
+    }
+};
+
+const DataRegionHarness = mar.Harness(.{
+    .init = DataRegionApp.init,
+    .scenario = DataRegionApp.run,
+    .capture = DataRegionApp.capture,
+    .Input = DataRegionInput,
+    .name = "xitdb.data_region",
+});
 
 fn runDataRegionCrashCase(
     allocator: std.mem.Allocator,
@@ -258,71 +337,23 @@ fn runDataRegionCrashCase(
     comptime fault: DataRegionFault,
     warmup_transactions: usize,
 ) !DataRegionProbe {
-    var world = try mar.World.init(allocator, .{ .seed = seed });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .disk = .{ .sector_size = sector_size } });
-    const io = sim.env.io();
-
-    var file = try std.Io.Dir.cwd().createFile(io, "xit-data.db", .{ .read = true, .truncate = true });
-    defer file.close(io);
-
-    var db = try DB.init(.{ .io = io, .file = file });
-    var model = std.ArrayList(Snapshot).empty;
-    defer model.deinit(allocator);
-
-    try runRandomWorkload(allocator, &world, &db, &model, warmup_transactions);
-    const grow_ops = [_]Operation{
-        .{ .put_bytes = .{ .key_index = 0, .value = data_probe_value[0..] } },
-    };
-    try applyTransaction(&db, &grow_ops);
-    try appendModelTransaction(allocator, &model, &grow_ops);
-    try verifyHistory(allocator, &db, model.items);
-
-    try sim.control.disk.setFaults(.{ .write_error_rate = .oneIn(8) });
-    const failed = blk: {
-        const key_index = try world.randomIntLessThan(usize, KeyCount);
-        const unacknowledged_ops = [_]Operation{
-            .{ .put_bytes = .{ .key_index = key_index, .value = data_probe_value[0..] } },
-        };
-        applyTransaction(&db, &unacknowledged_ops) catch break :blk true;
-        break :blk false;
-    };
-
-    if (!failed) {
-        return .{
-            .trace = try allocator.dupe(u8, world.traceBytes()),
-            .unacknowledged_window = false,
-            .data_region_faulted = false,
-        };
+    var captured = try DataRegionHarness.runCapture(allocator, .{
+        .seed = seed,
+        .simulate = .{ .disk = .{ .sector_size = sector_size } },
+        .input = .{ .sector_size = sector_size, .fault = fault, .warmup_transactions = warmup_transactions },
+    });
+    defer captured.deinit();
+    switch (captured.report) {
+        .passed => {
+            var probe = captured.outcome.?;
+            probe.trace = &.{};
+            return probe;
+        },
+        .failed => |failure| {
+            failure.print();
+            return error.AcknowledgedHistoryLost;
+        },
     }
-
-    switch (fault) {
-        .torn => try sim.control.disk.setFaults(.{ .crash_torn_write_rate = .always() }),
-        .reordered => try sim.control.disk.setFaults(.{ .crash_reordered_write_rate = .always() }),
-    }
-    try sim.control.disk.crash();
-    try restartAfterDiskCrash(sim);
-
-    // The crash killed the simulated process; reopen the database file
-    // like a restarted process before recovering.
-    var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit-data.db", .{ .mode = .read_write });
-    defer recovered_file.close(io);
-    var recovered = try DB.init(.{ .io = io, .file = recovered_file });
-    verifyHistory(allocator, &recovered, model.items) catch |err| {
-        std.debug.print(
-            "xitdb data-region {s} invariant violation seed=0x{x} sector_size={} trace:\n{s}\n",
-            .{ fault.name(), seed, sector_size, world.traceBytes() },
-        );
-        return err;
-    };
-
-    const trace = try allocator.dupe(u8, world.traceBytes());
-    return .{
-        .trace = trace,
-        .unacknowledged_window = true,
-        .data_region_faulted = traceHasDataRegionFault(trace, sector_size, fault),
-    };
 }
 
 fn traceHasDataRegionFault(trace: []const u8, sector_size: u64, comptime fault: DataRegionFault) bool {
@@ -348,50 +379,80 @@ fn parseTraceUint(line: []const u8, key: []const u8) ?u64 {
     return std.fmt.parseInt(u64, line[value_start..value_end], 10) catch null;
 }
 
+const TornApp = struct {
+    result: TornOutcome = .recovery_corrupted,
+
+    fn init(_: mar.Sim) TornApp {
+        return .{};
+    }
+
+    fn run(case: *mar.SimCase(TornApp)) !void {
+        const control = case.control();
+        const allocator = control.harnessAllocator();
+        const io = case.env().io();
+
+        var file = try std.Io.Dir.cwd().createFile(io, "xit-torn.db", .{ .read = true, .truncate = true });
+        defer file.close(io);
+
+        var db = try DB.init(.{ .io = io, .file = file });
+        var model = std.ArrayList(Snapshot).empty;
+        defer model.deinit(allocator);
+
+        const ops = [_]Operation{
+            .{ .put_bytes = .{ .key_index = 0, .value = "committed" } },
+        };
+        try applyTransaction(&db, &ops);
+        try appendModelTransaction(allocator, &model, &ops);
+        try verifyHistory(allocator, &db, model.items);
+
+        var writer = db.core.writer();
+        try writer.seekTo(committed_size_header_offset);
+        try writer.interface.writeInt(u64, 0, .big);
+        try writer.interface.flush();
+
+        try control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
+        try control.disk.crash();
+        try restartAfterDiskCrash(case.sim);
+
+        // The crash killed the simulated process; reopen the database file
+        // like a restarted process before recovering.
+        var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit-torn.db", .{ .mode = .read_write });
+        defer recovered_file.close(io);
+        var recovered = try DB.init(.{ .io = io, .file = recovered_file });
+        case.app.result = if (verifyHistory(allocator, &recovered, model.items)) |_| .recovered else |err| switch (err) {
+            error.EndOfStream => .recovery_corrupted,
+            else => |e| return e,
+        };
+    }
+
+    fn capture(case: *mar.SimCase(TornApp), _: std.mem.Allocator) !TornOutcome {
+        return case.app.result;
+    }
+};
+
+const TornHarness = mar.Harness(.{
+    .init = TornApp.init,
+    .scenario = TornApp.run,
+    .capture = TornApp.capture,
+    .name = "xitdb.torn_header",
+});
+
 fn runTornHeaderRecoveryCase(allocator: std.mem.Allocator, seed: u64, sector_size: u64) !TornResult {
-    var world = try mar.World.init(allocator, .{ .seed = seed });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .disk = .{ .sector_size = sector_size } });
-    const io = sim.env.io();
-
-    var file = try std.Io.Dir.cwd().createFile(io, "xit-torn.db", .{ .read = true, .truncate = true });
-    defer file.close(io);
-
-    var db = try DB.init(.{ .io = io, .file = file });
-    var model = std.ArrayList(Snapshot).empty;
-    defer model.deinit(allocator);
-
-    const ops = [_]Operation{
-        .{ .put_bytes = .{ .key_index = 0, .value = "committed" } },
-    };
-    try applyTransaction(&db, &ops);
-    try appendModelTransaction(allocator, &model, &ops);
-    try verifyHistory(allocator, &db, model.items);
-
-    var writer = db.core.writer();
-    try writer.seekTo(committed_size_header_offset);
-    try writer.interface.writeInt(u64, 0, .big);
-    try writer.interface.flush();
-
-    try sim.control.disk.setFaults(.{ .crash_torn_write_rate = .always() });
-    try sim.control.disk.crash();
-    try restartAfterDiskCrash(sim);
-
-    // The crash killed the simulated process; reopen the database file
-    // like a restarted process before recovering.
-    var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit-torn.db", .{ .mode = .read_write });
-    defer recovered_file.close(io);
-    var recovered = try DB.init(.{ .io = io, .file = recovered_file });
-    const result: TornOutcome = if (verifyHistory(allocator, &recovered, model.items)) |_| .recovered else |err| switch (err) {
-        error.EndOfStream => .recovery_corrupted,
-        else => |e| return e,
-    };
-
-    return .{
-        .result = result,
-        .trace = try allocator.dupe(u8, world.traceBytes()),
-    };
+    var captured = try TornHarness.runCapture(allocator, .{
+        .seed = seed,
+        .simulate = .{ .disk = .{ .sector_size = sector_size } },
+    });
+    defer captured.deinit();
+    switch (captured.report) {
+        .passed => |passed| return .{
+            .result = captured.outcome.?,
+            .trace = try allocator.dupe(u8, passed.trace),
+        },
+        .failed => |failure| {
+            failure.print();
+            return error.ScenarioFailed;
+        },
+    }
 }
 
 test "xitdb modeled workload matches host std.Io file behavior" {
@@ -399,20 +460,10 @@ test "xitdb modeled workload matches host std.Io file behavior" {
 
     const plan = makeHostRandomPlan(0xFACE_FEED);
 
-    var sim_world = try mar.World.init(allocator, .{ .seed = 0xFACE_FEED });
-    defer sim_world.deinit();
-
-    const sim = try sim_world.simulate(.{ .disk = .{ .sector_size = 4096 } });
-    const sim_io = sim.env.io();
-
-    var sim_file = try std.Io.Dir.cwd().createFile(sim_io, "xit-parity.db", .{ .read = true, .truncate = true });
-    defer sim_file.close(sim_io);
-
-    var sim_db = try DB.init(.{ .io = sim_io, .file = sim_file });
-    var sim_model = std.ArrayList(Snapshot).empty;
-    defer sim_model.deinit(allocator);
-    try runPlan(allocator, &sim_db, &sim_model, &plan);
-    try verifyHistory(allocator, &sim_db, sim_model.items);
+    var captured = try ParityHarness.runCapture(allocator, .{ .seed = 0xFACE_FEED, .input = .{ .plan_seed = 0xFACE_FEED } });
+    defer captured.deinit();
+    if (captured.report == .failed) captured.report.failed.print();
+    const sim_model = captured.outcome orelse return error.ScenarioFailed;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -435,55 +486,123 @@ test "xitdb modeled workload matches host std.Io file behavior" {
     try runPlan(allocator, &prod_db, &prod_model, &plan);
     try verifyHistory(allocator, &prod_db, prod_model.items);
 
-    try std.testing.expectEqualSlices(Snapshot, sim_model.items, prod_model.items);
+    try std.testing.expectEqualSlices(Snapshot, sim_model.snapshots, prod_model.items);
 }
+
+const ParityModel = struct {
+    allocator: std.mem.Allocator,
+    snapshots: []Snapshot,
+
+    pub fn deinit(self: *ParityModel) void {
+        self.allocator.free(self.snapshots);
+    }
+};
+
+const ParityApp = struct {
+    model: std.ArrayList(Snapshot) = .empty,
+    allocator: std.mem.Allocator,
+
+    fn init(sim: mar.Sim) ParityApp {
+        return .{ .allocator = sim.control.harnessAllocator() };
+    }
+
+    pub fn deinit(self: *ParityApp) void {
+        self.model.deinit(self.allocator);
+    }
+
+    fn run(case: *mar.SimCase(ParityApp)) !void {
+        const plan = makeHostRandomPlan(ParityHarness.input().plan_seed);
+        const io = case.env().io();
+        var file = try std.Io.Dir.cwd().createFile(io, "xit-parity.db", .{ .read = true, .truncate = true });
+        defer file.close(io);
+        var db = try DB.init(.{ .io = io, .file = file });
+        try runPlan(case.app.allocator, &db, &case.app.model, &plan);
+        try verifyHistory(case.app.allocator, &db, case.app.model.items);
+    }
+
+    fn capture(case: *mar.SimCase(ParityApp), allocator: std.mem.Allocator) !ParityModel {
+        return .{ .allocator = allocator, .snapshots = try allocator.dupe(Snapshot, case.app.model.items) };
+    }
+};
+
+const ParityHarness = mar.Harness(.{
+    .init = ParityApp.init,
+    .scenario = ParityApp.run,
+    .capture = ParityApp.capture,
+    .Input = struct { plan_seed: u64 },
+    .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4096 } },
+    .name = "xitdb.host_parity",
+});
 
 const FaultMode = enum {
     none,
     lost_write_crash,
 };
 
-fn runTrace(allocator: std.mem.Allocator, seed: u64, fault_mode: FaultMode) ![]u8 {
-    var world = try mar.World.init(allocator, .{ .seed = seed });
-    defer world.deinit();
-
-    const sim = try world.simulate(.{ .disk = .{ .sector_size = 4096 } });
-    const io = sim.env.io();
-
-    var file = try std.Io.Dir.cwd().createFile(io, "xit.db", .{ .read = true, .truncate = true });
-    defer file.close(io);
-
-    var db = try DB.init(.{ .io = io, .file = file });
-    var model = std.ArrayList(Snapshot).empty;
-    defer model.deinit(allocator);
-
-    const transaction_count = switch (fault_mode) {
-        .none => TransactionCount,
-        .lost_write_crash => 1 + try world.randomIntLessThan(usize, TransactionCount),
-    };
-
-    try runRandomWorkload(allocator, &world, &db, &model, transaction_count);
-    try verifyHistory(allocator, &db, model.items);
-
-    switch (fault_mode) {
-        .none => {
-            try appendTrailingJunkAndVerifyRecovery(allocator, io, file, &db, model.items);
-        },
-        .lost_write_crash => {
-            try sim.control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
-            try sim.control.disk.crash();
-            try restartAfterDiskCrash(sim);
-
-            // The crash killed the simulated process; reopen the database
-            // file like a restarted process before recovering.
-            var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit.db", .{ .mode = .read_write });
-            defer recovered_file.close(io);
-            var recovered = try DB.init(.{ .io = io, .file = recovered_file });
-            try verifyHistory(allocator, &recovered, model.items);
-        },
+const TraceApp = struct {
+    fn init(_: mar.Sim) TraceApp {
+        return .{};
     }
 
-    return allocator.dupe(u8, world.traceBytes());
+    fn run(case: *mar.SimCase(TraceApp)) !void {
+        const fault_mode = TraceHarness.input().fault_mode;
+        const control = case.control();
+        const allocator = control.harnessAllocator();
+        const io = case.env().io();
+
+        var file = try std.Io.Dir.cwd().createFile(io, "xit.db", .{ .read = true, .truncate = true });
+        defer file.close(io);
+
+        var db = try DB.init(.{ .io = io, .file = file });
+        var model = std.ArrayList(Snapshot).empty;
+        defer model.deinit(allocator);
+
+        const transaction_count = switch (fault_mode) {
+            .none => TransactionCount,
+            .lost_write_crash => 1 + try control.chooseIntLessThan("xitdb.transaction_count", usize, TransactionCount),
+        };
+
+        try runRandomWorkload(allocator, control, &db, &model, transaction_count);
+        try verifyHistory(allocator, &db, model.items);
+
+        switch (fault_mode) {
+            .none => {
+                try appendTrailingJunkAndVerifyRecovery(allocator, io, file, &db, model.items);
+            },
+            .lost_write_crash => {
+                try control.disk.setFaults(.{ .crash_lost_write_rate = .always() });
+                try control.disk.crash();
+                try restartAfterDiskCrash(case.sim);
+
+                // The crash killed the simulated process; reopen the database
+                // file like a restarted process before recovering.
+                var recovered_file = try std.Io.Dir.cwd().openFile(io, "xit.db", .{ .mode = .read_write });
+                defer recovered_file.close(io);
+                var recovered = try DB.init(.{ .io = io, .file = recovered_file });
+                try verifyHistory(allocator, &recovered, model.items);
+            },
+        }
+    }
+};
+
+const TraceHarness = mar.Harness(.{
+    .init = TraceApp.init,
+    .scenario = TraceApp.run,
+    .Input = struct { fault_mode: FaultMode },
+    .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4096 } },
+    .name = "xitdb.workload",
+});
+
+fn runTrace(allocator: std.mem.Allocator, seed: u64, fault_mode: FaultMode) ![]u8 {
+    var report = try TraceHarness.run(allocator, .{ .seed = seed, .input = .{ .fault_mode = fault_mode } });
+    defer report.deinit();
+    switch (report) {
+        .passed => |passed| return allocator.dupe(u8, passed.trace),
+        .failed => |failure| {
+            failure.print();
+            return error.ScenarioFailed;
+        },
+    }
 }
 
 fn makeHostRandomPlan(seed: u64) [TransactionCount]Transaction {
@@ -531,16 +650,16 @@ fn runPlan(
 
 fn runRandomWorkload(
     allocator: std.mem.Allocator,
-    world: *mar.World,
+    control: mar.Control,
     db: *DB,
     model: *std.ArrayList(Snapshot),
     transaction_count: usize,
 ) !void {
     for (0..transaction_count) |tx_index| {
         var ops_buffer: [MaxOpsPerTransaction]Operation = undefined;
-        const op_count = 1 + try world.randomIntLessThan(usize, MaxOpsPerTransaction);
+        const op_count = 1 + try control.chooseIntLessThan("xitdb.op_count", usize, MaxOpsPerTransaction);
         for (ops_buffer[0..op_count]) |*op| {
-            op.* = try randomOperation(world, tx_index);
+            op.* = try randomOperation(control, tx_index);
         }
 
         try applyTransaction(db, ops_buffer[0..op_count]);
@@ -548,17 +667,17 @@ fn runRandomWorkload(
     }
 }
 
-fn randomOperation(world: *mar.World, tx_index: usize) !Operation {
-    const key_index = try world.randomIntLessThan(usize, KeyCount);
-    const kind = try world.randomIntLessThan(u8, 3);
+fn randomOperation(control: mar.Control, tx_index: usize) !Operation {
+    const key_index = try control.chooseIntLessThan("xitdb.key", usize, KeyCount);
+    const kind = try control.chooseIntLessThan("xitdb.op_kind", u8, 3);
     return switch (kind) {
         0 => .{ .put_bytes = .{
             .key_index = key_index,
-            .value = byte_values[try world.randomIntLessThan(usize, byte_values.len)],
+            .value = byte_values[try control.chooseIntLessThan("xitdb.bytes_value", usize, byte_values.len)],
         } },
         1 => .{ .put_uint = .{
             .key_index = key_index,
-            .value = @as(u64, tx_index) * 100 + try world.randomIntLessThan(u64, 100),
+            .value = @as(u64, tx_index) * 100 + try control.chooseIntLessThan("xitdb.uint_value", u64, 100),
         } },
         else => .{ .remove = .{ .key_index = key_index } },
     };
@@ -746,26 +865,114 @@ fn makeFuzzPlan(
     return plan;
 }
 
-/// Run one planned crash-fault case. The last transaction in `plan` is the
-/// victim: it runs as a cooperative task while an operation-count crash is
-/// armed, so the crash can land mid-commit with pending writes.
+/// One planned operation as harness input: byte values name an entry of
+/// `byte_values`, so the plan round-trips through a capsule.
+const PlanOp = union(enum) {
+    put_bytes: struct { key_index: usize, value_index: usize },
+    put_uint: struct { key_index: usize, value: u64 },
+    remove: struct { key_index: usize },
+};
+
+const FuzzInput = struct {
+    sector_size: u64,
+    fault: FuzzFault,
+    crash_after_ops: u64,
+    /// Transactions in order; the last is the victim.
+    plan: []const []const PlanOp,
+};
+
+fn planOp(op: Operation) PlanOp {
+    return switch (op) {
+        .put_bytes => |put| .{ .put_bytes = .{
+            .key_index = put.key_index,
+            .value_index = for (byte_values, 0..) |value, index| {
+                if (std.mem.eql(u8, value, put.value)) break index;
+            } else unreachable,
+        } },
+        .put_uint => |put| .{ .put_uint = .{ .key_index = put.key_index, .value = put.value } },
+        .remove => |remove| .{ .remove = .{ .key_index = remove.key_index } },
+    };
+}
+
+fn transactionFromPlan(ops: []const PlanOp) Transaction {
+    var transaction = Transaction{};
+    for (ops) |op| {
+        transaction.ops[transaction.op_count] = switch (op) {
+            .put_bytes => |put| .{ .put_bytes = .{ .key_index = put.key_index, .value = byte_values[put.value_index] } },
+            .put_uint => |put| .{ .put_uint = .{ .key_index = put.key_index, .value = put.value } },
+            .remove => |remove| .{ .remove = .{ .key_index = remove.key_index } },
+        };
+        transaction.op_count += 1;
+    }
+    return transaction;
+}
+
+const FuzzApp = struct {
+    outcome: FuzzOutcome = .failed,
+
+    fn init(_: mar.Sim) FuzzApp {
+        return .{};
+    }
+
+    fn run(case: *mar.SimCase(FuzzApp)) !void {
+        case.app.outcome = try fuzzCaseBody(case.sim, FuzzHarness.input());
+    }
+
+    fn capture(case: *mar.SimCase(FuzzApp), _: std.mem.Allocator) !FuzzOutcome {
+        return case.app.outcome;
+    }
+};
+
+const FuzzHarness = mar.Harness(.{
+    .init = FuzzApp.init,
+    .scenario = FuzzApp.run,
+    .capture = FuzzApp.capture,
+    .Input = FuzzInput,
+    .name = "xitdb.crash_fuzz",
+});
+
+/// Run one planned crash-fault case through its harness. The last
+/// transaction in `plan` is the victim: it runs as a cooperative task while
+/// an operation-count crash is armed, so the crash can land mid-commit with
+/// pending writes.
 fn runFuzzCase(
     allocator: std.mem.Allocator,
     params: FuzzParams,
     plan: []const Transaction,
 ) !FuzzOutcome {
     std.debug.assert(plan.len >= 1);
-
-    var world = try mar.World.init(allocator, .{
+    const plan_ops = try allocator.alloc([]PlanOp, plan.len);
+    defer allocator.free(plan_ops);
+    var built: usize = 0;
+    defer for (plan_ops[0..built]) |ops| allocator.free(ops);
+    for (plan, 0..) |transaction, index| {
+        plan_ops[index] = try allocator.alloc(PlanOp, transaction.op_count);
+        built += 1;
+        for (transaction.slice(), plan_ops[index]) |op, *out| out.* = planOp(op);
+    }
+    var captured = try FuzzHarness.runCapture(allocator, .{
         .seed = params.seed,
         .tick_ns = fuzz_tick_ns,
+        .simulate = .{ .disk = .{ .sector_size = params.sector_size, .min_latency_ns = fuzz_tick_ns } },
+        .input = .{
+            .sector_size = params.sector_size,
+            .fault = params.fault,
+            .crash_after_ops = params.crash_after_ops,
+            .plan = @ptrCast(plan_ops),
+        },
     });
-    defer world.deinit();
+    defer captured.deinit();
+    switch (captured.report) {
+        .passed => return captured.outcome.?,
+        .failed => |failure| {
+            failure.print();
+            return error.ScenarioFailed;
+        },
+    }
+}
 
-    const sim = try world.simulate(.{ .disk = .{
-        .sector_size = params.sector_size,
-        .min_latency_ns = fuzz_tick_ns,
-    } });
+fn fuzzCaseBody(sim: mar.Sim, input: FuzzInput) !FuzzOutcome {
+    const allocator = sim.control.harnessAllocator();
     const io = sim.env.io();
 
     var file = try std.Io.Dir.cwd().createFile(io, "xit-fuzz.db", .{ .read = true, .truncate = true });
@@ -775,7 +982,8 @@ fn runFuzzCase(
     var model = std.ArrayList(Snapshot).empty;
     defer model.deinit(allocator);
 
-    for (plan[0 .. plan.len - 1]) |transaction| {
+    for (input.plan[0 .. input.plan.len - 1]) |ops| {
+        const transaction = transactionFromPlan(ops);
         try applyTransaction(&db, transaction.slice());
         try appendModelTransaction(allocator, &model, transaction.slice());
     }
@@ -788,10 +996,10 @@ fn runFuzzCase(
     // that conflates it with committed-history loss.)
     try file.sync(io);
 
-    try sim.control.disk.setFaults(params.fault.diskFaults());
-    try sim.control.disk.crashAfterOps(params.crash_after_ops);
+    try sim.control.disk.setFaults(input.fault.diskFaults());
+    try sim.control.disk.crashAfterOps(input.crash_after_ops);
 
-    const victim = plan[plan.len - 1];
+    const victim = transactionFromPlan(input.plan[input.plan.len - 1]);
     var victim_task = VictimTask{ .db = &db, .ops = victim.slice() };
     var victim_future = try std.Io.concurrent(io, VictimTask.run, .{ &victim_task, io });
     victim_future.await(io);
