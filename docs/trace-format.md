@@ -19,7 +19,7 @@ Traces use newline-delimited UTF-8 text.
 The first line is a header:
 
 ```text
-marionette.trace format=text version=4
+marionette.trace format=text version=5
 ```
 
 Version 1 (2026-06-11) added `io.random` events: every `Io.random` /
@@ -50,6 +50,24 @@ reports known task-completion cycles. Managed process cleanup occurs before
 runner capture. These changes are part of the same unreleased version 4 contract.
 Version 3 capsules are rejected by the current execution codec.
 
+Version 5 (0.10) names the choice site of every decision event:
+`world.random_u64 site=<site> value=<u64>`, `world.random_bool site=<site>
+value=<bool>`, and `world.random_int_less_than site=<site> type=<type>
+less_than=<u64> value=<u64>`. The site is the same identity the decision tape
+records, such as `disk.fault.crash_lost_write` or `network.typed_drop`.
+Version 5 also adds `io.fault_effect node=<u64> incarnation=<u64>
+operation=<std.Io operation> cause=<disk error> error=<std.Io error>
+fault_event=<u64|none> decision=<u64|none>` when a fault-induced disk error
+reaches application code, and `io.unmodeled operation=<name> node=<u64>
+incarnation=<u64> strict=<bool>` when code touches an operation the simulator
+does not model. Version 4 capsules are rejected.
+
+`record(fmt, args)` validates its literal format text at compile time: the
+event name and keys must be literal and valid, and every field must be
+`key=value`. `{s}` string arguments are written with the escaping below, so an
+ordinary string value cannot break the grammar; other values must format
+without spaces, `=`, or control bytes, and an empty value is still invalid.
+
 Every later line is one event:
 
 ```text
@@ -59,13 +77,13 @@ event=<u64> <component>.<action> <key>=<value> ...
 Example:
 
 ```text
-marionette.trace format=text version=4
+marionette.trace format=text version=5
 event=0 world.init seed=12648430 start_ns=0 tick_ns=1
 event=1 run.name value=smoke
 event=2 run.tag value=scenario:smoke
 event=3 run.attribute key=packet_loss_percent value=uint:20
 event=4 world.tick now_ns=1
-event=5 world.random_u64 value=10121301305976376037
+event=5 world.random_u64 site=world.random_u64 value=10121301305976376037
 event=6 buggify hook=drop_packet rate=20/100 roll=73 fired=false
 event=7 request.accepted id=42
 ```

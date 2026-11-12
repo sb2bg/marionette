@@ -20,8 +20,9 @@ record it, so a run always replays under the model it was recorded with.
 | `tcp_v1` | yes, since 0.9 | TCP-lite over a push-based packet fabric. Faults produce silence; errors come from Linux-shaped mechanisms. |
 | `legacy_v0` | before 0.9 | The pull model: delivery waits for readers, faults become immediate errors, and close and kill reach peers through shared state. |
 
-`legacy_v0` is deprecated: it is retained for one release so recorded
-evidence and unported harnesses keep running, and 0.10 removes it. Capsules written before 0.9 name no model and decode as `legacy_v0`.
+`legacy_v0` is deprecated. It is retained so recorded evidence and its
+characterization tests keep running; it will be removed once those are
+ported to `tcp_v1`. Capsules written before 0.9 name no model and decode as `legacy_v0`.
 A `tcp_v1` capsule carries `model_version`
 (`network_semantic_version`); replay rejects a capsule from another version with
 `error.IncompatibleNetworkModel`.
@@ -246,9 +247,8 @@ virtual time. `awaitDelivery()` is the explicit harness-driver operation: it
 advances time to this endpoint's own next delivery, or returns null without
 advancing when no packet has a finite delivery time. An indefinite hold can
 therefore return null while messages remain queued; healing the hold makes
-them eligible again. `receive()`, which could advance
-time to a delivery for any endpoint on the bus, is deprecated and will be
-removed in 0.10.
+them eligible again. 0.10 removed `receive()`, which could advance time to a
+delivery for any endpoint on the bus.
 
 Migration path: keep the protocol's state machine and its message type, add a
 codec, and carry the encoded messages over `std.Io.net` streams between

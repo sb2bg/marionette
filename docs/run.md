@@ -217,9 +217,38 @@ Failure kinds are:
 - `replay_diverged`;
 - `determinism_mismatch`;
 - `first_run_failed`;
-- `second_run_failed`.
+- `second_run_failed`;
+- `task_failed`;
+- `recording_failed`;
+- `unsupported_operation`.
 
-`RunFailure.writeSummary` writes a compact replay line. A passed or failed
+`RunFailure.writeSummary` writes a compact replay line, and
+`RunFailure.writeDiagnosis` explains the failure boundary after it:
+
+```text
+first difference at event 42:
+  first:  event=42 world.random_int_less_than site=disk.latency type=u64 less_than=3 value=1
+  second: event=42 world.random_int_less_than site=disk.latency type=u64 less_than=3 value=2
+fault effects: 1 observed by the application
+  event=15 io.fault_effect node=0 incarnation=0 operation=write cause=WriteError error=InputOutput fault_event=13 decision=0
+    caused by event=13 disk.fault op=4 path=data kind=write_error rate=1/1 roll=0 fired=true
+trace tail: last 16 of 230 events (41 empty wakes omitted)
+  ...
+```
+
+The first difference appears only when two executions disagree. `print`
+writes both. `mar.writeTraceHistory(writer, trace, focus)` writes every event
+naming a `TraceFocus`: `node:<id>` (`node=`, `from=`, `to=`, `owner=`),
+`op:<id>` (disk operation ids), `path:<path>` (`path=` or `new_path=`), or
+`fault:<id>` (network fault handles and `fault_event=` references).
+
+Set `SimulateOptions.strict_capabilities = true` to fail a run as
+`unsupported_operation` when application code touches an operation the
+simulator does not model, even if the application handles the error, so a
+passing run cannot silently depend on an unmodeled fallback. `error_name`
+names the operation. Without it the operation fails as a host without the
+feature would and the trace records `io.unmodeled`, which keeps intentional
+feature-absence tests possible. A passed or failed
 report owns the first execution's decision tape; a replay divergence also owns
 the expected and actual decision boundaries. `takeDecisionTape` transfers tape
 ownership. All remaining metadata, traces, and tape storage live until

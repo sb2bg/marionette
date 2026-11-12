@@ -2,8 +2,54 @@
 
 ## v0.10.0 - Unreleased
 
-The harness API, settled before the first stabilization candidate, with
-the pinned validations as its acceptance test.
+Harness and diagnostics: the common workflow, settled with the pinned
+validations as its acceptance test, and failures that explain their
+decisions and operations. The final API freeze follows 0.11.
+
+- **A complete replicated-service example.** `examples/replicated_service.zig`
+  replicates writes from a primary to two backups over `std.Io.net`, keeps
+  durable logs, cuts power, restarts every replica as a managed process, and
+  checks that acknowledged writes survive. Its planted bug (acknowledging
+  before syncing) fails, exact-replays from a capsule, reduces, and is kept as
+  a seed regression, using only public runner APIs.
+- **Breaking: escaped structured recording.** `record(fmt, args)` validates
+  its literal format text at compile time (a literal event name, literal keys,
+  and `key=value` fields) and writes `{s}` string arguments with trace
+  escaping, so an ordinary string value cannot break trace syntax. A format
+  that cannot form a valid payload is now a compile error.
+- **Descriptive time errors.** `World.runFor`, `World.tick`, and
+  `Control.runFor` return `DurationNotTickAligned` or `ClockOverflow` instead
+  of asserting, before time moves; disk, network, and process options return
+  the same errors (`TimeError`). `InvalidDuration` remains for zero or
+  mode-inconsistent durations.
+- **Breaking: choice sites in text traces.** Trace format version 5 adds
+  `site=<choice site>` to every `world.random_*` decision event. Capsules
+  with older traces are rejected with `UnsupportedReplayVersion`.
+  `tests/fixtures/0.10.0` classifies the change against `0.8.3`.
+- **Correlated fault effects.** A fault-induced disk error that reaches
+  application code through `std.Io` records `io.fault_effect` with the node,
+  its incarnation, the `std.Io` operation, the modeled cause, the mapped
+  `std.Io` error, and the trace event and decision of the fired fault, even
+  when the application handles the error.
+- **Failure diagnosis.** `RunFailure.print` and the CLI add, after the
+  summary, the first differing events of both traces on a determinism
+  mismatch, the observed fault effects with their causing events, and a
+  bounded tail without empty scheduler wakes. `mar.writeTraceHistory` and
+  `mar.TraceFocus` select every event naming a node, disk operation, path, or
+  fault (CLI `--history node:1`); `mar.writeTraceTail` and
+  `mar.firstTraceDifference` are available directly. Trace summaries count
+  `empty_wakes` instead of listing them.
+- **Strict capability mode.** `SimulateOptions.strict_capabilities` fails a
+  run as the new `unsupported_operation` kind when code touches an operation
+  the simulator does not model (symbolic and hard links, real paths,
+  ownership, memory maps, datagram and Unix-domain sockets), even if the
+  application handles its error. Without it the operation fails as a host
+  without the feature would and records `io.unmodeled`.
+- **Breaking:** `Endpoint.receive`, deprecated in 0.9, is removed; use `poll`
+  or `awaitDelivery`.
+- `legacy_v0` stays deprecated. Its removal is deferred past the one-release
+  window until the legacy characterization and regression tests are ported to
+  `tcp_v1`, so their evidence is kept rather than dropped.
 
 - **One typed harness.** `mar.Harness(.{ .init, .scenario, .checks,
   .simulate, .name, .capture, .Input })` is built once and drives `run`,

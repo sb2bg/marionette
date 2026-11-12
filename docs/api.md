@@ -225,9 +225,16 @@ booleans, and floats.
 
 ## Traces And Summaries
 
-`World.record` and `Env.record` append line-oriented events. Dynamic text must
-be passed through structured fields or encoded so spaces and control bytes do
-not invalidate the trace grammar. See [Trace Format](trace-format.md).
+`World.record` and `Env.record` append line-oriented events. Their literal
+format text is validated at compile time and `{s}` string arguments are
+escaped, so ordinary text cannot invalidate the trace grammar. See
+[Trace Format](trace-format.md).
+
+`TraceFocus`, `writeTraceHistory`, `writeTraceTail`, and
+`firstTraceDifference` derive focused histories, bounded tails, and the first
+differing event from trace bytes; `RunFailure.writeDiagnosis` combines them.
+`TimeError` names the descriptive `DurationNotTickAligned` and
+`ClockOverflow` errors of harness time inputs.
 
 `summarize(allocator, trace)` builds an owned `Summary` with event, subsystem,
 run metadata, network, and fault counts. Call `Summary.deinit`.

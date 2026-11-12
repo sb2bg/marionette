@@ -7,6 +7,7 @@ smallest example covering the boundary you need.
 
 | Example | Demonstrates |
 | --- | --- |
+| [`replicated_service.zig`](https://github.com/sb2bg/marionette/blob/main/examples/replicated_service.zig) | The complete workflow: three nodes, durable logs, `std.Io.net`, power loss, managed restart, a planted bug, capsule replay, reduction, and a seed regression |
 | [`retry_queue.zig`](https://github.com/sb2bg/marionette/blob/main/examples/retry_queue.zig) | Virtual time, retry races, named checks, and a planted stale-ack bug |
 | [`kv_store.zig`](https://github.com/sb2bg/marionette/blob/main/examples/kv_store.zig) | `std.Io.File`, WAL durability, crash recovery, allocation, and `Recorder` |
 | [`std_io_net_kv.zig`](https://github.com/sb2bg/marionette/blob/main/examples/std_io_net_kv.zig) | Fixed-frame codecs shared by host and simulated `std.Io.net` paths |

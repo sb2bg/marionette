@@ -10,81 +10,15 @@ Marionette should make failures in Zig systems code reproducible, explainable,
 and reducible while keeping application code shaped around `std.Io` and narrow
 application-owned capabilities.
 
-## Next: 0.10: Harness And Diagnostics
+## Next: 0.11: Independent Host Storage
 
 0.8.3 corrected storage durability with `portable_v2`. 0.9 made the network
 honest: TCP-lite over a push-based fabric, hosts that own their addresses,
-faults as handles that produce silence, every packet's fate in the trace,
-`netstat` on failure, and versioned semantics with `tcp_v1` as the default.
-`Endpoint(Message)` stays experimental under a declared delivery and
-ownership contract; see `CHANGELOG.md`.
-
-The runner works, but the pinned real-world workloads do not use it: 9 of the 11
-files in `validation/` call `World.init` directly and compare traces by hand, so
-the best evidence gets no capsules, reduction, campaigns, or crash-point sweeps.
-They also fail from task bodies by panicking (91 panic sites). This milestone
-settles the common harness workflow, with those workloads as its acceptance
-test. Final API freeze follows 0.11's host-storage integration.
-
-- **Run the validations through the runner.** Port beanstalkz and dusty first;
-  what they cannot express (multi-node setup, outcome assertions, failing a run
-  from a task) is the gap to close.
-- **Publish one complete replicated-service example.** A three-node example
-  uses public runner APIs for durable state, socket communication, managed
-  restart, a planted invariant failure, capsule replay, reduction, and
-  preservation as a regression. Extend it with independent power loss in 0.11.
-- **Fail a run from a task.** Make a task error a scenario failure with a report
-  instead of a panic, through error-returning `std.Io` futures or a case helper.
-- **One typed harness.** Replace `config: anytype` with a harness type built once
-  from the app, scenario, and checks, driving run, fuzz, replay, reduction,
-  campaigns, and sweeps. Replay then cannot be handed different checks, and
-  simulation options can default.
-- **Infallible recording.** Recording errors land in every caller's signature
-  although production recording cannot fail. Record the first failure on the
-  world and fail the run at the next boundary; give `Recorder` a sink so
-  production code can send events somewhere. Make escaped structured fields
-  the common path and validate literal format components at compile time where
-  practical, so ordinary string values cannot break trace syntax.
-- **One process-control surface.** Choose between `sim.killProcess`,
-  `control.process.kill`, and `ManagedProcess`.
-- **Keep `World` an engine detail.** Move the choices harnesses need
-  (`chooseBool`, `chooseIntLessThan`, `randomBytes`) onto `Control`, stop
-  exposing mutable `World` fields, and return precise error sets where a control
-  interface has one implementation. Public harness inputs such as misaligned
-  durations and clock overflow return descriptive errors.
-- **Reproduce without editing code.** Rerun a failing fuzz or campaign seed
-  through a build option, fill `ReplayIdentity` from the build, and replay a
-  downstream capsule from the command line.
-- **Group the root exports** into namespaces such as `mar.disk`, `mar.net`, and
-  `mar.replay`, after the adopter workflow establishes the useful boundaries.
-
-### Diagnostics Deliverables
-
-0.10 closes the complete diagnostic workflow. 0.8.3 already separates crash
-injections, eligible pending state, and crash effects in sweep results, and
-0.9 traces each packet's fate and prints `netstat` on failure.
-
-- **Explain the failure boundary.** Determinism mismatches show the first
-  differing events from both traces; scenario failures include a bounded tail.
-  Support focused node, operation, and file histories without requiring a GUI.
-- **Correlate faults across models.** Record fault and decision identities,
-  node/incarnation, affected operation, modeled cause, and mapped `std.Io`
-  error. Application observation and recovery require explicit harness evidence;
-  effect counters alone do not establish either.
-- **Make choices readable.** Include choice-site identities in text traces.
-  Summaries can filter empty wakes while raw evidence retains causal events.
-- **Distinguish unsupported models from application failures.** A strict
-  capability mode marks a run unsupported when code touches an unmodeled
-  operation, even if the application catches its I/O error. Intentional
-  feature-absence testing remains explicitly selectable.
-
-Exit when the ported validations need no `World.init`, no task panics, and no
-hand-compared traces; the replicated-service example completes the workflow
-from failure to preserved regression; and failures expose the relevant decisions
-and operations.
-The workflow is settled, with the final public contract completed in 0.11.
-
-## 0.11: Independent Host Storage
+faults as handles that produce silence, every packet's fate in the trace, and
+`tcp_v1` as the default. 0.10 settled the harness workflow, with every pinned
+validation on `mar.Harness`, a complete replicated-service example, escaped
+structured recording, descriptive time errors, and failures that explain
+their decisions, fault effects, and operations; see `CHANGELOG.md`.
 
 Give each host its own storage namespace and crash domain, building on 0.9's
 host identities and 0.10's process-control surface.
@@ -107,8 +41,8 @@ remain deferred.
 
 ## Stabilization And 1.0 Acceptance
 
-With 0.8.3's storage gaps closed and 0.9's network defaults flipped, once 0.10
-and 0.11 settle the workflow and host-storage APIs, a release-candidate phase
+With 0.8.3's storage gaps closed, 0.9's network defaults flipped, and 0.10's
+workflow settled, once 0.11 settles the host-storage APIs, a release-candidate phase
 should close the following evidence gates. 1.0 commits to the documented
 deterministic `std.Io` subset and testing workflow.
 
@@ -164,6 +98,8 @@ workload evidence. They are not prerequisites for a narrow, dependable 1.0.
   than relying on regeneration after a nondeterminism failure.
 - Build a network nemesis, per-seed swarm fault profiles, and targeted packet
   rules on 0.9's fault handles.
+- Remove the deprecated `legacy_v0` network semantics once its
+  characterization and regression tests are ported to `tcp_v1`.
 - Model TCP keepalive, congestion control, and Nagle's algorithm in a later
   `tcp_v2` once a pinned workload depends on them.
 - Add datagrams, and rebuild `Endpoint(Message)` on them under a declared
