@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.3 - Unreleased
+## v0.8.3 - 2026-11-11
 
 Storage correctness. The disk contract is now `portable_v2` (disk model
 revision 3), which separates data durability from namespace durability. Two
