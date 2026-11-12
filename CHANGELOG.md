@@ -53,6 +53,12 @@ the pinned validations as its acceptance test.
   commands over a seed or a retained capsule.
 - **Precise errors.** Network control returns `ControlError` instead of
   `anyerror`.
+- **Toward the stabilization gates.** The [stability ledger](docs/stability.md)
+  classifies every public surface as a 1.0 candidate, experimental, or
+  deprecated, with deprecation rules. `zig build check-baseline` fails when
+  the deterministic baseline totals exceed `benchmarks/budget.json`, and CI
+  runs it. The host-differential exchanges also run under `tcp_v1` and
+  compare the accepted peer's source address.
 - **The validations run through the runner.** beanstalkz, dusty, pg.zig,
   redis.zig, mailbox, xitdb, the std.Io.net KV example, and the bounded-queue
   scenarios are `mar.Harness` values: no `World.init`, no task panics, and no
