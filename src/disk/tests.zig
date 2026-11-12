@@ -123,11 +123,11 @@ test "disk: rejects invalid paths, ranges, and latency options" {
         SimDisk.init(&world, .{ .sector_size = 0 }),
     );
     try std.testing.expectError(
-        error.InvalidDuration,
+        error.DurationNotTickAligned,
         SimDisk.init(&world, .{ .min_latency_ns = 11 }),
     );
     try std.testing.expectError(
-        error.InvalidDuration,
+        error.DurationNotTickAligned,
         SimDisk.init(&world, .{ .min_latency_ns = clock_module.default_tick_ns }),
     );
 

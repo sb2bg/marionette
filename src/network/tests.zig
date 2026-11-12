@@ -587,10 +587,10 @@ test "network contract: invalid node rate and duration validation" {
     try std.testing.expectError(error.InvalidNode, control.setNode(3, false));
     try std.testing.expectError(error.InvalidNode, control.setLink(0, 3, false));
     try std.testing.expectError(error.InvalidDuration, control.clog(0, 1, 0));
-    try std.testing.expectError(error.InvalidDuration, control.clog(0, 1, 11));
-    try std.testing.expectError(error.InvalidDuration, control.setLatency(.{ .min_latency_ns = 11 }));
-    try std.testing.expectError(error.InvalidDuration, control.setLatency(.{ .latency_jitter_ns = 11 }));
-    try std.testing.expectError(error.InvalidDuration, control.setLatency(.{ .min_latency_ns = 10, .latency_jitter_ns = std.math.maxInt(u64) - 9 }));
+    try std.testing.expectError(error.DurationNotTickAligned, control.clog(0, 1, 11));
+    try std.testing.expectError(error.DurationNotTickAligned, control.setLatency(.{ .min_latency_ns = 11 }));
+    try std.testing.expectError(error.DurationNotTickAligned, control.setLatency(.{ .latency_jitter_ns = 11 }));
+    try std.testing.expectError(error.ClockOverflow, control.setLatency(.{ .min_latency_ns = 10, .latency_jitter_ns = std.math.maxInt(u64) - 5 }));
     try std.testing.expectError(error.InvalidRate, control.setLossiness(.{ .drop_rate = .{ .numerator = 1, .denominator = 0 } }));
     try std.testing.expectError(error.InvalidRate, control.setLossiness(.{ .drop_rate = .{ .numerator = 2, .denominator = 1 } }));
 }

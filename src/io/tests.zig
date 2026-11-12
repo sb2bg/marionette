@@ -2728,7 +2728,7 @@ test "io: process dynamics validate rates and tick-aligned durations" {
         }),
     );
     try std.testing.expectError(
-        error.InvalidDuration,
+        error.DurationNotTickAligned,
         sim.control.process.setDynamics(0, .{
             .crash_rate = .always(),
             .crash_stability_min_ns = 11,

@@ -17,6 +17,8 @@ pub const NetworkError = error{
     /// A duration is zero where progress requires a positive interval, not
     /// aligned to the world's tick, or would overflow simulated time.
     InvalidDuration,
+    DurationNotTickAligned,
+    ClockOverflow,
     /// A send drop rate has an invalid numerator/denominator pair.
     InvalidRate,
     /// A directed path queue is at capacity.

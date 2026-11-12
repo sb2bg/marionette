@@ -39,6 +39,8 @@ pub const DiskError = error{
     NoSpaceLeft,
     InvalidAlignment,
     InvalidDuration,
+    DurationNotTickAligned,
+    ClockOverflow,
     InvalidPath,
     InvalidRate,
     InvalidRange,

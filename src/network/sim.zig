@@ -287,20 +287,20 @@ const SharedRuntime = struct {
 
     fn validatePositiveTickDuration(self: *const SharedRuntime, duration_ns: clock_module.Duration) NetworkError!void {
         if (duration_ns == 0) return error.InvalidDuration;
-        if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
+        if (duration_ns % self.world.clock().tick_ns != 0) return error.DurationNotTickAligned;
     }
 
     fn validateFaultLatency(self: *const SharedRuntime, faults: NetworkFaultOptions) NetworkError!void {
         const tick_ns = self.world.clock().tick_ns;
-        if (faults.min_latency_ns % tick_ns != 0) return error.InvalidDuration;
-        if (faults.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
+        if (faults.min_latency_ns % tick_ns != 0) return error.DurationNotTickAligned;
+        if (faults.latency_jitter_ns % tick_ns != 0) return error.DurationNotTickAligned;
         if (std.math.maxInt(clock_module.Duration) - faults.min_latency_ns < faults.latency_jitter_ns) {
-            return error.InvalidDuration;
+            return error.ClockOverflow;
         }
     }
 
     fn validateTickAlignedDuration(self: *const SharedRuntime, duration_ns: clock_module.Duration) NetworkError!void {
-        if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
+        if (duration_ns % self.world.clock().tick_ns != 0) return error.DurationNotTickAligned;
     }
 
     fn validateClogs(self: *const SharedRuntime, options: NetworkClogOptions) !void {
@@ -308,7 +308,7 @@ const SharedRuntime = struct {
         if (options.path_clog_rate.numerator > 0) {
             try self.validatePositiveTickDuration(options.path_clog_duration_ns);
         } else if (options.path_clog_duration_ns != 0 and options.path_clog_duration_ns % self.world.clock().tick_ns != 0) {
-            return error.InvalidDuration;
+            return error.DurationNotTickAligned;
         }
     }
 
@@ -612,7 +612,7 @@ const SharedRuntime = struct {
     fn clog(self: *SharedRuntime, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
         try self.validatePositiveTickDuration(duration_ns);
         if (std.math.maxInt(clock_module.Timestamp) - self.world.now() < duration_ns) {
-            return error.InvalidDuration;
+            return error.ClockOverflow;
         }
 
         const until = self.world.now() + duration_ns;
@@ -758,7 +758,7 @@ const SharedRuntime = struct {
         // Retained for VTable source compatibility. Composition code uses the
         // shared fault-evolution participant through SimControl.
         const tick_ns = self.world.clock().tick_ns;
-        if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+        if (duration_ns % tick_ns != 0) return error.DurationNotTickAligned;
         if (duration_ns == 0) return;
 
         const end_ns = try addTimestamp(self.world.now(), duration_ns);
@@ -1229,7 +1229,7 @@ fn addTimestamp(
     timestamp: clock_module.Timestamp,
     duration_ns: clock_module.Duration,
 ) NetworkError!clock_module.Timestamp {
-    return std.math.add(clock_module.Timestamp, timestamp, duration_ns) catch error.InvalidDuration;
+    return std.math.add(clock_module.Timestamp, timestamp, duration_ns) catch error.ClockOverflow;
 }
 
 fn addDurationTicks(
@@ -1237,7 +1237,7 @@ fn addDurationTicks(
     ticks: u64,
     tick_ns: clock_module.Duration,
 ) NetworkError!clock_module.Timestamp {
-    const duration_ns = std.math.mul(clock_module.Duration, ticks, tick_ns) catch return error.InvalidDuration;
+    const duration_ns = std.math.mul(clock_module.Duration, ticks, tick_ns) catch return error.ClockOverflow;
     return addTimestamp(timestamp, duration_ns);
 }
 
@@ -1514,7 +1514,7 @@ fn TypedRuntime(comptime Payload: type) type {
                 }
             }
             if (std.math.maxInt(clock_module.Timestamp) - shared.world.now() < latency_ns) {
-                return error.InvalidDuration;
+                return error.ClockOverflow;
             }
 
             const queue = &self.queues[path];
@@ -1667,7 +1667,7 @@ fn TypedRuntime(comptime Payload: type) type {
 
         fn runForDeterministicFaults(self: *Self, duration_ns: clock_module.Duration) !void {
             const tick_ns = self.shared.world.clock().tick_ns;
-            if (duration_ns % tick_ns != 0) return error.InvalidDuration;
+            if (duration_ns % tick_ns != 0) return error.DurationNotTickAligned;
             var remaining = duration_ns;
             while (remaining > 0) : (remaining -= tick_ns) {
                 try self.shared.world.tick();
@@ -1832,7 +1832,7 @@ const SimByteRuntime = struct {
 
         const latency_ns = try self.latency();
         if (std.math.maxInt(clock_module.Timestamp) - shared.world.now() < latency_ns) {
-            return error.InvalidDuration;
+            return error.ClockOverflow;
         }
 
         const deliver_at = @max(shared.world.now() + latency_ns, minimum_delivery_at);

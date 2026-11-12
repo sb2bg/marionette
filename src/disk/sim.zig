@@ -1546,8 +1546,8 @@ pub const SimDisk = struct {
         if (options.sector_size > std.math.maxInt(usize)) return error.InvalidRange;
         const min_latency_ns = options.min_latency_ns orelse world.clock().tick_ns;
         const tick_ns = world.clock().tick_ns;
-        if (min_latency_ns % tick_ns != 0) return error.InvalidDuration;
-        if (options.latency_jitter_ns % tick_ns != 0) return error.InvalidDuration;
+        if (min_latency_ns % tick_ns != 0) return error.DurationNotTickAligned;
+        if (options.latency_jitter_ns % tick_ns != 0) return error.DurationNotTickAligned;
         return .{
             .sector_size = options.sector_size,
             .min_latency_ns = min_latency_ns,
@@ -1635,7 +1635,7 @@ pub const SimDisk = struct {
         const latency_ns = try self.latency();
         if (latency_ns == 0) return latency_ns;
         if (std.math.maxInt(clock_module.Timestamp) - self.world.now() < latency_ns) {
-            return error.InvalidDuration;
+            return error.ClockOverflow;
         }
         const deadline_ns = self.world.now() + latency_ns;
         if (self.latency_runtime) |runtime| {

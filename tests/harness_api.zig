@@ -112,9 +112,9 @@ const BadRecording = struct {
     }
 
     fn scenario(case: *mar.SimCase(@This())) !void {
-        // Spaces are not a valid event name: the call returns normally and
+        // An empty value is invalid even escaped: the call returns normally and
         // the runner reports the failure at its next boundary.
-        case.env().record("not a valid event", .{});
+        case.env().record("app.note value={s}", .{""});
         case.env().record("app.after value=1", .{});
     }
 };

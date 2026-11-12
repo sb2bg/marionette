@@ -147,6 +147,8 @@ pub const AllocationControl = env_module.AllocationControl;
 
 /// Deterministic simulation engine state.
 pub const World = @import("world.zig").World;
+/// Descriptive errors for harness-supplied durations and clock advances.
+pub const TimeError = @import("world.zig").TimeError;
 
 /// Runtime network loss configuration.
 pub const NetworkLossOptions = network_module.NetworkLossOptions;
@@ -344,6 +346,7 @@ test "public roots hide internal wiring" {
 test {
     _ = @import("disk/root.zig");
     _ = @import("decision.zig");
+    _ = @import("record_format.zig");
     _ = @import("env.zig");
     _ = @import("message_pool.zig");
     _ = @import("network/root.zig");

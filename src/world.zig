@@ -4,6 +4,7 @@
 //! registered disk, network, I/O, and scheduler resources for a simulation.
 
 const std = @import("std");
+const record_format = @import("record_format.zig");
 
 const allocation_module = @import("allocation.zig");
 const clock_module = @import("clock.zig");
@@ -49,6 +50,10 @@ pub const TraceValue = union(enum) {
         value: []const u8,
     };
 };
+
+/// Descriptive errors for harness-supplied time: a duration that is not a
+/// whole number of ticks, and an advance past the clock's range.
+pub const TimeError = error{ DurationNotTickAligned, ClockOverflow };
 
 /// Build one structured trace field.
 pub fn traceField(key: []const u8, value: TraceValue) TraceField {
@@ -807,6 +812,7 @@ pub const World = struct {
 
     /// Advance the world by one simulation tick.
     pub fn tick(self: *World) !void {
+        try self.validateAdvance(self.clock().tick_ns);
         const now_before = self.now();
         errdefer self.sim_clock.now_ns = now_before;
         self.sim_clock.tick();
@@ -815,8 +821,11 @@ pub const World = struct {
 
     /// Advance the world by a duration measured in nanoseconds.
     ///
-    /// `duration_ns` must be an exact multiple of the world's tick size.
+    /// `duration_ns` must be an exact multiple of the world's tick size
+    /// (`error.DurationNotTickAligned`) and must not move the clock past its
+    /// range (`error.ClockOverflow`).
     pub fn runFor(self: *World, duration_ns: clock_module.Duration) !void {
+        try self.validateAdvance(duration_ns);
         const start_ns = self.now();
         errdefer self.sim_clock.now_ns = start_ns;
         self.sim_clock.runFor(duration_ns);
@@ -824,6 +833,12 @@ pub const World = struct {
             "world.run_for start_ns={} duration_ns={} end_ns={}",
             .{ start_ns, duration_ns, self.now() },
         );
+    }
+
+    /// Check a harness-supplied clock advance before any state changes.
+    pub fn validateAdvance(self: *const World, duration_ns: clock_module.Duration) TimeError!void {
+        if (duration_ns % self.sim_clock.tick_ns != 0) return error.DurationNotTickAligned;
+        if (std.math.maxInt(clock_module.Timestamp) - self.now() < duration_ns) return error.ClockOverflow;
     }
 
     /// Return the world's current simulated timestamp in nanoseconds.
@@ -844,7 +859,10 @@ pub const World = struct {
 
         try self.trace_log.print(self.allocator, "event={} ", .{self.event_index});
         const payload_start = self.trace_log.items.len;
-        try self.trace_log.print(self.allocator, fmt, args);
+        // Literal format text is validated at compile time and `{s}` string
+        // arguments are escaped, so only non-string values can still produce
+        // an invalid payload.
+        try record_format.appendRecord(&self.trace_log, self.allocator, fmt, args);
         if (!isValidTracePayload(self.trace_log.items[payload_start..])) {
             return error.InvalidTracePayload;
         }
@@ -1430,12 +1448,21 @@ test "world: invalid trace payload returns error and rolls back" {
     defer std.testing.allocator.free(before_trace);
     const before_event_index = world.nextEventIndex();
 
+    // An empty string is the one string value escaping cannot make valid.
     try std.testing.expectError(
         error.InvalidTracePayload,
-        world.record("service.message value={s}", .{"hello world"}),
+        world.record("service.message value={s}", .{""}),
     );
     try std.testing.expectEqual(before_event_index, world.nextEventIndex());
     try std.testing.expectEqualStrings(before_trace, world.traceBytes());
+}
+
+test "world: record escapes ordinary string values" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99 });
+    defer world.deinit();
+
+    try world.record("service.message value={s} len={}", .{ "hello world=\n", @as(u64, 13) });
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "service.message value=hello%20world%3D%0A len=13") != null);
 }
 
 test "world: structured fields escape ambiguous text bytes" {
@@ -1470,4 +1497,22 @@ test "world: empty bare structured text rolls back" {
     );
     try std.testing.expectEqual(before_event_index, world.nextEventIndex());
     try std.testing.expectEqualStrings(before_trace, world.traceBytes());
+}
+
+test "world: harness time inputs return descriptive errors" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 10 });
+    defer world.deinit();
+    const trace_len = world.traceBytes().len;
+    try std.testing.expectError(error.DurationNotTickAligned, world.runFor(15));
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 0), world.now());
+    try std.testing.expectEqual(trace_len, world.traceBytes().len);
+
+    const sim = try world.simulate(.{});
+    try std.testing.expectError(error.DurationNotTickAligned, sim.control.runFor(7));
+    try sim.control.runFor(20);
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
+    // Aligned, but past the clock's range from now.
+    try std.testing.expectError(error.ClockOverflow, world.runFor(std.math.maxInt(u64) - 15));
+    try std.testing.expectError(error.ClockOverflow, sim.control.runFor(std.math.maxInt(u64) - 15));
+    try std.testing.expectEqual(@as(clock_module.Timestamp, 20), world.now());
 }

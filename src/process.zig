@@ -357,8 +357,8 @@ pub const ProcessSupervisor = struct {
         try self.validateTickAlignedDuration(options.restart_stability_min_ns);
     }
 
-    fn validateTickAlignedDuration(self: *const ProcessSupervisor, duration_ns: clock_module.Duration) error{InvalidDuration}!void {
-        if (duration_ns % self.world.clock().tick_ns != 0) return error.InvalidDuration;
+    fn validateTickAlignedDuration(self: *const ProcessSupervisor, duration_ns: clock_module.Duration) error{ DurationNotTickAligned, ClockOverflow }!void {
+        if (duration_ns % self.world.clock().tick_ns != 0) return error.DurationNotTickAligned;
     }
 
     fn ensureAutoSchedules(self: *ProcessSupervisor) !void {
@@ -526,16 +526,16 @@ fn processControlFinishRunFor(ptr: *anyopaque) anyerror!void {
 fn addTimestamp(
     timestamp: clock_module.Timestamp,
     duration_ns: clock_module.Duration,
-) error{InvalidDuration}!clock_module.Timestamp {
-    return std.math.add(clock_module.Timestamp, timestamp, duration_ns) catch error.InvalidDuration;
+) error{ DurationNotTickAligned, ClockOverflow }!clock_module.Timestamp {
+    return std.math.add(clock_module.Timestamp, timestamp, duration_ns) catch error.ClockOverflow;
 }
 
 fn addDurationTicks(
     timestamp: clock_module.Timestamp,
     ticks: u64,
     tick_ns: clock_module.Duration,
-) error{InvalidDuration}!clock_module.Timestamp {
-    const duration_ns = std.math.mul(clock_module.Duration, ticks, tick_ns) catch return error.InvalidDuration;
+) error{ DurationNotTickAligned, ClockOverflow }!clock_module.Timestamp {
+    const duration_ns = std.math.mul(clock_module.Duration, ticks, tick_ns) catch return error.ClockOverflow;
     return addTimestamp(timestamp, duration_ns);
 }
 

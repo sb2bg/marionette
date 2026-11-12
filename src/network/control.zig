@@ -70,7 +70,7 @@ pub const AnyNetworkControl = struct {
     }
 
     /// Set base delivery latency plus seeded jitter. Values must be
-    /// tick-aligned or `error.InvalidDuration` returns. Traced as
+    /// tick-aligned or `error.DurationNotTickAligned` returns. Traced as
     /// `network.latency`.
     pub fn setLatency(self: AnyNetworkControl, options: NetworkLatencyOptions) ControlError!void {
         try self.vtable.set_latency(self.ptr, options);
@@ -102,7 +102,7 @@ pub const AnyNetworkControl = struct {
 
     /// Clog one directed path until simulated time advances by
     /// `duration_ns` (positive and tick-aligned, or
-    /// `error.InvalidDuration`). Queued packets wait; they are not
+    /// `error.InvalidDuration`, or `error.DurationNotTickAligned`). Queued packets wait; they are not
     /// dropped. Traced as `network.clog`.
     pub fn clog(self: AnyNetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) ControlError!void {
         try self.vtable.clog(self.ptr, from, to, duration_ns);

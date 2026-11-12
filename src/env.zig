@@ -142,7 +142,7 @@ pub const Recorder = struct {
         if (self.sink) |sink| {
             var buffer: [max_sink_line]u8 = undefined;
             var writer: std.Io.Writer = .fixed(&buffer);
-            writer.print(fmt, args) catch {};
+            @import("record_format.zig").writeRecord(&writer, fmt, args) catch {};
             sink.write(sink.ptr, writer.buffered());
         }
     }
@@ -307,7 +307,7 @@ pub const ProcessControl = struct {
     /// Configure automatic crash/restart rates for one node. Replaces any
     /// previous dynamics and reschedules from the current time. Invalid
     /// rates return `error.InvalidRate`; misaligned stability durations
-    /// return `error.InvalidDuration`. Traced as `process.dynamics`.
+    /// return `error.DurationNotTickAligned`. Traced as `process.dynamics`.
     pub fn setDynamics(self: ProcessControl, node: network_module.NodeId, options: ProcessDynamicsOptions) !void {
         try self.vtable.set_dynamics(self.ptr, node, options);
     }
@@ -346,12 +346,10 @@ pub const FaultEvolutionControl = struct {
     world: *World,
 
     pub fn runFor(self: FaultEvolutionControl, duration_ns: clock_module.Duration) !void {
-        const tick_ns = self.world.clock().tick_ns;
-        std.debug.assert(duration_ns % tick_ns == 0);
+        try self.world.validateAdvance(duration_ns);
         if (duration_ns == 0) return;
 
-        const end_ns = std.math.add(clock_module.Timestamp, self.world.now(), duration_ns) catch
-            @panic("simulated duration exceeds clock range");
+        const end_ns = self.world.now() + duration_ns;
         try self.evolveAtCurrentBoundary();
         while (try self.nextBoundaryBeforeOrAt(end_ns)) |boundary_ns| {
             if (boundary_ns > self.world.now()) {
@@ -525,9 +523,9 @@ pub const SimControl = struct {
     /// timestamps. The duration must be a whole number of ticks; a
     /// misaligned duration asserts as harness misuse.
     pub fn runFor(self: SimControl, duration_ns: clock_module.Duration) !void {
-        // Misuse contract: like `World.runFor` and `SimClock.runFor`, a
-        // duration that is not a whole number of ticks is a harness bug and
-        // asserts instead of returning an error.
+        // A duration that is not a whole number of ticks returns
+        // `error.DurationNotTickAligned`, and one past the clock's range
+        // `error.ClockOverflow`, before time moves.
         try self.faultEvolution().runFor(duration_ns);
     }
 
