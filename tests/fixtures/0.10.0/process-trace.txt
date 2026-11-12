@@ -6,7 +6,7 @@ event=3 run.name value=managed%20lifecycle
 event=4 run.tag value=compatibility
 event=5 run.tag value=process
 event=6 run.attribute key=version value=uint:1
-event=7 disk.model contract=portable_v2 version=2 sector_size=4096 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=identity_pending
+event=7 disk.model contract=portable_v2 version=3 sector_size=4096 torn_write=sector_prefix reorder=crash_global_reverse lifecycle=identity_pending
 event=8 world.run_for start_ns=0 duration_ns=1 end_ns=1
 event=9 disk.stat_dir op=0 path=state status=not_found latency_ns=1
 event=10 world.run_for start_ns=1 duration_ns=1 end_ns=2

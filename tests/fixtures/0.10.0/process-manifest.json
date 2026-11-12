@@ -9,7 +9,7 @@
     "zig": "fixture",
     "target": "fixture",
     "optimize": "fixture",
-    "disk_version": 2
+    "disk_version": 3
   },
   "options": {
     "seed": 72,

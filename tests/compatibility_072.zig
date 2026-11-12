@@ -179,10 +179,10 @@ test "0.8.3 compatibility: a portable_v1 capsule is rejected, not reinterpreted"
 
 /// 0.10 changes only the trace format: version 5 adds `site=<choice site>`
 /// as the first field of every `world.random_*` decision event. Removing that
-/// field and restoring the version 4 header must give the 0.8.3 bytes.
+/// field and restoring the version 4 header must give the released 0.8.3 bytes.
 fn expectOnlySiteFields(comptime file: []const u8) !void {
     const allocator = std.testing.allocator;
-    const old = @embedFile("fixtures/0.8.3/" ++ file);
+    const old = @embedFile("fixtures/0.8.3-revision3/" ++ file);
     const new = @embedFile("fixtures/0.10.0/" ++ file);
     var stripped: std.ArrayList(u8) = .empty;
     defer stripped.deinit(allocator);
