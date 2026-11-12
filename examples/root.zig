@@ -10,6 +10,7 @@ pub const std_io_net_kv = @import("std_io_net_kv.zig");
 pub const memtable_pressure = @import("memtable_pressure.zig");
 pub const wal_record = @import("wal_record.zig");
 pub const reduction = @import("reduction.zig");
+pub const replicated_service = @import("replicated_service.zig");
 const support = @import("support.zig");
 
 test {
@@ -24,4 +25,5 @@ test {
     _ = wal_record;
     _ = support;
     _ = reduction;
+    _ = replicated_service;
 }
