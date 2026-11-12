@@ -1,5 +1,6 @@
 //! Type-erased network fault-control authority.
 
+const std = @import("std");
 const clock_module = @import("../clock.zig");
 const fault_evolution_module = @import("../fault_evolution.zig");
 const faults = @import("faults.zig");
@@ -7,6 +8,10 @@ const types = @import("types.zig");
 const World = @import("../world.zig").World;
 
 pub const Fault = faults.Fault;
+
+/// Every error the network control can return. The interface has one
+/// simulated implementation, so callers get a precise set.
+pub const ControlError = types.NetworkError || std.mem.Allocator.Error || @import("../world.zig").TraceError || @import("../world.zig").DecisionError;
 pub const FaultOptions = faults.FaultOptions;
 pub const DegradeOptions = faults.DegradeOptions;
 
@@ -22,32 +27,32 @@ pub const AnyNetworkControl = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        set_lossiness: *const fn (*anyopaque, NetworkLossOptions) anyerror!void,
-        set_latency: *const fn (*anyopaque, NetworkLatencyOptions) anyerror!void,
-        set_clogs: *const fn (*anyopaque, NetworkClogOptions) anyerror!void,
-        set_partition_dynamics: *const fn (*anyopaque, NetworkPartitionDynamicsOptions) anyerror!void,
-        set_node: *const fn (*anyopaque, NodeId, bool) anyerror!void,
-        set_link: *const fn (*anyopaque, NodeId, NodeId, bool) anyerror!void,
-        clog: *const fn (*anyopaque, NodeId, NodeId, clock_module.Duration) anyerror!void,
-        unclog: *const fn (*anyopaque, NodeId, NodeId) anyerror!void,
-        unclog_all: *const fn (*anyopaque) anyerror!void,
-        partition: *const fn (*anyopaque, []const NodeId, []const NodeId, FaultOptions) anyerror!Fault,
-        isolate: *const fn (*anyopaque, NodeId, FaultOptions) anyerror!Fault,
-        cut: *const fn (*anyopaque, NodeId, NodeId, FaultOptions) anyerror!Fault,
-        degrade: *const fn (*anyopaque, NodeId, NodeId, DegradeOptions) anyerror!Fault,
-        heal_fault: *const fn (*anyopaque, Fault) anyerror!void,
+        set_lossiness: *const fn (*anyopaque, NetworkLossOptions) ControlError!void,
+        set_latency: *const fn (*anyopaque, NetworkLatencyOptions) ControlError!void,
+        set_clogs: *const fn (*anyopaque, NetworkClogOptions) ControlError!void,
+        set_partition_dynamics: *const fn (*anyopaque, NetworkPartitionDynamicsOptions) ControlError!void,
+        set_node: *const fn (*anyopaque, NodeId, bool) ControlError!void,
+        set_link: *const fn (*anyopaque, NodeId, NodeId, bool) ControlError!void,
+        clog: *const fn (*anyopaque, NodeId, NodeId, clock_module.Duration) ControlError!void,
+        unclog: *const fn (*anyopaque, NodeId, NodeId) ControlError!void,
+        unclog_all: *const fn (*anyopaque) ControlError!void,
+        partition: *const fn (*anyopaque, []const NodeId, []const NodeId, FaultOptions) ControlError!Fault,
+        isolate: *const fn (*anyopaque, NodeId, FaultOptions) ControlError!Fault,
+        cut: *const fn (*anyopaque, NodeId, NodeId, FaultOptions) ControlError!Fault,
+        degrade: *const fn (*anyopaque, NodeId, NodeId, DegradeOptions) ControlError!Fault,
+        heal_fault: *const fn (*anyopaque, Fault) ControlError!void,
         active_faults: *const fn (*anyopaque) usize,
-        add_host_name: *const fn (*anyopaque, []const u8, NodeId) anyerror!void,
-        record_netstat: *const fn (*anyopaque, []const u8) anyerror!void,
+        add_host_name: *const fn (*anyopaque, []const u8, NodeId) ControlError!void,
+        record_netstat: *const fn (*anyopaque, []const u8) ControlError!void,
         next_essential_event_at: *const fn (*anyopaque) ?clock_module.Timestamp,
         semantics: *const fn (*anyopaque) ?types.Semantics,
-        heal: *const fn (*anyopaque) anyerror!void,
-        heal_links: *const fn (*anyopaque) anyerror!void,
-        restore_core_liveness: *const fn (*anyopaque, []const NodeId) anyerror!void,
-        evolve_tick_faults: *const fn (*anyopaque) anyerror!void,
-        evolve_for: *const fn (*anyopaque, clock_module.Duration) anyerror!void,
-        next_fault_boundary_before_or_at: *const fn (*anyopaque, clock_module.Timestamp) anyerror!?clock_module.Timestamp,
-        finish_run_for: *const fn (*anyopaque) anyerror!void,
+        heal: *const fn (*anyopaque) ControlError!void,
+        heal_links: *const fn (*anyopaque) ControlError!void,
+        restore_core_liveness: *const fn (*anyopaque, []const NodeId) ControlError!void,
+        evolve_tick_faults: *const fn (*anyopaque) ControlError!void,
+        evolve_for: *const fn (*anyopaque, clock_module.Duration) ControlError!void,
+        next_fault_boundary_before_or_at: *const fn (*anyopaque, clock_module.Timestamp) ControlError!?clock_module.Timestamp,
+        finish_run_for: *const fn (*anyopaque) ControlError!void,
         world: *const fn (*anyopaque) ?*World,
         shared: *const fn (*anyopaque) ?*anyopaque,
     };
@@ -60,38 +65,38 @@ pub const AnyNetworkControl = struct {
 
     /// Set the seeded per-packet drop rate applied at send time. Traced
     /// as `network.lossiness`; drops record `network.drop`.
-    pub fn setLossiness(self: AnyNetworkControl, options: NetworkLossOptions) !void {
+    pub fn setLossiness(self: AnyNetworkControl, options: NetworkLossOptions) ControlError!void {
         try self.vtable.set_lossiness(self.ptr, options);
     }
 
     /// Set base delivery latency plus seeded jitter. Values must be
     /// tick-aligned or `error.InvalidDuration` returns. Traced as
     /// `network.latency`.
-    pub fn setLatency(self: AnyNetworkControl, options: NetworkLatencyOptions) !void {
+    pub fn setLatency(self: AnyNetworkControl, options: NetworkLatencyOptions) ControlError!void {
         try self.vtable.set_latency(self.ptr, options);
     }
 
     /// Set the seeded automatic path-clog rate and duration. Replaces
     /// pending automatic clog schedules. Traced as `network.clog_faults`.
-    pub fn setClogs(self: AnyNetworkControl, options: NetworkClogOptions) !void {
+    pub fn setClogs(self: AnyNetworkControl, options: NetworkClogOptions) ControlError!void {
         try self.vtable.set_clogs(self.ptr, options);
     }
 
     /// Set the seeded automatic node-isolating partition/heal rates.
     /// Dynamics evolve only at `tick`/`runFor` fault boundaries. Traced
     /// as `network.partition_dynamics`.
-    pub fn setPartitionDynamics(self: AnyNetworkControl, options: NetworkPartitionDynamicsOptions) !void {
+    pub fn setPartitionDynamics(self: AnyNetworkControl, options: NetworkPartitionDynamicsOptions) ControlError!void {
         try self.vtable.set_partition_dynamics(self.ptr, options);
     }
 
     /// Mark one simulated node up or down. Packets from or to a down node
     /// are dropped with a trace-visible reason. Traced as `network.node`.
-    pub fn setNode(self: AnyNetworkControl, node: NodeId, up: bool) !void {
+    pub fn setNode(self: AnyNetworkControl, node: NodeId, up: bool) ControlError!void {
         try self.vtable.set_node(self.ptr, node, up);
     }
 
     /// Enable or disable one directed link. Traced as `network.link`.
-    pub fn setLink(self: AnyNetworkControl, from: NodeId, to: NodeId, enabled: bool) !void {
+    pub fn setLink(self: AnyNetworkControl, from: NodeId, to: NodeId, enabled: bool) ControlError!void {
         try self.vtable.set_link(self.ptr, from, to, enabled);
     }
 
@@ -99,17 +104,17 @@ pub const AnyNetworkControl = struct {
     /// `duration_ns` (positive and tick-aligned, or
     /// `error.InvalidDuration`). Queued packets wait; they are not
     /// dropped. Traced as `network.clog`.
-    pub fn clog(self: AnyNetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) !void {
+    pub fn clog(self: AnyNetworkControl, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) ControlError!void {
         try self.vtable.clog(self.ptr, from, to, duration_ns);
     }
 
     /// Clear one directed path clog. Traced as `network.unclog`.
-    pub fn unclog(self: AnyNetworkControl, from: NodeId, to: NodeId) !void {
+    pub fn unclog(self: AnyNetworkControl, from: NodeId, to: NodeId) ControlError!void {
         try self.vtable.unclog(self.ptr, from, to);
     }
 
     /// Clear every directed path clog. Traced as `network.unclog_all`.
-    pub fn unclogAll(self: AnyNetworkControl) !void {
+    pub fn unclogAll(self: AnyNetworkControl) ControlError!void {
         try self.vtable.unclog_all(self.ptr);
     }
 
@@ -117,29 +122,29 @@ pub const AnyNetworkControl = struct {
     /// directions, and return the fault. Nodes in neither group keep
     /// reaching both sides (a partial partition). Traced as
     /// `network.partition` and, except under `legacy_v0`, `network.fault`.
-    pub fn partition(self: AnyNetworkControl, left: []const NodeId, right: []const NodeId, options: FaultOptions) !Fault {
+    pub fn partition(self: AnyNetworkControl, left: []const NodeId, right: []const NodeId, options: FaultOptions) ControlError!Fault {
         return self.vtable.partition(self.ptr, left, right, options);
     }
 
     /// Cut one node off from every other node, in both directions.
-    pub fn isolate(self: AnyNetworkControl, node: NodeId, options: FaultOptions) !Fault {
+    pub fn isolate(self: AnyNetworkControl, node: NodeId, options: FaultOptions) ControlError!Fault {
         return self.vtable.isolate(self.ptr, node, options);
     }
 
     /// Disrupt one directed link.
-    pub fn cut(self: AnyNetworkControl, from: NodeId, to: NodeId, options: FaultOptions) !Fault {
+    pub fn cut(self: AnyNetworkControl, from: NodeId, to: NodeId, options: FaultOptions) ControlError!Fault {
         return self.vtable.cut(self.ptr, from, to, options);
     }
 
     /// Slow one directed link, optionally with seeded loss. `tcp_v1` only.
-    pub fn degrade(self: AnyNetworkControl, from: NodeId, to: NodeId, options: DegradeOptions) !Fault {
+    pub fn degrade(self: AnyNetworkControl, from: NodeId, to: NodeId, options: DegradeOptions) ControlError!Fault {
         return self.vtable.degrade(self.ptr, from, to, options);
     }
 
     /// Heal one fault, leaving every other fault in place. Returns
     /// `error.FaultNotActive` when it already healed or expired. Traced as
     /// `network.fault_heal`.
-    pub fn healFault(self: AnyNetworkControl, fault: Fault) !void {
+    pub fn healFault(self: AnyNetworkControl, fault: Fault) ControlError!void {
         try self.vtable.heal_fault(self.ptr, fault);
     }
 
@@ -150,14 +155,14 @@ pub const AnyNetworkControl = struct {
 
     /// Make the simulated DNS resolve `name` to `node`'s addresses.
     /// Every node also resolves as `nodeN`. `tcp_v1` only.
-    pub fn addHostName(self: AnyNetworkControl, name: []const u8, node: NodeId) !void {
+    pub fn addHostName(self: AnyNetworkControl, name: []const u8, node: NodeId) ControlError!void {
         try self.vtable.add_host_name(self.ptr, name, node);
     }
 
     /// Record a `netstat` table of sockets, held packets, and active
     /// faults into the trace (`netstat.*` events). `tcp_v1` only; a no-op
     /// otherwise.
-    pub fn recordNetstat(self: AnyNetworkControl, reason: []const u8) !void {
+    pub fn recordNetstat(self: AnyNetworkControl, reason: []const u8) ControlError!void {
         try self.vtable.record_netstat(self.ptr, reason);
     }
 
@@ -178,20 +183,20 @@ pub const AnyNetworkControl = struct {
 
     /// Re-enable every link, clear every clog, and mark every node up.
     /// Traced as `network.heal`.
-    pub fn heal(self: AnyNetworkControl) !void {
+    pub fn heal(self: AnyNetworkControl) ControlError!void {
         try self.vtable.heal(self.ptr);
     }
 
     /// Re-enable every link without changing node up/down state or clogs.
     /// Traced as `network.heal_links`.
-    pub fn healLinks(self: AnyNetworkControl) !void {
+    pub fn healLinks(self: AnyNetworkControl) ControlError!void {
         try self.vtable.heal_links(self.ptr);
     }
 
     /// Re-enable links, clear clogs, and mark nodes up inside the core
     /// only, leaving faults that touch non-core nodes in place. Building
     /// block for the one-shot liveness transition.
-    pub fn restoreCoreLiveness(self: AnyNetworkControl, core: []const NodeId) !void {
+    pub fn restoreCoreLiveness(self: AnyNetworkControl, core: []const NodeId) ControlError!void {
         try self.vtable.restore_core_liveness(self.ptr, core);
     }
 
@@ -250,59 +255,59 @@ const unavailable_network_control_vtable: AnyNetworkControl.VTable = .{
     .shared = unavailableControlShared,
 };
 
-fn unavailableControlSetLossiness(_: *anyopaque, _: NetworkLossOptions) anyerror!void {
+fn unavailableControlSetLossiness(_: *anyopaque, _: NetworkLossOptions) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlSetLatency(_: *anyopaque, _: NetworkLatencyOptions) anyerror!void {
+fn unavailableControlSetLatency(_: *anyopaque, _: NetworkLatencyOptions) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlSetClogs(_: *anyopaque, _: NetworkClogOptions) anyerror!void {
+fn unavailableControlSetClogs(_: *anyopaque, _: NetworkClogOptions) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlSetPartitionDynamics(_: *anyopaque, _: NetworkPartitionDynamicsOptions) anyerror!void {
+fn unavailableControlSetPartitionDynamics(_: *anyopaque, _: NetworkPartitionDynamicsOptions) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlSetNode(_: *anyopaque, _: NodeId, _: bool) anyerror!void {
+fn unavailableControlSetNode(_: *anyopaque, _: NodeId, _: bool) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlSetLink(_: *anyopaque, _: NodeId, _: NodeId, _: bool) anyerror!void {
+fn unavailableControlSetLink(_: *anyopaque, _: NodeId, _: NodeId, _: bool) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlClog(_: *anyopaque, _: NodeId, _: NodeId, _: clock_module.Duration) anyerror!void {
+fn unavailableControlClog(_: *anyopaque, _: NodeId, _: NodeId, _: clock_module.Duration) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlUnclog(_: *anyopaque, _: NodeId, _: NodeId) anyerror!void {
+fn unavailableControlUnclog(_: *anyopaque, _: NodeId, _: NodeId) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlUnclogAll(_: *anyopaque) anyerror!void {
+fn unavailableControlUnclogAll(_: *anyopaque) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlPartition(_: *anyopaque, _: []const NodeId, _: []const NodeId, _: FaultOptions) anyerror!Fault {
+fn unavailableControlPartition(_: *anyopaque, _: []const NodeId, _: []const NodeId, _: FaultOptions) ControlError!Fault {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlIsolate(_: *anyopaque, _: NodeId, _: FaultOptions) anyerror!Fault {
+fn unavailableControlIsolate(_: *anyopaque, _: NodeId, _: FaultOptions) ControlError!Fault {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlCut(_: *anyopaque, _: NodeId, _: NodeId, _: FaultOptions) anyerror!Fault {
+fn unavailableControlCut(_: *anyopaque, _: NodeId, _: NodeId, _: FaultOptions) ControlError!Fault {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlDegrade(_: *anyopaque, _: NodeId, _: NodeId, _: DegradeOptions) anyerror!Fault {
+fn unavailableControlDegrade(_: *anyopaque, _: NodeId, _: NodeId, _: DegradeOptions) ControlError!Fault {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlHealFault(_: *anyopaque, _: Fault) anyerror!void {
+fn unavailableControlHealFault(_: *anyopaque, _: Fault) ControlError!void {
     return error.NetworkUnavailable;
 }
 
@@ -310,11 +315,11 @@ fn unavailableControlActiveFaults(_: *anyopaque) usize {
     return 0;
 }
 
-fn unavailableControlAddHostName(_: *anyopaque, _: []const u8, _: NodeId) anyerror!void {
+fn unavailableControlAddHostName(_: *anyopaque, _: []const u8, _: NodeId) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlRecordNetstat(_: *anyopaque, _: []const u8) anyerror!void {}
+fn unavailableControlRecordNetstat(_: *anyopaque, _: []const u8) ControlError!void {}
 
 fn unavailableControlNextEssentialEventAt(_: *anyopaque) ?clock_module.Timestamp {
     return null;
@@ -324,27 +329,27 @@ fn unavailableControlSemantics(_: *anyopaque) ?types.Semantics {
     return null;
 }
 
-fn unavailableControlHeal(_: *anyopaque) anyerror!void {
+fn unavailableControlHeal(_: *anyopaque) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlHealLinks(_: *anyopaque) anyerror!void {
+fn unavailableControlHealLinks(_: *anyopaque) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlRestoreCoreLiveness(_: *anyopaque, _: []const NodeId) anyerror!void {
+fn unavailableControlRestoreCoreLiveness(_: *anyopaque, _: []const NodeId) ControlError!void {
     return error.NetworkUnavailable;
 }
 
-fn unavailableControlEvolveTickFaults(_: *anyopaque) anyerror!void {}
+fn unavailableControlEvolveTickFaults(_: *anyopaque) ControlError!void {}
 
-fn unavailableControlEvolveFor(_: *anyopaque, _: clock_module.Duration) anyerror!void {}
+fn unavailableControlEvolveFor(_: *anyopaque, _: clock_module.Duration) ControlError!void {}
 
-fn unavailableControlNextFaultBoundaryBeforeOrAt(_: *anyopaque, _: clock_module.Timestamp) anyerror!?clock_module.Timestamp {
+fn unavailableControlNextFaultBoundaryBeforeOrAt(_: *anyopaque, _: clock_module.Timestamp) ControlError!?clock_module.Timestamp {
     return null;
 }
 
-fn unavailableControlFinishRunFor(_: *anyopaque) anyerror!void {}
+fn unavailableControlFinishRunFor(_: *anyopaque) ControlError!void {}
 
 fn unavailableControlWorld(_: *anyopaque) ?*World {
     return null;

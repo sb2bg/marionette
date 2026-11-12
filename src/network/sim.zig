@@ -17,6 +17,7 @@ pub const FaultOptions = faults_module.FaultOptions;
 pub const DegradeOptions = faults_module.DegradeOptions;
 
 const AnyNetworkControl = control_module.AnyNetworkControl;
+const ControlError = control_module.ControlError;
 const Endpoint = endpoint_module.Endpoint;
 const Message = message_pool_module.Message;
 const NetworkClogOptions = types.NetworkClogOptions;
@@ -1096,59 +1097,59 @@ const shared_control_vtable: AnyNetworkControl.VTable = .{
     .shared = sharedControlShared,
 };
 
-fn sharedControlSetLossiness(ptr: *anyopaque, options: NetworkLossOptions) anyerror!void {
+fn sharedControlSetLossiness(ptr: *anyopaque, options: NetworkLossOptions) ControlError!void {
     try sharedControl(ptr).setLossiness(options);
 }
 
-fn sharedControlSetLatency(ptr: *anyopaque, options: NetworkLatencyOptions) anyerror!void {
+fn sharedControlSetLatency(ptr: *anyopaque, options: NetworkLatencyOptions) ControlError!void {
     try sharedControl(ptr).setLatency(options);
 }
 
-fn sharedControlSetClogs(ptr: *anyopaque, options: NetworkClogOptions) anyerror!void {
+fn sharedControlSetClogs(ptr: *anyopaque, options: NetworkClogOptions) ControlError!void {
     try sharedControl(ptr).setClogs(options);
 }
 
-fn sharedControlSetPartitionDynamics(ptr: *anyopaque, options: NetworkPartitionDynamicsOptions) anyerror!void {
+fn sharedControlSetPartitionDynamics(ptr: *anyopaque, options: NetworkPartitionDynamicsOptions) ControlError!void {
     try sharedControl(ptr).setPartitionDynamics(options);
 }
 
-fn sharedControlSetNode(ptr: *anyopaque, node: NodeId, up: bool) anyerror!void {
+fn sharedControlSetNode(ptr: *anyopaque, node: NodeId, up: bool) ControlError!void {
     try sharedControl(ptr).setNode(node, up);
 }
 
-fn sharedControlSetLink(ptr: *anyopaque, from: NodeId, to: NodeId, enabled: bool) anyerror!void {
+fn sharedControlSetLink(ptr: *anyopaque, from: NodeId, to: NodeId, enabled: bool) ControlError!void {
     try sharedControl(ptr).setLink(from, to, enabled);
 }
 
-fn sharedControlClog(ptr: *anyopaque, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) anyerror!void {
+fn sharedControlClog(ptr: *anyopaque, from: NodeId, to: NodeId, duration_ns: clock_module.Duration) ControlError!void {
     try sharedControl(ptr).clog(from, to, duration_ns);
 }
 
-fn sharedControlUnclog(ptr: *anyopaque, from: NodeId, to: NodeId) anyerror!void {
+fn sharedControlUnclog(ptr: *anyopaque, from: NodeId, to: NodeId) ControlError!void {
     try sharedControl(ptr).unclog(from, to);
 }
 
-fn sharedControlUnclogAll(ptr: *anyopaque) anyerror!void {
+fn sharedControlUnclogAll(ptr: *anyopaque) ControlError!void {
     try sharedControl(ptr).unclogAll();
 }
 
-fn sharedControlPartition(ptr: *anyopaque, left: []const NodeId, right: []const NodeId, options: FaultOptions) anyerror!Fault {
+fn sharedControlPartition(ptr: *anyopaque, left: []const NodeId, right: []const NodeId, options: FaultOptions) ControlError!Fault {
     return sharedControl(ptr).partitionGroups(left, right, options);
 }
 
-fn sharedControlIsolate(ptr: *anyopaque, node: NodeId, options: FaultOptions) anyerror!Fault {
+fn sharedControlIsolate(ptr: *anyopaque, node: NodeId, options: FaultOptions) ControlError!Fault {
     return sharedControl(ptr).isolate(node, options);
 }
 
-fn sharedControlCut(ptr: *anyopaque, from: NodeId, to: NodeId, options: FaultOptions) anyerror!Fault {
+fn sharedControlCut(ptr: *anyopaque, from: NodeId, to: NodeId, options: FaultOptions) ControlError!Fault {
     return sharedControl(ptr).cut(from, to, options);
 }
 
-fn sharedControlDegrade(ptr: *anyopaque, from: NodeId, to: NodeId, options: DegradeOptions) anyerror!Fault {
+fn sharedControlDegrade(ptr: *anyopaque, from: NodeId, to: NodeId, options: DegradeOptions) ControlError!Fault {
     return sharedControl(ptr).degrade(from, to, options);
 }
 
-fn sharedControlHealFault(ptr: *anyopaque, fault: Fault) anyerror!void {
+fn sharedControlHealFault(ptr: *anyopaque, fault: Fault) ControlError!void {
     try sharedControl(ptr).healFault(fault);
 }
 
@@ -1156,7 +1157,7 @@ fn sharedControlActiveFaults(ptr: *anyopaque) usize {
     return sharedControl(ptr).registry.faults.items.len;
 }
 
-fn sharedControlAddHostName(ptr: *anyopaque, name: []const u8, node: NodeId) anyerror!void {
+fn sharedControlAddHostName(ptr: *anyopaque, name: []const u8, node: NodeId) ControlError!void {
     const shared = sharedControl(ptr);
     try shared.validateNode(node);
     const engine = shared.tcp orelse return error.UnsupportedFaultMode;
@@ -1164,7 +1165,7 @@ fn sharedControlAddHostName(ptr: *anyopaque, name: []const u8, node: NodeId) any
     try shared.world.record("network.host_name name={s} node={}", .{ name, node });
 }
 
-fn sharedControlRecordNetstat(ptr: *anyopaque, reason: []const u8) anyerror!void {
+fn sharedControlRecordNetstat(ptr: *anyopaque, reason: []const u8) ControlError!void {
     const shared = sharedControl(ptr);
     const engine = shared.tcp orelse return;
     try engine.recordNetstat(reason);
@@ -1178,31 +1179,31 @@ fn sharedControlSemantics(ptr: *anyopaque) ?types.Semantics {
     return sharedControl(ptr).semantics;
 }
 
-fn sharedControlHeal(ptr: *anyopaque) anyerror!void {
+fn sharedControlHeal(ptr: *anyopaque) ControlError!void {
     try sharedControl(ptr).heal();
 }
 
-fn sharedControlHealLinks(ptr: *anyopaque) anyerror!void {
+fn sharedControlHealLinks(ptr: *anyopaque) ControlError!void {
     try sharedControl(ptr).healLinks();
 }
 
-fn sharedControlRestoreCoreLiveness(ptr: *anyopaque, core: []const NodeId) anyerror!void {
+fn sharedControlRestoreCoreLiveness(ptr: *anyopaque, core: []const NodeId) ControlError!void {
     try sharedControl(ptr).restoreCoreLiveness(core);
 }
 
-fn sharedControlEvolveTickFaults(ptr: *anyopaque) anyerror!void {
+fn sharedControlEvolveTickFaults(ptr: *anyopaque) ControlError!void {
     try sharedControl(ptr).evolveTickFaults();
 }
 
-fn sharedControlEvolveFor(ptr: *anyopaque, duration_ns: clock_module.Duration) anyerror!void {
+fn sharedControlEvolveFor(ptr: *anyopaque, duration_ns: clock_module.Duration) ControlError!void {
     try sharedControl(ptr).evolveFor(duration_ns);
 }
 
-fn sharedControlNextFaultBoundaryBeforeOrAt(ptr: *anyopaque, end_ns: clock_module.Timestamp) anyerror!?clock_module.Timestamp {
+fn sharedControlNextFaultBoundaryBeforeOrAt(ptr: *anyopaque, end_ns: clock_module.Timestamp) ControlError!?clock_module.Timestamp {
     return try sharedControl(ptr).nextFaultBoundaryBeforeOrAt(end_ns);
 }
 
-fn sharedControlFinishRunFor(ptr: *anyopaque) anyerror!void {
+fn sharedControlFinishRunFor(ptr: *anyopaque) ControlError!void {
     try sharedControl(ptr).finishRunFor();
 }
 
@@ -1694,7 +1695,7 @@ fn TypedRuntime(comptime Payload: type) type {
             return @ptrCast(@alignCast(ptr));
         }
 
-        fn vtableSend(ptr: *anyopaque, from: NodeId, to: NodeId, payload: Payload) anyerror!void {
+        fn vtableSend(ptr: *anyopaque, from: NodeId, to: NodeId, payload: Payload) ControlError!void {
             try fromOpaque(ptr).send(from, to, payload);
         }
 
