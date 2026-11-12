@@ -95,24 +95,25 @@ const checks = [_]mar.StateCheck(Case){
     .{ .name = "only durable records recover", .check = recoveredStateIsSafe },
 };
 
+const Harness = mar.Harness(.{
+    .init = init,
+    .scenario = scenario,
+    .checks = &checks,
+    .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 16 } },
+});
+
 test "WAL recovery is deterministic" {
-    try mar.expectSimPass(.{
-        .allocator = std.testing.allocator,
-        .seed = 0xC0FFEE,
-        .simulate = mar.World.SimulateOptions{
-            .disk = .{ .sector_size = 16 },
-        },
-        .init = init,
-        .scenario = scenario,
-        .checks = &checks,
-    });
+    try Harness.expectPass(std.testing.allocator, .{ .seed = 0xC0FFEE });
+    try Harness.fuzz(std.testing.allocator, .{}, .{ .seeds = 256 });
 }
 ```
 
 The complete, runnable version is
-[`examples/kv_store.zig`](examples/kv_store.zig). `expectSimPass` records
-semantic choices on the first execution, exact-replays them on the second, and
-compares traces; `expectSimFuzz` repeats that replay check across derived seeds.
+[`examples/kv_store.zig`](examples/kv_store.zig). Every run records semantic
+choices on the first execution, exact-replays them on the second, and compares
+traces; `fuzz` repeats that across derived seeds, and the same harness replays
+and reduces retained capsules. A task that finds a violation calls
+`control.failRun(err)` instead of panicking, so the failure stays replayable.
 Advanced harnesses can supply a strictly ordered `seed_schedule` to reset
 the random stream at a simulated-time/random-call microstep. Schedules are
 same-build exploration controls; recorded decisions are the replay authority.
@@ -161,6 +162,9 @@ const mar = @import("marionette");
 - Structured deadlock and scheduler failures with compact wait-state traces,
   deterministic step budgets that make yielding livelocks replayable, and an
   opt-in worker watchdog for code that never yields.
+- One typed `mar.Harness` per scenario: run, fuzz, replay, reduce, campaigns,
+  and crash-point sweeps with the same checks, outcome capture, typed inputs,
+  and reruns from a build option (`-Dmarionette-seed`) without editing code.
 - Unattended campaigns that deduplicate failures, retain replay capsules,
   reduce each new failure, report throughput, and resume after a kill. Retained
   failures replay and reduce from a fresh process.
