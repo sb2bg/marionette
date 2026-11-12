@@ -54,3 +54,7 @@ test {
 test {
     _ = @import("network_tcp.zig");
 }
+
+test {
+    _ = @import("network_deadlines_090.zig");
+}

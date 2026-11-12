@@ -144,6 +144,14 @@ pub fn Ops(comptime Backend: type) type {
             connection.tcp = conn_id;
 
             while (true) {
+                // Scheduler waits round up to a tick. A handshake becoming
+                // ready at that tick must not beat its earlier raw deadline.
+                if (deadline) |at| if (at <= backend.world.now()) {
+                    backend.world.record("io.net.connect_timeout handle={} conn={}", .{ handle, conn_id }) catch {};
+                    engine.abort(conn_id);
+                    backend.retireNetHandle(handle);
+                    return error.Timeout;
+                };
                 switch (engine.connectStatus(conn_id)) {
                     .established => {
                         backend.world.record("io.net.connect handle={} port={}", .{ handle, address.getPort() }) catch {};
@@ -162,12 +170,6 @@ pub fn Ops(comptime Backend: type) type {
                     },
                     .pending => {},
                 }
-                if (deadline) |at| if (at <= backend.world.now()) {
-                    backend.world.record("io.net.connect_timeout handle={} conn={}", .{ handle, conn_id }) catch {};
-                    engine.abort(conn_id);
-                    backend.retireNetHandle(handle);
-                    return error.Timeout;
-                };
                 const wait_set = backend.futex_wait_set orelse {
                     engine.abort(conn_id);
                     backend.retireNetHandle(handle);

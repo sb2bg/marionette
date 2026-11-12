@@ -3216,6 +3216,10 @@ fn simBatchAwait(backend: *Backend, batch: *Io.Batch, deadline: ?u64, concurrent
             .woken, .timed_out => {},
             .canceled, .failed => return error.Canceled,
         }
+        // Honor the raw deadline before consuming readiness from a rounded
+        // wakeup. Keep the initial ready-operation pass above, so a zero-time
+        // poll can still complete without blocking.
+        if (deadline) |at| if (at <= backend.world.now()) return error.Timeout;
     }
 }
 

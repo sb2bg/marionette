@@ -477,7 +477,7 @@ test "tcp_v1: capsules record the network model and replay exactly" {
     const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
     defer std.testing.allocator.free(bytes);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"semantics\":\"tcp_v1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_version\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_version\":3") != null);
 
     var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
     defer capsule.deinit();
@@ -486,9 +486,11 @@ test "tcp_v1: capsules record the network model and replay exactly" {
     defer replay.deinit();
     try std.testing.expect(replay == .passed);
 
-    const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"model_version\":2", "\"model_version\":1");
-    defer std.testing.allocator.free(changed);
-    try std.testing.expectError(error.IncompatibleNetworkModel, mar.ReplayCapsule.decode(std.testing.allocator, changed));
+    inline for (.{ "\"model_version\":1", "\"model_version\":2" }) |old_model| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"model_version\":3", old_model);
+        defer std.testing.allocator.free(changed);
+        try std.testing.expectError(error.IncompatibleNetworkModel, mar.ReplayCapsule.decode(std.testing.allocator, changed));
+    }
 
     // A capsule written before 0.9 names no model and replays as legacy.
     const legacy = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"semantics\":\"tcp_v1\",", "");

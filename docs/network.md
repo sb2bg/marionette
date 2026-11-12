@@ -26,8 +26,9 @@ A `tcp_v1` capsule carries `model_version`
 (`network_semantic_version`); replay rejects a capsule from another version with
 `error.IncompatibleNetworkModel`.
 Model version 2 corrects typed-endpoint holds, slow faults, per-path ordering,
-full-range TCP jitter, and RTT sampling. Earlier candidate capsules recorded
-under model version 1 require their pinned build.
+full-range TCP jitter, and RTT sampling. Model version 3 preserves raw
+application deadlines when scheduler waits round up to a tick. Earlier
+candidate capsules recorded under versions 1 or 2 require their pinned build.
 
 ## Topology
 
@@ -105,7 +106,11 @@ Without an application timeout, a read across a partition blocks. If nothing
 else can happen, the scheduler reports a deadlock, so a missing timeout is a
 finding, not a hang. Applications set timeouts the production way: a `connect`
 timeout, or `io.operateTimeout` around a read or write (`Batch` awaits are
-supported).
+supported). Scheduler waits round up to a clock tick, but an operation that
+has blocked still checks its original deadline before accepting readiness.
+The timeout wins when the wake is at or after that deadline; late reads do
+not consume data, and late writes do not consume send-buffer capacity. An
+already-ready batch operation may complete immediately with a zero timeout.
 
 ### Close, Kill, And Crash
 

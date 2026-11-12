@@ -95,9 +95,16 @@ no longer read each other's state.
   bound, and RTT estimates use each segment's own ACK instead of counting
   idle time before a later write. Allocation-failure, fault-composition,
   ordering, timing, and capsule replay regressions cover these corrections.
-- **Candidate compatibility.** Network model version 2 rejects earlier
-  version-1 candidate capsules with `IncompatibleNetworkModel`. Disk revision
-  3 and both storage review fixes shipped in 0.8.3 are retained unchanged.
+- **Deadline ordering.** A TCP connect or blocked batch operation honors its
+  original deadline before accepting readiness at a rounded scheduler tick.
+  Timeouts do not consume late read data or newly available write capacity;
+  already-ready batch operations still support zero-time polling. Tests cover
+  relative and absolute deadlines, task and harness contexts, exact-deadline
+  ties, batch retries, and both read and write side effects.
+- **Candidate compatibility.** Network model version 3 rejects earlier
+  version-1 and version-2 candidate capsules with `IncompatibleNetworkModel`.
+  Disk revision 3 and both storage review fixes shipped in 0.8.3 are retained
+  unchanged.
 
 ## v0.8.3 - 2026-11-11
 
