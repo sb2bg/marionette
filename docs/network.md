@@ -25,6 +25,9 @@ evidence and unported harnesses keep running, and 0.10 removes it. Capsules writ
 A `tcp_v1` capsule carries `model_version`
 (`network_semantic_version`); replay rejects a capsule from another version with
 `error.IncompatibleNetworkModel`.
+Model version 2 corrects typed-endpoint holds, slow faults, per-path ordering,
+full-range TCP jitter, and RTT sampling. Earlier candidate capsules recorded
+under model version 1 require their pinned build.
 
 ## Topology
 
@@ -213,7 +216,7 @@ asked. `control.network.recordNetstat(reason)` records one on demand.
 
 `Endpoint(Message)` stays experimental. It sends typed values over per-path
 queues and obeys the same fault handles (`drop` and `reject` discard, clogs
-delay), but it has no wire, no flow control, and no connection lifecycle. raftz
+and `hold` delay, and `slow` adds directed latency, jitter, and loss), but it has no wire, no flow control, and no connection lifecycle. raftz
 builds cluster tests on it; it is not promoted to a stable surface. Retaining
 it requires the contract below.
 
@@ -222,7 +225,8 @@ happen at send (configured loss, a down source) or when the message becomes due
 (a down destination, a disabled link, a dropping or rejecting fault), and every
 loss records `network.drop` with its reason. Ready messages are delivered by
 delivery time, then send order, so latency can reorder messages on different
-paths but never on one path. A full path returns `error.EventQueueFull`.
+paths but, under `tcp_v1`, never on one path. `legacy_v0` keeps its earlier
+delivery-time ordering. A full path returns `error.EventQueueFull`.
 
 Ownership: `send` copies the message by value and the receiver owns its copy.
 `sim.endpoint(Message, node)` rejects at compile time a `Message` containing
@@ -233,7 +237,9 @@ referenced storage must stay valid and immutable for the simulation.
 Time: `poll()` returns a message ready now, or null, and never advances
 virtual time. `awaitDelivery()` is the explicit harness-driver operation: it
 advances time to this endpoint's own next delivery, or returns null without
-advancing when nothing is in flight to it. `receive()`, which could advance
+advancing when no packet has a finite delivery time. An indefinite hold can
+therefore return null while messages remain queued; healing the hold makes
+them eligible again. `receive()`, which could advance
 time to a delivery for any endpoint on the bus, is deprecated and will be
 removed in 0.10.
 

@@ -477,7 +477,7 @@ test "tcp_v1: capsules record the network model and replay exactly" {
     const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
     defer std.testing.allocator.free(bytes);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"semantics\":\"tcp_v1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_version\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_version\":2") != null);
 
     var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
     defer capsule.deinit();
@@ -486,7 +486,7 @@ test "tcp_v1: capsules record the network model and replay exactly" {
     defer replay.deinit();
     try std.testing.expect(replay == .passed);
 
-    const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"model_version\":1", "\"model_version\":2");
+    const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"model_version\":2", "\"model_version\":1");
     defer std.testing.allocator.free(changed);
     try std.testing.expectError(error.IncompatibleNetworkModel, mar.ReplayCapsule.decode(std.testing.allocator, changed));
 
@@ -627,4 +627,96 @@ test "tcp_v1: a window probe recovers a lost window update" {
     try std.testing.expectEqual(@as(?anyerror, null), flood.write_error);
     try std.testing.expectEqual(@as(usize, Flood.total), received);
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "tcp.window_probe conn=2") != null);
+}
+
+test "tcp_v1: full-range TCP latency jitter preserves application timeouts" {
+    inline for (.{ false, true }) |degraded| {
+        var world = try mar.World.init(std.testing.allocator, .{ .seed = 7, .tick_ns = 1 });
+        defer world.deinit();
+        const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+        const server_io = (try sim.envForNode(0)).io();
+        const client_io = (try sim.envForNode(1)).io();
+        try sim.control.network.setLatency(.{ .min_latency_ns = 0, .latency_jitter_ns = if (degraded) 0 else std.math.maxInt(u64) });
+        if (degraded) _ = try sim.control.network.degrade(1, 0, .{ .jitter_ns = std.math.maxInt(u64) });
+        var listener = try serverAddress(7000).listen(server_io, .{});
+        defer listener.deinit(server_io);
+        try std.testing.expectError(error.Timeout, serverAddress(7000).connect(client_io, .{
+            .mode = .stream,
+            .timeout = .{ .duration = .{ .raw = .fromNanoseconds(10), .clock = .awake } },
+        }));
+        try std.testing.expectEqual(@as(u64, 10), world.now());
+    }
+}
+
+test "tcp_v1: idle time between writes is not sampled as round-trip time" {
+    var world = try mar.World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 1 * ms });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2, .semantics = .tcp_v1 } });
+    try sim.control.network.setLatency(.{ .min_latency_ns = 1 * ms });
+    const server_io = (try sim.envForNode(0)).io();
+    const client_io = (try sim.envForNode(1)).io();
+    const address = mar.AnyNetworkControl.hostIp4(0, 7000);
+    var listener = try address.listen(server_io, .{});
+    const client = try address.connect(client_io, .{ .mode = .stream, .protocol = .tcp });
+    const server = try listener.accept(server_io);
+    var buffer: [64]u8 = undefined;
+
+    try writeAll(client_io, client, "first");
+    _ = try read(server_io, server, &buffer);
+    try sim.control.runFor(10 * s);
+    try writeAll(client_io, client, "second");
+    _ = try read(server_io, server, &buffer);
+    try sim.control.runFor(1 * s);
+
+    // Each segment's own ACK samples a 2 ms round trip, so the first
+    // retransmission waits the 200 ms minimum, not the 10 s of think time.
+    const fault = try sim.control.network.partition(&.{0}, &.{1}, .{});
+    try writeAll(client_io, client, "third");
+    try sim.control.runFor(1 * s);
+    try sim.control.network.healFault(fault);
+    try mar.expectTraceContains(world.traceBytes(), "tcp.retransmit conn=2 seq=12 attempt=1 rto_ns=400000000");
+
+    client.close(client_io);
+    server.close(server_io);
+    listener.deinit(server_io);
+}
+
+const TypedFaultApp = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const sender = try case.sim.endpoint(u32, 0);
+        const receiver = try case.sim.endpoint(u32, 1);
+        try case.control().network.setLatency(.{ .min_latency_ns = 10 });
+        _ = try case.control().network.degrade(0, 1, .{ .delay_ns = 10, .jitter_ns = 20 });
+        _ = try case.control().network.cut(0, 1, .{ .mode = .hold, .duration_ns = 20 });
+        try sender.send(1, 1);
+        try sender.send(1, 2);
+        try std.testing.expectEqual(@as(u32, 1), (try receiver.awaitDelivery()).?.message);
+        try std.testing.expectEqual(@as(u32, 2), (try receiver.awaitDelivery()).?.message);
+    }
+};
+
+test "endpoint: composed faults record and replay through a capsule" {
+    const simulate: mar.World.SimulateOptions = .{ .network = .{ .nodes = 2 } };
+    var report = try mar.runSimCase(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xFA017,
+        .tick_ns = 10,
+        .init = TypedFaultApp.init,
+        .scenario = TypedFaultApp.scenario,
+        .simulate = simulate,
+    });
+    defer report.deinit();
+    try std.testing.expect(report == .passed);
+    const identity: mar.ReplayIdentity = .{ .build = "typed-faults", .sut = "endpoint" };
+    const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
+    defer std.testing.allocator.free(bytes);
+    var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
+    defer capsule.deinit();
+    var replay = try mar.replaySimCase(.{ .allocator = std.testing.allocator, .init = TypedFaultApp.init, .scenario = TypedFaultApp.scenario }, &capsule, identity);
+    defer replay.deinit();
+    try std.testing.expect(replay == .passed);
 }

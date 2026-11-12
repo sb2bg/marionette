@@ -408,6 +408,7 @@ const SharedRuntime = struct {
         return try addTimestamp(self.world.now(), duration);
     }
 
+    /// Consume `paths`, including when registration or recording fails.
     fn commitFault(
         self: *SharedRuntime,
         kind: faults_module.FaultKind,
@@ -476,7 +477,8 @@ const SharedRuntime = struct {
         try self.validateFaultOptions(options);
         try self.world.record("network.partition left_count={} right_count={}", .{ left.len, right.len });
         var paths = try self.registry.emptyPaths();
-        errdefer paths.deinit(self.world.allocator);
+        var paths_owned = true;
+        errdefer if (paths_owned) paths.deinit(self.world.allocator);
         for (left) |from| {
             for (right) |to| {
                 if (from == to) continue;
@@ -485,6 +487,7 @@ const SharedRuntime = struct {
             }
         }
         const until = try self.untilFor(options.duration_ns);
+        paths_owned = false;
         return self.commitFault(.partition, options.mode, paths, until, .{ .delay_ns = options.delay_ns });
     }
 
@@ -492,7 +495,8 @@ const SharedRuntime = struct {
         try self.validateNode(node);
         try self.validateFaultOptions(options);
         var paths = try self.registry.emptyPaths();
-        errdefer paths.deinit(self.world.allocator);
+        var paths_owned = true;
+        errdefer if (paths_owned) paths.deinit(self.world.allocator);
         for (0..self.process_count) |other_index| {
             if (other_index == node) continue;
             const other: NodeId = @intCast(other_index);
@@ -500,6 +504,7 @@ const SharedRuntime = struct {
             paths.set(try self.pathIndex(other, node));
         }
         const until = try self.untilFor(options.duration_ns);
+        paths_owned = false;
         return self.commitFault(.isolate, options.mode, paths, until, .{ .delay_ns = options.delay_ns });
     }
 
@@ -507,9 +512,11 @@ const SharedRuntime = struct {
         const index = try self.pathIndex(from, to);
         try self.validateFaultOptions(options);
         var paths = try self.registry.emptyPaths();
-        errdefer paths.deinit(self.world.allocator);
+        var paths_owned = true;
+        errdefer if (paths_owned) paths.deinit(self.world.allocator);
         paths.set(index);
         const until = try self.untilFor(options.duration_ns);
+        paths_owned = false;
         return self.commitFault(.cut, options.mode, paths, until, .{ .delay_ns = options.delay_ns });
     }
 
@@ -521,9 +528,11 @@ const SharedRuntime = struct {
         try self.validateTickAlignedDuration(options.jitter_ns);
         if (options.duration_ns) |duration| try self.validatePositiveTickDuration(duration);
         var paths = try self.registry.emptyPaths();
-        errdefer paths.deinit(self.world.allocator);
+        var paths_owned = true;
+        errdefer if (paths_owned) paths.deinit(self.world.allocator);
         paths.set(index);
         const until = try self.untilFor(options.duration_ns);
+        paths_owned = false;
         return self.commitFault(.degrade, .slow, paths, until, .{
             .delay_ns = options.delay_ns,
             .jitter_ns = options.jitter_ns,
@@ -851,13 +860,15 @@ const SharedRuntime = struct {
         );
         if (self.tcp != null) {
             var paths = try self.registry.emptyPaths();
-            errdefer paths.deinit(self.world.allocator);
+            var paths_owned = true;
+            errdefer if (paths_owned) paths.deinit(self.world.allocator);
             for (0..self.process_count) |other_index| {
                 if (other_index == isolated) continue;
                 const other: NodeId = @intCast(other_index);
                 paths.set(try self.pathIndex(isolated, other));
                 paths.set(try self.pathIndex(other, isolated));
             }
+            paths_owned = false;
             const fault = try self.commitFault(.auto_partition, .drop, paths, null, .{});
             self.auto_partition_fault = fault.id;
         }
@@ -1437,7 +1448,6 @@ fn TypedRuntime(comptime Payload: type) type {
                 .shared = shared,
                 .queues = queues,
             };
-            errdefer runtime.free(allocator);
 
             try shared.registerTypedRuntime(Payload, runtime);
             errdefer shared.unregisterTypedRuntime(Payload);
@@ -1478,20 +1488,47 @@ fn TypedRuntime(comptime Payload: type) type {
                 return;
             }
 
-            const latency_ns = try self.latency();
+            var latency_ns = try self.latency();
+            const path = try shared.pathIndex(from, to);
+            if (shared.tcp != null) {
+                for (shared.registry.faults.items) |*fault| {
+                    if (fault.mode != .slow or !fault.covers(path)) continue;
+                    latency_ns = std.math.add(clock_module.Duration, latency_ns, fault.delay_ns) catch return error.InvalidDuration;
+                    if (fault.jitter_ns > 0) {
+                        const tick = shared.world.clock().tick_ns;
+                        const max_ticks = fault.jitter_ns / tick;
+                        const ticks = if (max_ticks == std.math.maxInt(u64))
+                            try shared.world.chooseU64("network.typed_degrade_latency")
+                        else
+                            try shared.world.chooseIntLessThan("network.typed_degrade_latency", u64, max_ticks + 1);
+                        latency_ns = std.math.add(clock_module.Duration, latency_ns, ticks * tick) catch return error.InvalidDuration;
+                    }
+                    if (fault.drop_rate.numerator > 0) {
+                        const roll = try shared.world.chooseIntLessThan("network.typed_degrade_drop", u32, fault.drop_rate.denominator);
+                        if (fault.drop_rate.fires(roll)) {
+                            try shared.world.record("network.drop id={} from={} to={} reason=fault fault={} mode=slow roll={}", .{ packet_id, from, to, fault.id, roll });
+                            return;
+                        }
+                    }
+                }
+            }
             if (std.math.maxInt(clock_module.Timestamp) - shared.world.now() < latency_ns) {
                 return error.InvalidDuration;
             }
 
+            const queue = &self.queues[path];
+            var deliver_at = shared.world.now() + latency_ns;
+            if (shared.tcp != null and queue.items.len > 0) {
+                deliver_at = @max(deliver_at, queue.items[queue.items.len - 1].deliver_at);
+            }
             const packet: Packet = .{
                 .id = packet_id,
                 .from = from,
                 .to = to,
-                .deliver_at = shared.world.now() + latency_ns,
+                .deliver_at = deliver_at,
                 .payload = payload,
             };
 
-            const queue = &self.queues[try shared.pathIndex(from, to)];
             if (queue.items.len >= shared.path_capacity) return error.EventQueueFull;
             try queue.ensureUnusedCapacity(shared.world.allocator, 1);
 
@@ -1553,10 +1590,24 @@ fn TypedRuntime(comptime Payload: type) type {
             for (self.queues, 0..) |queue, index| {
                 const packet = if (queue.items.len == 0) continue else queue.items[0];
                 if (packet.to != node) continue;
-                const ready_at = @max(packet.deliver_at, self.shared.links[index].clogged_until);
+                const ready_at = self.packetReadyAt(index, packet) orelse continue;
                 if (best == null or ready_at < best.?) best = ready_at;
             }
             return best;
+        }
+
+        fn packetReadyAt(self: *const Self, path: usize, packet: Packet) ?clock_module.Timestamp {
+            var at = @max(packet.deliver_at, self.shared.links[path].clogged_until);
+            // Dropping faults outrank holds. Legacy keeps its earlier clog
+            // ordering so recorded characterization traces remain unchanged.
+            if (self.shared.tcp == null) return at;
+            if (self.shared.registry.blocks(path)) return packet.deliver_at;
+            switch (self.shared.registry.holdUntil(path)) {
+                .none => {},
+                .until => |until| at = @max(at, until),
+                .indefinite => return null,
+            }
+            return at;
         }
 
         fn popReadyFor(self: *Self, node: NodeId) !?Packet {
@@ -1599,8 +1650,8 @@ fn TypedRuntime(comptime Payload: type) type {
                 if (queue.items.len == 0) continue;
                 const packet = queue.items[0];
                 if (packet.to != node) continue;
-                if (packet.deliver_at > self.shared.world.now()) continue;
-                if (self.shared.links[index].clogged_until > self.shared.world.now()) continue;
+                const ready_at = self.packetReadyAt(index, packet) orelse continue;
+                if (ready_at > self.shared.world.now()) continue;
                 if (best_index == null or packetLessThan(packet, best_packet)) {
                     best_index = index;
                     best_packet = packet;

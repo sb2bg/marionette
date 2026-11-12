@@ -87,6 +87,18 @@ no longer read each other's state.
   replaced models, 0.10 removes it; its capsules replay on 0.9 or earlier
   pinned builds.
 
+- **Release review fixes.** Fault registration and typed-endpoint creation
+  free their allocations exactly once on failure. Typed endpoints honor
+  overlapping and timed holds, drop/reject precedence, directed slow-fault
+  latency, jitter, and loss, and FIFO delivery on each `tcp_v1` message path.
+  TCP jitter accepts the full duration range without overflowing its draw
+  bound, and RTT estimates use each segment's own ACK instead of counting
+  idle time before a later write. Allocation-failure, fault-composition,
+  ordering, timing, and capsule replay regressions cover these corrections.
+- **Candidate compatibility.** Network model version 2 rejects earlier
+  version-1 candidate capsules with `IncompatibleNetworkModel`. Disk revision
+  3 and both storage review fixes shipped in 0.8.3 are retained unchanged.
+
 ## v0.8.3 - 2026-11-11
 
 Storage correctness. The disk contract is now `portable_v2` (disk model

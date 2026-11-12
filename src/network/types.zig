@@ -67,7 +67,7 @@ pub const TimingProfile = enum {
 
 /// Version of the network model's observable semantics. Bump when replaying
 /// the same decisions under the same options would change behavior.
-pub const network_semantic_version: u32 = 1;
+pub const network_semantic_version: u32 = 2;
 
 /// Per-socket buffer sizes for `tcp_v1`.
 pub const TcpOptions = struct {

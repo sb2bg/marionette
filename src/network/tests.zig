@@ -2,6 +2,7 @@ const std = @import("std");
 
 const clock_module = @import("../clock.zig");
 const endpoint_module = @import("endpoint.zig");
+const faults_module = @import("faults.zig");
 const sim_module = @import("sim.zig");
 const types = @import("types.zig");
 const World = @import("../world.zig").World;
@@ -20,6 +21,51 @@ const TestPayload = struct {
 const OtherTestPayload = struct {
     value: u64,
 };
+
+const FaultRegistration = enum { partition, isolate, cut, degrade, automatic_partition, link, clog };
+
+fn faultRegistrationAllocationFailureSweep(allocator: std.mem.Allocator, kind: FaultRegistration) !void {
+    var world = try World.init(allocator, .{ .seed = 0xFA017, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const control = sim.control.network;
+    switch (kind) {
+        .partition => _ = try control.partition(&.{0}, &.{ 1, 2 }, .{ .duration_ns = 20 }),
+        .isolate => _ = try control.isolate(1, .{ .duration_ns = 20 }),
+        .cut => _ = try control.cut(0, 1, .{ .duration_ns = 20 }),
+        .degrade => _ = try control.degrade(0, 1, .{ .delay_ns = 10, .duration_ns = 20 }),
+        .automatic_partition => {
+            try control.setPartitionDynamics(.{ .partition_rate = .always() });
+            try sim.control.tick();
+        },
+        .link => try control.setLink(0, 1, false),
+        .clog => try control.clog(0, 1, 20),
+    }
+    try std.testing.expectEqual(@as(usize, 1), control.activeFaultCount());
+}
+
+test "network: fault registration frees owned paths once on every allocation failure" {
+    // Force growth to allocate, so failure indices do not depend on whether
+    // a host allocator can resize a particular trace buffer in place.
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    inline for (std.enums.values(FaultRegistration)) |kind| {
+        try std.testing.checkAllAllocationFailures(backing.allocator(), faultRegistrationAllocationFailureSweep, .{kind});
+    }
+}
+
+fn endpointAllocationFailureSweep(allocator: std.mem.Allocator) !void {
+    var world = try World.init(allocator, .{ .seed = 0xA110C });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    _ = try sim.endpoint(TestPayload, 0);
+    _ = try sim.endpoint(TestPayload, 1);
+    _ = try sim.endpoint(OtherTestPayload, 1);
+}
+
+test "network: endpoint construction frees its runtime and queues once on allocation failure" {
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(backing.allocator(), endpointAllocationFailureSweep, .{});
+}
 
 test "network: full-range latency jitter does not overflow its draw bound" {
     var world = try World.init(std.testing.allocator, .{ .seed = 0x1A7E, .tick_ns = 1 });
@@ -699,4 +745,103 @@ test "endpoint: payloads with pointers or slices need the borrowed opt-in" {
     try sender.send(1, .{ .name = "static" });
     const envelope = (try receiver.awaitDelivery()).?;
     try std.testing.expectEqualStrings("static", envelope.message.name);
+}
+
+test "endpoint: overlapping holds delay delivery until the last hold heals" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sender = try sim.endpoint(TestPayload, 0);
+    const receiver = try sim.endpoint(TestPayload, 1);
+    const manual = try sim.control.network.cut(0, 1, .{ .mode = .hold });
+    _ = try sim.control.network.cut(0, 1, .{ .mode = .hold, .duration_ns = 30 });
+    try sender.send(1, .{ .value = 1 });
+    try sender.send(1, .{ .value = 2 });
+    try sim.control.runFor(10);
+    try std.testing.expect(try receiver.poll() == null);
+    try std.testing.expect(try receiver.awaitDelivery() == null);
+    try std.testing.expectEqual(@as(u64, 10), world.now());
+    try sim.control.network.healFault(manual);
+    try std.testing.expect(try receiver.poll() == null);
+    try std.testing.expectEqual(@as(u64, 1), (try receiver.awaitDelivery()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 30), world.now());
+    try std.testing.expectEqual(@as(u64, 2), (try receiver.poll()).?.message.value);
+    try std.testing.expectEqual(@as(usize, 0), sim.control.network.activeFaultCount());
+}
+
+test "endpoint: an indefinite hold does not block another incoming path" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const held = try sim.endpoint(TestPayload, 0);
+    const receiver = try sim.endpoint(TestPayload, 1);
+    const free = try sim.endpoint(TestPayload, 2);
+    const fault = try sim.control.network.cut(0, 1, .{ .mode = .hold });
+    try held.send(1, .{ .value = 1 });
+    try free.send(1, .{ .value = 2 });
+    try std.testing.expectEqual(@as(u64, 2), (try receiver.awaitDelivery()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 10), world.now());
+    try std.testing.expect(try receiver.awaitDelivery() == null);
+    try sim.control.network.healFault(fault);
+    try std.testing.expectEqual(@as(u64, 1), (try receiver.poll()).?.message.value);
+}
+
+test "endpoint: dropping faults outrank holds and clogs" {
+    inline for (.{ faults_module.FaultMode.drop, faults_module.FaultMode.reject }) |mode| {
+        var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 10 });
+        defer world.deinit();
+        const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+        const sender = try sim.endpoint(TestPayload, 0);
+        const receiver = try sim.endpoint(TestPayload, 1);
+        _ = try sim.control.network.cut(0, 1, .{ .mode = .hold });
+        try sim.control.network.clog(0, 1, 100);
+        _ = try sim.control.network.cut(0, 1, .{ .mode = mode });
+        try sender.send(1, .{ .value = 1 });
+        try std.testing.expect(try receiver.awaitDelivery() == null);
+        try std.testing.expectEqual(@as(u64, 10), world.now());
+        try sim.control.network.heal();
+        try std.testing.expect(try receiver.poll() == null);
+        try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=link_disabled") != null);
+    }
+}
+
+test "endpoint: slow faults add directed latency and loss" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 3 } });
+    const sender = try sim.endpoint(TestPayload, 0);
+    const receiver = try sim.endpoint(TestPayload, 1);
+    const other = try sim.endpoint(TestPayload, 2);
+    const first = try sim.control.network.degrade(0, 1, .{ .delay_ns = 20 });
+    _ = try sim.control.network.degrade(0, 1, .{ .delay_ns = 30 });
+    try sender.send(1, .{ .value = 1 });
+    try other.send(1, .{ .value = 2 });
+    try std.testing.expectEqual(@as(u64, 2), (try receiver.awaitDelivery()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 10), world.now());
+    try std.testing.expectEqual(@as(u64, 1), (try receiver.awaitDelivery()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 60), world.now());
+    try sim.control.network.healFault(first);
+    try sender.send(1, .{ .value = 3 });
+    try std.testing.expectEqual(@as(u64, 3), (try receiver.awaitDelivery()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 100), world.now());
+    _ = try sim.control.network.degrade(0, 1, .{ .drop_rate = .always() });
+    try sender.send(1, .{ .value = 4 });
+    try std.testing.expect(try receiver.awaitDelivery() == null);
+    try std.testing.expectEqual(@as(u64, 100), world.now());
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "reason=fault fault=3 mode=slow") != null);
+}
+
+test "endpoint: latency changes preserve FIFO on one directed path" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 1, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .nodes = 2 } });
+    const sender = try sim.endpoint(TestPayload, 0);
+    const receiver = try sim.endpoint(TestPayload, 1);
+    try sim.control.network.setLatency(.{ .min_latency_ns = 100 });
+    try sender.send(1, .{ .value = 1 });
+    try sim.control.network.setLatency(.{ .min_latency_ns = 10 });
+    try sender.send(1, .{ .value = 2 });
+    try std.testing.expectEqual(@as(u64, 1), (try receiver.awaitDelivery()).?.message.value);
+    try std.testing.expectEqual(@as(u64, 100), world.now());
+    try std.testing.expectEqual(@as(u64, 2), (try receiver.poll()).?.message.value);
 }

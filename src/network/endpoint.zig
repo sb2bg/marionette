@@ -39,7 +39,8 @@ pub fn requireValuePayload(comptime Message: type) void {
 /// down destination, a disabled link, a dropping or rejecting fault); every
 /// loss records `network.drop` with its reason. Ready messages are delivered
 /// in order of delivery time, then send order, so latency can reorder
-/// messages on different paths but never on one path. Clogs and holding
+/// messages on different paths but, under `tcp_v1`, never on one path.
+/// `legacy_v0` retains its older delivery-time ordering. Clogs and holding
 /// faults delay without dropping. A full directed path returns
 /// `error.EventQueueFull` from `send`; there is no other backpressure.
 ///
@@ -96,8 +97,10 @@ pub fn Endpoint(comptime Message: type) type {
         }
 
         /// Advance virtual time to this endpoint's next pending delivery and
-        /// return it. Returns null, without advancing, when nothing is in
-        /// flight to this endpoint. A harness-driver operation: it moves the
+        /// return it. Returns null, without advancing, when nothing has a
+        /// finite delivery time, including packets under indefinite holds.
+        /// Those packets remain queued until their holds heal.
+        /// A harness-driver operation: it moves the
         /// clock explicitly, so tasks should poll and sleep instead.
         pub fn awaitDelivery(self: Self) !?Envelope {
             return try self.vtable.await_delivery(self.ptr, self.self_node);

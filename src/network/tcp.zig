@@ -259,6 +259,7 @@ pub const Connection = struct {
     timer_armed: [timer_kind_count]bool = @splat(false),
 
     const RttSample = struct {
+        /// Sequence just past the timed segment.
         seq: u64,
         sent_at: Timestamp,
     };
@@ -445,6 +446,16 @@ pub const Engine = struct {
 
     fn ceilTick(self: *Engine, duration_ns: Duration) Duration {
         return self.fabric.world.clock().ceilDuration(duration_ns);
+    }
+
+    fn sampleJitter(self: *Engine, comptime site: []const u8, maximum_ns: Duration) Duration {
+        const tick = self.world().clock().tick_ns;
+        const maximum_ticks = maximum_ns / tick;
+        const ticks = if (maximum_ticks == std.math.maxInt(u64))
+            self.world().chooseU64(site) catch 0
+        else
+            self.world().chooseIntLessThan(site, u64, maximum_ticks + 1) catch 0;
+        return ticks * tick;
     }
 
     // ------------------------------------------------------------------
@@ -766,7 +777,7 @@ pub const Engine = struct {
         } else {
             self.sendControl(conn, .{ .syn = true }, 0);
             conn.snd_nxt = 1;
-            conn.rtt_sample = .{ .seq = 0, .sent_at = self.now() };
+            conn.rtt_sample = .{ .seq = 1, .sent_at = self.now() };
             self.armTimer(conn, .rto, conn.rto_ns);
         }
         return conn.id;
@@ -1075,18 +1086,14 @@ pub const Engine = struct {
         if (!loopback) {
             delay = options.min_latency_ns;
             if (options.latency_jitter_ns > 0) {
-                const tick = world_ptr.clock().tick_ns;
-                const ticks = world_ptr.chooseIntLessThan("network.tcp_latency", u64, options.latency_jitter_ns / tick + 1) catch 0;
-                delay +|= ticks * tick;
+                delay +|= self.sampleJitter("network.tcp_latency", options.latency_jitter_ns);
             }
             for (self.fabric.registry.faults.items) |*fault| {
                 if (!fault.covers(path)) continue;
                 if (fault.mode == .slow) {
                     delay +|= fault.delay_ns;
                     if (fault.jitter_ns > 0) {
-                        const tick = world_ptr.clock().tick_ns;
-                        const ticks = world_ptr.chooseIntLessThan("network.tcp_degrade_latency", u64, fault.jitter_ns / tick + 1) catch 0;
-                        delay +|= ticks * tick;
+                        delay +|= self.sampleJitter("network.tcp_degrade_latency", fault.jitter_ns);
                     }
                     if (fault.drop_rate.numerator > 0) {
                         const roll = world_ptr.chooseIntLessThan("network.tcp_degrade_drop", u32, fault.drop_rate.denominator) catch 0;
@@ -1221,7 +1228,7 @@ pub const Engine = struct {
         self.world().record("tcp.state conn={} host={} state=SYN_RECV sock={} local={f} remote={f}", .{ conn.id, conn.host, listener.id, conn.local, conn.remote }) catch {};
         self.sendControl(conn, .{ .syn = true, .ack = true }, 0);
         conn.snd_nxt = 1;
-        conn.rtt_sample = .{ .seq = 0, .sent_at = self.now() };
+        conn.rtt_sample = .{ .seq = 1, .sent_at = self.now() };
         self.armTimer(conn, .rto, conn.rto_ns);
     }
 
@@ -1533,7 +1540,8 @@ pub const Engine = struct {
 
     fn sampleRtt(self: *Engine, conn: *Connection, ack: u64) void {
         const sample = conn.rtt_sample orelse return;
-        if (ack <= sample.seq) return;
+        // `seq` is the end of the timed segment; its own ACK is the sample.
+        if (ack < sample.seq) return;
         conn.rtt_sample = null;
         const rtt = self.now() - sample.sent_at;
         if (conn.srtt_ns) |srtt| {
