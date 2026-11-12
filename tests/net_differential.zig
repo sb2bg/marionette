@@ -14,6 +14,7 @@ const Outcome = struct {
     client_read: [4]u8 = undefined,
     client_read_len: usize = 0,
     client_saw_eof: bool = false,
+    accepted_peer_ip_is_loopback: bool = false,
 };
 
 const ServerTask = struct {
@@ -30,6 +31,10 @@ const ServerTask = struct {
             stream.socket.address.getPort() != self.server.socket.address.getPort();
         self.outcome.accepted_peer_family_matches_connect =
             std.meta.activeTag(stream.socket.address) == std.meta.activeTag(self.connect_address);
+        self.outcome.accepted_peer_ip_is_loopback = switch (stream.socket.address) {
+            .ip4 => |ip4| ip4.bytes[0] == 127,
+            .ip6 => |ip6| ip6.isLoopBack(),
+        };
 
         var read_buffers: [1][]u8 = .{&self.outcome.server_read};
         self.outcome.server_read_len = netRead(
@@ -208,4 +213,44 @@ fn netWrite(io: std.Io, handle: std.Io.net.Socket.Handle, header: []const u8, da
         .data = data,
         .splat = splat,
     } })).net_write;
+}
+
+/// Under `tcp_v1` a host owns its loopback, so the same-host exchange the host
+/// backend runs is the honest comparison, including the client's source
+/// address (which `legacy_v0` does not model).
+fn simulatedTcpOutcome(wildcard: bool) !Outcome {
+    var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xD1FD, .tick_ns = 10 });
+    defer world.deinit();
+    const sim = try world.simulate(.{ .network = .{ .semantics = .tcp_v1, .nodes = 2 } });
+    const io = (try sim.envForNode(0)).io();
+    const bind = Io.net.IpAddress.parseIp4(if (wildcard) "0.0.0.0" else "127.0.0.1", 0) catch unreachable;
+    var server = try bind.listen(io, .{});
+    defer server.deinit(io);
+    const connect_address = Io.net.IpAddress.parseIp4("127.0.0.1", server.socket.address.getPort()) catch unreachable;
+
+    var outcome: Outcome = .{};
+    try runExchange(io, &server, io, connect_address, &outcome);
+    return outcome;
+}
+
+fn expectSameOutcome(host: Outcome, simulated: Outcome) !void {
+    try std.testing.expectEqual(host.accepted_peer_port_is_nonzero, simulated.accepted_peer_port_is_nonzero);
+    try std.testing.expectEqual(host.accepted_peer_port_differs_from_listener, simulated.accepted_peer_port_differs_from_listener);
+    try std.testing.expectEqual(host.accepted_peer_family_matches_connect, simulated.accepted_peer_family_matches_connect);
+    try std.testing.expectEqual(host.accepted_peer_ip_is_loopback, simulated.accepted_peer_ip_is_loopback);
+    try std.testing.expectEqual(host.server_read_len, simulated.server_read_len);
+    try std.testing.expectEqualStrings(host.server_read[0..host.server_read_len], simulated.server_read[0..simulated.server_read_len]);
+    try std.testing.expectEqual(host.client_read_len, simulated.client_read_len);
+    try std.testing.expectEqualStrings(host.client_read[0..host.client_read_len], simulated.client_read[0..simulated.client_read_len]);
+    try std.testing.expectEqual(host.client_saw_eof, simulated.client_saw_eof);
+}
+
+test "tcp_v1 no-fault loopback exchange matches the host backend, source address included" {
+    const host = try hostOutcome();
+    try std.testing.expect(host.accepted_peer_ip_is_loopback);
+    try expectSameOutcome(host, try simulatedTcpOutcome(false));
+}
+
+test "tcp_v1 wildcard loopback exchange matches the host backend, source address included" {
+    try expectSameOutcome(try hostWildcardOutcome(), try simulatedTcpOutcome(true));
 }
