@@ -101,8 +101,11 @@ no longer read each other's state.
   already-ready batch operations still support zero-time polling. Tests cover
   relative and absolute deadlines, task and harness contexts, exact-deadline
   ties, batch retries, and both read and write side effects.
-- **Candidate compatibility.** Network model version 3 rejects earlier
-  version-1 and version-2 candidate capsules with `IncompatibleNetworkModel`.
+- **Socket-close wakeups.** Closing a TCP socket wakes all pending batch reads
+  and writes, including timed operations, so they observe `SocketUnconnected`
+  immediately instead of timing out or remaining blocked without a deadline.
+- **Candidate compatibility.** Network model version 4 rejects earlier
+  version-1, version-2, and version-3 candidate capsules with `IncompatibleNetworkModel`.
   Disk revision 3 and both storage review fixes shipped in 0.8.3 are retained
   unchanged.
 

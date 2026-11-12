@@ -1122,6 +1122,9 @@ pub const Backend = struct {
         if (connection_state.tcp) |id| {
             if (self.tcpEngine()) |engine| engine.close(id);
             self.wakeConnection(handle, std.math.maxInt(usize));
+            // Engine.close detaches the application handle before sending
+            // FIN, so its notifier cannot wake batches watching this socket.
+            self.wakeBatchWaiters(@intCast(handle));
             return;
         }
         if (connection_state.node) |node| {

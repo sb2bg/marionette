@@ -477,7 +477,7 @@ test "tcp_v1: capsules record the network model and replay exactly" {
     const bytes = try mar.ReplayCapsule.encode(std.testing.allocator, &report, identity);
     defer std.testing.allocator.free(bytes);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"semantics\":\"tcp_v1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_version\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_version\":4") != null);
 
     var capsule = try mar.ReplayCapsule.decode(std.testing.allocator, bytes);
     defer capsule.deinit();
@@ -486,8 +486,8 @@ test "tcp_v1: capsules record the network model and replay exactly" {
     defer replay.deinit();
     try std.testing.expect(replay == .passed);
 
-    inline for (.{ "\"model_version\":1", "\"model_version\":2" }) |old_model| {
-        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"model_version\":3", old_model);
+    inline for (.{ "\"model_version\":1", "\"model_version\":2", "\"model_version\":3" }) |old_model| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "\"model_version\":4", old_model);
         defer std.testing.allocator.free(changed);
         try std.testing.expectError(error.IncompatibleNetworkModel, mar.ReplayCapsule.decode(std.testing.allocator, changed));
     }
@@ -721,4 +721,117 @@ test "endpoint: composed faults record and replay through a capsule" {
     var replay = try mar.replaySimCase(.{ .allocator = std.testing.allocator, .init = TypedFaultApp.init, .scenario = TypedFaultApp.scenario }, &capsule, identity);
     defer replay.deinit();
     try std.testing.expect(replay == .passed);
+}
+
+const ClosingRead = struct {
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    err: ?anyerror = null,
+    count: ?usize = null,
+    fn run(self: *@This()) void {
+        var bytes: [8]u8 = undefined;
+        var data: [1][]u8 = .{&bytes};
+        const result = self.io.operateTimeout(.{ .net_read = .{ .socket_handle = self.stream.socket.handle, .data = &data } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } }) catch |err| {
+            self.err = err;
+            return;
+        };
+        self.count = (result.net_read catch |err| {
+            self.err = err;
+            return;
+        }).data_len;
+    }
+};
+test "tcp_v1 close: closing a socket wakes its pending timed read" {
+    if (!fibers) return error.SkipZigTest;
+    var world = try newWorld(90);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{ .nodes = 2 });
+    defer pair.listener.deinit(pair.server_io);
+    defer pair.server.close(pair.server_io);
+    var reader: ClosingRead = .{ .io = pair.client_io, .stream = pair.client };
+    var future = try std.Io.concurrent(pair.client_io, ClosingRead.run, .{&reader});
+    defer future.cancel(pair.client_io);
+    try std.Io.sleep(pair.harness_io, .fromNanoseconds(5 * ms), .awake);
+    const closed_at = world.now();
+    pair.client.close(pair.client_io);
+    future.await(pair.client_io);
+    try std.testing.expectEqual(@as(?anyerror, error.SocketUnconnected), reader.err);
+    try std.testing.expectEqual(closed_at, world.now());
+}
+test "tcp_v1 close: receive shutdown wakes its pending timed read" {
+    if (!fibers) return error.SkipZigTest;
+    var world = try newWorld(91);
+    defer world.deinit();
+    var pair = try Pair.init(&world, .{ .nodes = 2 });
+    defer pair.listener.deinit(pair.server_io);
+    defer pair.server.close(pair.server_io);
+    defer pair.client.close(pair.client_io);
+    var reader: ClosingRead = .{ .io = pair.client_io, .stream = pair.client };
+    var future = try std.Io.concurrent(pair.client_io, ClosingRead.run, .{&reader});
+    defer future.cancel(pair.client_io);
+    try std.Io.sleep(pair.harness_io, .fromNanoseconds(5 * ms), .awake);
+    const closed_at = world.now();
+    try pair.client.shutdown(pair.client_io, .recv);
+    future.await(pair.client_io);
+    try std.testing.expectEqual(@as(?anyerror, null), reader.err);
+    try std.testing.expectEqual(@as(?usize, 0), reader.count);
+    try std.testing.expectEqual(closed_at, world.now());
+}
+
+const ClosingBatch = struct {
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    concurrent: bool,
+    done: bool = false,
+
+    fn run(self: *@This()) !void {
+        var buffer: [1]u8 = undefined;
+        var data: [1][]u8 = .{&buffer};
+        const outgoing: [1][]const u8 = .{"b"};
+        var storage: [2]std.Io.Operation.Storage = undefined;
+        var batch = std.Io.Batch.init(&storage);
+        defer batch.cancel(self.io);
+        batch.addAt(0, .{ .net_read = .{ .socket_handle = self.stream.socket.handle, .data = &data } });
+        batch.addAt(1, .{ .net_write = .{ .socket_handle = self.stream.socket.handle, .header = "", .data = &outgoing, .splat = 1 } });
+        if (self.concurrent) {
+            try batch.awaitConcurrent(self.io, .none);
+        } else try batch.awaitAsync(self.io);
+        const read_result = batch.next().?;
+        try std.testing.expectEqual(@as(u32, 0), read_result.index);
+        try std.testing.expectError(error.SocketUnconnected, read_result.result.net_read);
+        const write_result = batch.next().?;
+        try std.testing.expectEqual(@as(u32, 1), write_result.index);
+        try std.testing.expectError(error.SocketUnconnected, write_result.result.net_write);
+        try std.testing.expect(batch.next() == null);
+        self.done = true;
+    }
+};
+
+test "tcp_v1 close: all untimed batches wake with closed read and write results" {
+    if (!fibers) return error.SkipZigTest;
+    inline for (.{ false, true }) |concurrent| {
+        var world = try newWorld(92);
+        defer world.deinit();
+        var pair = try Pair.init(&world, .{ .nodes = 2, .tcp = .{ .mss = 1, .send_buffer_bytes = 1, .receive_buffer_bytes = 1 } });
+        defer pair.listener.deinit(pair.server_io);
+        defer pair.server.close(pair.server_io);
+        // Keep the send buffer full and the read empty so both operations
+        // must park. Multiple batches share this socket's close notification.
+        _ = try pair.sim.control.network.partition(&.{0}, &.{1}, .{});
+        try writeAll(pair.client_io, pair.client, "a");
+        var first: ClosingBatch = .{ .io = pair.client_io, .stream = pair.client, .concurrent = concurrent };
+        var second = first;
+        var first_future = try std.Io.concurrent(pair.client_io, ClosingBatch.run, .{&first});
+        defer _ = first_future.cancel(pair.client_io) catch {};
+        var second_future = try std.Io.concurrent(pair.client_io, ClosingBatch.run, .{&second});
+        defer _ = second_future.cancel(pair.client_io) catch {};
+        try std.Io.sleep(pair.harness_io, .fromNanoseconds(5 * ms), .awake);
+        try std.testing.expect(!first.done and !second.done);
+        const closed_at = world.now();
+        pair.client.close(pair.client_io);
+        try first_future.await(pair.client_io);
+        try second_future.await(pair.client_io);
+        try std.testing.expect(first.done and second.done);
+        try std.testing.expectEqual(closed_at, world.now());
+    }
 }

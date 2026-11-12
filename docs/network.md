@@ -27,8 +27,10 @@ A `tcp_v1` capsule carries `model_version`
 `error.IncompatibleNetworkModel`.
 Model version 2 corrects typed-endpoint holds, slow faults, per-path ordering,
 full-range TCP jitter, and RTT sampling. Model version 3 preserves raw
-application deadlines when scheduler waits round up to a tick. Earlier
-candidate capsules recorded under versions 1 or 2 require their pinned build.
+application deadlines when scheduler waits round up to a tick. Model version 4
+wakes all pending batch reads and writes when their local socket closes.
+Earlier candidate capsules recorded under versions 1, 2, or 3 require their
+pinned build.
 
 ## Topology
 
