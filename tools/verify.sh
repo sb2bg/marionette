@@ -29,3 +29,4 @@ done
 "$zig_exe" test src/fiber.zig -target x86_64-windows-gnu -Osafe -fno-emit-bin
 "$zig_exe" build check-sve --summary all
 "$zig_exe" build check-release-symbols --summary all
+"$zig_exe" build check-baseline -Doptimize=ReleaseFast --summary all

@@ -1,0 +1,5 @@
+{
+  "kv": { "trace_bytes": 42300000, "tape_bytes": 2360000, "decisions": 19150, "events": 564000 },
+  "reduction_minimized": { "trace_bytes": 7690000, "tape_bytes": 3680000, "decisions": 33000, "events": 143000 },
+  "net": { "trace_bytes": 55600000, "tape_bytes": 32900000, "decisions": 290000, "events": 733000 }
+}

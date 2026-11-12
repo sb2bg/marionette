@@ -138,4 +138,46 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(bytes);
     try std.Io.File.stdout().writeStreamingAll(init.io, bytes);
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+
+    // `--budget <path>` checks the deterministic totals against limits.
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer args.deinit();
+    _ = args.next();
+    while (args.next()) |arg| {
+        if (!std.mem.eql(u8, arg, "--budget")) return error.UnknownArgument;
+        const path = args.next() orelse return error.MissingBudgetPath;
+        const budget_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .limited(64 * 1024));
+        defer init.gpa.free(budget_bytes);
+        const parsed = try std.json.parseFromSlice(Budget, init.gpa, budget_bytes, .{});
+        defer parsed.deinit();
+        var over = false;
+        over = checkTotals(init, "kv", runs, parsed.value.kv) or over;
+        over = checkTotals(init, "reduction.minimized", minimized, parsed.value.reduction_minimized) or over;
+        over = checkTotals(init, "net", net_runs, parsed.value.net) or over;
+        if (over) return error.BaselineBudgetExceeded;
+        try std.Io.File.stdout().writeStreamingAll(init.io, "baseline budget ok\n");
+    }
+}
+
+/// Deterministic per-workload limits. Elapsed time is reported but never
+/// budgeted: it depends on the machine.
+const Budget = struct {
+    kv: Totals,
+    reduction_minimized: Totals,
+    net: Totals,
+};
+
+fn checkTotals(init: std.process.Init, name: []const u8, actual: Totals, limit: Totals) bool {
+    var over = false;
+    inline for (.{ "trace_bytes", "tape_bytes", "decisions", "events" }) |field| {
+        if (@field(actual, field) > @field(limit, field)) {
+            over = true;
+            var buffer: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(&buffer, "baseline budget exceeded: {s}.{s} actual={} limit={}\n", .{
+                name, field, @field(actual, field), @field(limit, field),
+            }) catch "baseline budget exceeded\n";
+            std.Io.File.stderr().writeStreamingAll(init.io, line) catch {};
+        }
+    }
+    return over;
 }

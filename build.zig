@@ -130,6 +130,10 @@ pub fn build(b: *std.Build) void {
         .root_module = baseline_mod,
     }));
     b.step("baseline", "Measure fixed run/reduction workloads and retained trace/tape bytes").dependOn(&baseline.step);
+    const check_baseline = b.addRunArtifact(baseline.producer.?);
+    check_baseline.addArgs(&.{ "--budget", "benchmarks/budget.json" });
+    check_baseline.setCwd(b.path("."));
+    b.step("check-baseline", "Fail when baseline trace, tape, decision, or event totals exceed benchmarks/budget.json (10% over v0.10)").dependOn(&check_baseline.step);
 
     const run_examples_exe = b.addExecutable(.{
         .name = "marionette-run",

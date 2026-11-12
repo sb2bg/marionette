@@ -41,5 +41,12 @@ campaigns on pinned xitdb and redis.zig in separate processes; see
 `zig-out/campaigns` unless `-Dcampaign-dir` says otherwise.
 
 For repeatable measurements before performance work, run
-`zig build baseline -Doptimize=fast`; it prints one JSON line of run and
-reduction throughput and retained trace and tape sizes.
+`zig build baseline -Doptimize=fast`; it prints one JSON line of run,
+reduction, and lossy `tcp_v1` transfer throughput and retained trace and tape
+sizes.
+
+`zig build check-baseline -Doptimize=ReleaseFast` is the regression budget:
+it fails when the deterministic totals (trace bytes, tape bytes, decisions,
+events) of any baseline workload exceed `benchmarks/budget.json`, which allows
+10% over v0.10. Elapsed time is reported but never budgeted. A change that
+grows them on purpose updates the budget in the same commit.

@@ -152,3 +152,6 @@ jobs:
 
       - name: Check release symbols
         run: zig build check-release-symbols
+
+      - name: Check deterministic baseline budgets
+        run: zig build check-baseline -Doptimize=ReleaseFast
