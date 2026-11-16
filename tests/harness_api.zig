@@ -340,3 +340,25 @@ test "harness: typed inputs reach the run and replay from the capsule" {
     try std.testing.expectEqualStrings("TooLarge", replayed.failed.error_name.?);
     try std.testing.expectError(error.HarnessInputRequired, SizedHarness.run(std.testing.allocator, .{}));
 }
+
+test "harness: the cli reruns a seed with a typed input" {
+    const identity: mar.ReplayIdentity = .{ .build = "harness", .sut = "sized" };
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+
+    // A harness with an input needs it; a malformed one is a usage error.
+    try std.testing.expectEqual(@as(u8, 2), try mar.cli.run(SizedHarness, gpa, io, &.{ "rerun", "1" }, identity, &output.writer));
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "pass --input <json>") != null);
+    try std.testing.expectEqual(@as(u8, 2), try mar.cli.run(SizedHarness, gpa, io, &.{ "rerun", "1", "--input", "{\"size\":" }, identity, &output.writer));
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "marionette: invalid --input") != null);
+
+    try std.testing.expectEqual(@as(u8, 0), try mar.cli.run(SizedHarness, gpa, io, &.{ "rerun", "1", "--input", "{\"size\":3,\"label\":\"ok\"}" }, identity, &output.writer));
+    try std.testing.expectEqual(@as(u8, 1), try mar.cli.run(SizedHarness, gpa, io, &.{ "rerun", "1", "--input", "{\"size\":12,\"label\":\"big\"}", "--trace" }, identity, &output.writer));
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "sized.input size=12 label=big") != null);
+
+    // A harness without an input, and replay, reject one.
+    try std.testing.expectEqual(@as(u8, 2), try mar.cli.run(CounterHarness, gpa, io, &.{ "rerun", "1", "--input", "{}" }, identity, &output.writer));
+    try std.testing.expectEqual(@as(u8, 2), try mar.cli.run(SizedHarness, gpa, io, &.{ "replay", "capsule.json", "--input", "{}" }, identity, &output.writer));
+}

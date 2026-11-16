@@ -17,10 +17,17 @@
 //!
 //! Commands:
 //!
-//!   rerun <seed> [--trace]               run one seed, as a fuzz or campaign
+//!   rerun <seed> [--input <json>] [--trace]
+//!                                        run one seed, as a fuzz or campaign
 //!                                         failure reported it
 //!   replay <capsule.json> [--trace]      exact-replay a retained capsule
 //!   reduce <capsule.json> [--attempts N] reduce a capsule from scratch
+//!
+//! `rerun` uses the harness's own simulation options and run name with default
+//! start time and tick. A harness with an `Input` type requires `--input`,
+//! the run's input as JSON (the `harness.input` attribute a failure records);
+//! one without rejects it. `replay` and `reduce` take the input from the
+//! capsule.
 //!
 //! Any command accepts `--history <focus>`, where focus is `node:<id>`,
 //! `op:<id>`, `path:<path>`, or `fault:<id>`, to print only the events that
@@ -51,6 +58,7 @@ pub fn run(
     var trace = false;
     var history: ?diagnosis.Focus = null;
     var attempts: usize = 256;
+    var input_json: ?[]const u8 = null;
     var index: usize = 2;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
@@ -62,17 +70,39 @@ pub fn run(
         } else if (std.mem.eql(u8, arg, "--attempts") and index + 1 < args.len) {
             index += 1;
             attempts = std.fmt.parseInt(usize, args[index], 10) catch return usage(out);
+        } else if (std.mem.eql(u8, arg, "--input") and index + 1 < args.len) {
+            index += 1;
+            input_json = args[index];
         } else return usage(out);
     }
 
     if (std.mem.eql(u8, command, "rerun")) {
         const seed = seed_module.parseSeed(args[1]) catch return usage(out);
-        var report = try H.run(allocator, .{ .seed = seed });
+        var report = if (comptime H.InputType == void) report: {
+            if (input_json != null) {
+                try out.writeAll("marionette: this harness takes no --input\n");
+                return 2;
+            }
+            break :report try H.run(allocator, .{ .seed = seed });
+        } else report: {
+            const json = input_json orelse {
+                try out.writeAll("marionette: this harness takes an input; pass --input <json> as the failure recorded it in harness.input\n");
+                return 2;
+            };
+            const parsed = std.json.parseFromSlice(H.InputType, allocator, json, .{ .allocate = .alloc_always }) catch |err| {
+                try out.print("marionette: invalid --input: {s}\n", .{@errorName(err)});
+                return 2;
+            };
+            defer parsed.deinit();
+            break :report try H.run(allocator, .{ .seed = seed, .input = parsed.value });
+        };
         defer report.deinit();
         try writeReport(out, &report, trace, history);
         return if (report == .passed) 0 else 1;
     }
 
+    // Capsules carry their own input.
+    if (input_json != null) return usage(out);
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, args[1], allocator, .limited(256 * 1024 * 1024)) catch |err| {
         try out.print("marionette: cannot read {s}: {s}\n", .{ args[1], @errorName(err) });
         return 2;
@@ -135,7 +165,7 @@ fn writeReport(out: *std.Io.Writer, report: *const run_types.RunReport, trace: b
 
 fn usage(out: *std.Io.Writer) !u8 {
     try out.writeAll(
-        \\usage: <harness> rerun <seed> [--trace] [--history <focus>]
+        \\usage: <harness> rerun <seed> [--input <json>] [--trace] [--history <focus>]
         \\       <harness> replay <capsule.json> [--trace] [--history <focus>]
         \\       <harness> reduce <capsule.json> [--attempts N] [--trace] [--history <focus>]
         \\focus: node:<id> | op:<id> | path:<path> | fault:<id>

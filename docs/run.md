@@ -97,6 +97,9 @@ reruns exactly the seed passed as `zig build test -Dmarionette-seed=<seed>`,
 and `mar.repro.identity(repro, sut)` builds a `ReplayIdentity` from the
 consumer's Git revision. A small executable around `mar.cli.run(H, ...)` gives
 `rerun <seed>`, `replay <capsule.json>`, and `reduce <capsule.json>` commands.
+`rerun` uses the harness's own simulation options; a harness with an `Input`
+type also takes `--input <json>`, the run's `harness.input` attribute.
+`replay` and `reduce` read the input from the capsule.
 
 The runner owns world and application cleanup. If the app type defines
 `deinit`, it runs before each world is destroyed and remains part of replay

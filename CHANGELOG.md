@@ -97,7 +97,8 @@ decisions and operations. The final API freeze follows 0.11.
   `ReplayIdentity` from it, and `Harness.fuzz` reruns exactly the requested
   seed. A fuzz failure prints the option that reruns it. `mar.cli.run`
   gives a downstream harness executable `rerun`, `replay`, and `reduce`
-  commands over a seed or a retained capsule.
+  commands over a seed or a retained capsule; `rerun --input <json>` supplies
+  a typed harness input, which `replay` and `reduce` read from the capsule.
 - **Precise errors.** Network control returns `ControlError` instead of
   `anyerror`.
 - **Toward the stabilization gates.** The [stability ledger](docs/stability.md)
