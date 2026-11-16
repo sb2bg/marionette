@@ -57,8 +57,10 @@ less_than=<u64> value=<u64>`. The site is the same identity the decision tape
 records, such as `disk.fault.crash_lost_write` or `network.typed_drop`.
 Version 5 also adds `io.fault_effect node=<u64> incarnation=<u64>
 operation=<std.Io operation> cause=<disk error> error=<std.Io error>
-fault_event=<u64|none> decision=<u64|none>` when a fault-induced disk error
-reaches application code, and `io.unmodeled operation=<name> node=<u64>
+fault_event=<u64> decision=<u64|none>` when a fault-induced disk error
+(`ReadError`, `WriteError`, or `DiskCrashed`) reaches application code; a
+capacity `NoSpaceLeft` is not a fault effect and records none. It also adds
+`io.unmodeled operation=<name> node=<u64>
 incarnation=<u64> strict=<bool>` when code touches an operation the simulator
 does not model. Version 4 capsules are rejected.
 

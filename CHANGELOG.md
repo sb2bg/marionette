@@ -30,7 +30,8 @@ decisions and operations. The final API freeze follows 0.11.
   application code through `std.Io` records `io.fault_effect` with the node,
   its incarnation, the `std.Io` operation, the modeled cause, the mapped
   `std.Io` error, and the trace event and decision of the fired fault, even
-  when the application handles the error.
+  when the application handles the error. Only fired faults count: a
+  `NoSpaceLeft` from `capacity_bytes` records no fault effect.
 - **Failure diagnosis.** `RunFailure.print` and the CLI add, after the
   summary, the first differing events of both traces on a determinism
   mismatch, the observed fault effects with their causing events, and a

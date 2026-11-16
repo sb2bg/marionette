@@ -762,6 +762,11 @@ pub const Backend = struct {
     /// application receives, naming the node, incarnation, operation, modeled
     /// cause, and the fault event and decision that caused it. Errors that are
     /// not fault effects pass through unrecorded.
+    ///
+    /// Only fired faults raise these causes: `ReadError` and `WriteError`
+    /// immediately after their fault roll, and `DiskCrashed` after a crash.
+    /// `NoSpaceLeft` comes from the configured capacity, not a fault, so it
+    /// is excluded rather than credited to whichever fault fired last.
     pub fn faultEffect(
         self: *Backend,
         comptime operation: []const u8,
@@ -769,18 +774,19 @@ pub const Backend = struct {
         mapped: anytype,
     ) @TypeOf(mapped) {
         switch (cause) {
-            error.ReadError, error.WriteError, error.NoSpaceLeft, error.DiskCrashed => {},
+            error.ReadError, error.WriteError, error.DiskCrashed => {},
             else => return mapped,
         }
-        const fault = self.world.last_fault;
+        // An error with no fired fault behind it is not a fault effect.
+        const fault = self.world.last_fault orelse return mapped;
         self.world.recordFields("io.fault_effect", &.{
             traceField("node", .{ .uint = self.process_node orelse 0 }),
             traceField("incarnation", .{ .uint = self.incarnation }),
             traceField("operation", .{ .literal = operation }),
             traceField("cause", .{ .literal = @errorName(cause) }),
             traceField("error", .{ .literal = @errorName(mapped) }),
-            if (fault) |ref| traceField("fault_event", .{ .uint = ref.event }) else traceField("fault_event", .{ .literal = "none" }),
-            if (fault != null and fault.?.decision != null) traceField("decision", .{ .uint = fault.?.decision.? }) else traceField("decision", .{ .literal = "none" }),
+            traceField("fault_event", .{ .uint = fault.event }),
+            if (fault.decision) |decision| traceField("decision", .{ .uint = decision }) else traceField("decision", .{ .literal = "none" }),
         }) catch |err| self.world.latchRecordingFailure(err);
         return mapped;
     }

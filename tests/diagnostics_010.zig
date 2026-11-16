@@ -85,6 +85,42 @@ test "diagnostics: a failure explains itself with fault effects and a bounded ta
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "disk.write ") != null);
 }
 
+const FullAfterFault = struct {
+    fn init(_: mar.Sim) @This() {
+        return .{};
+    }
+
+    fn scenario(case: *mar.SimCase(@This())) !void {
+        const io = case.env().io();
+        var file = try std.Io.Dir.cwd().createFile(io, "data", .{});
+        defer file.close(io);
+        // One injected write fault, handled by the application.
+        try case.control().disk.setFaults(.{ .write_error_rate = .always() });
+        file.writePositionalAll(io, "DATA", 0) catch {};
+        // Then no faults, only a full disk.
+        try case.control().disk.setFaults(.{ .capacity_bytes = 4 });
+        if (file.writePositionalAll(io, "DATADATA", 0)) |_| {
+            return error.ExpectedNoSpaceLeft;
+        } else |err| if (err != error.NoSpaceLeft) return err;
+    }
+};
+
+test "diagnostics: a full disk is not credited to an earlier fault" {
+    var report = try mar.runSimCase(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{ .disk = .{ .sector_size = 4 } },
+        .init = FullAfterFault.init,
+        .scenario = FullAfterFault.scenario,
+    });
+    defer report.deinit();
+    const trace = report.passed.trace;
+    try mar.expectTraceContains(trace, "status=no_space");
+    // Only the injected write error is a fault effect.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, trace, "io.fault_effect "));
+    try mar.expectTraceContains(trace, "io.fault_effect node=0 incarnation=0 operation=write cause=WriteError");
+    try std.testing.expect(std.mem.indexOf(u8, trace, "cause=NoSpaceLeft") == null);
+}
+
 const Unmodeled = struct {
     fn init(_: mar.Sim) @This() {
         return .{};
