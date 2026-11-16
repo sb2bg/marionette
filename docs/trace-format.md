@@ -66,9 +66,10 @@ does not model. Version 4 capsules are rejected.
 
 `record(fmt, args)` validates its literal format text at compile time: the
 event name and keys must be literal and valid, and every field must be
-`key=value`. `{s}` string arguments are written with the escaping below, so an
-ordinary string value cannot break the grammar; other values must format
-without spaces, `=`, or control bytes, and an empty value is still invalid.
+`key=value`; literal values may not contain `%`, which is reserved for escapes.
+`{s}` string arguments are written with the escaping below, so no string value
+breaks the grammar: an empty string that is a whole value is written as `%`.
+Other values must format without spaces, `=`, or control bytes.
 
 Every later line is one event:
 
@@ -111,6 +112,8 @@ Rules:
   Text values are percent-encoded byte-by-byte for ambiguous bytes: space,
   `=`, `%`, `\`, ASCII control bytes, and non-ASCII bytes become `%HH`.
   Existing unambiguous ASCII such as `scenario:smoke` remains readable.
+  An empty text value is written as a lone `%` (`path=%`). Escaping writes `%`
+  only as the start of a `%HH` triple, so the lone `%` is unambiguous.
 - Run attributes encode the Marionette scalar type in the value text:
   `string:<escaped-text>`, `int:<i64>`, `uint:<u64>`, `bool:<true|false>`, or
   `float:<f64>`.

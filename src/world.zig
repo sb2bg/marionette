@@ -127,6 +127,10 @@ fn allocationRandomIntLessThan(ptr: *anyopaque, less_than: u32) !u32 {
     return try world.chooseIntLessThan("allocation.failure", u32, less_than);
 }
 
+/// The trace value of an empty string field (`key=%`). Escaping writes `%`
+/// only as the start of a `%HH` triple, so a lone `%` cannot mean anything else.
+pub const empty_trace_text = record_format.empty_text;
+
 /// Write text as an unambiguous trace value fragment.
 ///
 /// Spaces, `=`, `%`, backslash, control bytes, and non-ASCII bytes are encoded
@@ -1013,7 +1017,10 @@ pub const World = struct {
                 if (!isValidTraceValue(literal)) return error.InvalidTracePayload;
                 try self.trace_log.appendSlice(self.allocator, literal);
             },
-            .text => |text| try self.appendEscapedTraceText(text, false),
+            .text => |text| if (text.len == 0)
+                try self.trace_log.appendSlice(self.allocator, empty_trace_text)
+            else
+                try self.appendEscapedTraceText(text, false),
             .typed_text => |typed| {
                 if (!isValidTraceValue(typed.type_name)) return error.InvalidTracePayload;
                 try self.trace_log.print(self.allocator, "{s}:", .{typed.type_name});
@@ -1497,10 +1504,10 @@ test "world: invalid trace payload returns error and rolls back" {
     defer std.testing.allocator.free(before_trace);
     const before_event_index = world.nextEventIndex();
 
-    // An empty string is the one string value escaping cannot make valid.
+    // A value whose own formatting has a space cannot be made valid.
     try std.testing.expectError(
         error.InvalidTracePayload,
-        world.record("service.message value={s}", .{""}),
+        world.record("service.message value={any}", .{@as([]const u8, "hi")}),
     );
     try std.testing.expectEqual(before_event_index, world.nextEventIndex());
     try std.testing.expectEqualStrings(before_trace, world.traceBytes());
@@ -1512,6 +1519,10 @@ test "world: record escapes ordinary string values" {
 
     try world.record("service.message value={s} len={}", .{ "hello world=\n", @as(u64, 13) });
     try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "service.message value=hello%20world%3D%0A len=13") != null);
+
+    // An empty string is recorded, not rejected.
+    try world.record("service.message value={s}", .{""});
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "service.message value=%\n") != null);
 }
 
 test "world: structured fields escape ambiguous text bytes" {
@@ -1530,7 +1541,18 @@ test "world: structured fields escape ambiguous text bytes" {
     ) != null);
 }
 
-test "world: empty bare structured text rolls back" {
+test "world: empty structured text records the empty marker" {
+    var world = try World.init(std.testing.allocator, .{ .seed = 99 });
+    defer world.deinit();
+
+    try world.recordFields("service.path", &.{
+        traceField("path", .{ .text = "" }),
+        traceField("next", .{ .uint = 1 }),
+    });
+    try std.testing.expect(std.mem.indexOf(u8, world.traceBytes(), "service.path path=% next=1\n") != null);
+}
+
+test "world: an invalid structured field rolls back" {
     var world = try World.init(std.testing.allocator, .{ .seed = 99 });
     defer world.deinit();
 
@@ -1541,7 +1563,7 @@ test "world: empty bare structured text rolls back" {
     try std.testing.expectError(
         error.InvalidTracePayload,
         world.recordFields("service.path", &.{
-            traceField("path", .{ .text = "" }),
+            traceField("label", .{ .typed_text = .{ .type_name = "bad type", .value = "x" } }),
         }),
     );
     try std.testing.expectEqual(before_event_index, world.nextEventIndex());

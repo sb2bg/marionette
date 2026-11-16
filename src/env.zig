@@ -114,7 +114,10 @@ pub const Recorder = struct {
             try writer.print(" {s}=", .{field.key});
             switch (field.value) {
                 .literal => |literal| try writer.writeAll(literal),
-                .text => |text| world_module.writeEscapedTraceText(writer, text, true) catch {},
+                .text => |text| if (text.len == 0)
+                    try writer.writeAll(world_module.empty_trace_text)
+                else
+                    world_module.writeEscapedTraceText(writer, text, true) catch {},
                 .typed_text => |typed| {
                     try writer.print("{s}:", .{typed.type_name});
                     world_module.writeEscapedTraceText(writer, typed.value, true) catch {};

@@ -112,10 +112,16 @@ const BadRecording = struct {
     }
 
     fn scenario(case: *mar.SimCase(@This())) !void {
-        // An empty value is invalid even escaped: the call returns normally and
-        // the runner reports the failure at its next boundary.
-        case.env().record("app.note value={s}", .{""});
+        // A cause that names a future event is invalid: the call returns
+        // normally and the runner reports the failure at its next boundary.
+        _ = case.env().recorder().event("app.note", &.{}, std.math.maxInt(u64));
         case.env().record("app.after value=1", .{});
+    }
+
+    fn empty(case: *mar.SimCase(@This())) !void {
+        // An empty string is an ordinary value, recorded as `%`.
+        case.env().record("app.note value={s}", .{""});
+        _ = case.env().recorder().event("app.path", &.{mar.traceField("path", .{ .text = "" })}, null);
     }
 };
 
@@ -128,8 +134,20 @@ test "harness: a failed app recording fails the run at the next boundary" {
     });
     defer report.deinit();
     try std.testing.expectEqual(mar.RunFailureKind.recording_failed, report.failed.kind);
-    try std.testing.expectEqualStrings("InvalidTracePayload", report.failed.error_name.?);
+    try std.testing.expectEqualStrings("InvalidCausalEvent", report.failed.error_name.?);
     try mar.expectTraceContains(report.failed.first_trace, "app.after value=1");
+}
+
+test "harness: recording an empty string does not fail the run" {
+    var report = try mar.runSimCase(.{
+        .allocator = std.testing.allocator,
+        .simulate = mar.World.SimulateOptions{},
+        .init = BadRecording.init,
+        .scenario = BadRecording.empty,
+    });
+    defer report.deinit();
+    try mar.expectTraceContains(report.passed.trace, "app.note value=%");
+    try mar.expectTraceContains(report.passed.trace, "app.path path=%");
 }
 
 const Helpers = struct {

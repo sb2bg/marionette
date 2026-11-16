@@ -15,8 +15,11 @@ decisions and operations. The final API freeze follows 0.11.
 - **Breaking: escaped structured recording.** `record(fmt, args)` validates
   its literal format text at compile time (a literal event name, literal keys,
   and `key=value` fields) and writes `{s}` string arguments with trace
-  escaping, so an ordinary string value cannot break trace syntax. A format
-  that cannot form a valid payload is now a compile error.
+  escaping, so no string value can break trace syntax. An empty string is
+  recorded as a lone `%` (`key=%`), in `record` and in structured text fields,
+  instead of failing the run; escaping never otherwise writes a lone `%`, and
+  literal format values may not contain one. A format that cannot form a valid
+  payload is now a compile error.
 - **Descriptive time errors.** `World.runFor`, `World.tick`, and
   `Control.runFor` return `DurationNotTickAligned` or `ClockOverflow` instead
   of asserting, before time moves; disk, network, and process options return

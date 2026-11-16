@@ -2,6 +2,7 @@
 //! compile time into literal text and placeholders, rejects literal text that
 //! could not form a valid trace payload, and writes `{s}` string arguments
 //! with trace escaping, so an ordinary string value cannot break trace syntax.
+//! An empty string that forms a whole value is written as `empty_text`.
 
 const std = @import("std");
 
@@ -11,6 +12,9 @@ pub const Segment = struct {
     text: []const u8,
     /// Argument index for placeholders.
     arg: usize = 0,
+    /// An escaped placeholder that is a field's entire value, so an empty
+    /// string is written as `empty_text`.
+    whole_value: bool = false,
 
     pub const Kind = enum { literal, value, escaped };
 };
@@ -78,10 +82,13 @@ pub fn segments(comptime fmt: []const u8, comptime Args: type) []const Segment {
             if (literal.len != 0) result = result ++ &[_]Segment{.{ .kind = .literal, .text = literal }};
             literal = "";
             const escaped = std.mem.eql(u8, spec, "s") and isStringType(types[next_arg]);
+            const whole_value = index > 0 and fmt[index - 1] == '=' and
+                (close + 1 == fmt.len or fmt[close + 1] == ' ');
             result = result ++ &[_]Segment{.{
                 .kind = if (escaped) .escaped else .value,
                 .text = spec,
                 .arg = next_arg,
+                .whole_value = escaped and whole_value,
             }};
             shape = shape ++ "X";
             next_arg += 1;
@@ -120,7 +127,8 @@ fn validateShape(comptime fmt: []const u8, comptime shape: []const u8) void {
             };
             if (value.len == 0) @compileError("record field has an empty value: " ++ fmt);
             for (value) |char| switch (char) {
-                '=', '\n', '\r', '\t', '\\' => @compileError("record field value has an invalid literal character: " ++ fmt),
+                // `%` is reserved for escapes and the empty marker.
+                '=', '%', '\n', '\r', '\t', '\\' => @compileError("record field value has an invalid literal character: " ++ fmt),
                 else => {},
             };
         }
@@ -128,6 +136,10 @@ fn validateShape(comptime fmt: []const u8, comptime shape: []const u8) void {
 }
 
 const hex = "0123456789ABCDEF";
+
+/// The trace value of an empty string. Escaping writes `%` only as the start
+/// of a `%HH` triple, so a lone `%` value cannot come from any other text.
+pub const empty_text = "%";
 
 fn isPlain(byte: u8) bool {
     if (byte <= ' ' or byte >= 0x7f) return false;
@@ -137,8 +149,8 @@ fn isPlain(byte: u8) bool {
     };
 }
 
-/// Append one record payload to `list`. Empty escaped strings write nothing,
-/// so payload validation still rejects the empty value.
+/// Append one record payload to `list`. An empty string that is a whole
+/// value is written as `empty_text`; one inside a larger value writes nothing.
 pub fn appendRecord(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -151,6 +163,7 @@ pub fn appendRecord(
         .value => try list.print(allocator, "{" ++ part.text ++ "}", .{args[part.arg]}),
         .escaped => {
             const bytes: []const u8 = args[part.arg];
+            if (part.whole_value and bytes.len == 0) try list.appendSlice(allocator, empty_text);
             for (bytes) |byte| {
                 if (isPlain(byte)) {
                     try list.append(allocator, byte);
@@ -170,6 +183,7 @@ pub fn writeRecord(writer: *std.Io.Writer, comptime fmt: []const u8, args: anyty
         .value => try writer.print("{" ++ part.text ++ "}", .{args[part.arg]}),
         .escaped => {
             const bytes: []const u8 = args[part.arg];
+            if (part.whole_value and bytes.len == 0) try writer.writeAll(empty_text);
             for (bytes) |byte| {
                 if (isPlain(byte)) {
                     try writer.writeByte(byte);
@@ -194,4 +208,21 @@ test "record format keeps non-string specifiers and literal braces" {
     const Kind = enum { put, get };
     try appendRecord(&list, std.testing.allocator, "app.op kind={s} set={{a}} x={d}", .{ @tagName(Kind.put), 3 });
     try std.testing.expectEqualStrings("app.op kind=put set={a} x=3", list.items);
+}
+
+test "record format writes an empty whole value as the empty marker" {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try appendRecord(&list, std.testing.allocator, "app.put key={s} value={s}", .{ "", "v" });
+    try std.testing.expectEqualStrings("app.put key=% value=v", list.items);
+
+    // Inside a larger value an empty string adds nothing.
+    list.clearRetainingCapacity();
+    try appendRecord(&list, std.testing.allocator, "app.put key=k{s} tag={s}x", .{ "", "" });
+    try std.testing.expectEqualStrings("app.put key=k tag=x", list.items);
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeRecord(&writer, "app.put key={s}", .{""});
+    try std.testing.expectEqualStrings("app.put key=%", writer.buffered());
 }
